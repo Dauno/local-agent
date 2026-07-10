@@ -1,0 +1,405 @@
+package config_test
+
+import (
+	"errors"
+	"math"
+	"os"
+	"path/filepath"
+	"reflect"
+	"strings"
+	"testing"
+
+	"github.com/Dauno/slack-local-agent/internal/config"
+)
+
+func TestDefaultMatchesPRD(t *testing.T) {
+	t.Parallel()
+
+	want := config.Config{
+		Agent: config.AgentConfig{Name: "Dev Agent"},
+		State: config.StateConfig{
+			Dir: ".local-agent",
+			DB:  ".local-agent/local-agent.db",
+		},
+		Context: config.ContextConfig{
+			MaxMessages:                   30,
+			MaxChars:                      20_000,
+			RetainMessagesPerConversation: 100,
+		},
+		Runtime: config.RuntimeConfig{
+			LogLevel:                "info",
+			ModelTimeoutSeconds:     0,
+			SlackAPITimeoutSeconds:  30,
+			MaxConcurrentModelCalls: 4,
+			BusyMessage:             "El bot está ocupado procesando otras solicitudes. Intenta de nuevo en unos minutos.",
+			ModelErrorMessage:       "No pude completar la respuesta por un error del modelo. Intenta de nuevo.",
+		},
+		Model: config.ModelConfig{
+			Name:            "deepseek-v4-flash",
+			BaseURL:         "https://api.deepseek.com",
+			APIKeyEnv:       "DEEPSEEK_API_KEY",
+			ReasoningEffort: "high",
+			ExtraBody: map[string]any{
+				"thinking": map[string]any{"type": "enabled"},
+			},
+		},
+		Slack: config.SlackConfig{
+			AppName:             "Local Agent",
+			BotDisplayName:      "Dev Agent",
+			UnauthorizedMessage: "No tienes permiso para usar este bot. Pide acceso a quien administra local-agent.",
+			AllowedUserIDs:      []string{},
+			AllowedTeamIDs:      []string{},
+			AllowedChannelIDs:   []string{},
+		},
+	}
+
+	got := config.Default()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Default() mismatch\n got: %#v\nwant: %#v", got, want)
+	}
+	if err := got.Validate(); err != nil {
+		t.Fatalf("default config must validate: %v", err)
+	}
+}
+
+func TestDefaultDoesNotShareExtraBody(t *testing.T) {
+	t.Parallel()
+
+	first := config.Default()
+	second := config.Default()
+	first.Model.ExtraBody["thinking"].(map[string]any)["type"] = "disabled"
+
+	got := second.Model.ExtraBody["thinking"].(map[string]any)["type"]
+	if got != "enabled" {
+		t.Fatalf("defaults share mutable extra_body state: got %v", got)
+	}
+}
+
+func TestMarshalDefaultYAML(t *testing.T) {
+	t.Parallel()
+
+	got, err := config.Marshal(config.Default())
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+	want := `agent:
+  name: Dev Agent
+state:
+  dir: .local-agent
+  db: .local-agent/local-agent.db
+context:
+  max_messages: 30
+  max_chars: 20000
+  retain_messages_per_conversation: 100
+runtime:
+  log_level: info
+  model_timeout_seconds: 0
+  slack_api_timeout_seconds: 30
+  max_concurrent_model_calls: 4
+  busy_message: El bot está ocupado procesando otras solicitudes. Intenta de nuevo en unos minutos.
+  model_error_message: No pude completar la respuesta por un error del modelo. Intenta de nuevo.
+model:
+  name: deepseek-v4-flash
+  base_url: https://api.deepseek.com
+  api_key_env: DEEPSEEK_API_KEY
+  reasoning_effort: high
+  extra_body:
+    thinking:
+      type: enabled
+slack:
+  app_name: Local Agent
+  bot_display_name: Dev Agent
+  unauthorized_message: No tienes permiso para usar este bot. Pide acceso a quien administra local-agent.
+  allow_all_users: false
+  allowed_user_ids: []
+  allowed_team_ids: []
+  allowed_channel_ids: []
+`
+	if string(got) != want {
+		t.Fatalf("default YAML mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
+	}
+}
+
+func TestParseAppliesOnlyMissingDefaults(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Parse([]byte(`agent:
+  name: Release Agent
+model:
+  headers:
+    X-Client: local-agent
+  extra_body: {}
+slack:
+  allow_all_users: true
+  allowed_user_ids: null
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+
+	if cfg.Agent.Name != "Release Agent" {
+		t.Fatalf("agent.name = %q", cfg.Agent.Name)
+	}
+	if cfg.Model.Name != "deepseek-v4-flash" {
+		t.Fatalf("missing model.name did not receive default: %q", cfg.Model.Name)
+	}
+	if len(cfg.Model.ExtraBody) != 0 {
+		t.Fatalf("explicit empty extra_body was overwritten: %#v", cfg.Model.ExtraBody)
+	}
+	if cfg.Model.Headers["X-Client"] != "local-agent" {
+		t.Fatalf("model headers not decoded: %#v", cfg.Model.Headers)
+	}
+	if cfg.Slack.AllowedUserIDs == nil || len(cfg.Slack.AllowedUserIDs) != 0 {
+		t.Fatalf("allowed_user_ids should normalize to an empty slice: %#v", cfg.Slack.AllowedUserIDs)
+	}
+}
+
+func TestParseEmptyOrCommentOnlyUsesDefaults(t *testing.T) {
+	t.Parallel()
+
+	for _, input := range []string{"", "   \n", "# intentionally using defaults\n"} {
+		cfg, err := config.Parse([]byte(input))
+		if err != nil {
+			t.Fatalf("Parse(%q) error: %v", input, err)
+		}
+		want := config.Default()
+		if !reflect.DeepEqual(cfg.Agent, want.Agent) ||
+			!reflect.DeepEqual(cfg.State, want.State) ||
+			!reflect.DeepEqual(cfg.Context, want.Context) ||
+			!reflect.DeepEqual(cfg.Runtime, want.Runtime) ||
+			!reflect.DeepEqual(cfg.Model, want.Model) ||
+			!reflect.DeepEqual(cfg.Slack, want.Slack) {
+			t.Fatalf("Parse(%q) did not produce defaults: %#v", input, cfg)
+		}
+	}
+}
+
+func TestParseAndMarshalPreserveUnknownFieldsAndComments(t *testing.T) {
+	t.Parallel()
+
+	input := []byte(`# operator note
+agent:
+  name: Old Name # keep this comment
+  tone: terse
+plugin_extension:
+  enabled: true
+model:
+  headers:
+    X-Trace: enabled
+`)
+	cfg, err := config.Parse(input)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	cfg.Agent.Name = "New Name"
+	cfg.Model.Headers = nil
+
+	output, err := config.Marshal(cfg)
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+	text := string(output)
+	for _, fragment := range []string{
+		"# operator note",
+		"name: New Name # keep this comment",
+		"tone: terse",
+		"plugin_extension:",
+		"enabled: true",
+	} {
+		if !strings.Contains(text, fragment) {
+			t.Errorf("output lost %q:\n%s", fragment, text)
+		}
+	}
+	if strings.Contains(text, "headers:") || strings.Contains(text, "X-Trace") {
+		t.Fatalf("cleared known headers were retained:\n%s", text)
+	}
+}
+
+func TestParseRejectsMalformedDocuments(t *testing.T) {
+	t.Parallel()
+
+	tests := map[string]string{
+		"sequence root":      "- invalid\n",
+		"multiple documents": "agent: {}\n---\nagent: {}\n",
+		"duplicate key":      "agent:\n  name: one\n  name: two\n",
+		"wrong typed value":  "context:\n  max_messages: many\n",
+	}
+	for name, input := range tests {
+		name, input := name, input
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			if _, err := config.Parse([]byte(input)); err == nil {
+				t.Fatal("Parse() unexpectedly succeeded")
+			}
+		})
+	}
+}
+
+func TestValidationReportsTypedFieldErrors(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Agent.Name = " "
+	cfg.State.DB = ""
+	cfg.Context.MaxMessages = 0
+	cfg.Runtime.LogLevel = "verbose"
+	cfg.Runtime.ModelTimeoutSeconds = -1
+	cfg.Runtime.SlackAPITimeoutSeconds = -1
+	cfg.Runtime.MaxConcurrentModelCalls = 0
+	cfg.Model.BaseURL = "ftp://example.com"
+	cfg.Model.APIKeyEnv = "NOT-AN-ENV"
+	cfg.Model.ReasoningEffort = "maximum"
+	cfg.Model.Headers = map[string]string{"Bad Header": "line\nbreak"}
+	cfg.Model.ExtraBody = map[string]any{"bad": math.NaN(), "stream": true}
+	cfg.Slack.AllowedUserIDs = []string{"not-a-user"}
+	cfg.Slack.AllowedTeamIDs = []string{"U12345678"}
+	cfg.Slack.AllowedChannelIDs = []string{"D12345678"}
+
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) {
+		t.Fatalf("Validate() error type = %T, want *config.ValidationError: %v", err, err)
+	}
+	for _, field := range []string{
+		"agent.name",
+		"state.db",
+		"context.max_messages",
+		"runtime.log_level",
+		"runtime.model_timeout_seconds",
+		"runtime.slack_api_timeout_seconds",
+		"runtime.max_concurrent_model_calls",
+		"model.base_url",
+		"model.api_key_env",
+		"model.reasoning_effort",
+		`model.headers["Bad Header"]`,
+		"model.extra_body",
+		"model.extra_body.stream",
+		"slack.allowed_user_ids[0]",
+		"slack.allowed_team_ids[0]",
+		"slack.allowed_channel_ids[0]",
+	} {
+		if !validation.Has(field) {
+			t.Errorf("validation did not report %s: %v", field, err)
+		}
+	}
+}
+
+func TestValidateAcceptsConfiguredAccessListsAndHeaders(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Model.Headers = map[string]string{"X-Client-Version": "1", "X_Custom": "ok"}
+	cfg.Slack.AllowedUserIDs = []string{"U12345678", "W12345678"}
+	cfg.Slack.AllowedTeamIDs = []string{"T12345678"}
+	cfg.Slack.AllowedChannelIDs = []string{"C12345678", "G12345678"}
+
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() error: %v", err)
+	}
+}
+
+func TestValidateRejectsSensitiveModelHeaders(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Model.Headers = map[string]string{"Authorization": "Bearer secret"}
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) || !validation.Has(`model.headers["Authorization"]`) {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestResolvePaths(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.State.Dir = "var/state"
+	cfg.State.DB = filepath.Join(root, "outside", "agent.db")
+
+	paths, err := cfg.ResolvePaths(root)
+	if err != nil {
+		t.Fatalf("ResolvePaths() error: %v", err)
+	}
+	want := config.Paths{
+		ProjectRoot:    root,
+		StateDir:       filepath.Join(root, "var", "state"),
+		DatabaseFile:   filepath.Join(root, "outside", "agent.db"),
+		ConfigFile:     filepath.Join(root, ".local-agent", "config.yaml"),
+		ManifestFile:   filepath.Join(root, ".local-agent", "app-manifest.local.yaml"),
+		EnvExampleFile: filepath.Join(root, ".local-agent", "local.env.example"),
+		EnvFile:        filepath.Join(root, ".env"),
+	}
+	if !reflect.DeepEqual(paths, want) {
+		t.Fatalf("ResolvePaths()\n got: %#v\nwant: %#v", paths, want)
+	}
+
+	configPath, err := config.ConfigPath(root)
+	if err != nil {
+		t.Fatalf("ConfigPath() error: %v", err)
+	}
+	if configPath != want.ConfigFile {
+		t.Fatalf("ConfigPath() = %q, want %q", configPath, want.ConfigFile)
+	}
+}
+
+func TestSaveAndLoadPreserveFileModeAndExtensions(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
+	input := []byte("agent:\n  name: Existing\nextension:\n  value: retained\n")
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, input, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	cfg.Agent.Name = "Updated"
+	if err := config.Save(path, cfg); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("saved mode = %04o, want 0600", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "name: Updated") || !strings.Contains(string(data), "value: retained") {
+		t.Fatalf("saved data lost changes or extensions:\n%s", data)
+	}
+
+	reloaded, err := config.Load(path)
+	if err != nil {
+		t.Fatalf("re-Load() error: %v", err)
+	}
+	if reloaded.Agent.Name != "Updated" {
+		t.Fatalf("reloaded agent.name = %q", reloaded.Agent.Name)
+	}
+}
+
+func TestSaveCreatesParentAndUsesNonSensitiveMode(t *testing.T) {
+	t.Parallel()
+
+	path := filepath.Join(t.TempDir(), "missing", "config.yaml")
+	if err := config.Save(path, config.Default()); err != nil {
+		t.Fatalf("Save() error: %v", err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o644 {
+		t.Fatalf("new config mode = %04o, want 0644", got)
+	}
+}
