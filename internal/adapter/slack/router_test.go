@@ -85,6 +85,19 @@ func TestRouterRoutesSupportedInvocations(t *testing.T) {
 			},
 		},
 		{
+			name:      "C-prefixed thread follow-up normalizes inconsistent group type",
+			innerType: slackevents.Message,
+			data: slackevents.MessageEvent{
+				Type: "message", User: testUser, Text: "continua", TimeStamp: testTS,
+				ThreadTimeStamp: testThread, Channel: testChannel, ChannelType: slackevents.ChannelTypeGroup,
+			},
+			want: domain.Invocation{
+				EventID: testEventID, EventType: "message", TeamID: testTeam, ChannelID: testChannel,
+				ChannelKind: domain.ChannelPublic, UserID: testUser, EventTS: testTS, ThreadTS: testThread,
+				Text: "continua", Trigger: domain.TriggerThreadReply,
+			},
+		},
+		{
 			name:      "private thread follow-up",
 			innerType: slackevents.Message,
 			data: &slackevents.MessageEvent{

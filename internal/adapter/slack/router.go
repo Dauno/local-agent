@@ -113,11 +113,15 @@ func (r Router) routeMessage(eventID, teamID string, event slackevents.MessageEv
 		if event.ThreadTimeStamp == "" || r.botMention.MatchString(event.Text) {
 			return domain.Invocation{}, false
 		}
-		if event.ChannelType == slackevents.ChannelTypeChannel {
-			invocation.ChannelKind = domain.ChannelPublic
-		} else {
-			invocation.ChannelKind = domain.ChannelPrivate
+		// App mentions do not carry ChannelType, so they canonicalize the kind
+		// from the Slack channel ID. Do the same for thread replies: otherwise a
+		// differing ChannelType for the same channel would generate identical
+		// conversation keys with conflicting persisted metadata.
+		kind, ok := channelKindFromID(event.Channel)
+		if !ok || kind == domain.ChannelDM {
+			return domain.Invocation{}, false
 		}
+		invocation.ChannelKind = kind
 		invocation.Trigger = domain.TriggerThreadReply
 		invocation.Text = strings.TrimSpace(event.Text)
 	default: // Includes multi-party DMs.
