@@ -1,3 +1,6 @@
 .env
 .local-agent/
 .opencode/
+/bin/
+coverage.out
+docs/
