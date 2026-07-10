@@ -47,7 +47,6 @@ func (liveChecker) CheckModel(ctx context.Context, cfg config.ModelConfig, apiKe
 	}
 	request := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("Reply with OK.", genai.RoleUser)},
-		Config:   &genai.GenerateContentConfig{MaxOutputTokens: 8},
 	}
 	for response, generateErr := range llm.GenerateContent(ctx, request, false) {
 		if generateErr != nil {
