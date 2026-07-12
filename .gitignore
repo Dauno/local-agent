@@ -4,3 +4,7 @@
 /bin/
 coverage.out
 docs/
+.agents-cli-spec.md
+entity_memory.md
+feature_spec.md
+technical_design.md
