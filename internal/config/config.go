@@ -166,8 +166,3 @@ func Default() Config {
 		},
 	}
 }
-
-// Defaults is an alias kept for call sites that read more naturally in plural.
-func Defaults() Config {
-	return Default()
-}

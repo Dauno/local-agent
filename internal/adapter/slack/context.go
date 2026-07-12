@@ -113,16 +113,13 @@ func (e *ContextEnricher) Enrich(ctx context.Context, invocation domain.Invocati
 	}
 	defer cancel()
 
-	facts := make([]domain.ContextFact, 0, 15)
-
-	// Invocation facts (no API call needed).
-	facts = append(facts,
-		domain.ContextFact{Key: "slack.team.id", Value: invocation.TeamID},
-		domain.ContextFact{Key: "slack.channel.id", Value: invocation.ChannelID},
-		domain.ContextFact{Key: "slack.channel.kind", Value: string(invocation.ChannelKind)},
-		domain.ContextFact{Key: "slack.trigger", Value: string(invocation.Trigger)},
-		domain.ContextFact{Key: "slack.message.timestamp", Value: invocation.EventTS},
-	)
+	facts := []domain.ContextFact{
+		{Key: "slack.team.id", Value: invocation.TeamID},
+		{Key: "slack.channel.id", Value: invocation.ChannelID},
+		{Key: "slack.channel.kind", Value: string(invocation.ChannelKind)},
+		{Key: "slack.trigger", Value: string(invocation.Trigger)},
+		{Key: "slack.message.timestamp", Value: invocation.EventTS},
+	}
 	if invocation.ThreadTS != "" {
 		facts = append(facts, domain.ContextFact{Key: "slack.thread.root_timestamp", Value: invocation.ThreadTS})
 	}

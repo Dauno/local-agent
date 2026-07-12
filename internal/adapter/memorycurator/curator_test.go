@@ -29,7 +29,8 @@ func TestProposePatchProvidesBoundedTopicRevisionMetadata(t *testing.T) {
 		t.Fatal(err)
 	}
 	longDescription := strings.Repeat("x", 1_000)
-	patch, err := curator.ProposePatch(t.Context(), "slack:T12345678:dm:D12345678", "1", []domain.Message{{Role: domain.RoleUser, Content: "update alpha"}}, []domain.TopicReference{{Slug: "project-alpha", Title: "Project Alpha", Description: longDescription, Revision: 4}})
+	longTag := strings.Repeat("y", 1_000)
+	patch, err := curator.ProposePatch(t.Context(), "slack:T12345678:dm:D12345678", "1", []domain.Message{{Role: domain.RoleUser, Content: "update alpha"}}, []domain.TopicReference{{Slug: "project-alpha", Title: "Project Alpha", Description: longDescription, Tags: []string{longTag}, Revision: 4}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +42,7 @@ func TestProposePatchProvidesBoundedTopicRevisionMetadata(t *testing.T) {
 			t.Fatalf("prompt missing %q:\n%s", want, llm.prompt)
 		}
 	}
-	if strings.Contains(llm.prompt, longDescription) {
+	if strings.Contains(llm.prompt, longDescription) || strings.Contains(llm.prompt, longTag) {
 		t.Fatal("curator prompt included unbounded topic metadata")
 	}
 }

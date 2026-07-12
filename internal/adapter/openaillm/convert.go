@@ -79,16 +79,7 @@ func textFromContent(content *genai.Content) (string, error) {
 			return "", ErrToolsUnsupported
 		}
 
-		encoded, err := json.Marshal(part)
-		if err != nil {
-			return "", fmt.Errorf("inspect ADK content part: %w", err)
-		}
-		var fields map[string]json.RawMessage
-		if err := json.Unmarshal(encoded, &fields); err != nil {
-			return "", fmt.Errorf("inspect ADK content part: %w", err)
-		}
-		delete(fields, "text")
-		if len(fields) != 0 {
+		if part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
 			return "", ErrUnsupportedPart
 		}
 		text.WriteString(part.Text)
