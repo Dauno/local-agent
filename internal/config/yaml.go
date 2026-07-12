@@ -58,6 +58,13 @@ var configSchema = []schemaField{
 		{name: "allowed_user_ids"},
 		{name: "allowed_team_ids"},
 		{name: "allowed_channel_ids"},
+		{name: "context", children: []schemaField{
+			{name: "enabled"},
+			{name: "max_chars"},
+			{name: "timeout_seconds"},
+			{name: "profile_cache_ttl_minutes"},
+			{name: "conversation_cache_ttl_minutes"},
+		}},
 	}},
 	{name: "memory", children: []schemaField{
 		{name: "enabled"},

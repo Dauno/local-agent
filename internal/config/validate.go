@@ -124,6 +124,36 @@ func Validate(cfg Config) error {
 	validateIDs(&problems, "slack.allowed_team_ids", cfg.Slack.AllowedTeamIDs, slackTeamIDPattern, "a plausible Slack team ID beginning with T")
 	validateIDs(&problems, "slack.allowed_channel_ids", cfg.Slack.AllowedChannelIDs, slackChannelIDPattern, "a plausible Slack public or private channel ID beginning with C or G")
 
+	if cfg.Slack.Context.Enabled {
+		if cfg.Slack.Context.MaxChars <= 0 {
+			add("slack.context.max_chars", "must be greater than zero when enabled")
+		}
+		if cfg.Slack.Context.TimeoutSeconds <= 0 {
+			add("slack.context.timeout_seconds", "must be greater than zero when enabled")
+		} else if cfg.Runtime.SlackAPITimeoutSeconds > 0 && cfg.Slack.Context.TimeoutSeconds > cfg.Runtime.SlackAPITimeoutSeconds {
+			add("slack.context.timeout_seconds", "must not exceed runtime.slack_api_timeout_seconds when that timeout is enabled")
+		}
+		if cfg.Slack.Context.ProfileCacheTTLMinutes <= 0 {
+			add("slack.context.profile_cache_ttl_minutes", "must be greater than zero when enabled")
+		}
+		if cfg.Slack.Context.ConversationCacheTTLMinutes <= 0 {
+			add("slack.context.conversation_cache_ttl_minutes", "must be greater than zero when enabled")
+		}
+	} else {
+		if cfg.Slack.Context.MaxChars < 0 {
+			add("slack.context.max_chars", "must not be negative")
+		}
+		if cfg.Slack.Context.TimeoutSeconds < 0 {
+			add("slack.context.timeout_seconds", "must not be negative")
+		}
+		if cfg.Slack.Context.ProfileCacheTTLMinutes < 0 {
+			add("slack.context.profile_cache_ttl_minutes", "must not be negative")
+		}
+		if cfg.Slack.Context.ConversationCacheTTLMinutes < 0 {
+			add("slack.context.conversation_cache_ttl_minutes", "must not be negative")
+		}
+	}
+
 	if cfg.Memory.MaxTopicsRecall <= 0 {
 		add("memory.max_topics_recall", "must be greater than zero")
 	}

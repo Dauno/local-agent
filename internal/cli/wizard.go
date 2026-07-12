@@ -18,6 +18,12 @@ const privacyNotice = `Aviso de privacidad:
 - Si un usuario autorizado invoca el bot en un canal, la respuesta del thread es visible para quienes puedan acceder a ese canal o thread, incluso si no están autorizados para invocar el bot.
 `
 
+const contextPrivacyNotice = `Contexto Slack opcional:
+- Se enviarán al endpoint de modelo configurado el nombre, cargo, zona horaria y locale del usuario que invoca, además del nombre, topic y purpose del canal.
+- Estos datos no se almacenan localmente por esta función. Las respuestas en canales siguen siendo visibles para quienes accedan a la conversación.
+- Habilitarlo requiere reinstalar la app Slack para conceder users:read.
+`
+
 func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io.Writer) error {
 	fmt.Fprintln(output, "[1/9] Creando artefactos locales faltantes")
 	snapshot, existingSecrets, err := backend.PrepareSetup(ctx)
@@ -86,6 +92,11 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 		if err != nil {
 			return err
 		}
+		fmt.Fprint(output, contextPrivacyNotice)
+		access.ContextEnabled, err = prompt.Confirm("Habilitar enriquecimiento de contexto Slack", cfg.Slack.Context.Enabled)
+		if err != nil {
+			return err
+		}
 		candidate := cfg
 		candidate.Agent.Name = agentName
 		candidate.Slack.AppName = appName
@@ -94,6 +105,7 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 		candidate.Slack.AllowedUserIDs = access.AllowedUserIDs
 		candidate.Slack.AllowedTeamIDs = access.AllowedTeamIDs
 		candidate.Slack.AllowedChannelIDs = access.AllowedChannelIDs
+		candidate.Slack.Context.Enabled = access.ContextEnabled
 		if err := config.Validate(candidate); err != nil {
 			fmt.Fprintf(output, "Configuración inválida: %v\nVuelve a ingresar el control de acceso.\n", err)
 			continue
@@ -110,8 +122,11 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 
 	fmt.Fprintln(output, "\n[8/9] Confirmar cambios")
 	fmt.Fprintf(output, "Agente: %s\nApp Slack: %s\nBot visible: %s\n", agentName, appName, botName)
-	fmt.Fprintf(output, "Permitir todos: %t\nUsuarios: %s\nTeams: %s\nCanales: %s\n",
-		access.AllowAllUsers, displayList(access.AllowedUserIDs), displayList(access.AllowedTeamIDs), displayList(access.AllowedChannelIDs))
+	fmt.Fprintf(output, "Permitir todos: %t\nUsuarios: %s\nTeams: %s\nCanales: %s\nContexto Slack: %t\n",
+		access.AllowAllUsers, displayList(access.AllowedUserIDs), displayList(access.AllowedTeamIDs), displayList(access.AllowedChannelIDs), access.ContextEnabled)
+	if access.ContextEnabled {
+		fmt.Fprintln(output, "Reinstala la app Slack para conceder users:read antes de ejecutar local-agent run.")
+	}
 	fmt.Fprintf(output, "%s: %s\nSLACK_BOT_TOKEN: %s\nSLACK_APP_TOKEN: %s\n",
 		cfg.Model.APIKeyEnv, secure.Mask(modelKey), secure.Mask(botToken), secure.Mask(appToken))
 	fmt.Fprint(output, privacyNotice)

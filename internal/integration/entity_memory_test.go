@@ -104,8 +104,8 @@ func (entityMemoryLLM) GenerateText(context.Context, string) (string, error) { r
 
 type memoryRecordingAgent struct{ memory []domain.MemorySnippet }
 
-func (a *memoryRecordingAgent) Respond(_ context.Context, _ []domain.Message, memory []domain.MemorySnippet) (string, error) {
-	a.memory = append([]domain.MemorySnippet(nil), memory...)
+func (a *memoryRecordingAgent) Respond(_ context.Context, req port.AgentRequest) (string, error) {
+	a.memory = append([]domain.MemorySnippet(nil), req.Memory...)
 	return "ok", nil
 }
 

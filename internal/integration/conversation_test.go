@@ -90,10 +90,10 @@ type recordingAgent struct {
 	contexts  [][]domain.Message
 }
 
-func (a *recordingAgent) Respond(_ context.Context, messages []domain.Message, _ []domain.MemorySnippet) (string, error) {
+func (a *recordingAgent) Respond(_ context.Context, req port.AgentRequest) (string, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	a.contexts = append(a.contexts, append([]domain.Message(nil), messages...))
+	a.contexts = append(a.contexts, append([]domain.Message(nil), req.Messages...))
 	response := a.responses[0]
 	a.responses = a.responses[1:]
 	return response, nil

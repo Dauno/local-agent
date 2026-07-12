@@ -62,6 +62,7 @@ func TestRenderIncludesIdentitySocketModeScopesAndEvents(t *testing.T) {
 		"groups:read",
 		"im:history",
 		"im:write",
+		"users:read",
 	}
 	if !reflect.DeepEqual(parsed.OAuthConfig.Scopes.Bot, wantScopes) {
 		t.Fatalf("bot scopes = %#v, want %#v", parsed.OAuthConfig.Scopes.Bot, wantScopes)

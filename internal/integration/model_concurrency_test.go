@@ -75,7 +75,7 @@ type blockingForegroundAgent struct {
 	unblock <-chan struct{}
 }
 
-func (a blockingForegroundAgent) Respond(_ context.Context, _ []domain.Message, _ []domain.MemorySnippet) (string, error) {
+func (a blockingForegroundAgent) Respond(_ context.Context, _ port.AgentRequest) (string, error) {
 	a.started <- struct{}{}
 	<-a.unblock
 	return "answer", nil

@@ -131,6 +131,15 @@ func (a *Application) Run(ctx context.Context) error {
 			return redactor.Error(fmt.Errorf("reconcile assistant exchanges: %w", err))
 		}
 	}
+
+	contextEnricher := slackadapter.NewContextEnricherFromSDK(logger, api, slackadapter.ContextEnricherConfig{
+		Enabled:                 cfg.Slack.Context.Enabled,
+		MaxChars:                cfg.Slack.Context.MaxChars,
+		Timeout:                 time.Duration(cfg.Slack.Context.TimeoutSeconds) * time.Second,
+		ProfileCacheTTL:         time.Duration(cfg.Slack.Context.ProfileCacheTTLMinutes) * time.Minute,
+		ConversationCacheTTL:    time.Duration(cfg.Slack.Context.ConversationCacheTTLMinutes) * time.Minute,
+	})
+
 	service, err := botusecase.New(botusecase.Config{
 		AccessPolicy: domain.AccessPolicy{
 			AllowAllUsers: cfg.Slack.AllowAllUsers, AllowedUserIDs: cfg.Slack.AllowedUserIDs,
@@ -148,6 +157,7 @@ func (a *Application) Run(ctx context.Context) error {
 	}, botusecase.Dependencies{
 		Store: store, Agent: agent, History: history, Publisher: publisher, Logger: logger,
 		ModelCalls: modelCalls, SanitizeContent: redactor.String,
+		Enricher: contextEnricher,
 	})
 	if err != nil {
 		return err

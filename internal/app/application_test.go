@@ -32,7 +32,7 @@ func TestRealCLISetupDoctorManifestAndVersion(t *testing.T) {
 		appToken = "xapp-integration-token"
 		modelKey = "integration-model-key"
 	)
-	input := strings.NewReader("\n\n\n" + botToken + "\n" + appToken + "\nU12345678\n\n\n\n" + modelKey + "\ny\n")
+	input := strings.NewReader("\n\n\n" + botToken + "\n" + appToken + "\nU12345678\n\n\n\n\n" + modelKey + "\ny\n")
 	var output, stderr bytes.Buffer
 	command, err := cli.NewRoot(application, cli.Streams{In: input, Out: &output, Err: &stderr})
 	if err != nil {

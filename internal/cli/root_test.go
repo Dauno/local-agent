@@ -62,7 +62,7 @@ func TestInitWizardCompletesNineStepsWithoutLeakingSecrets(t *testing.T) {
 		appToken = "xapp-123456789-secret"
 		modelKey = "model-api-secret"
 	)
-	input := strings.NewReader("\n\n\n" + botToken + "\n" + appToken + "\nU12345678\n\n\n\n" + modelKey + "\ny\n")
+	input := strings.NewReader("\n\n\n" + botToken + "\n" + appToken + "\nU12345678\n\n\n\n\n" + modelKey + "\ny\n")
 	var output, stderr bytes.Buffer
 	backend := setupBackend()
 	privacyVisibleAtApply := false
@@ -81,6 +81,12 @@ func TestInitWizardCompletesNineStepsWithoutLeakingSecrets(t *testing.T) {
 	}
 	if backend.identity.AgentName != "Dev Agent" || len(backend.access.AllowedUserIDs) != 1 || backend.access.AllowedUserIDs[0] != "U12345678" {
 		t.Fatalf("unexpected confirmed setup: identity=%#v access=%#v", backend.identity, backend.access)
+	}
+	if backend.access.ContextEnabled {
+		t.Fatalf("context enrichment unexpectedly enabled: %#v", backend.access)
+	}
+	if !strings.Contains(output.String(), "Contexto Slack opcional") {
+		t.Fatalf("context privacy disclosure missing: %s", output.String())
 	}
 	if backend.secrets.ModelAPIKey != modelKey || backend.secrets.SlackBotToken != botToken || backend.secrets.SlackAppToken != appToken {
 		t.Fatal("confirmed secrets were not passed to bootstrap")
@@ -107,7 +113,7 @@ func TestInitCancellationKeepsBaseArtifactsWithoutApplying(t *testing.T) {
 	backend.setupSecrets = bootstrap.Secrets{
 		ModelAPIKey: "existing-model", SlackBotToken: "xoxb-existing-token", SlackAppToken: "xapp-existing-token",
 	}
-	input := strings.NewReader(strings.Repeat("\n", 10) + "n\n")
+	input := strings.NewReader(strings.Repeat("\n", 11) + "n\n")
 	var output, stderr bytes.Buffer
 	root, _ := NewRoot(backend, Streams{In: input, Out: &output, Err: &stderr})
 	if code := Execute(t.Context(), root, []string{"init"}, &stderr); code != 0 {
