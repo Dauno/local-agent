@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -127,6 +128,69 @@ func (r *HistoryReader) RecentHistory(ctx context.Context, invocation domain.Inv
 	return history, nil
 }
 
+// FindPublishedAssistantExchange provides fail-closed crash recovery. It
+// returns a timestamp only when every expected bot-authored chunk carries the
+// prepared exchange's exact Slack metadata correlation ID.
+func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, intent port.AssistantExchangeIntent) (string, bool, error) {
+	if r == nil || r.client == nil {
+		return "", false, errors.New("Slack history client is required")
+	}
+	if r.botUserID == "" || intent.ChannelID == "" || intent.CorrelationID == "" {
+		return "", false, errors.New("invalid assistant exchange finder input")
+	}
+
+	callCtx := ctx
+	cancel := func() {}
+	if r.timeout > 0 {
+		callCtx, cancel = context.WithTimeout(ctx, r.timeout)
+	}
+	defer cancel()
+
+	const recoveryHistoryLimit = 100 // Slack's bounded history page is the strongest available recovery window.
+	var (
+		messages []slackapi.Message
+		err      error
+	)
+	if intent.ChannelKind == domain.ChannelDM {
+		messages, err = r.client.ConversationHistory(callCtx, intent.ChannelID, "", recoveryHistoryLimit)
+	} else {
+		if intent.RootTS == "" {
+			return "", false, errors.New("threaded assistant exchange has no root timestamp")
+		}
+		messages, err = r.client.ConversationReplies(callCtx, intent.ChannelID, intent.RootTS, "", recoveryHistoryLimit)
+	}
+	if err != nil {
+		safeErr := secure.NewRedactor().Error(err)
+		return "", false, fmt.Errorf("read Slack conversation for assistant exchange recovery: %w", safeErr)
+	}
+	chunks := SplitResponse(intent.Content)
+	matched := make([]slackapi.Message, 0, len(chunks))
+	for _, message := range messages {
+		if message.User == r.botUserID && message.Metadata.EventType == "local_agent.assistant_exchange" &&
+			metadataCorrelationID(message) == intent.CorrelationID {
+			matched = append(matched, message)
+		}
+	}
+	if len(matched) != len(chunks) {
+		return "", false, nil
+	}
+	sort.SliceStable(matched, func(i, j int) bool {
+		return parseSlackTimestamp(matched[i].Timestamp).Before(parseSlackTimestamp(matched[j].Timestamp))
+	})
+	for index, chunk := range chunks {
+		message := matched[index]
+		if message.Timestamp == "" || message.Hidden || message.Edited != nil || len(message.Files) != 0 || message.Text != chunk {
+			return "", false, nil
+		}
+	}
+	return matched[len(matched)-1].Timestamp, true, nil
+}
+
+func metadataCorrelationID(message slackapi.Message) string {
+	correlationID, _ := message.Metadata.EventPayload["correlation_id"].(string)
+	return correlationID
+}
+
 func mapHistory(messages []slackapi.Message, botUserID string) port.History {
 	history := port.History{Messages: make([]domain.Message, 0, len(messages))}
 	for _, message := range messages {
@@ -175,3 +239,4 @@ func parseSlackTimestamp(timestamp string) time.Time {
 }
 
 var _ port.HistoryReader = (*HistoryReader)(nil)
+var _ port.AssistantExchangeFinder = (*HistoryReader)(nil)

@@ -25,14 +25,14 @@ const (
 )
 
 type postClient interface {
-	PostMessage(context.Context, string, string, string) (string, error)
+	PostMessage(context.Context, string, string, string, string) (string, error)
 }
 
 type sdkPostClient struct {
 	client *slackapi.Client
 }
 
-func (c sdkPostClient) PostMessage(ctx context.Context, channelID, text, threadTS string) (string, error) {
+func (c sdkPostClient) PostMessage(ctx context.Context, channelID, text, threadTS, correlationID string) (string, error) {
 	options := []slackapi.MsgOption{
 		slackapi.MsgOptionText(text, false),
 		slackapi.MsgOptionDisableLinkUnfurl(),
@@ -40,6 +40,12 @@ func (c sdkPostClient) PostMessage(ctx context.Context, channelID, text, threadT
 	}
 	if threadTS != "" {
 		options = append(options, slackapi.MsgOptionTS(threadTS))
+	}
+	if correlationID != "" {
+		options = append(options, slackapi.MsgOptionMetadata(slackapi.SlackMetadata{
+			EventType:    "local_agent.assistant_exchange",
+			EventPayload: map[string]any{"correlation_id": correlationID},
+		}))
 	}
 	_, timestamp, err := c.client.PostMessageContext(ctx, channelID, options...)
 	return timestamp, err
@@ -98,7 +104,7 @@ func (p *Publisher) Publish(ctx context.Context, target domain.ReplyTarget, text
 		if err := p.waitForChannel(ctx, channel); err != nil {
 			return result, fmt.Errorf("pace Slack channel %s: %w", target.ChannelID, err)
 		}
-		timestamp, err := p.postWithRetry(ctx, target, chunk)
+		timestamp, err := p.postWithRetry(ctx, target, chunk, target.CorrelationID)
 		channel.lastAttempt = p.now()
 		if err != nil {
 			safeErr := secure.NewRedactor().Error(err)
@@ -126,14 +132,14 @@ func (p *Publisher) waitForChannel(ctx context.Context, channel *channelPace) er
 	return p.sleep(ctx, wait)
 }
 
-func (p *Publisher) postWithRetry(ctx context.Context, target domain.ReplyTarget, text string) (string, error) {
+func (p *Publisher) postWithRetry(ctx context.Context, target domain.ReplyTarget, text, correlationID string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		callCtx := ctx
 		cancel := func() {}
 		if p.timeout > 0 {
 			callCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		}
-		timestamp, err := p.client.PostMessage(callCtx, target.ChannelID, text, target.ThreadTS)
+		timestamp, err := p.client.PostMessage(callCtx, target.ChannelID, text, target.ThreadTS, correlationID)
 		cancel()
 		if err == nil {
 			return timestamp, nil

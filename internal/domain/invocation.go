@@ -100,8 +100,9 @@ func (i Invocation) ConversationKey() (ConversationKey, error) {
 }
 
 type ReplyTarget struct {
-	ChannelID string
-	ThreadTS  string
+	ChannelID     string
+	ThreadTS      string
+	CorrelationID string // Durable per-intent identifier included in Slack message metadata.
 }
 
 func (i Invocation) ReplyTarget() ReplyTarget {

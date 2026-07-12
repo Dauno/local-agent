@@ -26,6 +26,7 @@ type Config struct {
 	Runtime RuntimeConfig `yaml:"runtime"`
 	Model   ModelConfig   `yaml:"model"`
 	Slack   SlackConfig   `yaml:"slack"`
+	Memory  MemoryConfig  `yaml:"memory"`
 
 	document *sourceDocument
 }
@@ -73,6 +74,22 @@ type SlackConfig struct {
 	AllowedChannelIDs   []string `yaml:"allowed_channel_ids"`
 }
 
+type MemoryConfig struct {
+	Enabled               bool   `yaml:"enabled"`
+	Directory             string `yaml:"directory"`
+	MaxTopicsRecall       int    `yaml:"max_topics_recall"`
+	MaxCharsRecall        int    `yaml:"max_chars_recall"`
+	RecallTimeoutSeconds  int    `yaml:"recall_timeout_seconds"`
+	CuratorTimeoutSeconds int    `yaml:"curator_timeout_seconds"`
+	CuratorMaxRetries     int    `yaml:"curator_max_retries"`
+	WorkerIntervalSeconds int    `yaml:"worker_interval_seconds"`
+	RetentionDays         int    `yaml:"retention_days"`
+	MaxTopics             int    `yaml:"max_topics"`
+	MaxLinks              int    `yaml:"max_links"`
+	MaxTopicChars         int    `yaml:"max_topic_chars"`
+	MaxPatchOps           int    `yaml:"max_patch_ops"`
+}
+
 // Default returns a new Config populated with the PRD defaults.
 func Default() Config {
 	return Config{
@@ -115,6 +132,21 @@ func Default() Config {
 			AllowedUserIDs:      []string{},
 			AllowedTeamIDs:      []string{},
 			AllowedChannelIDs:   []string{},
+		},
+		Memory: MemoryConfig{
+			Enabled:               false,
+			Directory:             "",
+			MaxTopicsRecall:       3,
+			MaxCharsRecall:        2000,
+			RecallTimeoutSeconds:  2,
+			CuratorTimeoutSeconds: 30,
+			CuratorMaxRetries:     3,
+			WorkerIntervalSeconds: 60,
+			RetentionDays:         90,
+			MaxTopics:             100,
+			MaxLinks:              50,
+			MaxTopicChars:         10000,
+			MaxPatchOps:           10,
 		},
 	}
 }

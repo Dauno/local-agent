@@ -51,6 +51,21 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			AllowedTeamIDs:      []string{},
 			AllowedChannelIDs:   []string{},
 		},
+		Memory: config.MemoryConfig{
+			Enabled:               false,
+			Directory:             "",
+			MaxTopicsRecall:       3,
+			MaxCharsRecall:        2000,
+			RecallTimeoutSeconds:  2,
+			CuratorTimeoutSeconds: 30,
+			CuratorMaxRetries:     3,
+			WorkerIntervalSeconds: 60,
+			RetentionDays:         90,
+			MaxTopics:             100,
+			MaxLinks:              50,
+			MaxTopicChars:         10000,
+			MaxPatchOps:           10,
+		},
 	}
 
 	got := config.Default()
@@ -114,7 +129,22 @@ slack:
   allowed_user_ids: []
   allowed_team_ids: []
   allowed_channel_ids: []
+memory:
+  enabled: false
+  directory: ""
+  max_topics_recall: 3
+  max_chars_recall: 2000
+  recall_timeout_seconds: 2
+  curator_timeout_seconds: 30
+  curator_max_retries: 3
+  worker_interval_seconds: 60
+  retention_days: 90
+  max_topics: 100
+  max_links: 50
+  max_topic_chars: 10000
+  max_patch_ops: 10
 `
+
 	if string(got) != want {
 		t.Fatalf("default YAML mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
 	}
@@ -309,6 +339,18 @@ func TestValidateRejectsSensitiveModelHeaders(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsInvalidMemoryLimits(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Memory.RecallTimeoutSeconds = 0
+	cfg.Memory.MaxPatchOps = 0
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) || !validation.Has("memory.recall_timeout_seconds") || !validation.Has("memory.max_patch_ops") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
 func TestResolvePaths(t *testing.T) {
 	t.Parallel()
 
@@ -329,6 +371,7 @@ func TestResolvePaths(t *testing.T) {
 		ManifestFile:   filepath.Join(root, ".local-agent", "app-manifest.local.yaml"),
 		EnvExampleFile: filepath.Join(root, ".local-agent", "local.env.example"),
 		EnvFile:        filepath.Join(root, ".env"),
+		MemoryDir:      filepath.Join(root, "var", "state", "memory"),
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("ResolvePaths()\n got: %#v\nwant: %#v", paths, want)

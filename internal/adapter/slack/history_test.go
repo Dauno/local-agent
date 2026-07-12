@@ -11,6 +11,7 @@ import (
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 func TestHistoryReaderUsesRepliesForChannelThreadAndMapsRoles(t *testing.T) {
@@ -148,6 +149,65 @@ func TestHistoryReaderReturnsRedactedWrappedAPIErrors(t *testing.T) {
 	}
 	if strings.Contains(err.Error(), "123456789-secret") {
 		t.Fatalf("RecentHistory() leaked token: %v", err)
+	}
+}
+
+func TestHistoryReaderFindsPublishedAssistantExchangeByMetadataCorrelation(t *testing.T) {
+	t.Parallel()
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testBot, Text: "older reply", Timestamp: "1719999999.000001"}},
+		{Msg: slackapi.Msg{User: testBot, Text: "published reply", Timestamp: "1720000001.000002", Metadata: exchangeMetadata("intent-correlation")}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	intent := port.AssistantExchangeIntent{
+		ID: "intent", ChannelID: testDM, ChannelKind: domain.ChannelDM,
+		Content: "published reply", CorrelationID: "intent-correlation",
+	}
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), intent)
+	if err != nil || !found || timestamp != "1720000001.000002" {
+		t.Fatalf("FindPublishedAssistantExchange() = %q, %t, %v", timestamp, found, err)
+	}
+	if call := client.lastCall(); call.method != "history" || call.latest != "" || call.limit != 100 || !call.hadDeadline {
+		t.Fatalf("recovery history call = %#v", call)
+	}
+}
+
+func TestHistoryReaderDoesNotRecoverFromContentAndTimeWithoutCorrelation(t *testing.T) {
+	t.Parallel()
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testBot, Text: "published reply", Timestamp: "1720000001.000002"}},
+		{Msg: slackapi.Msg{User: testBot, Text: "published reply", Timestamp: "1720000002.000002"}},
+	}}
+	reader := newHistoryReader(client, testBot, 0, nil)
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: "published reply", CorrelationID: "intent-correlation",
+	})
+	if err != nil || found || timestamp != "" {
+		t.Fatalf("ambiguous FindPublishedAssistantExchange() = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func TestHistoryReaderRequiresCorrelationOnEveryMultipartChunk(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("x", SlackChunkRunes+1)
+	chunks := SplitResponse(content)
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testBot, Text: chunks[0], Timestamp: "1720000001.000001", Metadata: exchangeMetadata("intent-correlation")}},
+		{Msg: slackapi.Msg{User: testBot, Text: chunks[1], Timestamp: "1720000002.000002"}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: content, CorrelationID: "intent-correlation",
+	})
+	if err != nil || found || timestamp != "" {
+		t.Fatalf("partial correlation recovery = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func exchangeMetadata(correlationID string) slackapi.SlackMetadata {
+	return slackapi.SlackMetadata{
+		EventType:    "local_agent.assistant_exchange",
+		EventPayload: map[string]any{"correlation_id": correlationID},
 	}
 }
 

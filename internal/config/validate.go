@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"sort"
 	"strings"
 )
 
@@ -123,6 +124,40 @@ func Validate(cfg Config) error {
 	validateIDs(&problems, "slack.allowed_team_ids", cfg.Slack.AllowedTeamIDs, slackTeamIDPattern, "a plausible Slack team ID beginning with T")
 	validateIDs(&problems, "slack.allowed_channel_ids", cfg.Slack.AllowedChannelIDs, slackChannelIDPattern, "a plausible Slack public or private channel ID beginning with C or G")
 
+	if cfg.Memory.MaxTopicsRecall <= 0 {
+		add("memory.max_topics_recall", "must be greater than zero")
+	}
+	if cfg.Memory.MaxCharsRecall <= 0 {
+		add("memory.max_chars_recall", "must be greater than zero")
+	}
+	if cfg.Memory.CuratorTimeoutSeconds <= 0 {
+		add("memory.curator_timeout_seconds", "must be greater than zero")
+	}
+	if cfg.Memory.RecallTimeoutSeconds <= 0 {
+		add("memory.recall_timeout_seconds", "must be greater than zero")
+	}
+	if cfg.Memory.CuratorMaxRetries <= 0 {
+		add("memory.curator_max_retries", "must be greater than zero")
+	}
+	if cfg.Memory.WorkerIntervalSeconds <= 0 {
+		add("memory.worker_interval_seconds", "must be greater than zero")
+	}
+	if cfg.Memory.RetentionDays <= 0 {
+		add("memory.retention_days", "must be greater than zero")
+	}
+	if cfg.Memory.MaxTopics <= 0 {
+		add("memory.max_topics", "must be greater than zero")
+	}
+	if cfg.Memory.MaxLinks < 0 {
+		add("memory.max_links", "must not be negative")
+	}
+	if cfg.Memory.MaxTopicChars <= 0 {
+		add("memory.max_topic_chars", "must be greater than zero")
+	}
+	if cfg.Memory.MaxPatchOps <= 0 {
+		add("memory.max_patch_ops", "must be greater than zero")
+	}
+
 	if len(problems) > 0 {
 		return &ValidationError{Fields: problems}
 	}
@@ -168,7 +203,13 @@ func validateBaseURL(problems *[]FieldError, value string) {
 }
 
 func validateHeaders(problems *[]FieldError, headers map[string]string) {
-	for name, value := range headers {
+	names := make([]string, 0, len(headers))
+	for name := range headers {
+		names = append(names, name)
+	}
+	sort.Strings(names) // Stable validation output also keeps redacted diagnostics stable.
+	for _, name := range names {
+		value := headers[name]
 		field := fmt.Sprintf("model.headers[%q]", name)
 		if !validHeaderName(name) {
 			*problems = append(*problems, FieldError{Field: field, Problem: "must be a valid HTTP header name"})

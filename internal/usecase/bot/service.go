@@ -8,6 +8,7 @@ import (
 	"log/slog"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -28,13 +29,17 @@ type Config struct {
 }
 
 type Dependencies struct {
-	Store           port.ConversationStore
-	Agent           port.Agent
-	History         port.HistoryReader
-	Publisher       port.ResponsePublisher
-	Clock           port.Clock
-	Logger          port.Logger
+	Store      port.ConversationStore
+	Agent      port.Agent
+	History    port.HistoryReader
+	Publisher  port.ResponsePublisher
+	Clock      port.Clock
+	Logger     port.Logger
+	ModelCalls port.ModelCallLimiter
+
 	SanitizeContent func(string) string
+	Memory          port.MemoryRetriever
+	Exchange        port.AssistantExchangeWriter
 }
 
 type Outcome string
@@ -50,15 +55,18 @@ const (
 )
 
 type Service struct {
-	cfg       Config
-	store     port.ConversationStore
-	agent     port.Agent
-	history   port.HistoryReader
-	publisher port.ResponsePublisher
-	clock     port.Clock
-	logger    port.Logger
-	limiter   *Limiter
-	sanitize  func(string) string
+	cfg        Config
+	store      port.ConversationStore
+	agent      port.Agent
+	history    port.HistoryReader
+	publisher  port.ResponsePublisher
+	clock      port.Clock
+	logger     port.Logger
+	limiter    *Limiter
+	modelCalls port.ModelCallLimiter
+	sanitize   func(string) string
+	recall     port.MemoryRetriever
+	exchange   port.AssistantExchangeWriter
 }
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
@@ -101,10 +109,14 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.SanitizeContent == nil {
 		deps.SanitizeContent = func(value string) string { return value }
 	}
+	if deps.ModelCalls == nil {
+		deps.ModelCalls = unlimitedModelCalls{}
+	}
 	return &Service{
 		cfg: cfg, store: deps.Store, agent: deps.Agent, history: deps.History,
 		publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
-		limiter: NewLimiter(cfg.MaxConcurrentCalls), sanitize: deps.SanitizeContent,
+		limiter: NewLimiter(cfg.MaxConcurrentCalls), modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
+		recall: deps.Memory, exchange: deps.Exchange,
 	}, nil
 }
 
@@ -167,7 +179,6 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 		return OutcomeBusy, nil
 	}
 	defer release()
-
 	prior, err := s.store.RecentMessages(ctx, key, s.cfg.ContextLimits.MaxMessages)
 	if err != nil {
 		s.logger.Error("conversation context lookup failed", "conversation_key", key, "error", err)
@@ -196,13 +207,37 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	}
 
 	modelContext := domain.LimitMessages(append(prior, userMessage), s.cfg.ContextLimits)
+
+	var memory []domain.MemorySnippet
+	if s.recall != nil {
+		snippets, err := s.recall.Recall(ctx, invocation.Text)
+		if err != nil {
+			s.logger.Warn("memory recall failed", "event_id", invocation.EventID, "error", err)
+		} else {
+			memory = domain.FitMemorySnippets(snippets, s.cfg.ContextLimits.MaxChars-messageChars(modelContext))
+		}
+	}
+
 	modelCtx := ctx
 	cancel := func() {}
 	if s.cfg.ModelTimeout > 0 {
 		modelCtx, cancel = context.WithTimeout(ctx, s.cfg.ModelTimeout)
 	}
+	modelRelease, modelAcquired := s.modelCalls.TryAcquire()
+	if !modelAcquired {
+		cancel()
+		s.logger.Info("model call rejected by shared backpressure", "conversation_key", key)
+		if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); err != nil {
+			s.logger.Error("busy response failed", "conversation_key", key, "error", err)
+			return OutcomePublishFailed, nil
+		}
+		return OutcomeBusy, nil
+	}
 	s.logger.Info("model call started", "conversation_key", key, "event_id", invocation.EventID)
-	response, modelErr := s.agent.Respond(modelCtx, modelContext)
+	response, modelErr := func() (string, error) {
+		defer modelRelease() // Shared permit covers only Agent.Respond, not Slack or database latency.
+		return s.agent.Respond(modelCtx, modelContext, memory)
+	}()
 	cancel()
 	if modelErr != nil || strings.TrimSpace(response) == "" {
 		if modelErr == nil {
@@ -226,26 +261,71 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 		}
 		return OutcomeModelFailed, nil
 	}
-	published, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), safeResponse)
+	// Stage the complete exchange before Slack accepts the reply. If finalization
+	// later fails, the durable intent is reconciled without losing curation input.
+	prepared := port.PreparedAssistantExchange{}
+	if s.exchange != nil {
+		intentMessage := domain.Message{
+			// Slack has not accepted this reply yet, so no timestamp is available.
+			Role: domain.RoleAssistant, Content: safeResponse,
+			CreatedAt: s.clock.Now().UTC(),
+		}
+		var prepareErr error
+		prepared, prepareErr = s.exchange.PrepareAssistantExchange(ctx, metadata, intentMessage, s.cfg.RetainMessages)
+		if prepareErr != nil {
+			s.logger.Error("assistant exchange preparation failed", "conversation_key", key, "error", prepareErr)
+			return "", fmt.Errorf("prepare assistant exchange: %w", prepareErr)
+		}
+	}
+	target := invocation.ReplyTarget()
+	target.CorrelationID = prepared.CorrelationID
+	published, err := s.publisher.Publish(ctx, target, safeResponse)
 	if err != nil {
+		// A transport error can follow Slack accepting the reply; retain the
+		// prepared intent so startup reconciliation can prove that outcome.
 		s.logger.Error("assistant response publish failed", "conversation_key", key, "error", err)
 		return OutcomePublishFailed, nil
 	}
 	assistantTS := published.LastMessageTS
 	if assistantTS == "" {
-		assistantTS = invocation.EventTS
+		return "", errors.New("Slack published a response without a timestamp")
 	}
-	metadata.LastTS = assistantTS
-	assistant := domain.Message{
-		Role: domain.RoleAssistant, Content: safeResponse, ExternalTS: assistantTS,
-		CreatedAt: s.clock.Now().UTC(),
+	if s.exchange != nil {
+		if err := s.exchange.MarkAssistantExchangePublished(ctx, prepared.ID, assistantTS); err != nil {
+			s.logger.Error("assistant exchange publication marking failed", "conversation_key", key, "error", err)
+			return "", fmt.Errorf("mark assistant exchange published: %w", err)
+		}
+		if err := s.exchange.FinalizeAssistantExchange(ctx, prepared.ID); err != nil {
+			s.logger.Error("assistant exchange persistence failed", "conversation_key", key, "error", err)
+			return "", fmt.Errorf("persist assistant exchange: %w", err)
+		}
+	} else {
+		metadata.LastTS = assistantTS
+		assistant := domain.Message{
+			Role: domain.RoleAssistant, Content: safeResponse, ExternalTS: assistantTS,
+			CreatedAt: s.clock.Now().UTC(),
+		}
+		if err := s.store.AppendMessage(ctx, metadata, assistant, s.cfg.RetainMessages); err != nil {
+			s.logger.Error("assistant message persistence failed", "conversation_key", key, "error", err)
+			return "", fmt.Errorf("persist assistant message: %w", err)
+		}
 	}
-	if err := s.store.AppendMessage(ctx, metadata, assistant, s.cfg.RetainMessages); err != nil {
-		s.logger.Error("assistant message persistence failed", "conversation_key", key, "error", err)
-		return "", fmt.Errorf("persist assistant message: %w", err)
-	}
+
 	s.logger.Info("Slack invocation completed", "conversation_key", key, "event_id", invocation.EventID)
 	return OutcomeResponded, nil
+}
+
+func messageChars(messages []domain.Message) int {
+	total := 0
+	for _, message := range messages {
+		total += utf8.RuneCountInString(message.Content)
+	}
+	return total
+}
+
+func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.AssistantExchangeWriter) {
+	s.recall = recall
+	s.exchange = exchange
 }
 
 func (s *Service) recoverHistory(ctx context.Context, invocation domain.Invocation) (port.History, error) {
@@ -276,3 +356,9 @@ func withoutInvocation(messages []domain.Message, eventTS string) []domain.Messa
 type systemClock struct{}
 
 func (systemClock) Now() time.Time { return time.Now() }
+
+// unlimitedModelCalls preserves standalone bot-service behavior. Runtime
+// composition always injects the shared process-wide limiter.
+type unlimitedModelCalls struct{}
+
+func (unlimitedModelCalls) TryAcquire() (func(), bool) { return func() {}, true }

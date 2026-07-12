@@ -160,6 +160,133 @@ func TestOpenExistingRejectsFutureSchema(t *testing.T) {
 	}
 }
 
+func TestOpenExistingUpgradesV3OutboxWithSourceSnapshot(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v3.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := dataSourceName(path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV1(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV2(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if err := migrateV3(ctx, tx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 3"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var defaultValue string
+	if err := store.db.QueryRowContext(ctx, `SELECT dflt_value FROM pragma_table_info('memory_outbox') WHERE name = 'source_messages'`).Scan(&defaultValue); err != nil {
+		t.Fatal(err)
+	}
+	if defaultValue != "'[]'" {
+		t.Fatalf("source_messages default = %q, want '[]'", defaultValue)
+	}
+}
+
+func TestOpenExistingUpgradesV5ExchangeIntentsAsPrepared(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v5.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := dataSourceName(path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range []func(context.Context, *sql.Tx) error{migrateV1, migrateV2, migrateV3, migrateV4, migrateV5} {
+		if err := migration(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_exchange_intents (
+			id, conversation_key, team_id, channel_id, channel_kind, root_ts, last_ts,
+			assistant_content, assistant_external_ts, assistant_created_at, retain, source_messages, created_at
+		) VALUES ('intent', 'slack:T:dm:D', 'T', 'D', 'dm', '', '1', 'reply', '1', 1, 10, '[]', 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var status, correlationID string
+	if err := store.db.QueryRowContext(ctx, `SELECT publish_status, correlation_id FROM memory_exchange_intents WHERE id = 'intent'`).Scan(&status, &correlationID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "prepared" {
+		t.Fatalf("migrated intent status = %q, want prepared", status)
+	}
+	if correlationID != "" {
+		t.Fatalf("legacy prepared intent correlation = %q, want empty", correlationID)
+	}
+	// A content-only finder must not be consulted for an intent that predates
+	// durable correlation metadata.
+	if err := store.ReconcileAssistantExchanges(ctx, exchangeFinder{content: "reply", timestamp: "2"}); err != nil {
+		t.Fatal(err)
+	}
+	var localAssistantCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM messages WHERE role = 'assistant'`).Scan(&localAssistantCount); err != nil {
+		t.Fatal(err)
+	}
+	if localAssistantCount != 0 {
+		t.Fatalf("unverified v5 intent created %d local assistant messages", localAssistantCount)
+	}
+	var preparedCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_exchange_intents WHERE publish_status = 'prepared'`).Scan(&preparedCount); err != nil {
+		t.Fatal(err)
+	}
+	if preparedCount != 1 {
+		t.Fatalf("legacy prepared intent count = %d, want 1", preparedCount)
+	}
+}
+
 func newTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "local-agent.db")

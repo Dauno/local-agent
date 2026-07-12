@@ -59,6 +59,21 @@ var configSchema = []schemaField{
 		{name: "allowed_team_ids"},
 		{name: "allowed_channel_ids"},
 	}},
+	{name: "memory", children: []schemaField{
+		{name: "enabled"},
+		{name: "directory"},
+		{name: "max_topics_recall"},
+		{name: "max_chars_recall"},
+		{name: "recall_timeout_seconds"},
+		{name: "curator_timeout_seconds"},
+		{name: "curator_max_retries"},
+		{name: "worker_interval_seconds"},
+		{name: "retention_days"},
+		{name: "max_topics"},
+		{name: "max_links"},
+		{name: "max_topic_chars"},
+		{name: "max_patch_ops"},
+	}},
 }
 
 // Load reads, applies defaults to, and validates a YAML config file.

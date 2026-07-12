@@ -16,6 +16,21 @@ type fakeClock struct{ now time.Time }
 
 func (c fakeClock) Now() time.Time { return c.now }
 
+func TestMemoryContextFitsExactRenderedUnicodeBudget(t *testing.T) {
+	snippets := []domain.MemorySnippet{{Title: "Topic", Slug: "topic", RevisionNumber: 1, Content: "abcdef🚀"}}
+	full := domain.RenderMemoryReference(snippets)
+	result := domain.FitMemorySnippets(snippets, len([]rune(full))-1)
+	if len(result) != 1 || result[0].Content != "abcdef" {
+		t.Fatalf("FitMemorySnippets() = %#v", result)
+	}
+	if got := len([]rune(domain.RenderMemoryReference(result))); got > len([]rune(full))-1 {
+		t.Fatalf("rendered memory has %d runes, exceeds budget", got)
+	}
+	if result := domain.FitMemorySnippets(snippets, 1); len(result) != 0 {
+		t.Fatalf("FitMemorySnippets() with no room = %#v", result)
+	}
+}
+
 type fakeStore struct {
 	mu           sync.Mutex
 	claimed      bool
@@ -62,17 +77,66 @@ func (s *fakeStore) AppendMessage(_ context.Context, metadata domain.Conversatio
 func (*fakeStore) CleanupDedupe(context.Context, time.Time) error { return nil }
 
 type fakeAgent struct {
-	response string
-	err      error
-	calls    int
-	context  []domain.Message
-	block    <-chan struct{}
-	started  chan<- struct{}
+	response  string
+	err       error
+	calls     int
+	context   []domain.Message
+	memory    []domain.MemorySnippet
+	block     <-chan struct{}
+	started   chan<- struct{}
+	onRespond func()
 }
 
-func (a *fakeAgent) Respond(ctx context.Context, messages []domain.Message) (string, error) {
+type fakeExchangeWriter struct {
+	calls       int
+	prepares    int
+	published   int
+	discards    int
+	metadata    domain.ConversationMetadata
+	message     domain.Message
+	prepared    port.PreparedAssistantExchange
+	err         error
+	onAppend    func()
+	publishedTS string
+}
+
+func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, _ domain.ConversationMetadata, _ domain.Message, _ int) (port.PreparedAssistantExchange, error) {
+	w.prepares++
+	if w.prepared.ID == "" {
+		w.prepared = port.PreparedAssistantExchange{ID: "intent", CorrelationID: "intent-correlation"}
+	}
+	return w.prepared, nil
+}
+
+func (w *fakeExchangeWriter) MarkAssistantExchangePublished(_ context.Context, _ string, assistantTS string) error {
+	w.published++
+	w.publishedTS = assistantTS
+	return nil
+}
+
+func (w *fakeExchangeWriter) FinalizeAssistantExchange(_ context.Context, _ string) error {
+	w.calls++
+	if w.onAppend != nil {
+		w.onAppend()
+	}
+	return w.err
+}
+
+func (w *fakeExchangeWriter) DiscardAssistantExchange(context.Context, string) error {
+	w.discards++
+	return nil
+}
+func (*fakeExchangeWriter) ReconcileAssistantExchanges(context.Context, port.AssistantExchangeFinder) error {
+	return nil
+}
+
+func (a *fakeAgent) Respond(ctx context.Context, messages []domain.Message, memory []domain.MemorySnippet) (string, error) {
 	a.calls++
 	a.context = append([]domain.Message(nil), messages...)
+	a.memory = append([]domain.MemorySnippet(nil), memory...)
+	if a.onRespond != nil {
+		a.onRespond()
+	}
 	if a.started != nil {
 		a.started <- struct{}{}
 	}
@@ -84,6 +148,12 @@ func (a *fakeAgent) Respond(ctx context.Context, messages []domain.Message) (str
 		}
 	}
 	return a.response, a.err
+}
+
+type fakeRecall struct{ snippets []domain.MemorySnippet }
+
+func (r fakeRecall) Recall(context.Context, string) ([]domain.MemorySnippet, error) {
+	return append([]domain.MemorySnippet(nil), r.snippets...), nil
 }
 
 type fakeHistory struct {
@@ -102,16 +172,42 @@ type publishedCall struct {
 }
 
 type fakePublisher struct {
-	mu    sync.Mutex
-	calls []publishedCall
-	err   error
+	mu        sync.Mutex
+	calls     []publishedCall
+	err       error
+	onPublish func()
 }
 
 func (p *fakePublisher) Publish(_ context.Context, target domain.ReplyTarget, text string) (port.PublishedResponse, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	p.calls = append(p.calls, publishedCall{target, text})
+	if p.onPublish != nil {
+		p.onPublish()
+	}
 	return port.PublishedResponse{LastMessageTS: "1700000002.000003"}, p.err
+}
+
+type trackingModelCallLimiter struct {
+	mu   sync.Mutex
+	held bool
+}
+
+func (l *trackingModelCallLimiter) TryAcquire() (func(), bool) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.held {
+		return nil, false
+	}
+	l.held = true
+	var once sync.Once
+	return func() {
+		once.Do(func() {
+			l.mu.Lock()
+			defer l.mu.Unlock()
+			l.held = false
+		})
+	}, true
 }
 
 func botInvocation() domain.Invocation {
@@ -162,6 +258,66 @@ func TestHandleAuthorizedDM(t *testing.T) {
 	}
 	if len(publisher.calls) != 1 || publisher.calls[0].target.ThreadTS != "" || publisher.calls[0].text != "answer" {
 		t.Fatalf("unexpected publishes: %#v", publisher.calls)
+	}
+}
+
+func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	writer := &fakeExchangeWriter{}
+	publisher := &fakePublisher{}
+	service := newTestService(t, store, &fakeAgent{response: "answer"}, &fakeHistory{}, publisher, nil)
+	service.AddMemory(nil, writer)
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if writer.prepares != 1 || writer.published != 1 || writer.publishedTS != "1700000002.000003" || writer.calls != 1 {
+		t.Fatalf("atomic writer = %#v", writer)
+	}
+	if got := publisher.calls[0].target.CorrelationID; got != "intent-correlation" {
+		t.Fatalf("prepared response correlation = %q", got)
+	}
+	if len(store.appended) != 1 || store.appended[0].Role != domain.RoleUser {
+		t.Fatalf("assistant bypassed atomic writer: %#v", store.appended)
+	}
+}
+
+func TestHandlePublishesOnlyAfterExchangeIntentIsPrepared(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	writer := &fakeExchangeWriter{err: errors.New("database unavailable")}
+	preparedAtPublish := false
+	publisher := &fakePublisher{onPublish: func() { preparedAtPublish = writer.prepares == 1 }}
+	service := newTestService(t, store, &fakeAgent{response: "answer"}, &fakeHistory{}, publisher, nil)
+	service.AddMemory(nil, writer)
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err == nil || outcome != "" {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if writer.prepares != 1 || writer.published != 1 || writer.calls != 1 {
+		t.Fatalf("exchange writer calls: prepares=%d published=%d finalizes=%d", writer.prepares, writer.published, writer.calls)
+	}
+	if !preparedAtPublish || len(publisher.calls) != 1 || publisher.calls[0].text != "answer" {
+		t.Fatalf("Slack publish did not occur before injected finalization failure: %#v", publisher.calls)
+	}
+}
+
+func TestHandleEnforcesCombinedMessageAndRenderedMemoryBudget(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	agent := &fakeAgent{response: "answer"}
+	service := newTestService(t, store, agent, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
+		cfg.ContextLimits.MaxChars = 500
+	})
+	service.AddMemory(fakeRecall{snippets: []domain.MemorySnippet{{Title: "Topic", RevisionNumber: 1, Content: strings.Repeat("é", 200)}}}, nil)
+	if outcome, err := service.Handle(t.Context(), botInvocation()); err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if len(agent.memory) != 1 {
+		t.Fatalf("memory = %#v", agent.memory)
+	}
+	if got := len([]rune(agent.context[0].Content)) + len([]rune(domain.RenderMemoryReference(agent.memory))); got > 500 {
+		t.Fatalf("combined model context has %d runes, exceeds 500", got)
 	}
 }
 
@@ -272,6 +428,56 @@ func TestPublishFailureDoesNotPersistAssistant(t *testing.T) {
 	}
 	if len(store.appended) != 1 || store.appended[0].Role != domain.RoleUser {
 		t.Fatalf("assistant was persisted after publish failure: %#v", store.appended)
+	}
+}
+
+func TestPublishErrorRetainsPreparedExchangeForRecovery(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	writer := &fakeExchangeWriter{}
+	publisher := &fakePublisher{err: errors.New("connection closed after Slack accepted reply")}
+	service := newTestService(t, store, &fakeAgent{response: "answer"}, &fakeHistory{}, publisher, nil)
+	service.AddMemory(nil, writer)
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomePublishFailed {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if writer.prepares != 1 || writer.discards != 0 || writer.published != 0 || writer.calls != 0 {
+		t.Fatalf("prepared exchange was not retained for recovery: %#v", writer)
+	}
+}
+
+func TestSharedModelPermitOnlyCoversAgentRespond(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	limiter := &trackingModelCallLimiter{}
+	var agentPermitAvailable, publishReleased, persistReleased bool
+	agent := &fakeAgent{response: "answer", onRespond: func() {
+		_, agentPermitAvailable = limiter.TryAcquire()
+	}}
+	publisher := &fakePublisher{onPublish: func() {
+		release, acquired := limiter.TryAcquire()
+		publishReleased = acquired
+		if acquired {
+			release()
+		}
+	}}
+	writer := &fakeExchangeWriter{onAppend: func() {
+		release, acquired := limiter.TryAcquire()
+		persistReleased = acquired
+		if acquired {
+			release()
+		}
+	}}
+	service := newTestService(t, store, agent, &fakeHistory{}, publisher, nil)
+	service.modelCalls = limiter
+	service.AddMemory(nil, writer)
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if agentPermitAvailable || !publishReleased || !persistReleased {
+		t.Fatalf("shared permit states: agentPermitAvailable=%t publishReleased=%t persistReleased=%t", agentPermitAvailable, publishReleased, persistReleased)
 	}
 }
 

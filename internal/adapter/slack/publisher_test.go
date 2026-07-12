@@ -2,8 +2,11 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -98,6 +101,7 @@ func TestPublisherPostsChunksInOrderToSameTargetsAndReturnsLastTimestamp(t *test
 			}
 
 			text := strings.Repeat("界", SlackChunkRunes+1)
+			tt.target.CorrelationID = "intent-correlation"
 			got, err := publisher.Publish(context.Background(), tt.target, text)
 			if err != nil {
 				t.Fatalf("Publish() error = %v", err)
@@ -119,8 +123,35 @@ func TestPublisherPostsChunksInOrderToSameTargetsAndReturnsLastTimestamp(t *test
 				if !call.hadDeadline {
 					t.Fatalf("call %d did not receive an API deadline", index+1)
 				}
+				if call.correlationID != tt.target.CorrelationID {
+					t.Fatalf("call %d correlation = %q, want %q", index+1, call.correlationID, tt.target.CorrelationID)
+				}
 			}
 		})
+	}
+}
+
+func TestSDKPostClientAddsDurableCorrelationMetadata(t *testing.T) {
+	t.Parallel()
+	var metadata slackapi.SlackMetadata
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if err := r.ParseForm(); err != nil {
+			t.Errorf("ParseForm() error = %v", err)
+		}
+		if err := json.Unmarshal([]byte(r.Form.Get("metadata")), &metadata); err != nil {
+			t.Errorf("metadata error = %v", err)
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"channel":"D12345678","ts":"1.1"}`))
+	}))
+	defer server.Close()
+
+	client := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
+	timestamp, err := (sdkPostClient{client: client}).PostMessage(t.Context(), testDM, "reply", "", "intent-correlation")
+	if err != nil || timestamp != "1.1" {
+		t.Fatalf("PostMessage() = %q, %v", timestamp, err)
+	}
+	if metadata.EventType != "local_agent.assistant_exchange" || metadata.EventPayload["correlation_id"] != "intent-correlation" {
+		t.Fatalf("Slack metadata = %#v", metadata)
 	}
 }
 
@@ -288,10 +319,11 @@ func joinChunkContent(chunks []string) string {
 }
 
 type postCall struct {
-	channelID   string
-	text        string
-	threadTS    string
-	hadDeadline bool
+	channelID     string
+	text          string
+	threadTS      string
+	correlationID string
+	hadDeadline   bool
 }
 
 type postResponse struct {
@@ -305,11 +337,11 @@ type fakePostClient struct {
 	responses []postResponse
 }
 
-func (c *fakePostClient) PostMessage(ctx context.Context, channelID, text, threadTS string) (string, error) {
+func (c *fakePostClient) PostMessage(ctx context.Context, channelID, text, threadTS, correlationID string) (string, error) {
 	_, hadDeadline := ctx.Deadline()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.calls = append(c.calls, postCall{channelID: channelID, text: text, threadTS: threadTS, hadDeadline: hadDeadline})
+	c.calls = append(c.calls, postCall{channelID: channelID, text: text, threadTS: threadTS, correlationID: correlationID, hadDeadline: hadDeadline})
 	index := len(c.calls) - 1
 	if index >= len(c.responses) {
 		return fmt.Sprintf("ts-%d", index+1), nil

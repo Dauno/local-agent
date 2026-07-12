@@ -15,6 +15,7 @@ type Paths struct {
 	ManifestFile   string
 	EnvExampleFile string
 	EnvFile        string
+	MemoryDir      string
 }
 
 // ResolvePaths resolves all relative paths against projectRoot. Managed MVP
@@ -42,6 +43,7 @@ func ResolvePaths(projectRoot string, cfg Config) (Paths, error) {
 		ManifestFile:   resolveAgainst(root, DefaultManifestFile),
 		EnvExampleFile: resolveAgainst(root, DefaultEnvExampleFile),
 		EnvFile:        resolveAgainst(root, DefaultEnvFile),
+		MemoryDir:      resolveMemoryDir(root, cfg.State.Dir, cfg.Memory.Directory),
 	}, nil
 }
 
@@ -67,4 +69,11 @@ func resolveAgainst(root, path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Join(root, path)
+}
+
+func resolveMemoryDir(projectRoot, stateDir, memoryDir string) string {
+	if strings.TrimSpace(memoryDir) != "" {
+		return resolveAgainst(projectRoot, memoryDir)
+	}
+	return filepath.Join(resolveAgainst(projectRoot, stateDir), "memory")
 }
