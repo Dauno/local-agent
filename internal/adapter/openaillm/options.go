@@ -136,11 +136,7 @@ func WithExtraBody(values map[string]any) Option {
 		if err != nil {
 			return fmt.Errorf("extra request body must contain JSON-compatible values: %w", err)
 		}
-		var cloned map[string]any
-		if err := json.Unmarshal(encoded, &cloned); err != nil {
-			return fmt.Errorf("clone extra request body: %w", err)
-		}
-		cfg.extraBody = cloned
+		json.Unmarshal(encoded, &cfg.extraBody)
 		return nil
 	}
 }

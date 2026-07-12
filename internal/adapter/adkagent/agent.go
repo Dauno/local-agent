@@ -162,24 +162,15 @@ func validateMessages(messages []domain.Message) error {
 	return nil
 }
 
-func formatMemoryForSession(memory []domain.MemorySnippet) string {
-	return domain.RenderMemoryReference(memory)
-}
-
 func preloadMemory(ctx context.Context, service session.Service, current session.Session, memory []domain.MemorySnippet) error {
 	event := session.NewEvent(ctx, "memory-context")
 	event.Author = "memory_service"
-	// Reference material is untrusted input, never model-authored conversation.
-	event.Content = genai.NewContentFromText(formatMemoryForSession(memory), genai.RoleUser)
+	event.Content = genai.NewContentFromText(domain.RenderMemoryReference(memory), genai.RoleUser)
 	return service.AppendEvent(ctx, current, event)
 }
 
-func formatContextForSession(context domain.AgentContext) string {
-	return domain.RenderContextReference(context, context.MaxChars)
-}
-
 func formatCurrentTurn(message string, context domain.AgentContext) string {
-	rendered := formatContextForSession(context)
+	rendered := domain.RenderContextReference(context, context.MaxChars)
 	if rendered == "" {
 		return message
 	}

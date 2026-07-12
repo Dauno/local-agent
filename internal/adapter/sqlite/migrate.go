@@ -65,45 +65,42 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func execMigration(ctx context.Context, tx *sql.Tx, version int, statements []string) error {
+	for i, stmt := range statements {
+		if _, err := tx.ExecContext(ctx, stmt); err != nil {
+			return fmt.Errorf("apply SQLite schema v%d statement %d: %w", version, i+1, err)
+		}
+	}
+	return nil
+}
+
 // migrateV7 adds the Slack metadata correlation used to prove a prepared
 // exchange was published. Existing prepared rows intentionally receive no ID:
 // their prior content/time matching is unsafe, so they remain unresolved.
 func migrateV7(ctx context.Context, tx *sql.Tx) error {
-	statements := []string{
+	return execMigration(ctx, tx, 7, []string{
 		`ALTER TABLE memory_exchange_intents ADD COLUMN correlation_id TEXT NOT NULL DEFAULT ''`,
 		`CREATE UNIQUE INDEX memory_exchange_intents_by_correlation
 			ON memory_exchange_intents (correlation_id)
 			WHERE length(correlation_id) > 0`,
-	}
-	for index, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply SQLite schema v7 statement %d: %w", index+1, err)
-		}
-	}
-	return nil
+	})
 }
 
 // migrateV6 separates durable pre-publish intents from replies confirmed by
 // Slack. Existing v5 rows are conservatively treated as prepared and require
 // Slack correlation before they can be finalized locally.
 func migrateV6(ctx context.Context, tx *sql.Tx) error {
-	statements := []string{
+	return execMigration(ctx, tx, 6, []string{
 		`ALTER TABLE memory_exchange_intents ADD COLUMN publish_status TEXT NOT NULL DEFAULT 'prepared'`,
 		`DROP INDEX memory_exchange_intents_by_conversation_and_source`,
 		`CREATE UNIQUE INDEX memory_exchange_intents_by_published_message
 			ON memory_exchange_intents (conversation_key, assistant_external_ts)
 			WHERE publish_status = 'published'`,
-	}
-	for index, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply SQLite schema v6 statement %d: %w", index+1, err)
-		}
-	}
-	return nil
+	})
 }
 
 func migrateV5(ctx context.Context, tx *sql.Tx) error {
-	statements := []string{
+	return execMigration(ctx, tx, 5, []string{
 		`CREATE TABLE memory_exchange_intents (
 			id TEXT PRIMARY KEY,
 			conversation_key TEXT NOT NULL,
@@ -125,24 +122,17 @@ func migrateV5(ctx context.Context, tx *sql.Tx) error {
 		)`,
 		`CREATE UNIQUE INDEX memory_exchange_intents_by_conversation_and_source
 			ON memory_exchange_intents (conversation_key, assistant_external_ts)`,
-	}
-	for index, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply SQLite schema v5 statement %d: %w", index+1, err)
-		}
-	}
-	return nil
+	})
 }
 
 func migrateV4(ctx context.Context, tx *sql.Tx) error {
-	if _, err := tx.ExecContext(ctx, `ALTER TABLE memory_outbox ADD COLUMN source_messages TEXT NOT NULL DEFAULT '[]'`); err != nil {
-		return fmt.Errorf("apply SQLite schema v4: %w", err)
-	}
-	return nil
+	return execMigration(ctx, tx, 4, []string{
+		`ALTER TABLE memory_outbox ADD COLUMN source_messages TEXT NOT NULL DEFAULT '[]'`,
+	})
 }
 
 func migrateV3(ctx context.Context, tx *sql.Tx) error {
-	statements := []string{
+	return execMigration(ctx, tx, 3, []string{
 		`ALTER TABLE memory_outbox ADD COLUMN lease_until INTEGER NOT NULL DEFAULT 0`,
 		`CREATE INDEX memory_outbox_by_processing_lease ON memory_outbox (status, lease_until)`,
 		`CREATE TABLE memory_patch_receipts (
@@ -153,17 +143,11 @@ func migrateV3(ctx context.Context, tx *sql.Tx) error {
 			CHECK (length(conversation_key) > 0),
 			CHECK (length(exchange_ts) > 0)
 		) WITHOUT ROWID`,
-	}
-	for index, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply SQLite schema v3 statement %d: %w", index+1, err)
-		}
-	}
-	return nil
+	})
 }
 
 func migrateV2(ctx context.Context, tx *sql.Tx) error {
-	statements := []string{
+	return execMigration(ctx, tx, 2, []string{
 		`CREATE TABLE memory_topics (
 			id TEXT PRIMARY KEY,
 			slug TEXT NOT NULL UNIQUE,
@@ -247,17 +231,11 @@ func migrateV2(ctx context.Context, tx *sql.Tx) error {
 			content,
 			tokenize='unicode61'
 		)`,
-	}
-	for index, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply SQLite schema v2 statement %d: %w", index+1, err)
-		}
-	}
-	return nil
+	})
 }
 
 func migrateV1(ctx context.Context, tx *sql.Tx) error {
-	statements := []string{
+	return execMigration(ctx, tx, 1, []string{
 		`CREATE TABLE dedupe_records (
 			dedupe_key TEXT PRIMARY KEY,
 			created_at INTEGER NOT NULL,
@@ -299,12 +277,5 @@ func migrateV1(ctx context.Context, tx *sql.Tx) error {
 		)`,
 		`CREATE INDEX messages_by_conversation_and_time
 			ON messages (conversation_key, created_at DESC, id DESC)`,
-	}
-
-	for index, statement := range statements {
-		if _, err := tx.ExecContext(ctx, statement); err != nil {
-			return fmt.Errorf("apply SQLite schema v1 statement %d: %w", index+1, err)
-		}
-	}
-	return nil
+	})
 }

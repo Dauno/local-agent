@@ -238,6 +238,9 @@ func TestGenerateContentRejectsUnsupportedRequestsBeforeHTTP(t *testing.T) {
 		{name: "function part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromFunctionCall("fn", nil)}}}}, want: ErrToolsUnsupported},
 		{name: "config tools", req: &model.LLMRequest{Contents: textRequest().Contents, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{}}}}, want: ErrToolsUnsupported},
 		{name: "non text part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("image"), "image/png")}}}}, want: ErrUnsupportedPart},
+		{name: "thought part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "reasoning", Thought: true}}}}}, want: ErrUnsupportedPart},
+		{name: "thought signature", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", ThoughtSignature: []byte("signature")}}}}}, want: ErrUnsupportedPart},
+		{name: "part metadata", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", PartMetadata: map[string]any{"source": "test"}}}}}}, want: ErrUnsupportedPart},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

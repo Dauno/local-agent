@@ -1018,31 +1018,28 @@ func isUniqueConstraint(err error) bool {
 }
 
 func syncFTSInsert(ctx context.Context, tx *sql.Tx, id, title, description, tagsJSON, content string) error {
+	return syncFTS(ctx, tx, id, title, description, tagsJSON, content, true)
+}
+
+func syncFTSUpdate(ctx context.Context, tx *sql.Tx, id domain.TopicID, content string) error {
+	var title, description, tagsJSON string
+	if err := tx.QueryRowContext(ctx,
+		`SELECT title, description, tags FROM memory_topics WHERE id = ?`, string(id),
+	).Scan(&title, &description, &tagsJSON); err != nil {
+		return fmt.Errorf("read topic for FTS update: %w", err)
+	}
+	return syncFTS(ctx, tx, string(id), title, description, tagsJSON, content, false)
+}
+
+func syncFTS(ctx context.Context, tx *sql.Tx, id, title, description, tagsJSON, content string, isNew bool) error {
 	var rowid int64
 	if err := tx.QueryRowContext(ctx, `SELECT rowid FROM memory_topics WHERE id = ?`, id).Scan(&rowid); err != nil {
 		return fmt.Errorf("read rowid: %w", err)
 	}
-	_, err := tx.ExecContext(ctx, `
-		INSERT INTO memory_topics_fts(rowid, title, description, tags, content)
-		VALUES (?, ?, ?, ?, ?)`,
-		rowid, title, description, tagsJSON, content,
-	)
-	if err != nil {
-		return fmt.Errorf("insert into FTS: %w", err)
-	}
-	return nil
-}
-
-func syncFTSUpdate(ctx context.Context, tx *sql.Tx, id domain.TopicID, content string) error {
-	var rowid int64
-	var title, description, tagsJSON string
-	if err := tx.QueryRowContext(ctx,
-		`SELECT rowid, title, description, tags FROM memory_topics WHERE id = ?`, string(id),
-	).Scan(&rowid, &title, &description, &tagsJSON); err != nil {
-		return fmt.Errorf("read topic for FTS update: %w", err)
-	}
-	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_topics_fts WHERE rowid = ?`, rowid); err != nil {
-		return fmt.Errorf("delete from FTS: %w", err)
+	if !isNew {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM memory_topics_fts WHERE rowid = ?`, rowid); err != nil {
+			return fmt.Errorf("delete from FTS: %w", err)
+		}
 	}
 	_, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_topics_fts(rowid, title, description, tags, content)
