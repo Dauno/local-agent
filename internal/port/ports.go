@@ -16,8 +16,23 @@ type ConversationStore interface {
 	CleanupDedupe(ctx context.Context, now time.Time) error
 }
 
+// AgentRequest bundles conversation history, recalled memory, and enriched
+// context into one model call. Future facts stay out of the bot use case.
+type AgentRequest struct {
+	Messages []domain.Message
+	Memory   []domain.MemorySnippet
+	Context  domain.AgentContext
+}
+
+// ContextEnricher resolves a bounded, structured view of the invoking Slack
+// user and conversation before a primary model call. Slack API failures and
+// missing scopes must never prevent a normal response.
+type ContextEnricher interface {
+	Enrich(ctx context.Context, invocation domain.Invocation) (domain.AgentContext, error)
+}
+
 type Agent interface {
-	Respond(ctx context.Context, messages []domain.Message, memory []domain.MemorySnippet) (string, error)
+	Respond(ctx context.Context, req AgentRequest) (string, error)
 }
 
 // ErrModelCallLimitReached indicates that the process-wide model-call budget is

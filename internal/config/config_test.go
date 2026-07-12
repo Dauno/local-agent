@@ -50,6 +50,13 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			AllowedUserIDs:      []string{},
 			AllowedTeamIDs:      []string{},
 			AllowedChannelIDs:   []string{},
+			Context: config.SlackContextConfig{
+				Enabled:                     false,
+				MaxChars:                    1500,
+				TimeoutSeconds:              5,
+				ProfileCacheTTLMinutes:      60,
+				ConversationCacheTTLMinutes: 15,
+			},
 		},
 		Memory: config.MemoryConfig{
 			Enabled:               false,
@@ -129,6 +136,12 @@ slack:
   allowed_user_ids: []
   allowed_team_ids: []
   allowed_channel_ids: []
+  context:
+    enabled: false
+    max_chars: 1500
+    timeout_seconds: 5
+    profile_cache_ttl_minutes: 60
+    conversation_cache_ttl_minutes: 15
 memory:
   enabled: false
   directory: ""
@@ -325,6 +338,19 @@ func TestValidateAcceptsConfiguredAccessListsAndHeaders(t *testing.T) {
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error: %v", err)
+	}
+}
+
+func TestValidateRejectsContextTimeoutAboveSlackAPITimeout(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Slack.Context.Enabled = true
+	cfg.Runtime.SlackAPITimeoutSeconds = 1
+	cfg.Slack.Context.TimeoutSeconds = 2
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) || !validation.Has("slack.context.timeout_seconds") {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 

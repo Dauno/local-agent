@@ -213,7 +213,7 @@ slack:
 	}
 	access := AccessControl{
 		AllowedUserIDs: []string{"U12345678"}, AllowedTeamIDs: []string{"T12345678"},
-		AllowedChannelIDs: []string{"C12345678"},
+		AllowedChannelIDs: []string{"C12345678"}, ContextEnabled: true,
 	}
 	secrets := Secrets{
 		ModelAPIKey: "model-secret", SlackBotToken: "xoxb-bot-secret", SlackAppToken: "xapp-app-secret",
@@ -249,6 +249,9 @@ slack:
 	}
 	if strings.Join(loaded.Slack.AllowedUserIDs, ",") != "U12345678" || strings.Join(loaded.Slack.AllowedTeamIDs, ",") != "T12345678" || strings.Join(loaded.Slack.AllowedChannelIDs, ",") != "C12345678" {
 		t.Fatalf("access control not applied: %#v", loaded.Slack)
+	}
+	if !loaded.Slack.Context.Enabled {
+		t.Fatalf("context setting not applied: %#v", loaded.Slack.Context)
 	}
 
 	wantManifest, _ := manifest.Render(manifest.Identity{AppName: identity.SlackAppName, BotDisplayName: identity.SlackBotDisplayName})

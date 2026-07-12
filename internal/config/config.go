@@ -65,13 +65,22 @@ type ModelConfig struct {
 }
 
 type SlackConfig struct {
-	AppName             string   `yaml:"app_name"`
-	BotDisplayName      string   `yaml:"bot_display_name"`
-	UnauthorizedMessage string   `yaml:"unauthorized_message"`
-	AllowAllUsers       bool     `yaml:"allow_all_users"`
-	AllowedUserIDs      []string `yaml:"allowed_user_ids"`
-	AllowedTeamIDs      []string `yaml:"allowed_team_ids"`
-	AllowedChannelIDs   []string `yaml:"allowed_channel_ids"`
+	AppName             string             `yaml:"app_name"`
+	BotDisplayName      string             `yaml:"bot_display_name"`
+	UnauthorizedMessage string             `yaml:"unauthorized_message"`
+	AllowAllUsers       bool               `yaml:"allow_all_users"`
+	AllowedUserIDs      []string           `yaml:"allowed_user_ids"`
+	AllowedTeamIDs      []string           `yaml:"allowed_team_ids"`
+	AllowedChannelIDs   []string           `yaml:"allowed_channel_ids"`
+	Context             SlackContextConfig `yaml:"context"`
+}
+
+type SlackContextConfig struct {
+	Enabled                      bool `yaml:"enabled"`
+	MaxChars                     int  `yaml:"max_chars"`
+	TimeoutSeconds               int  `yaml:"timeout_seconds"`
+	ProfileCacheTTLMinutes       int  `yaml:"profile_cache_ttl_minutes"`
+	ConversationCacheTTLMinutes  int  `yaml:"conversation_cache_ttl_minutes"`
 }
 
 type MemoryConfig struct {
@@ -132,6 +141,13 @@ func Default() Config {
 			AllowedUserIDs:      []string{},
 			AllowedTeamIDs:      []string{},
 			AllowedChannelIDs:   []string{},
+			Context: SlackContextConfig{
+				Enabled:                      false,
+				MaxChars:                     1500,
+				TimeoutSeconds:               5,
+				ProfileCacheTTLMinutes:       60,
+				ConversationCacheTTLMinutes:  15,
+			},
 		},
 		Memory: MemoryConfig{
 			Enabled:               false,

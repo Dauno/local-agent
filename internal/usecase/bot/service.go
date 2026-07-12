@@ -40,6 +40,7 @@ type Dependencies struct {
 	SanitizeContent func(string) string
 	Memory          port.MemoryRetriever
 	Exchange        port.AssistantExchangeWriter
+	Enricher        port.ContextEnricher
 }
 
 type Outcome string
@@ -67,6 +68,7 @@ type Service struct {
 	sanitize   func(string) string
 	recall     port.MemoryRetriever
 	exchange   port.AssistantExchangeWriter
+	enricher   port.ContextEnricher
 }
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
@@ -116,7 +118,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		cfg: cfg, store: deps.Store, agent: deps.Agent, history: deps.History,
 		publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
 		limiter: NewLimiter(cfg.MaxConcurrentCalls), modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
-		recall: deps.Memory, exchange: deps.Exchange,
+		recall: deps.Memory, exchange: deps.Exchange, enricher: deps.Enricher,
 	}, nil
 }
 
@@ -217,6 +219,7 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 			memory = domain.FitMemorySnippets(snippets, s.cfg.ContextLimits.MaxChars-messageChars(modelContext))
 		}
 	}
+	agentContext := s.enrich(ctx, invocation)
 
 	modelCtx := ctx
 	cancel := func() {}
@@ -236,7 +239,11 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	s.logger.Info("model call started", "conversation_key", key, "event_id", invocation.EventID)
 	response, modelErr := func() (string, error) {
 		defer modelRelease() // Shared permit covers only Agent.Respond, not Slack or database latency.
-		return s.agent.Respond(modelCtx, modelContext, memory)
+		return s.agent.Respond(modelCtx, port.AgentRequest{
+			Messages: modelContext,
+			Memory:   memory,
+			Context:  agentContext,
+		})
 	}()
 	cancel()
 	if modelErr != nil || strings.TrimSpace(response) == "" {
@@ -326,6 +333,18 @@ func messageChars(messages []domain.Message) int {
 func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.AssistantExchangeWriter) {
 	s.recall = recall
 	s.exchange = exchange
+}
+
+func (s *Service) enrich(ctx context.Context, invocation domain.Invocation) domain.AgentContext {
+	if s.enricher == nil {
+		return domain.AgentContext{}
+	}
+	agentCtx, err := s.enricher.Enrich(ctx, invocation)
+	if err != nil {
+		s.logger.Warn("context enrichment failed", "event_id", invocation.EventID, "error", err)
+		return domain.AgentContext{}
+	}
+	return agentCtx
 }
 
 func (s *Service) recoverHistory(ctx context.Context, invocation domain.Invocation) (port.History, error) {

@@ -82,6 +82,7 @@ type fakeAgent struct {
 	calls     int
 	context   []domain.Message
 	memory    []domain.MemorySnippet
+	agentCtx  domain.AgentContext
 	block     <-chan struct{}
 	started   chan<- struct{}
 	onRespond func()
@@ -130,10 +131,11 @@ func (*fakeExchangeWriter) ReconcileAssistantExchanges(context.Context, port.Ass
 	return nil
 }
 
-func (a *fakeAgent) Respond(ctx context.Context, messages []domain.Message, memory []domain.MemorySnippet) (string, error) {
+func (a *fakeAgent) Respond(ctx context.Context, req port.AgentRequest) (string, error) {
 	a.calls++
-	a.context = append([]domain.Message(nil), messages...)
-	a.memory = append([]domain.MemorySnippet(nil), memory...)
+	a.context = append([]domain.Message(nil), req.Messages...)
+	a.memory = append([]domain.MemorySnippet(nil), req.Memory...)
+	a.agentCtx = req.Context
 	if a.onRespond != nil {
 		a.onRespond()
 	}
@@ -154,6 +156,21 @@ type fakeRecall struct{ snippets []domain.MemorySnippet }
 
 func (r fakeRecall) Recall(context.Context, string) ([]domain.MemorySnippet, error) {
 	return append([]domain.MemorySnippet(nil), r.snippets...), nil
+}
+
+type fakeEnricher struct {
+	context  domain.AgentContext
+	err      error
+	calls    int
+	onEnrich func()
+}
+
+func (e *fakeEnricher) Enrich(context.Context, domain.Invocation) (domain.AgentContext, error) {
+	e.calls++
+	if e.onEnrich != nil {
+		e.onEnrich()
+	}
+	return e.context, e.err
 }
 
 type fakeHistory struct {
@@ -478,6 +495,45 @@ func TestSharedModelPermitOnlyCoversAgentRespond(t *testing.T) {
 	}
 	if agentPermitAvailable || !publishReleased || !persistReleased {
 		t.Fatalf("shared permit states: agentPermitAvailable=%t publishReleased=%t persistReleased=%t", agentPermitAvailable, publishReleased, persistReleased)
+	}
+}
+
+func TestEnrichmentRunsBeforeModelTimeoutAndSharedPermit(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	limiter := &trackingModelCallLimiter{}
+	var enrichmentPermitAvailable, agentPermitAvailable bool
+	enricher := &fakeEnricher{
+		context: domain.AgentContext{MaxChars: 10, Facts: []domain.ContextFact{{Key: "k", Value: "v"}}},
+	}
+	agent := &fakeAgent{response: "answer", onRespond: func() {
+		_, agentPermitAvailable = limiter.TryAcquire()
+	}}
+	service := newTestService(t, store, agent, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
+		cfg.ModelTimeout = 10 * time.Millisecond
+	})
+	service.modelCalls = limiter
+	service.enricher = enricher
+	enricher.onEnrich = func() {
+		time.Sleep(20 * time.Millisecond)
+		release, acquired := limiter.TryAcquire()
+		enrichmentPermitAvailable = acquired
+		if acquired {
+			release()
+		}
+	}
+	delayedRelease := make(chan struct{})
+	go func() {
+		time.Sleep(time.Millisecond)
+		close(delayedRelease)
+	}()
+	agent.block = delayedRelease
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if !enrichmentPermitAvailable || agentPermitAvailable || enricher.calls != 1 || len(agent.agentCtx.Facts) != 1 {
+		t.Fatalf("enrichment/model permit state: enrichment=%t agent=%t calls=%d context=%#v", enrichmentPermitAvailable, agentPermitAvailable, enricher.calls, agent.agentCtx)
 	}
 }
 

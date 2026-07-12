@@ -43,6 +43,7 @@ func (e *ActionableError) Remediation() string { return e.Fix }
 type LiveChecker interface {
 	CheckSlackBot(ctx context.Context, botToken string) error
 	CheckSlackApp(ctx context.Context, botToken, appToken string) error
+	CheckSlackContext(ctx context.Context, botToken string) error
 	CheckModel(ctx context.Context, model config.ModelConfig, apiKey string) error
 }
 
@@ -200,6 +201,16 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			report.fail("Slack Socket Mode", redactor.String(err.Error()), "Verify SLACK_APP_TOKEN has connections:write and belongs to this app.", false)
 		} else {
 			report.pass("Slack Socket Mode", "app-level token can open a Socket Mode connection")
+		}
+	}
+	if cfg.Slack.Context.Enabled && validSecrets[SlackBotTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.SlackAPITimeoutSeconds)
+		err := s.deps.Live.CheckSlackContext(liveCtx, values[SlackBotTokenKey])
+		cancel()
+		if err != nil {
+			report.fail("Slack context enrichment", redactor.String(err.Error()), "Reinstall the Slack app with users:read, then verify the bot token.", false)
+		} else {
+			report.pass("Slack context enrichment", "users:read capability check passed")
 		}
 	}
 	if apiKey := values[cfg.Model.APIKeyEnv]; validSecrets[cfg.Model.APIKeyEnv] {

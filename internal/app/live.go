@@ -40,6 +40,21 @@ func (liveChecker) CheckSlackApp(ctx context.Context, botToken, appToken string)
 	return nil
 }
 
+func (liveChecker) CheckSlackContext(ctx context.Context, botToken string) error {
+	api := slackapi.New(botToken)
+	auth, err := api.AuthTestContext(ctx)
+	if err != nil {
+		return fmt.Errorf("Slack auth.test for context check failed: %w", err)
+	}
+	if auth == nil || auth.UserID == "" {
+		return errors.New("Slack auth.test for context check returned no bot user ID")
+	}
+	if _, err := api.GetUserInfoContext(ctx, auth.UserID); err != nil {
+		return fmt.Errorf("Slack users.info failed: %w", err)
+	}
+	return nil
+}
+
 func (liveChecker) CheckModel(ctx context.Context, cfg config.ModelConfig, apiKey string) error {
 	llm, err := newModel(cfg, apiKey)
 	if err != nil {

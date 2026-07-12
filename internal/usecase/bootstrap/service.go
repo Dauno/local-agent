@@ -88,6 +88,7 @@ type AccessControl struct {
 	AllowedUserIDs    []string
 	AllowedTeamIDs    []string
 	AllowedChannelIDs []string
+	ContextEnabled    bool
 }
 
 type Secrets struct {
@@ -240,6 +241,7 @@ func (s *Service) ApplyConfirmedUpdates(
 	cfg.Slack.AllowedUserIDs = slices.Clone(access.AllowedUserIDs)
 	cfg.Slack.AllowedTeamIDs = slices.Clone(access.AllowedTeamIDs)
 	cfg.Slack.AllowedChannelIDs = slices.Clone(access.AllowedChannelIDs)
+	cfg.Slack.Context.Enabled = access.ContextEnabled
 	if err := cfg.Validate(); err != nil {
 		return Snapshot{}, err
 	}
