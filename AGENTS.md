@@ -36,19 +36,28 @@ Hexagonal (`docs/ARCHITECTURE.md` is authoritative). Strict dependency rules enf
 - `internal/adapter` — must not import other adapters (composed in `internal/app`).
 - `internal/app` — composition root; must not import CLI layer.
 
+`internal/integration` is a cross-package test layer that wires adapters and
+usecases together. It is exempt from the architecture dependency check (only
+`_test.go` files).
+
 ## Testing quirks
 
 - Tests use only local fakes: temp SQLite, HTTP test servers, injected in-memory stores. No live credentials needed.
-- `go test ./...` runs all tests. Architecture dependency check included.
+- `go test ./...` runs all tests, including the architecture dependency check.
 - Domain tests: table-driven, package-internal (`package domain`).
 - CLI tests inject streams + fakes.
-- No integration test build tags needed.
+- Integration tests (`internal/integration`) wire real adapters with temp SQLite; no build tags needed.
 
 ## Key conventions
 
 - **Secrets** go in `.env` (0600). **Config** goes in `.local-agent/config.yaml`.
-- **Redaction**: `internal/secure.Redactor` strips credentials from logs/errors/output at the last mile.
+- **Redaction**: `internal/secure.Redactor` (via `secure.NewRedactor(secrets...)`) strips credentials from logs/errors/output at the last mile.
 - **Context limits**: count Unicode code points, not bytes or rune length.
 - **Dedupe**: at-most-once by event + message keys. Ephemeral Slack history recovery is not persisted.
 - **Canonical keys**: `slack:{team}:dm:{channel}` or `slack:{team}:channel:{channel}:thread:{root_ts}`.
 - **Schema**: `PRAGMA user_version` for SQLite migrations.
+- **Memory**: curated entity memory stored in SQLite; `.local-agent/memory/` holds OKF file projections. Memory retrieval is deterministic (no LLM routing) and runs before each model call. Memory failure is non-fatal — the agent answers normally without it.
+
+## OpenCode config
+
+`.opencode/opencode.json` loads caveman mode instruction and ADK docs MCP server. Skills directory has ADK + ponytail skills. No repo-local agents configured.
