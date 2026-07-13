@@ -25,19 +25,22 @@ command -v go >/dev/null 2>&1 || {
             ;;
     esac
 
+    echo "Run:  ${install_cmd}"
     if [[ -t 0 ]]; then
-        echo "Run:  ${install_cmd}"
         read -r -p "Run this now? [y/N] " answer
-        if [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]; then
-            echo "Installing Go..."
-            eval "$install_cmd" || { echo "FAILED: ${install_cmd}"; exit 1; }
-        else
-            echo "Run the command above and re-execute this script."
-            exit 0
-        fi
+    elif [[ -e /dev/tty ]]; then
+        read -r -p "Run this now? [y/N] " answer < /dev/tty
     else
-        echo "Non-interactive mode. Run:  ${install_cmd}"
+        echo "Non-interactive mode. Run the command above manually."
         exit 1
+    fi
+
+    if [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]; then
+        echo "Installing Go..."
+        eval "$install_cmd" || { echo "FAILED: ${install_cmd}"; exit 1; }
+    else
+        echo "Run the command above and re-execute this script."
+        exit 0
     fi
 }
 command -v git >/dev/null 2>&1 || { echo "ERROR: Git is not installed or not in PATH."; exit 1; }
