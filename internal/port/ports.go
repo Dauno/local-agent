@@ -24,6 +24,35 @@ type AgentRequest struct {
 	Context  domain.AgentContext
 }
 
+// --- Structured agent runtime (replaces Agent.Respond for tool-aware turns) ---
+
+// AgentTurn is the structured result of one agent invocation. It always carries
+// assistant text; a non-nil PendingConfirmation signals that a mutable tool
+// requires user approval before execution.
+type AgentTurn struct {
+	Text                string
+	PendingConfirmation *domain.PendingConfirmation
+}
+
+// AgentRuntime runs one request or resumes a pending confirmation.
+type AgentRuntime interface {
+	Run(ctx context.Context, request AgentRequest) (AgentTurn, error)
+	Resume(ctx context.Context, decision domain.ConfirmationDecision) (AgentTurn, error)
+}
+
+// AgentToolFactory creates a set of ADK tools scoped to an actor and
+// conversation. It is called once per agent turn before the model call.
+// Returning no tools is valid and produces a text-only agent.
+//
+// The factory returns []tool.Tool directly (ADK concrete types) to avoid
+// the Go generics problem with functiontool construction. The adapter
+// only imports the tool package, not the individual tool implementations.
+type AgentToolFactory interface {
+	ToolsForInvocation(actor string, key domain.ConversationKey) []any
+}
+
+// --- Existing interfaces (kept for backward compat during migration) ---
+
 // ContextEnricher resolves a bounded, structured view of the invoking Slack
 // user and conversation before a primary model call. Slack API failures and
 // missing scopes must never prevent a normal response.
@@ -182,4 +211,47 @@ type ProjectionReader interface {
 // truth.
 type OKFProjector interface {
 	Project(ctx context.Context, reader ProjectionReader, outputDir string) error
+}
+
+// --- Confirmation delivery (Phase 2) ---
+
+// ConfirmationDelivery represents a durable bridge between an ADK confirmation
+// event and Slack publication.
+type ConfirmationDelivery struct {
+	WrapperCallID   string
+	OriginalCallID  string
+	SessionID       string
+	Actor           string
+	TeamID          string
+	ChannelID       string
+	ThreadTS        string
+	ConversationKey domain.ConversationKey
+	Summary         string
+	ParameterHash   string
+	Status          ConfirmationDeliveryStatus
+	CorrelationID   string
+	Expiry          time.Time
+}
+
+type ConfirmationDeliveryStatus string
+
+const (
+	ConfirmationPending   ConfirmationDeliveryStatus = "pending"
+	ConfirmationPublished ConfirmationDeliveryStatus = "published"
+	ConfirmationApproved  ConfirmationDeliveryStatus = "approved"
+	ConfirmationRejected  ConfirmationDeliveryStatus = "rejected"
+	ConfirmationExpired   ConfirmationDeliveryStatus = "expired"
+	ConfirmationConsumed  ConfirmationDeliveryStatus = "consumed"
+	ConfirmationFailed    ConfirmationDeliveryStatus = "failed"
+)
+
+// ConfirmationDeliveryStore persists and retrieves confirmation deliveries.
+type ConfirmationDeliveryStore interface {
+	CreateDelivery(ctx context.Context, delivery ConfirmationDelivery) error
+	MarkPublished(ctx context.Context, wrapperCallID, correlationID string) error
+	MarkConsumed(ctx context.Context, wrapperCallID string) error
+	RejectDelivery(ctx context.Context, wrapperCallID string) error
+	GetByWrapperCallID(ctx context.Context, wrapperCallID string) (*ConfirmationDelivery, error)
+	ListPending(ctx context.Context) ([]ConfirmationDelivery, error)
+	ExpireDeliveries(ctx context.Context, now time.Time) error
 }

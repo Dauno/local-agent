@@ -4,6 +4,7 @@ package openaillm
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
@@ -108,13 +109,50 @@ func responseFromCompletion(completion *openai.ChatCompletion) (*model.LLMRespon
 		return nil, ErrNoAssistantText
 	}
 	for _, choice := range completion.Choices {
-		if string(choice.Message.Role) != "assistant" || strings.TrimSpace(choice.Message.Content) == "" {
+		msg := choice.Message
+		if string(msg.Role) != "assistant" {
 			continue
 		}
+
+		parts := make([]*genai.Part, 0, len(msg.ToolCalls)+1)
+		if strings.TrimSpace(msg.Content) != "" {
+			parts = append(parts, genai.NewPartFromText(msg.Content))
+		}
+		for _, tc := range msg.ToolCalls {
+			if tc.Type != "function" {
+				return nil, fmt.Errorf("unsupported tool call type %q", tc.Type)
+			}
+			if strings.TrimSpace(tc.ID) == "" || strings.TrimSpace(tc.Function.Name) == "" {
+				return nil, errors.New("tool call ID and function name are required")
+			}
+			var args map[string]any
+			if strings.TrimSpace(tc.Function.Arguments) != "" {
+				if err := json.Unmarshal([]byte(tc.Function.Arguments), &args); err != nil || args == nil {
+					if err == nil {
+						err = errors.New("arguments must be a JSON object")
+					}
+					return nil, fmt.Errorf("decode tool call arguments for %q (call %s): %w", tc.Function.Name, tc.ID, err)
+				}
+			} else {
+				return nil, fmt.Errorf("decode tool call arguments for %q (call %s): empty arguments", tc.Function.Name, tc.ID)
+			}
+			parts = append(parts, &genai.Part{
+				FunctionCall: &genai.FunctionCall{
+					ID:   tc.ID,
+					Name: tc.Function.Name,
+					Args: args,
+				},
+			})
+		}
+
+		if len(parts) == 0 {
+			continue
+		}
+
 		return &model.LLMResponse{
 			Content: &genai.Content{
 				Role:  genai.RoleModel,
-				Parts: []*genai.Part{genai.NewPartFromText(choice.Message.Content)},
+				Parts: parts,
 			},
 			ModelVersion: completion.Model,
 			FinishReason: finishReason(choice.FinishReason),
@@ -133,7 +171,7 @@ func finishReason(value string) genai.FinishReason {
 	case "content_filter":
 		return genai.FinishReasonSafety
 	case "tool_calls", "function_call":
-		return genai.FinishReasonUnexpectedToolCall
+		return genai.FinishReasonStop
 	default:
 		return genai.FinishReasonOther
 	}

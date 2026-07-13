@@ -59,6 +59,10 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrateV9(ctx, tx); err != nil {
 				return err
 			}
+		case 10:
+			if err := migrateAdkSession(ctx, tx); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("no SQLite migration registered for version %d", version)
 		}

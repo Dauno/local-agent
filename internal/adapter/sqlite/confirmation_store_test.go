@@ -1,0 +1,82 @@
+package sqlite
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/Dauno/slack-local-agent/internal/port"
+)
+
+func TestConfirmationStorePreservesPresentationAndHandlesPublishedRejection(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	confirmations := NewConfirmationStore(store)
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID:  "wrapper",
+		OriginalCallID: "original",
+		SessionID:      "session",
+		Actor:          "U12345678",
+		TeamID:         "T12345678",
+		ChannelID:      "D12345678",
+		Summary:        "Delete worktree",
+		ParameterHash:  "hash",
+		Expiry:         time.Now().Add(time.Hour),
+	}
+	if err := confirmations.CreateDelivery(ctx, delivery); err != nil {
+		t.Fatal(err)
+	}
+	// The durable event can be replayed after a crash; creating it again must
+	// reconcile with the existing delivery rather than fail the recovery path.
+	if err := confirmations.CreateDelivery(ctx, delivery); err != nil {
+		t.Fatal(err)
+	}
+	if err := confirmations.MarkPublished(ctx, delivery.WrapperCallID, "correlation"); err != nil {
+		t.Fatal(err)
+	}
+	if err := confirmations.RejectDelivery(ctx, delivery.WrapperCallID); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := confirmations.GetByWrapperCallID(ctx, delivery.WrapperCallID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != port.ConfirmationRejected || got.Summary != delivery.Summary || got.ParameterHash != delivery.ParameterHash {
+		t.Fatalf("delivery = %#v", got)
+	}
+}
+
+func TestConfirmationStoreDoesNotListExpiredDelivery(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	confirmations := NewConfirmationStore(store)
+	if err := confirmations.CreateDelivery(ctx, port.ConfirmationDelivery{
+		WrapperCallID:  "expired-wrapper",
+		OriginalCallID: "original",
+		SessionID:      "session",
+		Actor:          "U12345678",
+		TeamID:         "T12345678",
+		ChannelID:      "D12345678",
+		Expiry:         time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	pending, err := confirmations.ListPending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pending) != 0 {
+		t.Fatalf("ListPending() = %#v, want no expired deliveries", pending)
+	}
+	if err := confirmations.ExpireDeliveries(ctx, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := confirmations.GetByWrapperCallID(ctx, "expired-wrapper")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == nil || got.Status != port.ConfirmationExpired {
+		t.Fatalf("delivery after expiry = %#v", got)
+	}
+}
