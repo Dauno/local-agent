@@ -24,6 +24,7 @@ type fakeBackend struct {
 	manifestContent string
 	manifestPath    string
 	applyCalls      int
+	resetCalls      int
 	prepared        int
 	identity        bootstrap.Identity
 	access          bootstrap.AccessControl
@@ -50,8 +51,8 @@ func (f *fakeBackend) Run(context.Context) error { return f.runErr }
 func (f *fakeBackend) Manifest(context.Context, bool) (string, string, error) {
 	return f.manifestContent, f.manifestPath, f.manifestErr
 }
-func (f *fakeBackend) ResetState(context.Context) error { return nil }
-func (*fakeBackend) Version() string                     { return "local-agent test-version" }
+func (f *fakeBackend) ResetState(context.Context) error { f.resetCalls++; return nil }
+func (*fakeBackend) Version() string                    { return "local-agent test-version" }
 
 func setupBackend() *fakeBackend {
 	return &fakeBackend{snapshot: bootstrap.Snapshot{Config: config.Default()}}
@@ -177,5 +178,31 @@ func TestManifestAndVersionOutput(t *testing.T) {
 	root, _ = NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
 	if code := Execute(t.Context(), root, []string{"version"}, &stderr); code != 0 || !strings.Contains(output.String(), "test-version") {
 		t.Fatalf("version exit=%d output=%q", code, output.String())
+	}
+}
+
+func TestInitResetStateRequiresConfirmation(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		input     string
+		wantCalls int
+	}{
+		{name: "declined", input: "n\n", wantCalls: 0},
+		{name: "confirmed", input: "y\n", wantCalls: 1},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := setupBackend()
+			var output, stderr bytes.Buffer
+			root, err := NewRoot(backend, Streams{In: strings.NewReader(tt.input), Out: &output, Err: &stderr})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if code := Execute(t.Context(), root, []string{"init", "--reset-state"}, &stderr); code != 0 {
+				t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+			}
+			if backend.resetCalls != tt.wantCalls {
+				t.Fatalf("ResetState calls = %d, want %d", backend.resetCalls, tt.wantCalls)
+			}
+		})
 	}
 }

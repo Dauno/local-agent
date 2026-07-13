@@ -19,9 +19,10 @@ type ConversationStore interface {
 // AgentRequest bundles conversation history, recalled memory, and enriched
 // context into one model call. Future facts stay out of the bot use case.
 type AgentRequest struct {
-	Messages []domain.Message
-	Memory   []domain.MemorySnippet
-	Context  domain.AgentContext
+	ConversationKey domain.ConversationKey
+	Messages        []domain.Message
+	Memory          []domain.MemorySnippet
+	Context         domain.AgentContext
 }
 
 // --- Structured agent runtime (replaces Agent.Respond for tool-aware turns) ---

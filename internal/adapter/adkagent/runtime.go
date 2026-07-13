@@ -24,21 +24,19 @@ import (
 
 // RuntimeConfig holds the dependencies for a durable ADK agent runtime.
 type RuntimeConfig struct {
-	AgentName       string
-	SessionService  session.Service
-	Model           model.LLM
-	ToolFactory     port.AgentToolFactory
-	ConversationKey domain.ConversationKey
+	AgentName      string
+	SessionService session.Service
+	Model          model.LLM
+	ToolFactory    port.AgentToolFactory
 }
 
 // Runtime adapts ADK's llmagent + durable session service into the
 // application's port.AgentRuntime boundary.
 type Runtime struct {
-	agentName       string
-	sessionService  session.Service
-	model           model.LLM
-	toolFactory     port.AgentToolFactory
-	conversationKey domain.ConversationKey
+	agentName      string
+	sessionService session.Service
+	model          model.LLM
+	toolFactory    port.AgentToolFactory
 }
 
 var _ port.AgentRuntime = (*Runtime)(nil)
@@ -57,15 +55,11 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if cfg.SessionService == nil {
 		return nil, errors.New("session service is required")
 	}
-	if strings.TrimSpace(string(cfg.ConversationKey)) == "" {
-		return nil, errors.New("conversation key is required")
-	}
 	return &Runtime{
-		agentName:       cfg.AgentName,
-		sessionService:  cfg.SessionService,
-		model:           cfg.Model,
-		toolFactory:     cfg.ToolFactory,
-		conversationKey: cfg.ConversationKey,
+		agentName:      cfg.AgentName,
+		sessionService: cfg.SessionService,
+		model:          cfg.Model,
+		toolFactory:    cfg.ToolFactory,
 	}, nil
 }
 
@@ -77,6 +71,9 @@ func adkSessionID(key domain.ConversationKey) string {
 // buildAgent constructs a per-turn llmagent with tools and before-model callback.
 func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agent.Agent, error) {
 	instruction := BaseInstruction(r.agentName)
+	if len(tools) > 0 {
+		instruction += " You may use only the registered function tools when they are relevant. Their arguments and results remain subject to application policy."
+	}
 
 	agentCfg := llmagent.Config{
 		Name:            technicalName,
@@ -103,6 +100,9 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 
 // Run executes one agent turn against the durable session.
 func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTurn, error) {
+	if strings.TrimSpace(string(req.ConversationKey)) == "" {
+		return port.AgentTurn{}, errors.New("conversation key is required")
+	}
 	if len(req.Messages) == 0 {
 		return port.AgentTurn{}, fmt.Errorf("%w: at least one message is required", ErrInvalidHistory)
 	}
@@ -114,7 +114,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 		return port.AgentTurn{}, fmt.Errorf("%w: final message must have user role", ErrInvalidHistory)
 	}
 
-	sessionID := adkSessionID(r.conversationKey)
+	sessionID := adkSessionID(req.ConversationKey)
 
 	// Ensure session exists (idempotent).
 	_, err := r.ensureSession(ctx, sessionID)
@@ -129,7 +129,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	// Build tools for this turn.
 	var tools []tool.Tool
 	if r.toolFactory != nil {
-		rawTools := r.toolFactory.ToolsForInvocation(current.UserID, r.conversationKey)
+		rawTools := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
 		for _, raw := range rawTools {
 			if t, ok := raw.(tool.Tool); ok {
 				tools = append(tools, t)
@@ -153,7 +153,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 
 	input := genai.NewContentFromText(current.Content, genai.RoleUser)
 
-	turn, err := runTurn(ctx, adkRunner, input, sessionID, current.UserID, r.conversationKey)
+	turn, err := runTurn(ctx, adkRunner, input, sessionID, current.UserID, req.ConversationKey)
 	if err != nil {
 		return port.AgentTurn{}, err
 	}
@@ -162,8 +162,8 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 
 // Resume continues a pending confirmation by sending the user's decision.
 func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecision) (port.AgentTurn, error) {
-	if decision.ConversationKey != r.conversationKey {
-		return port.AgentTurn{}, errors.New("confirmation conversation does not match runtime")
+	if strings.TrimSpace(string(decision.ConversationKey)) == "" {
+		return port.AgentTurn{}, errors.New("confirmation conversation key is required")
 	}
 	if strings.TrimSpace(decision.WrapperCallID) == "" || strings.TrimSpace(decision.OriginalCallID) == "" {
 		return port.AgentTurn{}, errors.New("confirmation call IDs are required")
@@ -171,11 +171,11 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 	if strings.TrimSpace(decision.Actor) == "" {
 		return port.AgentTurn{}, errors.New("confirmation actor is required")
 	}
-	sessionID := adkSessionID(r.conversationKey)
+	sessionID := adkSessionID(decision.ConversationKey)
 
 	var tools []tool.Tool
 	if r.toolFactory != nil {
-		for _, raw := range r.toolFactory.ToolsForInvocation(decision.Actor, r.conversationKey) {
+		for _, raw := range r.toolFactory.ToolsForInvocation(decision.Actor, decision.ConversationKey) {
 			if t, ok := raw.(tool.Tool); ok {
 				tools = append(tools, t)
 			}
@@ -216,7 +216,7 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 		},
 	}
 
-	turn, err := runTurn(ctx, adkRunner, resumeContent, sessionID, decision.Actor, r.conversationKey)
+	turn, err := runTurn(ctx, adkRunner, resumeContent, sessionID, decision.Actor, decision.ConversationKey)
 	if err != nil {
 		return port.AgentTurn{}, err
 	}

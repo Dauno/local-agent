@@ -20,6 +20,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	if current > SchemaVersion {
 		return &FutureSchemaError{Found: current, Supported: SchemaVersion}
 	}
+	if current > 0 && current < SchemaVersion {
+		return &StateResetNeededError{Found: current, Supported: SchemaVersion}
+	}
 
 	for version := current + 1; version <= SchemaVersion; version++ {
 		switch version {

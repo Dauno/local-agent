@@ -100,6 +100,14 @@ func newInitCommand(backend Backend, streams Streams) *cobra.Command {
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			if resetState {
+				confirmed, err := NewPrompter(streams.In, streams.Out).Confirm("Eliminar permanentemente todo el estado local", false)
+				if err != nil {
+					return &ExitError{Code: 1, Cause: err}
+				}
+				if !confirmed {
+					fmt.Fprintln(streams.Out, "Restablecimiento cancelado.")
+					return nil
+				}
 				if err := backend.ResetState(command.Context()); err != nil {
 					return &ExitError{Code: 1, Cause: err}
 				}

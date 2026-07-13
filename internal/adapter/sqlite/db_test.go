@@ -198,10 +198,16 @@ func TestOpenExistingUpgradesV3OutboxWithSourceSnapshot(t *testing.T) {
 	}
 
 	store, err := OpenExisting(ctx, path)
-	if err != nil {
-		t.Fatal(err)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("OpenExisting unexpectedly accepted a pre-tool schema")
 	}
-	defer store.Close()
+	if !errors.Is(err, ErrStateResetNeeded) {
+		t.Fatalf("OpenExisting error = %v, want ErrStateResetNeeded", err)
+	}
+	if store == nil {
+		return
+	}
 	var defaultValue string
 	if err := store.db.QueryRowContext(ctx, `SELECT dflt_value FROM pragma_table_info('memory_outbox') WHERE name = 'source_messages'`).Scan(&defaultValue); err != nil {
 		t.Fatal(err)
@@ -252,10 +258,16 @@ func TestOpenExistingUpgradesV5ExchangeIntentsAsPrepared(t *testing.T) {
 	}
 
 	store, err := OpenExisting(ctx, path)
-	if err != nil {
-		t.Fatal(err)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("OpenExisting unexpectedly accepted a pre-tool schema")
 	}
-	defer store.Close()
+	if !errors.Is(err, ErrStateResetNeeded) {
+		t.Fatalf("OpenExisting error = %v, want ErrStateResetNeeded", err)
+	}
+	if store == nil {
+		return
+	}
 	var status, correlationID string
 	if err := store.db.QueryRowContext(ctx, `SELECT publish_status, correlation_id FROM memory_exchange_intents WHERE id = 'intent'`).Scan(&status, &correlationID); err != nil {
 		t.Fatal(err)
@@ -326,10 +338,16 @@ func TestOpenExistingUpgradesV7TopicsWithDefaultBundlePath(t *testing.T) {
 	}
 
 	store, err := OpenExisting(ctx, path)
-	if err != nil {
-		t.Fatal(err)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("OpenExisting unexpectedly accepted a pre-tool schema")
 	}
-	defer store.Close()
+	if !errors.Is(err, ErrStateResetNeeded) {
+		t.Fatalf("OpenExisting error = %v, want ErrStateResetNeeded", err)
+	}
+	if store == nil {
+		return
+	}
 
 	topic, err := store.GetTopic(ctx, "existing")
 	if err != nil {
@@ -404,10 +422,16 @@ func TestOpenExistingUpgradesV8PersonTopicWithUnambiguousOwner(t *testing.T) {
 	}
 
 	store, err := OpenExisting(ctx, path)
-	if err != nil {
-		t.Fatal(err)
+	if store != nil {
+		_ = store.Close()
+		t.Fatal("OpenExisting unexpectedly accepted a pre-tool schema")
 	}
-	defer store.Close()
+	if !errors.Is(err, ErrStateResetNeeded) {
+		t.Fatalf("OpenExisting error = %v, want ErrStateResetNeeded", err)
+	}
+	if store == nil {
+		return
+	}
 	var ownerKey string
 	if err := store.db.QueryRowContext(ctx, `SELECT owner_key FROM memory_topics WHERE id = 'mem_legacy'`).Scan(&ownerKey); err != nil {
 		t.Fatal(err)
