@@ -15,6 +15,14 @@ in a project-local SQLite database.
 
 ## Install
 
+With Go 1.25+ installed, run:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/Dauno/local-agent/main/install.sh | bash
+```
+
+Or from a local clone:
+
 ```sh
 ./install.sh
 ```
