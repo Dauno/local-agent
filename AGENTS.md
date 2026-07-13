@@ -114,4 +114,4 @@ Backward compat: `port.Agent.Respond` still wired in `run.go`. The bot use case 
 
 ## OpenCode config
 
-`.opencode/opencode.json` loads caveman mode instruction and ADK docs MCP server. Skills directory has ADK + ponytail skills. No repo-local agents configured.
+`.opencode/opencode.json` enables `lsp: true` (Go gopls), loads caveman + soul-rules instructions, and connects to ADK docs via MCP server. Skills directory has 7 Google ADK skills (scaffold, code, deploy, eval, observability, publish, workflow). No repo-local agents configured.
