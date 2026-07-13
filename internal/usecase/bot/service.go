@@ -38,11 +38,11 @@ type Dependencies struct {
 	Logger     port.Logger
 	ModelCalls port.ModelCallLimiter
 
-	SanitizeContent    func(string) string
-	Memory             port.MemoryRetriever
-	Exchange           port.AssistantExchangeWriter
-	Enricher           port.ContextEnricher
-	ConfirmationStore  port.ConfirmationDeliveryStore
+	SanitizeContent   func(string) string
+	Memory            port.MemoryRetriever
+	Exchange          port.AssistantExchangeWriter
+	Enricher          port.ContextEnricher
+	ConfirmationStore port.ConfirmationDeliveryStore
 }
 
 type Outcome string
@@ -283,9 +283,10 @@ func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Contex
 	turn, modelErr := func() (port.AgentTurn, error) {
 		defer modelRelease()
 		return s.runtime.Run(modelCtx, port.AgentRequest{
-			Messages: modelContext,
-			Memory:   memory,
-			Context:  agentContext,
+			ConversationKey: key,
+			Messages:        modelContext,
+			Memory:          memory,
+			Context:         agentContext,
 		})
 	}()
 	cancel()
@@ -319,30 +320,41 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 			Actor:           pc.Actor,
 			TeamID:          invocation.TeamID,
 			ChannelID:       invocation.ChannelID,
-			ThreadTS:        invocation.ThreadTS,
+			ThreadTS:        invocation.ReplyTarget().ThreadTS,
 			ConversationKey: key,
+			Summary:         pc.Summary,
+			ParameterHash:   pc.ParameterHash,
 			Status:          port.ConfirmationPending,
 			Expiry:          pc.Expiry,
 		}
 		if err := s.confirmationStore.CreateDelivery(ctx, delivery); err != nil {
 			s.logger.Error("confirmation delivery creation failed", "conversation_key", key, "error", err)
+			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); pubErr != nil {
+				s.logger.Error("confirmation delivery failure reply failed", "error", pubErr)
+				return OutcomePublishFailed, nil
+			}
+			return OutcomeModelFailed, nil
 		}
 	}
 
 	// Publish the confirmation prompt as a regular message.
 	// Full interactive buttons are deferred (Phase 2 deferred work).
-	confirmText := fmt.Sprintf(":lock: %s\n\n*Call ID*: `%s`\n*Expires*: %s\n\nReply `approve %s` or `reject %s` to proceed.",
-		pc.Summary, pc.OriginalCallID, pc.Expiry.Format("15:04"), pc.WrapperCallID, pc.WrapperCallID)
+	confirmText := confirmationPrompt(pc.Summary, pc.OriginalCallID, pc.WrapperCallID, pc.Expiry)
 
 	safeText := s.sanitize(confirmText)
-	if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), safeText); err != nil {
+	target := invocation.ReplyTarget()
+	target.CorrelationID = confirmationCorrelationID(pc.WrapperCallID)
+	if _, err := s.publisher.Publish(ctx, target, safeText); err != nil {
 		s.logger.Error("confirmation prompt publish failed", "conversation_key", key, "error", err)
 		return OutcomePublishFailed, nil
 	}
 
 	// Mark the delivery as published if the store is available.
 	if s.confirmationStore != nil {
-		_ = s.confirmationStore.MarkPublished(ctx, pc.WrapperCallID, "")
+		if err := s.confirmationStore.MarkPublished(ctx, pc.WrapperCallID, target.CorrelationID); err != nil {
+			s.logger.Error("confirmation delivery publication marking failed", "wrapper_call_id", pc.WrapperCallID, "error", err)
+			return OutcomePublishFailed, nil
+		}
 	}
 
 	return OutcomeResponded, nil
@@ -428,6 +440,57 @@ func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.Assistant
 func (s *Service) AddRuntime(runtime port.AgentRuntime, confirmations port.ConfirmationDeliveryStore) {
 	s.runtime = runtime
 	s.confirmationStore = confirmations
+}
+
+// ReconcileConfirmations recovers a persisted prompt after a process crash.
+// A pending delivery is republished only when Slack history cannot prove the
+// deterministic correlation ID was already accepted.
+func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.AssistantExchangeFinder) error {
+	if s.confirmationStore == nil || finder == nil {
+		return nil
+	}
+	deliveries, err := s.confirmationStore.ListPending(ctx)
+	if err != nil {
+		return fmt.Errorf("list pending confirmations: %w", err)
+	}
+	for _, delivery := range deliveries {
+		if delivery.Status == port.ConfirmationPublished {
+			continue
+		}
+		correlationID := confirmationCorrelationID(delivery.WrapperCallID)
+		prompt := confirmationPrompt(delivery.Summary, delivery.OriginalCallID, delivery.WrapperCallID, delivery.Expiry)
+		channelKind := domain.ChannelDM
+		if delivery.ThreadTS != "" {
+			channelKind = domain.ChannelPublic
+		}
+		_, found, err := finder.FindPublishedAssistantExchange(ctx, port.AssistantExchangeIntent{
+			ChannelID: delivery.ChannelID, ChannelKind: channelKind, RootTS: delivery.ThreadTS,
+			Content: prompt, CorrelationID: correlationID,
+		})
+		if err != nil {
+			return fmt.Errorf("find confirmation %s: %w", delivery.WrapperCallID, err)
+		}
+		if !found {
+			if _, err := s.publisher.Publish(ctx, domain.ReplyTarget{
+				ChannelID: delivery.ChannelID, ThreadTS: delivery.ThreadTS, CorrelationID: correlationID,
+			}, s.sanitize(prompt)); err != nil {
+				return fmt.Errorf("republish confirmation %s: %w", delivery.WrapperCallID, err)
+			}
+		}
+		if err := s.confirmationStore.MarkPublished(ctx, delivery.WrapperCallID, correlationID); err != nil {
+			return fmt.Errorf("mark confirmation %s published: %w", delivery.WrapperCallID, err)
+		}
+	}
+	return nil
+}
+
+func confirmationCorrelationID(wrapperCallID string) string {
+	return "confirmation:" + wrapperCallID
+}
+
+func confirmationPrompt(summary, originalCallID, wrapperCallID string, expiry time.Time) string {
+	return fmt.Sprintf(":lock: %s\n\n*Call ID*: `%s`\n*Expires*: %s\n\nReply `approve %s` or `reject %s` to proceed.",
+		summary, originalCallID, expiry.Format("15:04"), wrapperCallID, wrapperCallID)
 }
 
 func (s *Service) enrich(ctx context.Context, invocation domain.Invocation) domain.AgentContext {
@@ -520,9 +583,21 @@ func (s *Service) HandleConfirmation(ctx context.Context, invocation domain.Invo
 		}
 		return OutcomeIgnoredFollowup
 	}
+	invocationKey, err := invocation.ConversationKey()
+	if err != nil {
+		s.logger.Error("confirmation conversation key failed", "error", err)
+		return OutcomeModelFailed
+	}
+	if delivery.ConversationKey != invocationKey || delivery.SessionID != fmt.Sprintf("adk:%s", invocationKey) {
+		s.logger.Warn("confirmation conversation mismatch", "wrapper_call_id", wrapperCallID)
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation belongs to a different conversation."); pubErr != nil {
+			s.logger.Error("conversation-mismatch reply failed", "error", pubErr)
+		}
+		return OutcomeIgnoredFollowup
+	}
 
 	// Validate not expired.
-	if now.After(delivery.Expiry) {
+	if !delivery.Expiry.After(now) {
 		s.confirmationStore.ExpireDeliveries(ctx, now)
 		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has expired."); pubErr != nil {
 			s.logger.Error("expiry reply failed", "error", pubErr)
@@ -537,21 +612,6 @@ func (s *Service) HandleConfirmation(ctx context.Context, invocation domain.Invo
 			s.logger.Error("already-consumed reply failed", "error", pubErr)
 		}
 		return OutcomeIgnoredFollowup
-	}
-
-	// Atomically mark as consumed to prevent replay.
-	if approved {
-		if err := s.confirmationStore.MarkConsumed(ctx, wrapperCallID); err != nil {
-			s.logger.Warn("confirmation already consumed (race)", "wrapper_call_id", wrapperCallID, "error", err)
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
-				s.logger.Error("race reply failed", "error", pubErr)
-			}
-			return OutcomeIgnoredFollowup
-		}
-	} else {
-		if err := s.confirmationStore.RejectDelivery(ctx, wrapperCallID); err != nil {
-			s.logger.Error("confirmation rejection failed", "wrapper_call_id", wrapperCallID, "error", err)
-		}
 	}
 
 	// Execute the resume.
@@ -570,12 +630,36 @@ func (s *Service) HandleConfirmation(ctx context.Context, invocation domain.Invo
 		return OutcomeBusy
 	}
 
+	// Claim only after a model permit is available, so a busy response leaves
+	// the confirmation pending and retryable. The conditional update prevents
+	// a replay from reaching the runtime.
+	if approved {
+		if err := s.confirmationStore.MarkConsumed(ctx, wrapperCallID); err != nil {
+			modelRelease()
+			cancel()
+			s.logger.Warn("confirmation already consumed (race)", "wrapper_call_id", wrapperCallID, "error", err)
+			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
+				s.logger.Error("race reply failed", "error", pubErr)
+			}
+			return OutcomeIgnoredFollowup
+		}
+	} else if err := s.confirmationStore.RejectDelivery(ctx, wrapperCallID); err != nil {
+		modelRelease()
+		cancel()
+		s.logger.Warn("confirmation already rejected (race)", "wrapper_call_id", wrapperCallID, "error", err)
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
+			s.logger.Error("race reply failed", "error", pubErr)
+		}
+		return OutcomeIgnoredFollowup
+	}
+
 	turn, resumeErr := func() (port.AgentTurn, error) {
 		defer modelRelease()
 		return s.runtime.Resume(modelCtx, domain.ConfirmationDecision{
 			WrapperCallID:   delivery.WrapperCallID,
 			OriginalCallID:  delivery.OriginalCallID,
 			ConversationKey: delivery.ConversationKey,
+			Actor:           invocation.UserID,
 			Approved:        approved,
 		})
 	}()

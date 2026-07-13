@@ -165,6 +165,13 @@ func (a *Application) ResetState(ctx context.Context) error {
 	if err := os.Remove(dbPath); err != nil {
 		return fmt.Errorf("delete database %s: %w", dbPath, err)
 	}
+	store, err := adaptersqlite.Initialize(ctx, dbPath)
+	if err != nil {
+		return fmt.Errorf("initialize fresh database: %w", err)
+	}
+	if err := store.Close(); err != nil {
+		return fmt.Errorf("close fresh database: %w", err)
+	}
 
 	// Clean up memory projections if they exist.
 	memoryDir := filepath.Join(a.root, ".local-agent", "memory")
@@ -174,10 +181,7 @@ func (a *Application) ResetState(ctx context.Context) error {
 		}
 	}
 
-	fmt.Fprintf(a.logOutput, "State reset complete. Database and memory projections deleted.\n")
-	fmt.Fprintf(a.logOutput, "Run 'local-agent init' to create a fresh configuration.\n")
-
-	_ = ctx
+	fmt.Fprintf(a.logOutput, "State reset complete. Fresh database initialized and memory projections deleted.\n")
 	return nil
 }
 
@@ -200,6 +204,12 @@ func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
 			return &doctor.ActionableError{
 				Err: err,
 				Fix: "Install a local-agent version that supports this database. To discard local conversation state, stop the agent, back up and delete only the configured database file, then run init.",
+			}
+		}
+		if errors.Is(err, adaptersqlite.ErrStateResetNeeded) {
+			return &doctor.ActionableError{
+				Err: err,
+				Fix: "Run: local-agent init --reset-state to discard incompatible local state.",
 			}
 		}
 		return err

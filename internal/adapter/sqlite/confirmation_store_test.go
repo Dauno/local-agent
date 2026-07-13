@@ -80,3 +80,21 @@ func TestConfirmationStoreDoesNotListExpiredDelivery(t *testing.T) {
 		t.Fatalf("delivery after expiry = %#v", got)
 	}
 }
+
+func TestConfirmationStoreRejectDeliveryIsSingleUse(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	confirmations := NewConfirmationStore(store)
+	if err := confirmations.CreateDelivery(ctx, port.ConfirmationDelivery{
+		WrapperCallID: "wrapper", OriginalCallID: "original", SessionID: "session",
+		Actor: "U12345678", TeamID: "T12345678", ChannelID: "D12345678", Expiry: time.Now().Add(time.Hour),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := confirmations.RejectDelivery(ctx, "wrapper"); err != nil {
+		t.Fatal(err)
+	}
+	if err := confirmations.RejectDelivery(ctx, "wrapper"); err == nil {
+		t.Fatal("second RejectDelivery() unexpectedly succeeded")
+	}
+}

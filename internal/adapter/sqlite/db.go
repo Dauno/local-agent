@@ -17,6 +17,7 @@ const SchemaVersion = 10
 var (
 	ErrDatabaseNotFound = errors.New("SQLite database not found")
 	ErrFutureSchema     = errors.New("SQLite schema is newer than this local-agent version")
+	ErrStateResetNeeded = errors.New("SQLite database predates the durable tool runtime")
 	ErrMetadataConflict = errors.New("conversation metadata conflicts with the canonical key")
 )
 
@@ -30,6 +31,17 @@ func (e *FutureSchemaError) Error() string {
 }
 
 func (e *FutureSchemaError) Unwrap() error { return ErrFutureSchema }
+
+type StateResetNeededError struct {
+	Found     int
+	Supported int
+}
+
+func (e *StateResetNeededError) Error() string {
+	return fmt.Sprintf("%v: found version %d, requires fresh version %d state", ErrStateResetNeeded, e.Found, e.Supported)
+}
+
+func (e *StateResetNeededError) Unwrap() error { return ErrStateResetNeeded }
 
 type Store struct {
 	db *sql.DB

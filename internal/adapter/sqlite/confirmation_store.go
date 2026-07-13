@@ -106,14 +106,24 @@ func (s *ConfirmationStore) MarkConsumed(ctx context.Context, wrapperCallID stri
 
 func (s *ConfirmationStore) RejectDelivery(ctx context.Context, wrapperCallID string) error {
 	now := time.Now().UTC()
-	_, err := s.db.ExecContext(ctx,
+	result, err := s.db.ExecContext(ctx,
 		`UPDATE tool_confirmation_deliveries
 		 SET status = ?, updated_at = ?
 		 WHERE wrapper_call_id = ? AND status IN (?, ?)`,
 		string(port.ConfirmationRejected), now.Unix(),
 		wrapperCallID, string(port.ConfirmationPending), string(port.ConfirmationPublished),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	affected, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected == 0 {
+		return fmt.Errorf("delivery %s not rejectable", wrapperCallID)
+	}
+	return nil
 }
 
 func (s *ConfirmationStore) GetByWrapperCallID(ctx context.Context, wrapperCallID string) (*port.ConfirmationDelivery, error) {

@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -224,6 +225,49 @@ func TestNewAndRespondValidateInputsBeforeModelCall(t *testing.T) {
 	}
 	if len(llm.recorded()) != 0 {
 		t.Fatal("invalid history invoked the model")
+	}
+}
+
+func TestRuntimeUsesConversationKeyFromEachRequest(t *testing.T) {
+	t.Parallel()
+
+	llm := &fakeLLM{response: func(request *model.LLMRequest) string {
+		return "reply:" + request.Contents[len(request.Contents)-1].Parts[0].Text
+	}}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	run := func(key domain.ConversationKey, text string) {
+		t.Helper()
+		turn, err := runtime.Run(t.Context(), port.AgentRequest{
+			ConversationKey: key,
+			Messages:        []domain.Message{{Role: domain.RoleUser, Content: text, UserID: "U12345678"}},
+		})
+		if err != nil || turn.Text != "reply:"+text {
+			t.Fatalf("Run(%q, %q) = %#v, %v", key, text, turn, err)
+		}
+	}
+
+	run("slack:T12345678:dm:D11111111", "first-a")
+	run("slack:T12345678:dm:D22222222", "first-b")
+	run("slack:T12345678:dm:D11111111", "second-a")
+
+	requests := llm.recorded()
+	if len(requests) != 3 {
+		t.Fatalf("model calls = %d, want 3", len(requests))
+	}
+	if len(requests[1].contents) != 1 || len(requests[2].contents) != 3 {
+		t.Fatalf("conversation history leaked or was lost: %#v", requests)
+	}
+	if requests[2].contents[0].text != "first-a" || requests[2].contents[2].text != "second-a" {
+		t.Fatalf("first conversation history = %#v", requests[2].contents)
+	}
+	if _, err := runtime.Run(t.Context(), port.AgentRequest{Messages: []domain.Message{{Role: domain.RoleUser, Content: "missing key"}}}); err == nil {
+		t.Fatal("Run accepted a missing conversation key")
 	}
 }
 

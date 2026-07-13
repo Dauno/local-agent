@@ -82,6 +82,9 @@ func (a *Application) Run(ctx context.Context) error {
 		if errors.Is(err, adaptersqlite.ErrFutureSchema) {
 			return redactor.Error(fmt.Errorf("%w. Install a local-agent version that supports this database or back up and remove only the configured database file", err))
 		}
+		if errors.Is(err, adaptersqlite.ErrStateResetNeeded) {
+			return redactor.Error(fmt.Errorf("%w. Run: local-agent init --reset-state", err))
+		}
 		return redactor.Error(fmt.Errorf("open runtime database: %w", err))
 	}
 	defer func() {
@@ -183,6 +186,9 @@ func (a *Application) Run(ctx context.Context) error {
 		// Expire old pending confirmations on startup.
 		if err := confirmationStore.ExpireDeliveries(ctx, time.Now().UTC()); err != nil {
 			logger.Warn("confirmation delivery expiry failed", "error", err)
+		}
+		if err := service.ReconcileConfirmations(ctx, history); err != nil {
+			return redactor.Error(fmt.Errorf("reconcile confirmation deliveries: %w", err))
 		}
 		logger.Info("ADK durable runtime enabled", "session_service", "sqlite")
 	}
