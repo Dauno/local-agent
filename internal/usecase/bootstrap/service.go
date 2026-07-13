@@ -13,6 +13,7 @@ import (
 	"slices"
 	"strings"
 
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/manifest"
 )
@@ -143,6 +144,49 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	}
 	if _, err := s.files.CreateFile(ctx, paths.EnvExampleFile, renderEnvExample(cfg.Model.APIKeyEnv), 0o644); err != nil {
 		return Snapshot{}, fmt.Errorf("create local environment example: %w", err)
+	}
+
+	agentsDir := filepath.Join(paths.StateDir, "agents")
+	providersDir := filepath.Join(paths.StateDir, "providers")
+	if err := s.files.EnsureDirectory(ctx, agentsDir, 0o755); err != nil {
+		return Snapshot{}, fmt.Errorf("create agents directory: %w", err)
+	}
+	if err := s.files.EnsureDirectory(ctx, providersDir, 0o755); err != nil {
+		return Snapshot{}, fmt.Errorf("create providers directory: %w", err)
+	}
+
+	provider := agentdef.SeedDeepSeekProvider(agentdef.SeedModelConfig{
+		Name:            cfg.Model.Name,
+		BaseURL:         cfg.Model.BaseURL,
+		APIKeyEnv:       cfg.Model.APIKeyEnv,
+		Headers:         cfg.Model.Headers,
+		ReasoningEffort: cfg.Model.ReasoningEffort,
+		ExtraBody:       cfg.Model.ExtraBody,
+	})
+	providerData, err := agentdef.MarshalProvider(provider)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("marshal seeded provider: %w", err)
+	}
+	if _, err := s.files.CreateFile(ctx, filepath.Join(providersDir, "deepseek.yaml"), providerData, 0o644); err != nil {
+		return Snapshot{}, fmt.Errorf("create provider definition: %w", err)
+	}
+
+	rootAgent := agentdef.SeedRootAgent("deepseek/flash-reasoning")
+	rootData, err := agentdef.MarshalAgentDef(rootAgent)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("marshal seeded root agent: %w", err)
+	}
+	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "root_agent.yaml"), rootData, 0o644); err != nil {
+		return Snapshot{}, fmt.Errorf("create root agent definition: %w", err)
+	}
+
+	curator := agentdef.SeedMemoryCurator("deepseek/flash-json")
+	curatorData, err := agentdef.MarshalAgentDef(curator)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("marshal seeded curator: %w", err)
+	}
+	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "memory_curator.yaml"), curatorData, 0o644); err != nil {
+		return Snapshot{}, fmt.Errorf("create memory curator definition: %w", err)
 	}
 
 	if err := s.files.CheckRegularFileOrMissing(ctx, paths.DatabaseFile); err != nil {

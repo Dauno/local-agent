@@ -12,6 +12,7 @@ import (
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 )
 
@@ -75,6 +76,26 @@ func (liveChecker) CheckModel(ctx context.Context, cfg config.ModelConfig, apiKe
 	return errors.New("model endpoint returned no response")
 }
 
+func (liveChecker) CheckResolvedModel(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error {
+	llm, err := newModelFromResolved(resolved, apiKey)
+	if err != nil {
+		return err
+	}
+	request := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("Reply with OK.", genai.RoleUser)},
+	}
+	for response, generateErr := range llm.GenerateContent(ctx, request, false) {
+		if generateErr != nil {
+			return generateErr
+		}
+		if response == nil || response.Content == nil {
+			return errors.New("model endpoint returned no assistant content")
+		}
+		return nil
+	}
+	return errors.New("model endpoint returned no response")
+}
+
 func newModel(cfg config.ModelConfig, apiKey string) (*openaillm.OpenAICompatibleLLM, error) {
 	return openaillm.New(
 		openaillm.WithAPIKey(apiKey),
@@ -84,4 +105,22 @@ func newModel(cfg config.ModelConfig, apiKey string) (*openaillm.OpenAICompatibl
 		openaillm.WithReasoningEffort(cfg.ReasoningEffort),
 		openaillm.WithExtraBody(cfg.ExtraBody),
 	)
+}
+
+func newModelFromResolved(resolved *agentdef.ResolvedModel, apiKey string) (*openaillm.OpenAICompatibleLLM, error) {
+	opts := []openaillm.Option{
+		openaillm.WithAPIKey(apiKey),
+		openaillm.WithBaseURL(resolved.BaseURL),
+		openaillm.WithModel(resolved.Model),
+	}
+	if len(resolved.Headers) > 0 {
+		opts = append(opts, openaillm.WithHeaders(resolved.Headers))
+	}
+	if resolved.ReasoningEffort != "" {
+		opts = append(opts, openaillm.WithReasoningEffort(resolved.ReasoningEffort))
+	}
+	if len(resolved.ExtraBody) > 0 {
+		opts = append(opts, openaillm.WithExtraBody(resolved.ExtraBody))
+	}
+	return openaillm.New(opts...)
 }

@@ -26,6 +26,7 @@ import (
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -63,18 +64,116 @@ func (a *Application) Run(ctx context.Context) error {
 		return errors.New("Configured state.dir is not a directory. Run: local-agent doctor")
 	}
 
-	values, err := envfile.NewResolver(paths.EnvFile).Resolve(
-		cfg.Model.APIKeyEnv, bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv,
+	defs, err := agentdef.Load(paths.StateDir)
+	if err != nil {
+		return fmt.Errorf("load agent definitions: %w", err)
+	}
+
+	var (
+		llm              *openaillm.OpenAICompatibleLLM
+		curatorLLM       memorycurator.LLM
+		agentName        string
+		rootDef          *agentdef.AgentDef
+		curatorDef       *agentdef.AgentDef
+		apiKey           string
+		botToken         string
+		appToken         string
+		modelBaseURL     string
+		redactionSecrets []string
 	)
-	if err != nil {
-		return fmt.Errorf("load runtime secrets: %w", err)
+
+	if defs != nil {
+		rootDefCandidate, ok := defs.Agents["root_agent"]
+		if !ok {
+			return errors.New("agent definition root_agent is required when declarative agents are configured")
+		}
+		rootDef = &rootDefCandidate
+		if cur, ok := defs.Agents["memory_curator"]; ok {
+			curatorDef = &cur
+		}
+
+		providerEnvs := defs.RequiredAPIKeyEnvs()
+		allKeys := make([]string, 0, len(providerEnvs)+2)
+		allKeys = append(allKeys, providerEnvs...)
+		allKeys = append(allKeys, bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv)
+		values, err := envfile.NewResolver(paths.EnvFile).Resolve(allKeys...)
+		if err != nil {
+			return fmt.Errorf("load runtime secrets: %w", err)
+		}
+		botToken = values[bootstrap.SlackBotTokenEnv]
+		appToken = values[bootstrap.SlackAppTokenEnv]
+		if err := requiredSlackTokens(botToken, appToken); err != nil {
+			return err
+		}
+
+		resolved, err := defs.ResolveModel(rootDef.Model)
+		if err != nil {
+			return fmt.Errorf("resolve root agent model: %w", err)
+		}
+		apiKey = values[resolved.APIKeyEnv]
+		if strings.TrimSpace(apiKey) == "" {
+			return fmt.Errorf("%s is not configured. Run: local-agent init", resolved.APIKeyEnv)
+		}
+		redactionSecrets = append(redactionSecrets, apiKey)
+		llm, err = newModelFromResolved(resolved, apiKey)
+		if err != nil {
+			return fmt.Errorf("build root model client: %w", err)
+		}
+
+		modelBaseURL = resolved.BaseURL
+
+		if cfg.Memory.Enabled {
+			if curatorDef == nil {
+				return errors.New("agent definition memory_curator is required when memory is enabled")
+			}
+			curatorResolved, err := defs.ResolveModel(curatorDef.Model)
+			if err != nil {
+				return fmt.Errorf("resolve curator model: %w", err)
+			}
+			curatorAPIKey := values[curatorResolved.APIKeyEnv]
+			if strings.TrimSpace(curatorAPIKey) == "" {
+				return fmt.Errorf("%s is not configured. Run: local-agent init", curatorResolved.APIKeyEnv)
+			}
+			redactionSecrets = append(redactionSecrets, curatorAPIKey)
+			curatorModel, err := newModelFromResolved(curatorResolved, curatorAPIKey)
+			if err != nil {
+				return fmt.Errorf("build curator model client: %w", err)
+			}
+			curatorLLM = &memoryCuratorLLM{
+				llm:                   curatorModel,
+				generateContentConfig: curatorResolved.GenerateContentConfig,
+			}
+		}
+
+		agentName = rootDef.Name
+	} else {
+		values, err := envfile.NewResolver(paths.EnvFile).Resolve(
+			cfg.Model.APIKeyEnv, bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv,
+		)
+		if err != nil {
+			return fmt.Errorf("load runtime secrets: %w", err)
+		}
+		var secretErr error
+		apiKey, botToken, appToken, secretErr = requiredSecrets(cfg, values)
+		if secretErr != nil {
+			return secretErr
+		}
+		redactionSecrets = append(redactionSecrets, apiKey)
+		llm, err = newModel(cfg.Model, apiKey)
+		if err != nil {
+			return fmt.Errorf("build model client: %w", err)
+		}
+		agentName = cfg.Agent.Name
+		modelBaseURL = cfg.Model.BaseURL
 	}
-	apiKey, botToken, appToken, err := requiredSecrets(cfg, values)
-	if err != nil {
-		return err
-	}
-	redactor := secure.NewRedactor(apiKey, botToken, appToken)
+
+	redactionSecrets = append(redactionSecrets, botToken, appToken)
+	redactor := secure.NewRedactor(redactionSecrets...)
 	logger := logging.New(a.logOutput, cfg.Runtime.LogLevel, redactor)
+
+	if llm == nil {
+		return redactor.Error(errors.New("model client not initialized"))
+	}
 
 	store, err := adaptersqlite.OpenExisting(ctx, paths.DatabaseFile)
 	if err != nil {
@@ -103,11 +202,7 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 	}
 
-	llm, err := newModel(cfg.Model, apiKey)
-	if err != nil {
-		return redactor.Error(err)
-	}
-	agent, err := adkagent.New(cfg.Agent.Name, llm)
+	agent, err := adkagent.New(agentName, llm)
 	if err != nil {
 		return redactor.Error(err)
 	}
@@ -169,8 +264,6 @@ func (a *Application) Run(ctx context.Context) error {
 		return err
 	}
 
-	// Wire the durable ADK runtime. When no tools are registered, it behaves
-	// identically to the legacy agent but persists session history.
 	sessionSvc := adaptersqlite.NewAdkSessionService(store)
 	if sessionSvc != nil {
 		var sandboxService *sandboxusecase.Service
@@ -189,8 +282,15 @@ func (a *Application) Run(ctx context.Context) error {
 			}
 		}
 		toolFactory := toolfactory.New(store, sandboxService)
+
+		rtInstruction := ""
+		if rootDef != nil {
+			rtInstruction = rootDef.Instruction
+		}
+
 		runtime, rtErr := adkagent.NewRuntime(adkagent.RuntimeConfig{
-			AgentName:      cfg.Agent.Name,
+			AgentName:      agentName,
+			Instruction:    rtInstruction,
 			SessionService: sessionSvc,
 			Model:          llm,
 			ToolFactory:    toolFactory,
@@ -200,7 +300,6 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 		confirmationStore := adaptersqlite.NewConfirmationStore(store)
 		service.AddRuntime(runtime, confirmationStore)
-		// Expire old pending confirmations on startup.
 		if err := confirmationStore.ExpireDeliveries(ctx, time.Now().UTC()); err != nil {
 			logger.Warn("confirmation delivery expiry failed", "error", err)
 		}
@@ -225,9 +324,20 @@ func (a *Application) Run(ctx context.Context) error {
 			return redactor.Error(fmt.Errorf("initialize memory service: %w", memErr))
 		}
 
-		curatorLLM := &memoryCuratorLLM{llm: llm}
+		curTimeout := time.Duration(cfg.Memory.CuratorTimeoutSeconds) * time.Second
+		curatorInstruction := ""
+		if curatorDef != nil {
+			curatorInstruction = curatorDef.Instruction
+			if curatorDef.TimeoutSeconds > 0 {
+				curTimeout = time.Duration(curatorDef.TimeoutSeconds) * time.Second
+			}
+		}
+		if curatorLLM == nil {
+			curatorLLM = &memoryCuratorLLM{llm: llm}
+		}
 		curator, curErr := memorycurator.New(curatorLLM, memorycurator.Config{
-			Timeout: time.Duration(cfg.Memory.CuratorTimeoutSeconds) * time.Second, ModelCalls: modelCalls,
+			Timeout: curTimeout, ModelCalls: modelCalls,
+			Instruction: curatorInstruction,
 		})
 		if curErr != nil {
 			return redactor.Error(fmt.Errorf("initialize memory curator: %w", curErr))
@@ -248,15 +358,29 @@ func (a *Application) Run(ctx context.Context) error {
 
 	socket := socketmode.New(api, socketmode.OptionLog(sdkLog))
 	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(auth.UserID), logger)
+	modelName := cfg.Model.Name
+	if rootDef != nil {
+		resolved, _ := defs.ResolveModel(rootDef.Model)
+		if resolved != nil {
+			modelName = resolved.Model
+		}
+	}
 	logger.Info("local-agent starting",
-		"agent", cfg.Agent.Name,
-		"model", cfg.Model.Name,
-		"model_base_url", cfg.Model.BaseURL,
+		"agent", agentName,
+		"model", modelName,
+		"model_base_url", modelBaseURL,
 		"database", paths.DatabaseFile,
 		"allowed_users", len(cfg.Slack.AllowedUserIDs),
 		"allow_all_users", cfg.Slack.AllowAllUsers,
 		"max_concurrent_model_calls", cfg.Runtime.MaxConcurrentModelCalls,
 	)
+	if defs != nil {
+		logger.Info("declarative agent definitions loaded",
+			"providers", len(defs.Providers),
+			"agents", len(defs.Agents))
+	} else {
+		logger.Info("using legacy config.Model; migrate to .local-agent/providers/ and .local-agent/agents/ for declarative model configuration")
+	}
 	err = listener.Run(ctx, func(eventCtx context.Context, invocation domain.Invocation) {
 		if _, handleErr := service.Handle(eventCtx, invocation); handleErr != nil {
 			logger.Error("Slack invocation processing failed", "event_id", invocation.EventID, "error", handleErr)
@@ -276,19 +400,26 @@ func requiredSecrets(cfg config.Config, values map[string]string) (apiKey, botTo
 	if strings.TrimSpace(apiKey) == "" {
 		return "", "", "", fmt.Errorf("%s is not configured. Run: local-agent init", cfg.Model.APIKeyEnv)
 	}
-	if strings.TrimSpace(botToken) == "" {
-		return "", "", "", errors.New("SLACK_BOT_TOKEN is not configured. Run: local-agent init")
-	}
-	if !startsWithValue(botToken, "xoxb-") {
-		return "", "", "", errors.New("SLACK_BOT_TOKEN must start with xoxb-. Run: local-agent doctor")
-	}
-	if strings.TrimSpace(appToken) == "" {
-		return "", "", "", errors.New("SLACK_APP_TOKEN is not configured. Run: local-agent init")
-	}
-	if !startsWithValue(appToken, "xapp-") {
-		return "", "", "", errors.New("SLACK_APP_TOKEN must start with xapp-. Run: local-agent doctor")
+	if err := requiredSlackTokens(botToken, appToken); err != nil {
+		return "", "", "", err
 	}
 	return apiKey, botToken, appToken, nil
+}
+
+func requiredSlackTokens(botToken, appToken string) error {
+	if strings.TrimSpace(botToken) == "" {
+		return errors.New("SLACK_BOT_TOKEN is not configured. Run: local-agent init")
+	}
+	if !startsWithValue(botToken, "xoxb-") {
+		return errors.New("SLACK_BOT_TOKEN must start with xoxb-. Run: local-agent doctor")
+	}
+	if strings.TrimSpace(appToken) == "" {
+		return errors.New("SLACK_APP_TOKEN is not configured. Run: local-agent init")
+	}
+	if !startsWithValue(appToken, "xapp-") {
+		return errors.New("SLACK_APP_TOKEN must start with xapp-. Run: local-agent doctor")
+	}
+	return nil
 }
 
 func startsWithValue(value, prefix string) bool {
@@ -318,14 +449,20 @@ func (w *redactingWriter) Write(data []byte) (int, error) {
 }
 
 type memoryCuratorLLM struct {
-	llm *openaillm.OpenAICompatibleLLM
+	llm                   *openaillm.OpenAICompatibleLLM
+	generateContentConfig *agentdef.GenerateContentConfig
 }
+
+var _ memorycurator.LLM = (*memoryCuratorLLM)(nil)
 
 func (m *memoryCuratorLLM) GenerateText(ctx context.Context, prompt string) (string, error) {
 	request := &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText(prompt, genai.RoleUser),
 		},
+	}
+	if m.generateContentConfig != nil {
+		request.Config = buildGenaiConfig(m.generateContentConfig)
 	}
 	var response string
 	for resp, err := range m.llm.GenerateContent(ctx, request, false) {
@@ -341,6 +478,33 @@ func (m *memoryCuratorLLM) GenerateText(ctx context.Context, prompt string) (str
 		}
 	}
 	return response, nil
+}
+
+func buildGenaiConfig(cfg *agentdef.GenerateContentConfig) *genai.GenerateContentConfig {
+	if cfg == nil {
+		return nil
+	}
+	c := &genai.GenerateContentConfig{}
+	if cfg.Temperature != nil {
+		temp := float32(*cfg.Temperature)
+		c.Temperature = &temp
+	}
+	if cfg.MaxOutputTokens > 0 {
+		tokens := int32(cfg.MaxOutputTokens)
+		c.MaxOutputTokens = tokens
+	}
+	if cfg.TopP != nil {
+		topP := float32(*cfg.TopP)
+		c.TopP = &topP
+	}
+	if cfg.TopK != nil {
+		topK := float32(*cfg.TopK)
+		c.TopK = &topK
+	}
+	if len(cfg.StopSequences) > 0 {
+		c.StopSequences = cfg.StopSequences
+	}
+	return c
 }
 
 func runMemoryCurator(

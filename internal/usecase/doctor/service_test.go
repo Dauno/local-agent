@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"os"
+	"path/filepath"
 	"testing"
 
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 )
 
@@ -32,13 +34,22 @@ type failingDatabase struct{ err error }
 
 func (d failingDatabase) CheckDatabase(context.Context, string) error { return d.err }
 
-type fakeLive struct{ bot, app, context, model int }
+type fakeLive struct {
+	bot, app, context, model int
+	modelAPIKey              string
+}
 
 func (f *fakeLive) CheckSlackBot(context.Context, string) error         { f.bot++; return nil }
 func (f *fakeLive) CheckSlackApp(context.Context, string, string) error { f.app++; return nil }
 func (f *fakeLive) CheckSlackContext(context.Context, string) error     { f.context++; return nil }
 func (f *fakeLive) CheckModel(context.Context, config.ModelConfig, string) error {
 	f.model++
+	return nil
+}
+
+func (f *fakeLive) CheckResolvedModel(_ context.Context, _ *agentdef.ResolvedModel, apiKey string) error {
+	f.model++
+	f.modelAPIKey = apiKey
 	return nil
 }
 
@@ -92,6 +103,54 @@ func TestLiveDoctorChecksContextCapabilityWhenEnabled(t *testing.T) {
 	service, _ := New(deps)
 	if report := service.Run(t.Context(), true); report.ExitCode() != 0 || live.context != 1 {
 		t.Fatalf("report=%#v live=%#v", report, live)
+	}
+}
+
+func TestLiveDoctorUsesDeclarativeModelCredential(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "provider.yaml"), []byte(`
+name: test
+type: openai_compatible
+base_url: https://example.test
+api_key_env: DECLARATIVE_MODEL_KEY
+profiles:
+  default:
+    model: test-model
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(`
+agent_class: LlmAgent
+name: root_agent
+model: test/default
+instruction: test
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, _, live := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.Secrets = fakeSecrets{values: map[string]string{
+		"DECLARATIVE_MODEL_KEY": "declarative-secret",
+		SlackBotTokenKey:        "xoxb-secret-token",
+		SlackAppTokenKey:        "xapp-secret-token",
+	}}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report := service.Run(t.Context(), true); report.ExitCode() != 0 {
+		t.Fatalf("report=%#v", report)
+	}
+	if live.model != 1 || live.modelAPIKey != "declarative-secret" {
+		t.Fatalf("live model checks=%d api key=%q", live.model, live.modelAPIKey)
 	}
 }
 

@@ -19,12 +19,12 @@ type recordingLLM struct {
 func (l *recordingLLM) GenerateText(_ context.Context, prompt string) (string, error) {
 	l.prompt = prompt
 	l.calls++
-	return `[{"type":"revise","topic_slug":"project-alpha","expected_rev":4,"content":"updated","change_reason":"new fact"}]`, nil
+	return `{"operations":[{"type":"revise","topic_slug":"project-alpha","expected_rev":4,"content":"updated","change_reason":"new fact"}]}`, nil
 }
 
 func TestProposePatchProvidesBoundedTopicRevisionMetadata(t *testing.T) {
 	llm := &recordingLLM{}
-	curator, err := New(llm, Config{})
+	curator, err := New(llm, Config{Instruction: "Extract durable project knowledge."})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestProposePatchProvidesBoundedTopicRevisionMetadata(t *testing.T) {
 	if len(patch.Operations) != 1 || patch.Operations[0].ExpectedRev != 4 {
 		t.Fatalf("patch = %#v", patch)
 	}
-	for _, want := range []string{"Relevant Existing Topics (untrusted JSON data)", `"slug":"project-alpha"`, `"revision":4`, "Use only these slugs"} {
+	for _, want := range []string{"Extract durable project knowledge.", "Relevant Existing Topics (untrusted JSON data)", `"slug":"project-alpha"`, `"revision":4`, "Use only these slugs"} {
 		if !strings.Contains(llm.prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, llm.prompt)
 		}
@@ -125,9 +125,30 @@ func TestProposePatchPrioritizesTrustedSpanishEntityFacts(t *testing.T) {
 	}
 }
 
+func TestParsePatchRequiresJSONObjectWithOperationsArray(t *testing.T) {
+	curator, err := New(&emptyPatchLLM{}, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, response := range []string{"", "[]", "{", "{}", `{"operations":null}`, `{"operations":{}}`} {
+		if _, err := curator.parsePatch("slack:T12345678:dm:D12345678", "1", response); err == nil {
+			t.Errorf("parsePatch(%q) succeeded, want error", response)
+		}
+	}
+
+	patch, err := curator.parsePatch("slack:T12345678:dm:D12345678", "1", `{"operations":[]}`)
+	if err != nil {
+		t.Fatalf("parsePatch valid response: %v", err)
+	}
+	if patch.Operations == nil || len(patch.Operations) != 0 {
+		t.Fatalf("patch operations = %#v, want empty non-nil slice", patch.Operations)
+	}
+}
+
 type emptyPatchLLM struct{ prompt string }
 
 func (l *emptyPatchLLM) GenerateText(_ context.Context, prompt string) (string, error) {
 	l.prompt = prompt
-	return "[]", nil
+	return `{"operations":[]}`, nil
 }

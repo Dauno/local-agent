@@ -1,5 +1,9 @@
 .env
-.local-agent/
+.local-agent/*
+!.local-agent/agents/
+!.local-agent/agents/**
+!.local-agent/providers/
+!.local-agent/providers/**
 .opencode/
 /bin/
 coverage.out

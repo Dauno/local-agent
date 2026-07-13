@@ -20,8 +20,9 @@ type LLM interface {
 }
 
 type Config struct {
-	Timeout    time.Duration
-	ModelCalls port.ModelCallLimiter
+	Timeout     time.Duration
+	ModelCalls  port.ModelCallLimiter
+	Instruction string
 }
 
 type Curator struct {
@@ -93,7 +94,12 @@ func ownerKey(conversationKey domain.ConversationKey, messages []domain.Message)
 
 func (c *Curator) buildPrompt(key domain.ConversationKey, messages []domain.Message, topics []domain.TopicReference) string {
 	var b strings.Builder
-	b.WriteString("You are a Memory Curator for a knowledge management system.\n\n")
+	instruction := c.config.Instruction
+	if strings.TrimSpace(instruction) == "" {
+		instruction = "You are a Memory Curator for a knowledge management system."
+	}
+	b.WriteString(instruction)
+	b.WriteString("\n\n")
 	b.WriteString("Analyze source data below and identify any durable knowledge, ")
 	b.WriteString("decisions, corrections, open questions, or topic relationships worth retaining. ")
 	b.WriteString("Only propose changes when the exchange contains substantive, reusable information.\n\n")
@@ -112,7 +118,8 @@ func (c *Curator) buildPrompt(key domain.ConversationKey, messages []domain.Mess
 	}
 
 	b.WriteString("## Instructions\n\n")
-	b.WriteString("Output a JSON array of operations. Each operation has a `type` field and relevant fields.\n\n")
+	b.WriteString("Output a JSON object with an 'operations' array. Each operation has a 'type' field and relevant fields.\n")
+	b.WriteString("Example: {\"operations\":[]}\n\n")
 	b.WriteString("Valid operation types:\n")
 	b.WriteString("- `create_topic`: Create a new topic. Fields: topic_slug (kebab-case), topic_title, topic_desc, tags (array), bundle_path (one of: people, projects, systems, facts; default facts), content (markdown), change_reason.\n")
 	b.WriteString("- `revise`: Update current knowledge. Fields: topic_slug, expected_rev (integer), content, change_reason.\n")
@@ -131,8 +138,8 @@ func (c *Curator) buildPrompt(key domain.ConversationKey, messages []domain.Mess
 	b.WriteString("- Use kebab-case for slugs: lowercase letters, numbers, hyphens only.\n")
 	b.WriteString("- Content must be concise, factual, and well-structured.\n")
 	b.WriteString("- Do not include credentials, secrets, or personal data in content.\n")
-	b.WriteString("- If no durable knowledge is found, output an empty JSON array: []\n")
-	b.WriteString("- Output ONLY the JSON array, no other text.\n")
+	b.WriteString("- If no durable knowledge is found, output: {\"operations\":[]}\n")
+	b.WriteString("- Output ONLY the JSON object, no other text.\n")
 
 	return b.String()
 }
@@ -225,23 +232,31 @@ type curatorOp struct {
 	LinkRelation    string   `json:"link_relation,omitempty"`
 }
 
+type curatorOpResponse struct {
+	Operations []curatorOp `json:"operations"`
+}
+
 func (c *Curator) parsePatch(conversationKey domain.ConversationKey, exchangeTS string, response string) (domain.MemoryPatch, error) {
-	response = extractJSON(response)
-	if strings.TrimSpace(response) == "[]" || strings.TrimSpace(response) == "" {
-		return domain.MemoryPatch{ConversationKey: conversationKey, ExchangeTS: exchangeTS}, nil
+	response = extractJSONObject(response)
+	trimmed := strings.TrimSpace(response)
+	if trimmed == "" {
+		return domain.MemoryPatch{}, errors.New("curator returned empty response; JSON object with operations array is required")
 	}
 
-	var ops []curatorOp
-	if err := json.Unmarshal([]byte(response), &ops); err != nil {
+	var wrapper curatorOpResponse
+	if err := json.Unmarshal([]byte(trimmed), &wrapper); err != nil {
 		return domain.MemoryPatch{}, fmt.Errorf("parse curator response: %w", err)
+	}
+	if wrapper.Operations == nil {
+		return domain.MemoryPatch{}, errors.New("curator response missing required operations field")
 	}
 
 	patch := domain.MemoryPatch{
 		ConversationKey: conversationKey,
 		ExchangeTS:      exchangeTS,
-		Operations:      make([]domain.MemoryOp, 0, len(ops)),
+		Operations:      make([]domain.MemoryOp, 0, len(wrapper.Operations)),
 	}
-	for _, op := range ops {
+	for _, op := range wrapper.Operations {
 		patch.Operations = append(patch.Operations, domain.MemoryOp{
 			Type:            op.Type,
 			TopicSlug:       op.TopicSlug,
@@ -261,11 +276,11 @@ func (c *Curator) parsePatch(conversationKey domain.ConversationKey, exchangeTS 
 	return patch, nil
 }
 
-func extractJSON(text string) string {
+func extractJSONObject(text string) string {
 	text = strings.TrimSpace(text)
-	if idx := strings.Index(text, "["); idx >= 0 {
+	if idx := strings.Index(text, "{"); idx >= 0 {
 		text = text[idx:]
-		if idx := strings.LastIndex(text, "]"); idx >= 0 {
+		if idx := strings.LastIndex(text, "}"); idx >= 0 {
 			text = text[:idx+1]
 		}
 	}

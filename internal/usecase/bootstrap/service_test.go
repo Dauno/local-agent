@@ -35,6 +35,9 @@ func TestEnsureBaseArtifactsFirstRun(t *testing.T) {
 		snapshot.Paths.ManifestFile,
 		snapshot.Paths.EnvExampleFile,
 		snapshot.Paths.DatabaseFile,
+		filepath.Join(snapshot.Paths.StateDir, "providers", "deepseek.yaml"),
+		filepath.Join(snapshot.Paths.StateDir, "agents", "root_agent.yaml"),
+		filepath.Join(snapshot.Paths.StateDir, "agents", "memory_curator.yaml"),
 	} {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("artifact %s: info=%v err=%v", path, info, err)

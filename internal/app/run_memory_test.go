@@ -146,7 +146,7 @@ type outboxTestLLM struct{ calls int }
 
 func (l *outboxTestLLM) GenerateText(context.Context, string) (string, error) {
 	l.calls++
-	return `[{"type":"create_topic","topic_slug":"durable-fact","topic_title":"Durable fact","content":"A durable fact."}]`, nil
+	return `{"operations":[{"type":"create_topic","topic_slug":"durable-fact","topic_title":"Durable fact","content":"A durable fact."}]}`, nil
 }
 
 type failingCuratorLLM struct {
