@@ -137,6 +137,50 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 
 func (*Application) Version() string { return buildinfo.String() }
 
+// ResetState implements the destructive init --reset-state command.
+// It deletes the SQLite database and generated memory projections.
+// Slack messages and remote sandbox resources are not affected.
+func (a *Application) ResetState(ctx context.Context) error {
+	configPath, err := config.ConfigPath(a.root)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return errors.New("configuration not found — nothing to reset")
+		}
+		return fmt.Errorf("load config: %w", err)
+	}
+	paths, err := cfg.ResolvePaths(a.root)
+	if err != nil {
+		return fmt.Errorf("resolve paths: %w", err)
+	}
+
+	dbPath := paths.DatabaseFile
+	if _, statErr := os.Stat(dbPath); errors.Is(statErr, os.ErrNotExist) {
+		return errors.New("no existing database found — nothing to reset")
+	}
+
+	if err := os.Remove(dbPath); err != nil {
+		return fmt.Errorf("delete database %s: %w", dbPath, err)
+	}
+
+	// Clean up memory projections if they exist.
+	memoryDir := filepath.Join(a.root, ".local-agent", "memory")
+	if _, statErr := os.Stat(memoryDir); statErr == nil {
+		if err := os.RemoveAll(memoryDir); err != nil {
+			return fmt.Errorf("delete memory projections: %w", err)
+		}
+	}
+
+	fmt.Fprintf(a.logOutput, "State reset complete. Database and memory projections deleted.\n")
+	fmt.Fprintf(a.logOutput, "Run 'local-agent init' to create a fresh configuration.\n")
+
+	_ = ctx
+	return nil
+}
+
 func (a *Application) bootstrapService() (*bootstrap.Service, error) {
 	return bootstrap.New(fsproject.New(), bootstrap.DatabaseInitializerFunc(func(ctx context.Context, path string) error {
 		store, err := adaptersqlite.Initialize(ctx, path)

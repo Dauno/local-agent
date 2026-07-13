@@ -19,6 +19,7 @@ type Backend interface {
 	Doctor(ctx context.Context, live bool) (doctor.Report, error)
 	Run(ctx context.Context) error
 	Manifest(ctx context.Context, write bool) (content, path string, err error)
+	ResetState(ctx context.Context) error
 	Version() string
 }
 
@@ -92,17 +93,26 @@ func Execute(ctx context.Context, root *cobra.Command, args []string, stderr io.
 }
 
 func newInitCommand(backend Backend, streams Streams) *cobra.Command {
-	return &cobra.Command{
+	var resetState bool
+	command := &cobra.Command{
 		Use:   "init",
 		Short: "Create and configure local-agent artifacts",
 		Args:  cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
+			if resetState {
+				if err := backend.ResetState(command.Context()); err != nil {
+					return &ExitError{Code: 1, Cause: err}
+				}
+				return nil
+			}
 			if err := runWizard(command.Context(), backend, NewPrompter(streams.In, streams.Out), streams.Out); err != nil {
 				return &ExitError{Code: 1, Cause: err}
 			}
 			return nil
 		},
 	}
+	command.Flags().BoolVar(&resetState, "reset-state", false, "destructively delete all local conversation, memory, session, and confirmation data")
+	return command
 }
 
 func newDoctorCommand(backend Backend, streams Streams) *cobra.Command {
