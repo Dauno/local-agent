@@ -153,6 +153,13 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 		return OutcomeDenied, nil
 	}
 
+	// Before the normal agent flow, check if this is a confirmation reply.
+	if s.runtime != nil && s.confirmationStore != nil {
+		if outcome, ok := s.tryResumeConfirmation(ctx, invocation); ok {
+			return outcome, nil
+		}
+	}
+
 	key, err := invocation.ConversationKey()
 	if err != nil {
 		return "", err
@@ -458,6 +465,143 @@ func withoutInvocation(messages []domain.Message, eventTS string) []domain.Messa
 		result = append(result, message)
 	}
 	return result
+}
+
+// tryResumeConfirmation checks whether the incoming message is a confirmation
+// reply (approve/reject) and processes it atomically. Returns (Outcome, true)
+// when consumed; returns ("", false) when the message is not a confirmation reply.
+func (s *Service) tryResumeConfirmation(ctx context.Context, invocation domain.Invocation) (Outcome, bool) {
+	text := strings.TrimSpace(invocation.Text)
+
+	var approved bool
+	var wrapperCallID string
+	var isConfirmation bool
+
+	if after, ok := strings.CutPrefix(text, "approve "); ok {
+		approved = true
+		wrapperCallID = strings.TrimSpace(after)
+		isConfirmation = true
+	} else if after, ok := strings.CutPrefix(text, "reject "); ok {
+		approved = false
+		wrapperCallID = strings.TrimSpace(after)
+		isConfirmation = true
+	}
+
+	if !isConfirmation || wrapperCallID == "" {
+		return "", false
+	}
+
+	return s.HandleConfirmation(ctx, invocation, wrapperCallID, approved), true
+}
+
+// HandleConfirmation verifies and executes a pending confirmation decision.
+func (s *Service) HandleConfirmation(ctx context.Context, invocation domain.Invocation, wrapperCallID string, approved bool) Outcome {
+	now := s.clock.Now().UTC()
+
+	delivery, err := s.confirmationStore.GetByWrapperCallID(ctx, wrapperCallID)
+	if err != nil {
+		s.logger.Error("confirmation lookup failed", "wrapper_call_id", wrapperCallID, "error", err)
+		return OutcomeModelFailed
+	}
+	if delivery == nil {
+		s.logger.Warn("confirmation not found", "wrapper_call_id", wrapperCallID)
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "Confirmation not found or already processed."); pubErr != nil {
+			s.logger.Error("confirmation-not-found reply failed", "error", pubErr)
+		}
+		return OutcomeIgnoredFollowup
+	}
+
+	// Validate actor match.
+	if delivery.Actor != invocation.UserID {
+		s.logger.Warn("confirmation actor mismatch",
+			"expected", delivery.Actor, "got", invocation.UserID)
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "Only the original requester can approve this action."); pubErr != nil {
+			s.logger.Error("actor-mismatch reply failed", "error", pubErr)
+		}
+		return OutcomeIgnoredFollowup
+	}
+
+	// Validate not expired.
+	if now.After(delivery.Expiry) {
+		s.confirmationStore.ExpireDeliveries(ctx, now)
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has expired."); pubErr != nil {
+			s.logger.Error("expiry reply failed", "error", pubErr)
+		}
+		return OutcomeIgnoredFollowup
+	}
+
+	// Validate status is consumable (pending or published).
+	if delivery.Status != port.ConfirmationPending && delivery.Status != port.ConfirmationPublished {
+		s.logger.Warn("confirmation already consumed", "wrapper_call_id", wrapperCallID, "status", delivery.Status)
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
+			s.logger.Error("already-consumed reply failed", "error", pubErr)
+		}
+		return OutcomeIgnoredFollowup
+	}
+
+	// Atomically mark as consumed to prevent replay.
+	if approved {
+		if err := s.confirmationStore.MarkConsumed(ctx, wrapperCallID); err != nil {
+			s.logger.Warn("confirmation already consumed (race)", "wrapper_call_id", wrapperCallID, "error", err)
+			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
+				s.logger.Error("race reply failed", "error", pubErr)
+			}
+			return OutcomeIgnoredFollowup
+		}
+	} else {
+		if err := s.confirmationStore.RejectDelivery(ctx, wrapperCallID); err != nil {
+			s.logger.Error("confirmation rejection failed", "wrapper_call_id", wrapperCallID, "error", err)
+		}
+	}
+
+	// Execute the resume.
+	modelCtx := ctx
+	cancel := func() {}
+	if s.cfg.ModelTimeout > 0 {
+		modelCtx, cancel = context.WithTimeout(ctx, s.cfg.ModelTimeout)
+	}
+	modelRelease, modelAcquired := s.modelCalls.TryAcquire()
+	if !modelAcquired {
+		cancel()
+		s.logger.Info("confirmation resume rejected by backpressure")
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); pubErr != nil {
+			s.logger.Error("busy reply failed", "error", pubErr)
+		}
+		return OutcomeBusy
+	}
+
+	turn, resumeErr := func() (port.AgentTurn, error) {
+		defer modelRelease()
+		return s.runtime.Resume(modelCtx, domain.ConfirmationDecision{
+			WrapperCallID:   delivery.WrapperCallID,
+			OriginalCallID:  delivery.OriginalCallID,
+			ConversationKey: delivery.ConversationKey,
+			Approved:        approved,
+		})
+	}()
+	cancel()
+	if resumeErr != nil {
+		s.logger.Error("confirmation resume failed", "wrapper_call_id", wrapperCallID, "error", resumeErr)
+		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); pubErr != nil {
+			s.logger.Error("resume-error reply failed", "error", pubErr)
+		}
+		return OutcomeModelFailed
+	}
+
+	safeText := s.sanitize(turn.Text)
+	if strings.TrimSpace(safeText) == "" {
+		safeText = s.sanitize(fmt.Sprintf("Confirmation %s.", map[bool]string{true: "approved", false: "rejected"}[approved]))
+	}
+	if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), safeText); pubErr != nil {
+		s.logger.Error("confirmation result publish failed", "error", pubErr)
+		return OutcomePublishFailed
+	}
+
+	s.logger.Info("confirmation processed",
+		"wrapper_call_id", wrapperCallID,
+		"approved", approved,
+		"actor", delivery.Actor)
+	return OutcomeResponded
 }
 
 type systemClock struct{}
