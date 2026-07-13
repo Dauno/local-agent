@@ -17,7 +17,7 @@ const SchemaVersion = 10
 var (
 	ErrDatabaseNotFound = errors.New("SQLite database not found")
 	ErrFutureSchema     = errors.New("SQLite schema is newer than this local-agent version")
-	ErrStateResetNeeded = errors.New("SQLite database predates the durable tool runtime")
+	ErrStateResetNeeded = errors.New("SQLite schema requires state reset")
 	ErrMetadataConflict = errors.New("conversation metadata conflicts with the canonical key")
 )
 

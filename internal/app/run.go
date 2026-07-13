@@ -17,6 +17,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
+	"github.com/Dauno/slack-local-agent/internal/adapter/fssandbox"
 	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
@@ -32,6 +33,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
 	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
+	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 )
 
 func (a *Application) Run(ctx context.Context) error {
@@ -171,7 +173,22 @@ func (a *Application) Run(ctx context.Context) error {
 	// identically to the legacy agent but persists session history.
 	sessionSvc := adaptersqlite.NewAdkSessionService(store)
 	if sessionSvc != nil {
-		toolFactory := toolfactory.New(store, nil)
+		var sandboxService *sandboxusecase.Service
+		if cfg.Sandbox.Enabled {
+			executor, err := fssandbox.New(cfg.Sandbox.Projects, cfg.Sandbox.MaxOutputBytes)
+			if err != nil {
+				return redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
+			}
+			sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
+				AllowedCapabilities: []domain.Capability{domain.CapListRepos, domain.CapReadFile, domain.CapListWorktrees},
+				CommandTimeout:      time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
+				MaxOutputBytes:      cfg.Sandbox.MaxOutputBytes,
+			}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(store), Executor: executor})
+			if err != nil {
+				return redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
+			}
+		}
+		toolFactory := toolfactory.New(store, sandboxService)
 		runtime, rtErr := adkagent.NewRuntime(adkagent.RuntimeConfig{
 			AgentName:      cfg.Agent.Name,
 			SessionService: sessionSvc,

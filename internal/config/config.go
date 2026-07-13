@@ -27,6 +27,7 @@ type Config struct {
 	Model   ModelConfig   `yaml:"model"`
 	Slack   SlackConfig   `yaml:"slack"`
 	Memory  MemoryConfig  `yaml:"memory"`
+	Sandbox SandboxConfig `yaml:"sandbox"`
 
 	document *sourceDocument
 }
@@ -76,11 +77,11 @@ type SlackConfig struct {
 }
 
 type SlackContextConfig struct {
-	Enabled                      bool `yaml:"enabled"`
-	MaxChars                     int  `yaml:"max_chars"`
-	TimeoutSeconds               int  `yaml:"timeout_seconds"`
-	ProfileCacheTTLMinutes       int  `yaml:"profile_cache_ttl_minutes"`
-	ConversationCacheTTLMinutes  int  `yaml:"conversation_cache_ttl_minutes"`
+	Enabled                     bool `yaml:"enabled"`
+	MaxChars                    int  `yaml:"max_chars"`
+	TimeoutSeconds              int  `yaml:"timeout_seconds"`
+	ProfileCacheTTLMinutes      int  `yaml:"profile_cache_ttl_minutes"`
+	ConversationCacheTTLMinutes int  `yaml:"conversation_cache_ttl_minutes"`
 }
 
 type MemoryConfig struct {
@@ -97,6 +98,13 @@ type MemoryConfig struct {
 	MaxLinks              int    `yaml:"max_links"`
 	MaxTopicChars         int    `yaml:"max_topic_chars"`
 	MaxPatchOps           int    `yaml:"max_patch_ops"`
+}
+
+type SandboxConfig struct {
+	Enabled               bool              `yaml:"enabled"`
+	Projects              map[string]string `yaml:"projects"`
+	CommandTimeoutSeconds int               `yaml:"command_timeout_seconds"`
+	MaxOutputBytes        int               `yaml:"max_output_bytes"`
 }
 
 // Default returns a new Config populated with the PRD defaults.
@@ -142,11 +150,11 @@ func Default() Config {
 			AllowedTeamIDs:      []string{},
 			AllowedChannelIDs:   []string{},
 			Context: SlackContextConfig{
-				Enabled:                      false,
-				MaxChars:                     1500,
-				TimeoutSeconds:               5,
-				ProfileCacheTTLMinutes:       60,
-				ConversationCacheTTLMinutes:  15,
+				Enabled:                     false,
+				MaxChars:                    1500,
+				TimeoutSeconds:              5,
+				ProfileCacheTTLMinutes:      60,
+				ConversationCacheTTLMinutes: 15,
 			},
 		},
 		Memory: MemoryConfig{
@@ -164,5 +172,6 @@ func Default() Config {
 			MaxTopicChars:         10000,
 			MaxPatchOps:           10,
 		},
+		Sandbox: SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 64 * 1024},
 	}
 }

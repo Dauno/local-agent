@@ -73,6 +73,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			MaxTopicChars:         10000,
 			MaxPatchOps:           10,
 		},
+		Sandbox: config.SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
 	}
 
 	got := config.Default()
@@ -156,6 +157,11 @@ memory:
   max_links: 50
   max_topic_chars: 10000
   max_patch_ops: 10
+sandbox:
+  enabled: false
+  projects: {}
+  command_timeout_seconds: 30
+  max_output_bytes: 65536
 `
 
 	if string(got) != want {
