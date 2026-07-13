@@ -187,6 +187,23 @@ func Validate(cfg Config) error {
 	if cfg.Memory.MaxPatchOps <= 0 {
 		add("memory.max_patch_ops", "must be greater than zero")
 	}
+	if cfg.Sandbox.Enabled {
+		if len(cfg.Sandbox.Projects) == 0 {
+			add("sandbox.projects", "must contain at least one registered project when enabled")
+		}
+		for name, path := range cfg.Sandbox.Projects {
+			if strings.TrimSpace(name) == "" {
+				add("sandbox.projects", "project names must not be empty")
+			}
+			requirePath(&problems, fmt.Sprintf("sandbox.projects[%q]", name), path)
+		}
+		if cfg.Sandbox.CommandTimeoutSeconds <= 0 {
+			add("sandbox.command_timeout_seconds", "must be greater than zero when enabled")
+		}
+		if cfg.Sandbox.MaxOutputBytes <= 0 {
+			add("sandbox.max_output_bytes", "must be greater than zero when enabled")
+		}
+	}
 
 	if len(problems) > 0 {
 		return &ValidationError{Fields: problems}
