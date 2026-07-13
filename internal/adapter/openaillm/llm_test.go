@@ -216,6 +216,119 @@ func TestGenerateContentReturnsProviderAndEmptyResponseErrors(t *testing.T) {
 	})
 }
 
+func TestGenerateContentTranslatesFunctionToolsAndCalls(t *testing.T) {
+	t.Parallel()
+
+	captured := make(chan map[string]any, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var body map[string]any
+		if err := json.NewDecoder(request.Body).Decode(&body); err != nil {
+			http.Error(writer, "invalid request", http.StatusBadRequest)
+			return
+		}
+		captured <- body
+		writeJSON(t, writer, http.StatusOK, map[string]any{
+			"id": "completion", "object": "chat.completion", "created": 1, "model": "test",
+			"choices": []any{map[string]any{
+				"finish_reason": "tool_calls",
+				"message": map[string]any{
+					"role": "assistant",
+					"tool_calls": []any{map[string]any{
+						"id": "provider-call", "type": "function",
+						"function": map[string]any{"name": "lookup", "arguments": `{"query":"status"}`},
+					}},
+				},
+			}},
+		})
+	}))
+	t.Cleanup(server.Close)
+
+	llm := mustTestLLM(t, server.URL)
+	response, err, yields := collect(llm.GenerateContent(context.Background(), &model.LLMRequest{
+		Contents: []*genai.Content{
+			genai.NewContentFromText("status", genai.RoleUser),
+			{Role: genai.RoleModel, Parts: []*genai.Part{
+				{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "lookup", Args: map[string]any{"query": "one"}}},
+				{FunctionCall: &genai.FunctionCall{ID: "call-2", Name: "lookup", Args: map[string]any{"query": "two"}}},
+			}},
+			{Role: genai.RoleUser, Parts: []*genai.Part{
+				{FunctionResponse: &genai.FunctionResponse{ID: "call-1", Name: "lookup", Response: map[string]any{"result": "one"}}},
+				{FunctionResponse: &genai.FunctionResponse{ID: "call-2", Name: "lookup", Response: map[string]any{"result": "two"}}},
+			}},
+		},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
+				Name: "lookup", ParametersJsonSchema: map[string]any{"type": "object"},
+			}}}},
+			ToolConfig: &genai.ToolConfig{FunctionCallingConfig: &genai.FunctionCallingConfig{Mode: genai.FunctionCallingConfigModeAuto}},
+		},
+	}, false))
+	if err != nil || yields != 1 {
+		t.Fatalf("GenerateContent() = %#v, %v, %d", response, err, yields)
+	}
+	if response.FinishReason != genai.FinishReasonStop || len(response.Content.Parts) != 1 {
+		t.Fatalf("response = %#v", response)
+	}
+	call := response.Content.Parts[0].FunctionCall
+	if call == nil || call.ID != "provider-call" || call.Name != "lookup" || call.Args["query"] != "status" {
+		t.Fatalf("function call = %#v", call)
+	}
+
+	body := <-captured
+	if body["parallel_tool_calls"] != false {
+		t.Fatalf("parallel_tool_calls = %#v", body["parallel_tool_calls"])
+	}
+	if body["tool_choice"] != "auto" {
+		t.Fatalf("tool_choice = %#v", body["tool_choice"])
+	}
+	tools := body["tools"].([]any)
+	if len(tools) != 1 || tools[0].(map[string]any)["type"] != "function" {
+		t.Fatalf("tools = %#v", tools)
+	}
+	messages := body["messages"].([]any)
+	if len(messages) != 4 {
+		t.Fatalf("messages = %#v", messages)
+	}
+	assistant := messages[1].(map[string]any)
+	if calls := assistant["tool_calls"].([]any); len(calls) != 2 {
+		t.Fatalf("assistant tool_calls = %#v", calls)
+	}
+	if messages[2].(map[string]any)["tool_call_id"] != "call-1" || messages[3].(map[string]any)["tool_call_id"] != "call-2" {
+		t.Fatalf("tool responses = %#v", messages[2:])
+	}
+}
+
+func TestGenerateContentRejectsInvalidFunctionProtocolBeforeHTTP(t *testing.T) {
+	t.Parallel()
+
+	llm := mustTestLLM(t, "https://example.com")
+	tests := []struct {
+		name string
+		req  *model.LLMRequest
+	}{
+		{
+			name: "duplicate declaration",
+			req:  &model.LLMRequest{Contents: textRequest().Contents, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "same"}, {Name: "same"}}}}}},
+		},
+		{
+			name: "missing call ID",
+			req:  &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{Name: "lookup"}}}}}},
+		},
+		{
+			name: "function response with text",
+			req:  &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "unexpected"}, {FunctionResponse: &genai.FunctionResponse{ID: "call", Name: "lookup"}}}}}},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := llm.requestParams(tt.req)
+			if err == nil {
+				t.Fatal("requestParams() unexpectedly succeeded")
+			}
+		})
+	}
+}
+
 func TestGenerateContentRejectsUnsupportedRequestsBeforeHTTP(t *testing.T) {
 	t.Parallel()
 
@@ -234,9 +347,6 @@ func TestGenerateContentRejectsUnsupportedRequestsBeforeHTTP(t *testing.T) {
 		want   error
 	}{
 		{name: "stream", req: textRequest(), stream: true, want: ErrStreamingUnsupported},
-		{name: "request tools", req: &model.LLMRequest{Contents: textRequest().Contents, Tools: map[string]any{"tool": true}}, want: ErrToolsUnsupported},
-		{name: "function part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromFunctionCall("fn", nil)}}}}, want: ErrToolsUnsupported},
-		{name: "config tools", req: &model.LLMRequest{Contents: textRequest().Contents, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{}}}}, want: ErrToolsUnsupported},
 		{name: "non text part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("image"), "image/png")}}}}, want: ErrUnsupportedPart},
 		{name: "thought part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "reasoning", Thought: true}}}}}, want: ErrUnsupportedPart},
 		{name: "thought signature", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", ThoughtSignature: []byte("signature")}}}}}, want: ErrUnsupportedPart},

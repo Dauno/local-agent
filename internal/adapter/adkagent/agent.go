@@ -201,10 +201,9 @@ func eventText(content *genai.Content) (string, error) {
 		if part == nil {
 			return "", ErrNoResponse
 		}
-		if part.FunctionCall != nil || part.FunctionResponse != nil || part.ToolCall != nil || part.ToolResponse != nil {
-			return "", errors.New("ADK agent returned an unsupported tool or function response")
+		if part.Text != "" {
+			text.WriteString(part.Text)
 		}
-		text.WriteString(part.Text)
 	}
 	return text.String(), nil
 }

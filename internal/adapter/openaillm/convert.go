@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/openai/openai-go/v3"
+	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/shared"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
@@ -15,9 +16,6 @@ import (
 func (m *OpenAICompatibleLLM) requestParams(request *model.LLMRequest) (openai.ChatCompletionNewParams, error) {
 	if request == nil {
 		return openai.ChatCompletionNewParams{}, errors.New("ADK model request is nil")
-	}
-	if len(request.Tools) > 0 {
-		return openai.ChatCompletionNewParams{}, ErrToolsUnsupported
 	}
 
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(request.Contents)+1)
@@ -31,21 +29,14 @@ func (m *OpenAICompatibleLLM) requestParams(request *model.LLMRequest) (openai.C
 		}
 	}
 	for index, content := range request.Contents {
-		text, err := textFromContent(content)
+		converted, err := contentToMessages(content)
 		if err != nil {
 			return openai.ChatCompletionNewParams{}, fmt.Errorf("convert content %d: %w", index, err)
 		}
-		switch content.Role {
-		case "", genai.RoleUser:
-			messages = append(messages, openai.UserMessage(text))
-		case genai.RoleModel:
-			messages = append(messages, openai.AssistantMessage(text))
-		default:
-			return openai.ChatCompletionNewParams{}, fmt.Errorf("convert content %d: unsupported ADK role %q", index, content.Role)
-		}
+		messages = append(messages, converted...)
 	}
 	if len(messages) == 0 {
-		return openai.ChatCompletionNewParams{}, errors.New("ADK model request contains no text messages")
+		return openai.ChatCompletionNewParams{}, errors.New("ADK model request contains no messages")
 	}
 
 	params := openai.ChatCompletionNewParams{
@@ -66,6 +57,99 @@ func (m *OpenAICompatibleLLM) requestParams(request *model.LLMRequest) (openai.C
 	return params, nil
 }
 
+func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessageParamUnion, error) {
+	if content == nil {
+		return nil, ErrUnsupportedPart
+	}
+
+	var texts []string
+	var functionCalls []*genai.FunctionCall
+	var functionResponses []*genai.FunctionResponse
+
+	for _, part := range content.Parts {
+		if part == nil {
+			return nil, ErrUnsupportedPart
+		}
+		switch {
+		case part.FunctionCall != nil:
+			functionCalls = append(functionCalls, part.FunctionCall)
+		case part.FunctionResponse != nil:
+			functionResponses = append(functionResponses, part.FunctionResponse)
+		default:
+			if part.ToolCall != nil || part.ToolResponse != nil || part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+				return nil, ErrUnsupportedPart
+			}
+			texts = append(texts, part.Text)
+		}
+	}
+
+	if len(functionCalls) > 0 && len(functionResponses) > 0 {
+		return nil, errors.New("content cannot mix function calls and responses")
+	}
+	if len(functionCalls) > 0 {
+		if content.Role != genai.RoleModel {
+			return nil, fmt.Errorf("function calls require model role, got %q", content.Role)
+		}
+		assistant := &openai.ChatCompletionAssistantMessageParam{
+			ToolCalls: make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(functionCalls)),
+		}
+		for _, call := range functionCalls {
+			if call == nil || strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
+				return nil, errors.New("function call ID and name are required")
+			}
+			args := call.Args
+			if args == nil {
+				args = map[string]any{}
+			}
+			encoded, err := json.Marshal(args)
+			if err != nil {
+				return nil, fmt.Errorf("encode function call arguments: %w", err)
+			}
+			assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+					ID:       call.ID,
+					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{Name: call.Name, Arguments: string(encoded)},
+				},
+			})
+		}
+		if len(texts) > 0 {
+			assistant.Content.OfString = param.NewOpt(strings.Join(texts, ""))
+		}
+		return []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}, nil
+	}
+
+	if len(functionResponses) > 0 {
+		if content.Role != genai.RoleUser || len(texts) > 0 {
+			return nil, errors.New("function responses require a user-role content with no text")
+		}
+		messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(functionResponses))
+		for _, response := range functionResponses {
+			if response == nil || strings.TrimSpace(response.ID) == "" || strings.TrimSpace(response.Name) == "" {
+				return nil, errors.New("function response ID and name are required")
+			}
+			encoded, err := json.Marshal(response.Response)
+			if err != nil {
+				return nil, fmt.Errorf("encode function response: %w", err)
+			}
+			messages = append(messages, openai.ToolMessage(string(encoded), response.ID))
+		}
+		return messages, nil
+	}
+
+	text := strings.Join(texts, "")
+	if strings.TrimSpace(text) == "" {
+		return nil, errors.New("content must have non-empty text")
+	}
+	switch content.Role {
+	case "", genai.RoleUser:
+		return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(text)}, nil
+	case genai.RoleModel:
+		return []openai.ChatCompletionMessageParamUnion{openai.AssistantMessage(text)}, nil
+	default:
+		return nil, fmt.Errorf("unsupported ADK role %q", content.Role)
+	}
+}
+
 func textFromContent(content *genai.Content) (string, error) {
 	if content == nil {
 		return "", ErrUnsupportedPart
@@ -76,23 +160,100 @@ func textFromContent(content *genai.Content) (string, error) {
 			return "", ErrUnsupportedPart
 		}
 		if part.FunctionCall != nil || part.FunctionResponse != nil || part.ToolCall != nil || part.ToolResponse != nil {
-			return "", ErrToolsUnsupported
+			return "", ErrUnsupportedPart
 		}
-
 		if part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
 			return "", ErrUnsupportedPart
 		}
 		text.WriteString(part.Text)
 	}
-	if strings.TrimSpace(text.String()) == "" {
-		return "", errors.New("text model content must not be empty")
-	}
 	return text.String(), nil
 }
 
 func applyGenerateConfig(params *openai.ChatCompletionNewParams, cfg *genai.GenerateContentConfig) error {
-	if len(cfg.Tools) > 0 || cfg.ToolConfig != nil {
-		return ErrToolsUnsupported
+	if cfg.ToolConfig != nil && len(cfg.Tools) == 0 {
+		return errors.New("function calling configuration requires function declarations")
+	}
+	if len(cfg.Tools) > 0 {
+		tools := make([]openai.ChatCompletionToolUnionParam, 0, len(cfg.Tools))
+		seenNames := make(map[string]struct{})
+		for toolIndex, tool := range cfg.Tools {
+			if tool == nil {
+				return fmt.Errorf("tool %d is nil", toolIndex)
+			}
+			if tool.Retrieval != nil || tool.ComputerUse != nil || tool.FileSearch != nil || tool.GoogleSearch != nil || tool.GoogleMaps != nil || tool.CodeExecution != nil || tool.EnterpriseWebSearch != nil || tool.GoogleSearchRetrieval != nil || tool.ParallelAISearch != nil || tool.URLContext != nil || len(tool.MCPServers) > 0 {
+				return fmt.Errorf("tool %d uses an unsupported non-function variant", toolIndex)
+			}
+			if len(tool.FunctionDeclarations) == 0 {
+				return fmt.Errorf("tool %d has no function declarations", toolIndex)
+			}
+			for _, decl := range tool.FunctionDeclarations {
+				if decl == nil {
+					return errors.New("function declaration is nil")
+				}
+				if strings.TrimSpace(decl.Name) == "" {
+					return errors.New("function declaration name is required")
+				}
+				if _, exists := seenNames[decl.Name]; exists {
+					return fmt.Errorf("duplicate function declaration %q", decl.Name)
+				}
+				seenNames[decl.Name] = struct{}{}
+				var paramsSchema shared.FunctionParameters
+				if decl.ParametersJsonSchema != nil && decl.Parameters != nil {
+					return fmt.Errorf("function declaration %q has both parameter schemas", decl.Name)
+				}
+				if decl.ParametersJsonSchema != nil {
+					encoded, err := json.Marshal(decl.ParametersJsonSchema)
+					if err != nil {
+						return fmt.Errorf("encode function declaration %q schema: %w", decl.Name, err)
+					}
+					var schema map[string]any
+					if err := json.Unmarshal(encoded, &schema); err != nil || schema == nil {
+						return fmt.Errorf("function declaration %q schema must be an object", decl.Name)
+					}
+					paramsSchema = shared.FunctionParameters(schema)
+				} else if decl.Parameters != nil {
+					schema, err := convertSchema(decl.Parameters)
+					if err != nil {
+						return fmt.Errorf("convert function declaration %q schema: %w", decl.Name, err)
+					}
+					objectSchema, ok := schema.(map[string]any)
+					if !ok {
+						return fmt.Errorf("function declaration %q schema must be an object", decl.Name)
+					}
+					paramsSchema = shared.FunctionParameters(objectSchema)
+				}
+				tools = append(tools, openai.ChatCompletionToolUnionParam{
+					OfFunction: &openai.ChatCompletionFunctionToolParam{
+						Function: shared.FunctionDefinitionParam{
+							Name:        decl.Name,
+							Description: param.NewOpt(decl.Description),
+							Parameters:  paramsSchema,
+						},
+					},
+				})
+			}
+		}
+		params.Tools = tools
+		if cfg.ToolConfig != nil {
+			functionConfig := cfg.ToolConfig.FunctionCallingConfig
+			if len(functionConfig.AllowedFunctionNames) > 0 || functionConfig.StreamFunctionCallArguments != nil {
+				return errors.New("restricted or streamed function calling is not supported")
+			}
+			switch functionConfig.Mode {
+			case genai.FunctionCallingConfigModeAuto:
+				params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: param.NewOpt("auto")}
+			case genai.FunctionCallingConfigModeAny:
+				params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: param.NewOpt("required")}
+			case genai.FunctionCallingConfigModeNone:
+				params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: param.NewOpt("none")}
+			case genai.FunctionCallingConfigModeUnspecified:
+				params.ToolChoice = openai.ChatCompletionToolChoiceOptionUnionParam{OfAuto: param.NewOpt("auto")}
+			default:
+				return fmt.Errorf("unsupported function calling mode %q", functionConfig.Mode)
+			}
+		}
+		params.ParallelToolCalls = openai.Bool(false)
 	}
 	if cfg.Temperature != nil {
 		params.Temperature = openai.Float(float64(*cfg.Temperature))
