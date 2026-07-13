@@ -80,11 +80,13 @@ Backward compat: `port.Agent.Respond` still wired in `run.go`. The bot use case 
 
 ### Sandbox capabilities
 
-- `internal/domain/sandbox.go`: `Capability` enum (6 types), `ToolAuditRecord`, `ToolLifecycleState`
+- `internal/domain/sandbox.go`: `Capability` enum (7 types), `ToolAuditRecord`, `ToolLifecycleState`
 - `internal/usecase/sandbox/service.go`: validates capability, checks idempotency via `GetAuditByCallID`, delegates to `SandboxExecutor`
 - `internal/adapter/sqlite/sandbox_audit.go`: audit over `tool_execution_audit` table
-- `internal/adapter/fssandbox/sandbox.go`: filesystem executor (list_repos, read_file, list_worktrees)
-- `internal/adapter/toolfactory/toolfactory.go`: 5 sandbox tools (3 read-only, 2 mutable with `RequireConfirmation: true`)
+- `internal/adapter/fssandbox/sandbox.go`: filesystem executor (`list_repos`, `list_directory`, `read_file`, `list_worktrees`)
+- `internal/adapter/toolfactory/toolfactory.go`: exposes 4 read-only sandbox tools when sandbox is enabled
+- Workspace inspection is opt-in through `sandbox.enabled` and `sandbox.projects`; relative roots resolve against the canonical application root
+- `list_directory` is non-recursive; `.env`, `.local-agent`, and `.git` are blocked at every depth, including through symlinks
 
 ## Data directory
 

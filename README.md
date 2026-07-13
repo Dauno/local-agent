@@ -134,6 +134,32 @@ SLACK_APP_TOKEN=xapp-...
 Static `model.headers` are optional but deliberately reject credential-bearing
 headers. Authentication belongs in `model.api_key_env`.
 
+### Workspace inspection
+
+Filesystem inspection is disabled by default. To let authorized Slack users
+inspect selected projects, explicitly enable the sandbox and register logical
+project names in `.local-agent/config.yaml`:
+
+```yaml
+sandbox:
+  enabled: true
+  projects:
+    workspace: .
+  command_timeout_seconds: 30
+  max_output_bytes: 65536
+```
+
+Relative project paths are resolved against the directory where `local-agent`
+started. The agent can discover registered names, list one directory at a time,
+and read bounded UTF-8 text files. It cannot execute commands or modify files.
+
+The filesystem boundary rejects absolute and parent-traversal paths, access
+outside registered roots, and unsafe symlinks. `.env`, `.local-agent`, and
+`.git` are unavailable at every depth; similarly named paths such as
+`.env.example`, `.gitignore`, and `.github` remain available. Source files can
+still contain embedded secrets, so register only projects whose source may be
+sent to the configured model endpoint.
+
 ## Privacy
 
 Recent authorized Slack conversation messages are stored locally in SQLite.
@@ -144,6 +170,11 @@ authorized to invoke the bot.
 
 Recognizable credentials are redacted from persisted message content, logs,
 setup summaries, doctor output, and application errors.
+
+When workspace inspection is enabled, requested source content is also sent to
+the configured model endpoint. Restricted local state and credential paths are
+blocked before content reaches the model; generic secret scanning of allowed
+source files is not provided.
 
 ## Verification
 

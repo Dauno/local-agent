@@ -478,3 +478,134 @@ func TestSaveCreatesParentAndUsesNonSensitiveMode(t *testing.T) {
 		t.Fatalf("new config mode = %04o, want 0644", got)
 	}
 }
+
+func TestParseAppliesSandboxConfig(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Parse([]byte(`sandbox:
+  enabled: true
+  projects:
+    workspace: .
+    api: ../api
+  command_timeout_seconds: 60
+  max_output_bytes: 32768
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if !cfg.Sandbox.Enabled {
+		t.Fatal("sandbox.enabled should be true")
+	}
+	if len(cfg.Sandbox.Projects) != 2 {
+		t.Fatalf("sandbox.projects count = %d, want 2", len(cfg.Sandbox.Projects))
+	}
+	if cfg.Sandbox.Projects["workspace"] != "." {
+		t.Fatalf("sandbox.projects[workspace] = %q", cfg.Sandbox.Projects["workspace"])
+	}
+	if cfg.Sandbox.CommandTimeoutSeconds != 60 {
+		t.Fatalf("sandbox.command_timeout_seconds = %d", cfg.Sandbox.CommandTimeoutSeconds)
+	}
+	if cfg.Sandbox.MaxOutputBytes != 32768 {
+		t.Fatalf("sandbox.max_output_bytes = %d", cfg.Sandbox.MaxOutputBytes)
+	}
+}
+
+func TestParseSandboxDisabledByDefault(t *testing.T) {
+	t.Parallel()
+
+	cfg, err := config.Parse([]byte(`agent:
+  name: minimal
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if cfg.Sandbox.Enabled {
+		t.Fatal("sandbox should be disabled by default")
+	}
+	if len(cfg.Sandbox.Projects) != 0 {
+		t.Fatalf("sandbox projects should be empty by default")
+	}
+}
+
+func TestValidateRejectsEnabledSandboxWithoutProjects(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Sandbox.Enabled = true
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) || !validation.Has("sandbox.projects") {
+		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestResolvePathsResolvesSandboxProjects(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	cfg := config.Default()
+	cfg.Sandbox.Enabled = true
+	cfg.Sandbox.Projects = map[string]string{
+		"workspace": ".",
+		"api":       "../api",
+		"frontend":  "/absolute/frontend",
+	}
+
+	paths, err := cfg.ResolvePaths(root)
+	if err != nil {
+		t.Fatalf("ResolvePaths() error: %v", err)
+	}
+	if paths.SandboxProjectRoots["workspace"] != root {
+		t.Fatalf("workspace = %q, want %q", paths.SandboxProjectRoots["workspace"], root)
+	}
+	wantAPI := filepath.Join(filepath.Dir(root), "api")
+	if paths.SandboxProjectRoots["api"] != wantAPI {
+		t.Fatalf("api = %q, want %q", paths.SandboxProjectRoots["api"], wantAPI)
+	}
+	wantFrontend := "/absolute/frontend"
+	if paths.SandboxProjectRoots["frontend"] != wantFrontend {
+		t.Fatalf("frontend = %q, want %q", paths.SandboxProjectRoots["frontend"], wantFrontend)
+	}
+}
+
+func TestPathResolvesEmptySandboxToNil(t *testing.T) {
+	t.Parallel()
+
+	root := t.TempDir()
+	paths, err := config.Default().ResolvePaths(root)
+	if err != nil {
+		t.Fatalf("ResolvePaths() error: %v", err)
+	}
+	if paths.SandboxProjectRoots != nil {
+		t.Fatalf("sandbox project roots should be nil for empty projects: %#v", paths.SandboxProjectRoots)
+	}
+}
+
+func TestResolvePathsUsesCanonicalProjectRootForSandboxProjects(t *testing.T) {
+	parent := t.TempDir()
+	physicalRoot := filepath.Join(parent, "physical", "workspace")
+	if err := os.MkdirAll(physicalRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	linkedRoot := filepath.Join(parent, "workspace-link")
+	if err := os.Symlink(physicalRoot, linkedRoot); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := config.Default()
+	cfg.Sandbox.Enabled = true
+	cfg.Sandbox.Projects = map[string]string{"workspace": ".", "api": "../api"}
+	paths, err := cfg.ResolvePaths(linkedRoot)
+	if err != nil {
+		t.Fatalf("ResolvePaths() error: %v", err)
+	}
+	if paths.ProjectRoot != physicalRoot {
+		t.Fatalf("project root = %q, want %q", paths.ProjectRoot, physicalRoot)
+	}
+	if paths.SandboxProjectRoots["workspace"] != physicalRoot {
+		t.Fatalf("workspace = %q, want %q", paths.SandboxProjectRoots["workspace"], physicalRoot)
+	}
+	wantAPI := filepath.Join(filepath.Dir(physicalRoot), "api")
+	if paths.SandboxProjectRoots["api"] != wantAPI {
+		t.Fatalf("api = %q, want %q", paths.SandboxProjectRoots["api"], wantAPI)
+	}
+}

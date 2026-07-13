@@ -7,6 +7,7 @@ type Capability string
 
 const (
 	CapListRepos      Capability = "list_repos"
+	CapListDirectory  Capability = "list_directory"
 	CapReadFile       Capability = "read_file"
 	CapListWorktrees  Capability = "list_worktrees"
 	CapCreateWorktree Capability = "create_worktree"
@@ -17,7 +18,7 @@ const (
 // IsReadOnly returns true for capabilities that do not mutate state.
 func (c Capability) IsReadOnly() bool {
 	switch c {
-	case CapListRepos, CapReadFile, CapListWorktrees:
+	case CapListRepos, CapListDirectory, CapReadFile, CapListWorktrees:
 		return true
 	default:
 		return false

@@ -268,12 +268,18 @@ func (a *Application) Run(ctx context.Context) error {
 	if sessionSvc != nil {
 		var sandboxService *sandboxusecase.Service
 		if cfg.Sandbox.Enabled {
-			executor, err := fssandbox.New(cfg.Sandbox.Projects, cfg.Sandbox.MaxOutputBytes)
+			projects := paths.SandboxProjectRoots
+			if len(projects) == 0 {
+				projects = cfg.Sandbox.Projects
+			}
+			executor, err := fssandbox.New(projects, cfg.Sandbox.MaxOutputBytes)
 			if err != nil {
 				return redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
 			}
 			sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
-				AllowedCapabilities: []domain.Capability{domain.CapListRepos, domain.CapReadFile, domain.CapListWorktrees},
+				AllowedCapabilities: []domain.Capability{
+					domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees,
+				},
 				CommandTimeout:      time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
 				MaxOutputBytes:      cfg.Sandbox.MaxOutputBytes,
 			}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(store), Executor: executor})

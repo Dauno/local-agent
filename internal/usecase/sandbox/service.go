@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -55,6 +56,7 @@ type SandboxOperation struct {
 type SandboxResult struct {
 	Output      string
 	OutputBytes int
+	Truncated   bool
 	Error       string
 }
 
@@ -175,8 +177,13 @@ func (s *Service) Run(ctx context.Context, callID string, capability domain.Capa
 		return result, execErr
 	}
 	if len(result.Output) > s.cfg.MaxOutputBytes {
-		result.Output = result.Output[:s.cfg.MaxOutputBytes]
-		result.OutputBytes = s.cfg.MaxOutputBytes
+		cut := s.cfg.MaxOutputBytes
+		for cut > 0 && !utf8.ValidString(result.Output[:cut]) {
+			cut--
+		}
+		result.Output = result.Output[:cut]
+		result.OutputBytes = cut
+		result.Truncated = true
 	}
 
 	if err := s.audit.UpdateAuditState(ctx, callID, domain.ToolStateCompleted, completedAt); err != nil {
@@ -209,8 +216,20 @@ func (s *Service) ValidateArgs(cap domain.Capability, args map[string]any) error
 		if !ok || strings.TrimSpace(path) == "" {
 			return errors.New("path is required for read_file")
 		}
-		if filepath.IsAbs(path) || strings.Contains(path, "..") || strings.Contains(path, "~") || strings.ContainsRune(path, '\x00') {
-			return errors.New("path traversal not allowed")
+		if err := validateRelativePath(path); err != nil {
+			return err
+		}
+	case domain.CapListDirectory:
+		project, ok := args["project"].(string)
+		if !ok || strings.TrimSpace(project) == "" {
+			return errors.New("project is required")
+		}
+		path, ok := args["path"].(string)
+		if !ok || strings.TrimSpace(path) == "" {
+			return nil // defaults to "."
+		}
+		if err := validateRelativePath(path); err != nil {
+			return err
 		}
 	case domain.CapCreateWorktree:
 		name, ok := args["name"].(string)
@@ -227,6 +246,32 @@ func (s *Service) ValidateArgs(cap domain.Capability, args map[string]any) error
 		}
 	}
 	return nil
+}
+
+func validateRelativePath(path string) error {
+	if filepath.IsAbs(path) {
+		return errors.New("path traversal not allowed")
+	}
+	if strings.Contains(path, "~") || strings.ContainsRune(path, '\x00') {
+		return errors.New("path traversal not allowed")
+	}
+	segs := strings.Split(filepath.ToSlash(path), "/")
+	for _, seg := range segs {
+		if seg == ".." {
+			return errors.New("path traversal not allowed")
+		}
+		if seg == "." {
+			continue
+		}
+		if isRestrictedSegment(seg) {
+			return errors.New("path not allowed")
+		}
+	}
+	return nil
+}
+
+func isRestrictedSegment(seg string) bool {
+	return seg == ".env" || seg == ".local-agent" || seg == ".git"
 }
 
 type systemClock struct{}
