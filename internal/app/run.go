@@ -24,6 +24,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
+	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -167,15 +168,22 @@ func (a *Application) Run(ctx context.Context) error {
 	// identically to the legacy agent but persists session history.
 	sessionSvc := adaptersqlite.NewAdkSessionService(store)
 	if sessionSvc != nil {
+		toolFactory := toolfactory.New(store, nil)
 		runtime, rtErr := adkagent.NewRuntime(adkagent.RuntimeConfig{
 			AgentName:      cfg.Agent.Name,
 			SessionService: sessionSvc,
 			Model:          llm,
+			ToolFactory:    toolFactory,
 		})
 		if rtErr != nil {
 			return redactor.Error(fmt.Errorf("initialize ADK runtime: %w", rtErr))
 		}
-		service.AddRuntime(runtime, adaptersqlite.NewConfirmationStore(store))
+		confirmationStore := adaptersqlite.NewConfirmationStore(store)
+		service.AddRuntime(runtime, confirmationStore)
+		// Expire old pending confirmations on startup.
+		if err := confirmationStore.ExpireDeliveries(ctx, time.Now().UTC()); err != nil {
+			logger.Warn("confirmation delivery expiry failed", "error", err)
+		}
 		logger.Info("ADK durable runtime enabled", "session_service", "sqlite")
 	}
 

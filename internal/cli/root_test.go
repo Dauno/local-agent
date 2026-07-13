@@ -50,7 +50,8 @@ func (f *fakeBackend) Run(context.Context) error { return f.runErr }
 func (f *fakeBackend) Manifest(context.Context, bool) (string, string, error) {
 	return f.manifestContent, f.manifestPath, f.manifestErr
 }
-func (*fakeBackend) Version() string { return "local-agent test-version" }
+func (f *fakeBackend) ResetState(context.Context) error { return nil }
+func (*fakeBackend) Version() string                     { return "local-agent test-version" }
 
 func setupBackend() *fakeBackend {
 	return &fakeBackend{snapshot: bootstrap.Snapshot{Config: config.Default()}}
