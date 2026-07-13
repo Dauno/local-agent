@@ -1,12 +1,9 @@
 # local-agent
 
-`local-agent` is a local-first conversational Slack agent written in Go. It
-connects through Slack Socket Mode, uses Google ADK for orchestration, calls an
-OpenAI-compatible Chat Completions endpoint, and keeps recent conversation
-state in a project-local SQLite database.
-
-The MVP is conversational only. It has no shell, filesystem, repository,
-tool-calling, or autonomous background-task access.
+`local-agent` is a local-first Slack bot written in Go. It connects through
+Slack Socket Mode, uses Google ADK for agent orchestration, calls an
+OpenAI-compatible Chat Completions endpoint, and persists conversation state
+in a project-local SQLite database.
 
 ## Requirements
 
@@ -22,11 +19,17 @@ tool-calling, or autonomous background-task access.
 ./install.sh
 ```
 
-By default the binary is placed in `$HOME/.local-agent/bin/local-agent`. Override
-the destination with `PREFIX`:
+The binary is placed in `$HOME/.local-agent/bin/local-agent`. Make sure the
+directory is on your `PATH`:
 
 ```sh
-PREFIX=/usr/local ./install.sh
+export PATH="$HOME/.local-agent/bin:$PATH"
+```
+
+Override the destination with `PREFIX`:
+
+```sh
+PREFIX=$HOME/.local/bin ./install.sh
 ```
 
 Build metadata is injected automatically from the current git revision. Override
