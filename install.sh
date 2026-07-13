@@ -1,6 +1,47 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+command -v go >/dev/null 2>&1 || {
+    echo "Go is not installed or not in PATH."
+    echo
+    case "$(uname -s)" in
+        Darwin)  install_cmd="brew install go" ;;
+        Linux)
+            if command -v apt-get >/dev/null 2>&1; then
+                install_cmd="sudo apt-get update && sudo apt-get install -y golang-go"
+            elif command -v dnf >/dev/null 2>&1; then
+                install_cmd="sudo dnf install -y golang"
+            elif command -v pacman >/dev/null 2>&1; then
+                install_cmd="sudo pacman -S --noconfirm go"
+            elif command -v apk >/dev/null 2>&1; then
+                install_cmd="apk add go"
+            else
+                echo "No supported package manager found. Install Go 1.25+ from https://go.dev/dl/"
+                exit 1
+            fi
+            ;;
+        *)  echo "Unsupported OS. Install Go 1.25+ from https://go.dev/dl/"
+            exit 1
+            ;;
+    esac
+
+    if [[ -t 0 ]]; then
+        echo "Run:  ${install_cmd}"
+        read -r -p "Run this now? [y/N] " answer
+        if [[ "${answer,,}" == "y" || "${answer,,}" == "yes" ]]; then
+            echo "Installing Go..."
+            eval "$install_cmd" || { echo "FAILED: ${install_cmd}"; exit 1; }
+        else
+            echo "Run the command above and re-execute this script."
+            exit 0
+        fi
+    else
+        echo "Non-interactive mode. Run:  ${install_cmd}"
+        exit 1
+    fi
+}
+command -v git >/dev/null 2>&1 || { echo "ERROR: Git is not installed or not in PATH."; exit 1; }
+
 REPO_URL="${REPO_URL:-https://github.com/Dauno/local-agent.git}"
 VERSION="${VERSION:-dev}"
 DATE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
