@@ -85,7 +85,7 @@ type Clock interface {
 // It is called before each model invocation and must never block the normal
 // response path.
 type MemoryRetriever interface {
-	Recall(ctx context.Context, query string) ([]domain.MemorySnippet, error)
+	Recall(ctx context.Context, query, ownerKey string) ([]domain.MemorySnippet, error)
 }
 
 // AssistantExchangeWriter durably stages an assistant exchange before it is
@@ -133,6 +133,8 @@ type MemoryStore interface {
 	ListRevisions(ctx context.Context, topicID domain.TopicID) ([]domain.TopicRevision, error)
 
 	SearchTopics(ctx context.Context, query string, maxTopics, maxChars int) ([]domain.MemorySnippet, error)
+	SearchTopicsForOwner(ctx context.Context, query, ownerKey string, maxTopics, maxChars int) ([]domain.MemorySnippet, error)
+	SearchPersonTopicsByOwner(ctx context.Context, ownerKey string, maxTopics, maxChars int) ([]domain.MemorySnippet, error)
 	SearchTopicReferences(ctx context.Context, query string, maxTopics int) ([]domain.TopicReference, error)
 	GetTopicReference(ctx context.Context, slug string) (*domain.TopicReference, error)
 	FindSimilarTopic(ctx context.Context, title string) (*domain.Topic, error)
@@ -160,9 +162,24 @@ type MemoryCurator interface {
 	ProposePatch(ctx context.Context, conversationKey domain.ConversationKey, exchangeTS string, messages []domain.Message, topics []domain.TopicReference) (domain.MemoryPatch, error)
 }
 
+// ProjectionSnapshot holds a consistent point-in-time view of all memory state
+// required to render an OKF bundle. It is read under a single transaction.
+type ProjectionSnapshot struct {
+	Topics    []domain.Topic
+	Revisions map[domain.TopicID][]domain.TopicRevision
+	Links     map[domain.TopicID][]domain.TopicLink
+	Evidence  map[domain.TopicID][]domain.Evidence
+}
+
+// ProjectionReader returns a consistent snapshot of the memory store suitable
+// for projecting an OKF bundle. It must be read under a single transaction.
+type ProjectionReader interface {
+	ReadProjectionSnapshot(ctx context.Context) (ProjectionSnapshot, error)
+}
+
 // OKFProjector materializes committed SQLite memory state into an Open
 // Knowledge Format bundle on the filesystem. It is never a writable source of
 // truth.
 type OKFProjector interface {
-	Project(ctx context.Context, store MemoryStore, outputDir string) error
+	Project(ctx context.Context, reader ProjectionReader, outputDir string) error
 }

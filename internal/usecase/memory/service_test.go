@@ -176,7 +176,11 @@ func TestTrustedEntityOperationsUsesExactSlugLookupBeyondRecallCap(t *testing.T)
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	if _, err := store.CreateTopic(t.Context(), "person-dauno", "Dauno", "", nil, "old identity", "init"); err != nil {
+	ownerKey := domain.SlackOwnerKey("slack:T12345678:dm:D12345678", "U12345678")
+	if _, err := store.ApplyMemoryPatch(t.Context(), domain.MemoryPatch{
+		ConversationKey: "slack:T12345678:dm:D12345678", ExchangeTS: "1", SourceAuthorID: "U12345678",
+		Operations: []domain.MemoryOp{{Type: domain.MemoryOpCreateTopic, TopicSlug: "person-dauno", TopicTitle: "Dauno", BundlePath: "people", Content: "old identity"}},
+	}, domain.MemoryLimits{MaxTopics: 2, MaxLinks: 1, MaxTopicChars: 100}); err != nil {
 		t.Fatal(err)
 	}
 	service, err := memory.New(memory.Config{
@@ -186,11 +190,11 @@ func TestTrustedEntityOperationsUsesExactSlugLookupBeyondRecallCap(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	ops, err := service.TrustedEntityOperations(t.Context(), []domain.Message{{Role: domain.RoleUser, Content: "Mi nombre es Dauno y soy el creador de local-agent"}})
+	ops, err := service.TrustedEntityOperations(t.Context(), "slack:T12345678:dm:D12345678", []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "Mi nombre es Dauno y soy el creador de local-agent"}})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(ops) != 1 || ops[0].Type != domain.MemoryOpRevise || ops[0].TopicSlug != "person-dauno" || ops[0].ExpectedRev != 1 {
+	if len(ops) != 1 || ops[0].Type != domain.MemoryOpRevise || ops[0].TopicSlug != domain.ScopedPersonTopicSlug("person-dauno", ownerKey) || ops[0].ExpectedRev != 1 {
 		t.Fatalf("TrustedEntityOperations() = %#v", ops)
 	}
 }

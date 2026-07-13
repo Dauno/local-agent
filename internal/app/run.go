@@ -133,11 +133,11 @@ func (a *Application) Run(ctx context.Context) error {
 	}
 
 	contextEnricher := slackadapter.NewContextEnricherFromSDK(logger, api, slackadapter.ContextEnricherConfig{
-		Enabled:                 cfg.Slack.Context.Enabled,
-		MaxChars:                cfg.Slack.Context.MaxChars,
-		Timeout:                 time.Duration(cfg.Slack.Context.TimeoutSeconds) * time.Second,
-		ProfileCacheTTL:         time.Duration(cfg.Slack.Context.ProfileCacheTTLMinutes) * time.Minute,
-		ConversationCacheTTL:    time.Duration(cfg.Slack.Context.ConversationCacheTTLMinutes) * time.Minute,
+		Enabled:              cfg.Slack.Context.Enabled,
+		MaxChars:             cfg.Slack.Context.MaxChars,
+		Timeout:              time.Duration(cfg.Slack.Context.TimeoutSeconds) * time.Second,
+		ProfileCacheTTL:      time.Duration(cfg.Slack.Context.ProfileCacheTTLMinutes) * time.Minute,
+		ConversationCacheTTL: time.Duration(cfg.Slack.Context.ConversationCacheTTLMinutes) * time.Minute,
 	})
 
 	service, err := botusecase.New(botusecase.Config{
@@ -361,7 +361,7 @@ func processOutbox(
 			return
 		}
 
-		trusted, err := memoryService.TrustedEntityOperations(ctx, messages)
+		trusted, err := memoryService.TrustedEntityOperations(ctx, item.ConversationKey, messages)
 		if err != nil {
 			logger.Warn("trusted entity topic lookup failed", "item_id", item.ID, "error", err)
 			retryOutbox(ctx, store, item, maxRetries, err)

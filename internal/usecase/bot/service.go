@@ -212,7 +212,7 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 
 	var memory []domain.MemorySnippet
 	if s.recall != nil {
-		snippets, err := s.recall.Recall(ctx, invocation.Text)
+		snippets, err := s.recall.Recall(ctx, invocation.Text, domain.SlackOwnerKey(key, invocation.UserID))
 		if err != nil {
 			s.logger.Warn("memory recall failed", "event_id", invocation.EventID, "error", err)
 		} else {

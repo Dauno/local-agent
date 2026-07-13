@@ -93,6 +93,88 @@ func TestEntityMemoryCandidatesRejectSpanishDirectivesBeforeGeneration(t *testin
 	}
 }
 
+func TestValidateBundlePath(t *testing.T) {
+	tests := []struct {
+		name  string
+		path  string
+		valid bool
+	}{
+		{name: "empty", path: "", valid: false},
+		{name: "blank", path: "  ", valid: false},
+		{name: "absolute", path: "/facts", valid: false},
+		{name: "trailing slash", path: "facts/", valid: false},
+		{name: "double slash", path: "facts//people", valid: false},
+		{name: "dot segment", path: "facts/./people", valid: false},
+		{name: "dotdot segment", path: "facts/../people", valid: false},
+		{name: "uppercase", path: "Facts", valid: false},
+		{name: "underscore", path: "facts_people", valid: false},
+		{name: "basic", path: "facts", valid: true},
+		{name: "nested", path: "projects/local-agent", valid: true},
+		{name: "complex", path: "systems/production/deploy", valid: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateBundlePath(test.path)
+			if (err == nil) != test.valid {
+				t.Fatalf("ValidateBundlePath(%q) error = %v, want valid=%t", test.path, err, test.valid)
+			}
+		})
+	}
+}
+
+func TestEntityMemoryCandidateNormalizesDeicticPrefixes(t *testing.T) {
+	tests := []struct {
+		name    string
+		message string
+		want    string
+		path    string
+	}{
+		{
+			name: "Spanish esto colon", message: "recuerda esto: el apodo de Camila es \"cami del amor\"",
+			want: "El apodo de Camila es \"cami del amor\".", path: "facts",
+		},
+		{name: "Spanish esto", message: "recuerda esto es mi preferencia", want: "Es mi preferencia.", path: "facts"},
+		{name: "Spanish esta", message: "recuerda esta es la config", want: "Es la config.", path: "facts"},
+		{name: "English this", message: "remember this: the server runs on port 8080", want: "The server runs on port 8080.", path: "facts"},
+		{name: "identity", message: "Mi nombre es Dauno y soy el creador de local-agent", want: "Dauno se identifica como creador de local-agent.", path: "people"},
+		{name: "project fact", message: "recuerda que el proyecto local-agent usa Go", want: "El proyecto local-agent usa Go.", path: "projects"},
+		{name: "system fact", message: "recuerda que producción usa PostgreSQL 16", want: "Producción usa PostgreSQL 16.", path: "systems"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			candidates := EntityMemoryCandidates([]Message{{Role: RoleUser, Content: test.message}})
+			if len(candidates) != 1 {
+				t.Fatalf("EntityMemoryCandidates() = %#v, want one candidate", candidates)
+			}
+			c := candidates[0]
+			if c.BundlePath != test.path {
+				t.Fatalf("BundlePath = %q, want %q", c.BundlePath, test.path)
+			}
+			if c.Content != test.want {
+				t.Fatalf("Content = %q, want %q", c.Content, test.want)
+			}
+		})
+	}
+}
+
+func TestTrustedEntityMemoryOperationsSetsBundlePath(t *testing.T) {
+	ops := TrustedEntityMemoryOperations(
+		[]Message{{Role: RoleUser, Content: "mi nombre es Dauno y soy el creador de local-agent"}},
+		nil, "slack:T12345678:user:U12345678",
+	)
+	if len(ops) != 1 || ops[0].BundlePath != "people" {
+		t.Fatalf("identity BundlePath = %q, want people", ops[0].BundlePath)
+	}
+
+	ops = TrustedEntityMemoryOperations(
+		[]Message{{Role: RoleUser, Content: "recuerda que producción usa PostgreSQL 16"}},
+		nil, "",
+	)
+	if len(ops) != 1 || ops[0].BundlePath != "systems" {
+		t.Fatalf("system BundlePath = %q, want systems", ops[0].BundlePath)
+	}
+}
+
 func TestTrustedEntityMemoryOperationsPrioritizesSpanishIdentityAndRememberRequests(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -124,7 +206,7 @@ func TestTrustedEntityMemoryOperationsPrioritizesSpanishIdentityAndRememberReque
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			ops := TrustedEntityMemoryOperations([]Message{{Role: RoleUser, Content: test.message}}, test.topics)
+			ops := TrustedEntityMemoryOperations([]Message{{Role: RoleUser, Content: test.message}}, test.topics, "")
 			if len(ops) != 1 {
 				t.Fatalf("TrustedEntityMemoryOperations() = %#v, want one operation", ops)
 			}
