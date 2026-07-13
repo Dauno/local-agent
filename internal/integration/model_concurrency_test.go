@@ -85,5 +85,5 @@ type countingCuratorLLM struct{ calls int }
 
 func (l *countingCuratorLLM) GenerateText(context.Context, string) (string, error) {
 	l.calls++
-	return "[]", nil
+	return `{"operations":[]}`, nil
 }

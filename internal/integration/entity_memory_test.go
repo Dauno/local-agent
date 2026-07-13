@@ -171,7 +171,7 @@ func containsMemorySlug(memory []domain.MemorySnippet, slug string) bool {
 
 type entityMemoryLLM struct{}
 
-func (entityMemoryLLM) GenerateText(context.Context, string) (string, error) { return "[]", nil }
+func (entityMemoryLLM) GenerateText(context.Context, string) (string, error) { return `{"operations":[]}`, nil }
 
 type memoryRecordingAgent struct{ memory []domain.MemorySnippet }
 

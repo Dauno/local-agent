@@ -25,6 +25,7 @@ import (
 // RuntimeConfig holds the dependencies for a durable ADK agent runtime.
 type RuntimeConfig struct {
 	AgentName      string
+	Instruction    string
 	SessionService session.Service
 	Model          model.LLM
 	ToolFactory    port.AgentToolFactory
@@ -34,6 +35,7 @@ type RuntimeConfig struct {
 // application's port.AgentRuntime boundary.
 type Runtime struct {
 	agentName      string
+	instruction    string
 	sessionService session.Service
 	model          model.LLM
 	toolFactory    port.AgentToolFactory
@@ -57,6 +59,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	}
 	return &Runtime{
 		agentName:      cfg.AgentName,
+		instruction:    cfg.Instruction,
 		sessionService: cfg.SessionService,
 		model:          cfg.Model,
 		toolFactory:    cfg.ToolFactory,
@@ -70,7 +73,12 @@ func adkSessionID(key domain.ConversationKey) string {
 
 // buildAgent constructs a per-turn llmagent with tools and before-model callback.
 func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agent.Agent, error) {
-	instruction := BaseInstruction(r.agentName)
+	instruction := r.instruction
+	if instruction != "" {
+		instruction = instruction + "\n\n" + ImmutablePolicy()
+	} else {
+		instruction = BaseInstruction(r.agentName)
+	}
 	if len(tools) > 0 {
 		instruction += " You may use only the registered function tools when they are relevant. Their arguments and results remain subject to application policy."
 	}
