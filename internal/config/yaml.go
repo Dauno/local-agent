@@ -81,6 +81,12 @@ var configSchema = []schemaField{
 		{name: "max_topic_chars"},
 		{name: "max_patch_ops"},
 	}},
+	{name: "sandbox", children: []schemaField{
+		{name: "enabled"},
+		{name: "projects"},
+		{name: "command_timeout_seconds"},
+		{name: "max_output_bytes"},
+	}},
 }
 
 // Load reads, applies defaults to, and validates a YAML config file.

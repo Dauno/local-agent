@@ -56,6 +56,9 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) [
 	if ro, err := f.listReposTool(actor); err == nil && ro != nil {
 		tools = append(tools, ro)
 	}
+	if ro, err := f.listDirectoryTool(actor); err == nil && ro != nil {
+		tools = append(tools, ro)
+	}
 	if ro, err := f.readFileTool(actor); err == nil && ro != nil {
 		tools = append(tools, ro)
 	}
@@ -126,7 +129,7 @@ func (f *Factory) listReposTool(actor string) (tool.Tool, error) {
 	return functiontool.New(
 		functiontool.Config{
 			Name:        "list_repos",
-			Description: "Lists pre-registered project repositories available for read-only inspection.",
+			Description: "Lists pre-registered project repositories available for read-only inspection. Returned names are the only valid project names for filesystem tools.",
 		},
 		func(ctx agent.Context, _ struct{}) (listReposResult, error) {
 			callID := ctx.FunctionCallID()
@@ -139,13 +142,43 @@ func (f *Factory) listReposTool(actor string) (tool.Tool, error) {
 	)
 }
 
+type listDirectoryArgs struct {
+	Project string `json:"project" jsonschema:"the project name from list_repos"`
+	Path    string `json:"path,omitzero" jsonschema:"project-relative directory path (defaults to '.')"`
+}
+
+type listDirectoryResult struct {
+	Entries   []string `json:"entries"`
+	Truncated bool     `json:"truncated"`
+}
+
+func (f *Factory) listDirectoryTool(actor string) (tool.Tool, error) {
+	sb := f.sandbox
+	return functiontool.New(
+		functiontool.Config{
+			Name:        "list_directory",
+			Description: "Lists directory contents non-recursively within a pre-registered project. Directory names end with '/'. Start with path '.' for the project root, then traverse subdirectories. Read-only -- no mutations.",
+		},
+		func(ctx agent.Context, args listDirectoryArgs) (listDirectoryResult, error) {
+			callID := ctx.FunctionCallID()
+			result, err := sb.Run(context.Background(), callID, domain.CapListDirectory,
+				map[string]any{"project": args.Project, "path": args.Path}, actor)
+			if err != nil {
+				return listDirectoryResult{}, err
+			}
+			return listDirectoryResult{Entries: splitNonEmpty(result.Output), Truncated: result.Truncated}, nil
+		},
+	)
+}
+
 type readFileArgs struct {
 	Project string `json:"project" jsonschema:"the project name from list_repos"`
 	Path    string `json:"path" jsonschema:"path to the file within the project"`
 }
 
 type readFileResult struct {
-	Content string `json:"content"`
+	Content   string `json:"content"`
+	Truncated bool   `json:"truncated"`
 }
 
 func (f *Factory) readFileTool(actor string) (tool.Tool, error) {
@@ -153,7 +186,7 @@ func (f *Factory) readFileTool(actor string) (tool.Tool, error) {
 	return functiontool.New(
 		functiontool.Config{
 			Name:        "read_file",
-			Description: "Reads a file from a pre-registered project. Read-only — no mutations.",
+			Description: "Reads a file from a pre-registered project. Read-only -- no mutations.",
 		},
 		func(ctx agent.Context, args readFileArgs) (readFileResult, error) {
 			callID := ctx.FunctionCallID()
@@ -162,7 +195,7 @@ func (f *Factory) readFileTool(actor string) (tool.Tool, error) {
 			if err != nil {
 				return readFileResult{}, err
 			}
-			return readFileResult{Content: result.Output}, nil
+			return readFileResult{Content: result.Output, Truncated: result.Truncated}, nil
 		},
 	)
 }
