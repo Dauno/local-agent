@@ -48,8 +48,9 @@ func (s *Store) ApplyMemoryPatch(ctx context.Context, patch domain.MemoryPatch, 
 		}
 		return false, nil
 	}
+	ownerKey := domain.SlackOwnerKey(patch.ConversationKey, patch.SourceAuthorID)
 	for _, op := range patch.Operations {
-		if err := applyMemoryOp(ctx, tx, patch, op, limits, now); err != nil {
+		if err := applyMemoryOp(ctx, tx, patch, op, ownerKey, limits, now); err != nil {
 			return false, err
 		}
 	}
@@ -59,7 +60,7 @@ func (s *Store) ApplyMemoryPatch(ctx context.Context, patch domain.MemoryPatch, 
 	return true, nil
 }
 
-func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op domain.MemoryOp, limits domain.MemoryLimits, now time.Time) error {
+func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op domain.MemoryOp, ownerKey string, limits domain.MemoryLimits, now time.Time) error {
 	switch op.Type {
 	case domain.MemoryOpCreateTopic:
 		var count int
@@ -69,10 +70,23 @@ func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op
 		if count >= limits.MaxTopics {
 			return fmt.Errorf("memory topic limit of %d reached", limits.MaxTopics)
 		}
+		bundlePath := op.BundlePath
+		if bundlePath == "" || domain.ValidateBundlePath(bundlePath) != nil {
+			bundlePath = "topics"
+		}
+		slug := op.TopicSlug
+		topicOwnerKey := ""
+		if bundlePath == "people" {
+			if ownerKey == "" {
+				return errors.New("person topic requires a Slack owner")
+			}
+			slug = domain.ScopedPersonTopicSlug(slug, ownerKey)
+			topicOwnerKey = ownerKey
+		}
 		id, tags := generateTopicID(), marshalTags(op.Tags)
 		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO memory_topics (id, slug, title, description, status, tags, content, current_rev, created_at, updated_at)
-			VALUES (?, ?, ?, ?, 'active', ?, ?, 1, ?, ?)`, id, op.TopicSlug, op.TopicTitle, op.TopicDesc, tags, op.Content, now.UnixNano(), now.UnixNano()); err != nil {
+			INSERT INTO memory_topics (id, slug, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at)
+			VALUES (?, ?, ?, ?, 'active', ?, ?, ?, ?, 1, ?, ?)`, id, slug, op.TopicTitle, op.TopicDesc, tags, bundlePath, topicOwnerKey, op.Content, now.UnixNano(), now.UnixNano()); err != nil {
 			return fmt.Errorf("create topic %q: %w", op.TopicSlug, err)
 		}
 		if err := syncFTSInsert(ctx, tx, id, op.TopicTitle, op.TopicDesc, tags, op.Content); err != nil {
@@ -85,7 +99,7 @@ func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op
 		revID, _ := result.LastInsertId()
 		return addPatchEvidence(ctx, tx, int(revID), patch, domain.EvidenceSource)
 	case domain.MemoryOpRevise, domain.MemoryOpCorrect:
-		topic, revID, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev)
+		topic, revID, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev, ownerKey)
 		if err != nil {
 			return err
 		}
@@ -96,7 +110,7 @@ func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op
 		}
 		return addPatchEvidence(ctx, tx, newRevID, patch, domain.EvidenceSource)
 	case domain.MemoryOpDecide, domain.MemoryOpQuestionAdd, domain.MemoryOpQuestionResolve:
-		topic, _, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev)
+		topic, _, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev, ownerKey)
 		if err != nil {
 			return err
 		}
@@ -122,11 +136,11 @@ func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op
 		}
 		return addPatchEvidence(ctx, tx, newRevID, patch, evidenceType)
 	case domain.MemoryOpLinkAdd:
-		source, revisionID, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev)
+		source, revisionID, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev, ownerKey)
 		if err != nil {
 			return err
 		}
-		target, _, err := topicForPatch(ctx, tx, op.TargetTopicSlug, 0)
+		target, _, err := topicForPatch(ctx, tx, op.TargetTopicSlug, 0, ownerKey)
 		if err != nil {
 			return err
 		}
@@ -148,11 +162,11 @@ func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op
 		}
 		return nil
 	case domain.MemoryOpLinkRemove:
-		source, _, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev)
+		source, _, err := topicForPatch(ctx, tx, op.TopicSlug, op.ExpectedRev, ownerKey)
 		if err != nil {
 			return err
 		}
-		target, _, err := topicForPatch(ctx, tx, op.TargetTopicSlug, 0)
+		target, _, err := topicForPatch(ctx, tx, op.TargetTopicSlug, 0, ownerKey)
 		if err != nil {
 			return err
 		}
@@ -165,11 +179,11 @@ func applyMemoryOp(ctx context.Context, tx *sql.Tx, patch domain.MemoryPatch, op
 	}
 }
 
-func topicForPatch(ctx context.Context, tx *sql.Tx, slug string, expectedRev int) (domain.Topic, int, error) {
+func topicForPatch(ctx context.Context, tx *sql.Tx, slug string, expectedRev int, ownerKey string) (domain.Topic, int, error) {
 	var topic domain.Topic
 	var id, status, tags string
 	var created, updated int64
-	err := tx.QueryRowContext(ctx, `SELECT id, title, description, status, tags, content, current_rev, created_at, updated_at FROM memory_topics WHERE slug = ?`, slug).Scan(&id, &topic.Title, &topic.Description, &status, &tags, &topic.Content, &topic.CurrentRev, &created, &updated)
+	err := tx.QueryRowContext(ctx, `SELECT id, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at FROM memory_topics WHERE slug = ?`, slug).Scan(&id, &topic.Title, &topic.Description, &status, &tags, &topic.BundlePath, &topic.OwnerKey, &topic.Content, &topic.CurrentRev, &created, &updated)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Topic{}, 0, fmt.Errorf("topic %q not found", slug)
@@ -177,6 +191,9 @@ func topicForPatch(ctx context.Context, tx *sql.Tx, slug string, expectedRev int
 		return domain.Topic{}, 0, fmt.Errorf("read topic %q: %w", slug, err)
 	}
 	topic.ID, topic.Slug, topic.Status, topic.Tags = domain.TopicID(id), slug, domain.TopicStatus(status), unmarshalTags(tags)
+	if topic.BundlePath == "people" && topic.OwnerKey != ownerKey {
+		return domain.Topic{}, 0, fmt.Errorf("person topic %q is owned by another Slack user", slug)
+	}
 	if expectedRev > 0 && topic.CurrentRev != expectedRev {
 		return domain.Topic{}, 0, fmt.Errorf("stale revision for topic %q: expected rev %d, current rev %d", slug, expectedRev, topic.CurrentRev)
 	}
@@ -249,8 +266,8 @@ func (s *Store) CreateTopic(
 	defer func() { _ = tx.Rollback() }()
 
 	result, err := tx.ExecContext(ctx, `
-		INSERT INTO memory_topics (id, slug, title, description, status, tags, content, current_rev, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'active', ?, ?, 1, ?, ?)`,
+		INSERT INTO memory_topics (id, slug, title, description, status, tags, bundle_path, content, current_rev, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'active', ?, 'topics', ?, 1, ?, ?)`,
 		id, slug, title, description, tagsJSON, content, nowNanos, nowNanos,
 	)
 	if err != nil {
@@ -282,19 +299,19 @@ func (s *Store) CreateTopic(
 	return domain.Topic{
 		ID: domain.TopicID(id), Slug: slug, Title: title,
 		Description: description, Status: domain.TopicStatusActive,
-		Tags: tags, CurrentRev: 1, CreatedAt: now, UpdatedAt: now,
+		Tags: tags, BundlePath: "topics", CurrentRev: 1, CreatedAt: now, UpdatedAt: now,
 	}, nil
 }
 
 func (s *Store) GetTopic(ctx context.Context, slug string) (domain.Topic, error) {
 	return scanTopic(s.db.QueryRowContext(ctx, `
-		SELECT id, slug, title, description, status, tags, content, current_rev, created_at, updated_at
+		SELECT id, slug, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at
 		FROM memory_topics WHERE slug = ?`, slug))
 }
 
 func (s *Store) GetTopicByID(ctx context.Context, id domain.TopicID) (domain.Topic, *domain.TopicRevision, error) {
 	topic, err := scanTopic(s.db.QueryRowContext(ctx, `
-		SELECT id, slug, title, description, status, tags, content, current_rev, created_at, updated_at
+		SELECT id, slug, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at
 		FROM memory_topics WHERE id = ?`, string(id)))
 	if err != nil {
 		return domain.Topic{}, nil, err
@@ -313,7 +330,7 @@ func (s *Store) GetTopicByID(ctx context.Context, id domain.TopicID) (domain.Top
 
 func (s *Store) ListTopics(ctx context.Context) ([]domain.Topic, error) {
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT id, slug, title, description, status, tags, content, current_rev, created_at, updated_at
+		SELECT id, slug, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at
 		FROM memory_topics ORDER BY updated_at DESC`)
 	if err != nil {
 		return nil, fmt.Errorf("list topics: %w", err)
@@ -329,6 +346,125 @@ func (s *Store) ListTopics(ctx context.Context) ([]domain.Topic, error) {
 		topics = append(topics, t)
 	}
 	return topics, rows.Err()
+}
+
+func (s *Store) ReadProjectionSnapshot(ctx context.Context) (port.ProjectionSnapshot, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return port.ProjectionSnapshot{}, fmt.Errorf("begin projection snapshot: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	rows, err := tx.QueryContext(ctx, `
+		SELECT id, slug, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at
+		FROM memory_topics ORDER BY updated_at DESC`)
+	if err != nil {
+		return port.ProjectionSnapshot{}, fmt.Errorf("list topics for snapshot: %w", err)
+	}
+	var topics []domain.Topic
+	topicIDs := make(map[domain.TopicID]struct{})
+	for rows.Next() {
+		t, scanErr := scanTopicFromRows(rows)
+		if scanErr != nil {
+			_ = rows.Close()
+			return port.ProjectionSnapshot{}, scanErr
+		}
+		topics = append(topics, t)
+		topicIDs[t.ID] = struct{}{}
+	}
+	if err := rows.Err(); err != nil {
+		return port.ProjectionSnapshot{}, err
+	}
+	if err := rows.Close(); err != nil {
+		return port.ProjectionSnapshot{}, err
+	}
+
+	revisions := make(map[domain.TopicID][]domain.TopicRevision)
+	links := make(map[domain.TopicID][]domain.TopicLink)
+	evidence := make(map[domain.TopicID][]domain.Evidence)
+
+	for topicID := range topicIDs {
+		revRows, revErr := tx.QueryContext(ctx, `
+			SELECT id, topic_id, revision_number, content, change_reason, created_at
+			FROM memory_topic_revisions
+			WHERE topic_id = ?
+			ORDER BY revision_number DESC`, string(topicID))
+		if revErr != nil {
+			return port.ProjectionSnapshot{}, fmt.Errorf("list revisions for snapshot: %w", revErr)
+		}
+		for revRows.Next() {
+			r, scanErr := scanRevisionFromRows(revRows)
+			if scanErr != nil {
+				_ = revRows.Close()
+				return port.ProjectionSnapshot{}, scanErr
+			}
+			revisions[topicID] = append(revisions[topicID], r)
+		}
+		if err := revRows.Err(); err != nil {
+			_ = revRows.Close()
+			return port.ProjectionSnapshot{}, err
+		}
+		_ = revRows.Close()
+
+		linkRows, linkErr := tx.QueryContext(ctx, `
+			SELECT source_topic_id, target_topic_id, relation, revision_id
+			FROM memory_topic_links
+			WHERE source_topic_id = ? OR target_topic_id = ?
+			ORDER BY revision_id DESC`, string(topicID), string(topicID))
+		if linkErr != nil {
+			return port.ProjectionSnapshot{}, fmt.Errorf("list links for snapshot: %w", linkErr)
+		}
+		for linkRows.Next() {
+			var l domain.TopicLink
+			var src, tgt string
+			if scanErr := linkRows.Scan(&src, &tgt, &l.Relation, &l.RevisionID); scanErr != nil {
+				_ = linkRows.Close()
+				return port.ProjectionSnapshot{}, scanErr
+			}
+			l.SourceTopicID = domain.TopicID(src)
+			l.TargetTopicID = domain.TopicID(tgt)
+			links[topicID] = append(links[topicID], l)
+		}
+		if err := linkRows.Err(); err != nil {
+			_ = linkRows.Close()
+			return port.ProjectionSnapshot{}, err
+		}
+		_ = linkRows.Close()
+
+		evRows, evErr := tx.QueryContext(ctx, `
+			SELECT e.id, e.topic_revision, e.source_key, e.source_ts, e.author_id, e.type
+			FROM memory_evidence e
+			JOIN memory_topic_revisions r ON e.topic_revision = r.id
+			WHERE r.topic_id = ?
+			ORDER BY e.id DESC`, string(topicID))
+		if evErr != nil {
+			return port.ProjectionSnapshot{}, fmt.Errorf("list evidence for snapshot: %w", evErr)
+		}
+		for evRows.Next() {
+			var ev domain.Evidence
+			var key, evType string
+			if scanErr := evRows.Scan(&ev.ID, &ev.TopicRevision, &key, &ev.SourceTS, &ev.AuthorID, &evType); scanErr != nil {
+				_ = evRows.Close()
+				return port.ProjectionSnapshot{}, scanErr
+			}
+			ev.SourceKey = domain.ConversationKey(key)
+			ev.Type = domain.EvidenceType(evType)
+			evidence[topicID] = append(evidence[topicID], ev)
+		}
+		if err := evRows.Err(); err != nil {
+			_ = evRows.Close()
+			return port.ProjectionSnapshot{}, err
+		}
+		_ = evRows.Close()
+	}
+
+	if err := tx.Commit(); err != nil {
+		return port.ProjectionSnapshot{}, err
+	}
+
+	return port.ProjectionSnapshot{
+		Topics: topics, Revisions: revisions, Links: links, Evidence: evidence,
+	}, nil
 }
 
 func (s *Store) DeleteTopic(ctx context.Context, id domain.TopicID) error {
@@ -504,6 +640,16 @@ func (s *Store) ListRevisions(ctx context.Context, topicID domain.TopicID) ([]do
 }
 
 func (s *Store) SearchTopics(ctx context.Context, query string, maxTopics, maxChars int) ([]domain.MemorySnippet, error) {
+	return s.searchTopics(ctx, query, "", maxTopics, maxChars)
+}
+
+// SearchTopicsForOwner preserves normal FTS recall without exposing another
+// Slack user's person topics.
+func (s *Store) SearchTopicsForOwner(ctx context.Context, query, ownerKey string, maxTopics, maxChars int) ([]domain.MemorySnippet, error) {
+	return s.searchTopics(ctx, query, ownerKey, maxTopics, maxChars)
+}
+
+func (s *Store) searchTopics(ctx context.Context, query, ownerKey string, maxTopics, maxChars int) ([]domain.MemorySnippet, error) {
 	if strings.TrimSpace(query) == "" {
 		return nil, nil
 	}
@@ -518,18 +664,56 @@ func (s *Store) SearchTopics(ctx context.Context, query string, maxTopics, maxCh
 	if ftsQuery == "" {
 		return nil, nil
 	}
+	whereOwner := ""
+	args := []any{ftsQuery}
+	if ownerKey == "" {
+		whereOwner = " AND t.bundle_path != 'people'"
+	} else {
+		whereOwner = " AND (t.bundle_path != 'people' OR t.owner_key = ?)"
+		args = append(args, ownerKey)
+	}
+	args = append(args, maxTopics+20)
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT t.id, t.title, t.slug, t.content, t.current_rev, t.updated_at
 		FROM memory_topics_fts fts
 		JOIN memory_topics t ON t.rowid = fts.rowid
-		WHERE memory_topics_fts MATCH ? AND t.status = 'active'
+		WHERE memory_topics_fts MATCH ? AND t.status = 'active'`+whereOwner+`
 		ORDER BY rank
-		LIMIT ?`, ftsQuery, maxTopics+20)
+		LIMIT ?`, args...)
 	if err != nil {
 		return nil, fmt.Errorf("search topics: %w", err)
 	}
 	defer rows.Close()
 
+	return memorySnippetsFromRows(rows, maxTopics, maxChars)
+}
+
+// SearchPersonTopicsByOwner recalls self-declared identity topics using their
+// immutable Slack ownership when a first-person question cannot match topic text lexically.
+func (s *Store) SearchPersonTopicsByOwner(ctx context.Context, ownerKey string, maxTopics, maxChars int) ([]domain.MemorySnippet, error) {
+	if strings.TrimSpace(ownerKey) == "" {
+		return nil, nil
+	}
+	if maxTopics <= 0 {
+		maxTopics = 3
+	}
+	if maxChars <= 0 {
+		maxChars = 2000
+	}
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT t.id, t.title, t.slug, t.content, t.current_rev, t.updated_at
+		FROM memory_topics t
+		WHERE t.status = 'active' AND t.bundle_path = 'people' AND t.owner_key = ?
+		ORDER BY t.updated_at DESC
+		LIMIT ?`, ownerKey, maxTopics+20)
+	if err != nil {
+		return nil, fmt.Errorf("search person topics by owner: %w", err)
+	}
+	defer rows.Close()
+	return memorySnippetsFromRows(rows, maxTopics, maxChars)
+}
+
+func memorySnippetsFromRows(rows *sql.Rows, maxTopics, maxChars int) ([]domain.MemorySnippet, error) {
 	var snippets []domain.MemorySnippet
 	totalChars := 0
 	var partial *domain.MemorySnippet
@@ -593,7 +777,7 @@ func (s *Store) SearchTopicReferences(ctx context.Context, query string, maxTopi
 		SELECT t.slug, t.title, t.description, t.tags, t.current_rev
 		FROM memory_topics_fts fts
 		JOIN memory_topics t ON t.rowid = fts.rowid
-		WHERE memory_topics_fts MATCH ? AND t.status = 'active'
+		WHERE memory_topics_fts MATCH ? AND t.status = 'active' AND t.bundle_path != 'people'
 		ORDER BY rank LIMIT ?`, ftsQuery, maxTopics)
 	if err != nil {
 		return nil, fmt.Errorf("search topic references: %w", err)
@@ -646,7 +830,7 @@ func buildFTSQuery(query string) string {
 
 func (s *Store) FindSimilarTopic(ctx context.Context, title string) (*domain.Topic, error) {
 	t, err := scanTopic(s.db.QueryRowContext(ctx, `
-		SELECT id, slug, title, description, status, tags, content, current_rev, created_at, updated_at
+		SELECT id, slug, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at
 		FROM memory_topics WHERE title = ?`, title))
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -948,7 +1132,7 @@ func scanTopic(row interface{ Scan(dest ...any) error }) (domain.Topic, error) {
 		createdNanos int64
 		updatedNanos int64
 	)
-	if err := row.Scan(&id, &t.Slug, &t.Title, &t.Description, &status, &tagsJSON, &t.Content, &t.CurrentRev, &createdNanos, &updatedNanos); err != nil {
+	if err := row.Scan(&id, &t.Slug, &t.Title, &t.Description, &status, &tagsJSON, &t.BundlePath, &t.OwnerKey, &t.Content, &t.CurrentRev, &createdNanos, &updatedNanos); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return domain.Topic{}, fmt.Errorf("topic not found: %w", err)
 		}
@@ -971,7 +1155,7 @@ func scanTopicFromRows(rows *sql.Rows) (domain.Topic, error) {
 		createdNanos int64
 		updatedNanos int64
 	)
-	if err := rows.Scan(&id, &t.Slug, &t.Title, &t.Description, &status, &tagsJSON, &t.Content, &t.CurrentRev, &createdNanos, &updatedNanos); err != nil {
+	if err := rows.Scan(&id, &t.Slug, &t.Title, &t.Description, &status, &tagsJSON, &t.BundlePath, &t.OwnerKey, &t.Content, &t.CurrentRev, &createdNanos, &updatedNanos); err != nil {
 		return domain.Topic{}, fmt.Errorf("scan topic: %w", err)
 	}
 	t.ID = domain.TopicID(id)

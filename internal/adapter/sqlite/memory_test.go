@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -690,6 +691,144 @@ func TestMemoryStore_SearchFTSMatchesNaturalLanguageEntityQuestions(t *testing.T
 	}
 }
 
+func TestMemoryStore_SearchPersonTopicsByOwnerScopesOwnership(t *testing.T) {
+	store, _ := newTestStore(t)
+	limits := domain.MemoryLimits{MaxTopics: 10, MaxLinks: 10, MaxTopicChars: 1_000}
+	patches := []domain.MemoryPatch{
+		{
+			ConversationKey: "slack:T12345678:dm:D12345678", ExchangeTS: "1", SourceAuthorID: "U00000001",
+			Operations: []domain.MemoryOp{{Type: domain.MemoryOpCreateTopic, TopicSlug: "dauno", TopicTitle: "Dauno", BundlePath: "people", Content: "Dauno is the creator."}},
+		},
+		{
+			ConversationKey: "slack:T12345678:dm:D87654321", ExchangeTS: "2", SourceAuthorID: "U00000002",
+			Operations: []domain.MemoryOp{{Type: domain.MemoryOpCreateTopic, TopicSlug: "other", TopicTitle: "Other", BundlePath: "people", Content: "Other is a user."}},
+		},
+		{
+			ConversationKey: "slack:T12345678:dm:D12345678", ExchangeTS: "3", SourceAuthorID: "U00000001",
+			Operations: []domain.MemoryOp{{Type: domain.MemoryOpCreateTopic, TopicSlug: "project", TopicTitle: "Project", BundlePath: "projects", Content: "Dauno maintains the project."}},
+		},
+	}
+	for _, patch := range patches {
+		if _, err := store.ApplyMemoryPatch(t.Context(), patch, limits); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	ownerKey := domain.SlackOwnerKey("slack:T12345678:dm:D12345678", "U00000001")
+	snippets, err := store.SearchPersonTopicsByOwner(t.Context(), ownerKey, 5, 1_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snippets) != 1 || snippets[0].Slug != domain.ScopedPersonTopicSlug("dauno", ownerKey) {
+		t.Fatalf("SearchPersonTopicsByOwner() = %#v", snippets)
+	}
+}
+
+func TestMemoryStore_ScopesSameNamePeopleByOwnerAndRejectsCrossOwnerRevision(t *testing.T) {
+	store, _ := newTestStore(t)
+	const key = domain.ConversationKey("slack:T12345678:dm:D12345678")
+	limits := domain.MemoryLimits{MaxTopics: 10, MaxLinks: 10, MaxTopicChars: 1_000}
+	owners := []struct {
+		userID  string
+		content string
+	}{
+		{userID: "U00000001", content: "Dauno owns the first identity."},
+		{userID: "U00000002", content: "Dauno owns the second identity."},
+	}
+	for index, owner := range owners {
+		patch := domain.MemoryPatch{
+			ConversationKey: key, ExchangeTS: fmt.Sprintf("%d", index+1), SourceAuthorID: owner.userID,
+			Operations: []domain.MemoryOp{{Type: domain.MemoryOpCreateTopic, TopicSlug: "person-dauno", TopicTitle: "Dauno", BundlePath: "people", Content: owner.content}},
+		}
+		if _, err := store.ApplyMemoryPatch(t.Context(), patch, limits); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	firstOwner := domain.SlackOwnerKey(key, owners[0].userID)
+	secondOwner := domain.SlackOwnerKey(key, owners[1].userID)
+	firstSlug := domain.ScopedPersonTopicSlug("person-dauno", firstOwner)
+	secondSlug := domain.ScopedPersonTopicSlug("person-dauno", secondOwner)
+	if firstSlug == secondSlug {
+		t.Fatal("same-name owners produced the same scoped slug")
+	}
+	first, err := store.GetTopic(t.Context(), firstSlug)
+	if err != nil || first.OwnerKey != firstOwner {
+		t.Fatalf("first owned topic = %#v, %v", first, err)
+	}
+	second, err := store.GetTopic(t.Context(), secondSlug)
+	if err != nil || second.OwnerKey != secondOwner {
+		t.Fatalf("second owned topic = %#v, %v", second, err)
+	}
+	if _, err := store.db.ExecContext(t.Context(), `UPDATE memory_topics SET owner_key = ? WHERE id = ?`, secondOwner, first.ID); err == nil || !strings.Contains(err.Error(), "owner is immutable") {
+		t.Fatalf("owner mutation error = %v", err)
+	}
+
+	_, err = store.ApplyMemoryPatch(t.Context(), domain.MemoryPatch{
+		ConversationKey: key, ExchangeTS: "3", SourceAuthorID: owners[1].userID,
+		Operations: []domain.MemoryOp{{Type: domain.MemoryOpRevise, TopicSlug: firstSlug, ExpectedRev: 1, Content: "cross-owner overwrite"}},
+	}, limits)
+	if err == nil || !strings.Contains(err.Error(), "owned by another Slack user") {
+		t.Fatalf("cross-owner revision error = %v", err)
+	}
+	first, err = store.GetTopic(t.Context(), firstSlug)
+	if err != nil || first.Content != owners[0].content || first.CurrentRev != 1 {
+		t.Fatalf("cross-owner revision changed first topic = %#v, %v", first, err)
+	}
+
+	for _, test := range []struct {
+		owner string
+		slug  string
+	}{{firstOwner, firstSlug}, {secondOwner, secondSlug}} {
+		snippets, err := store.SearchPersonTopicsByOwner(t.Context(), test.owner, 1, 1_000)
+		if err != nil || len(snippets) != 1 || snippets[0].Slug != test.slug {
+			t.Fatalf("SearchPersonTopicsByOwner(%q) = %#v, %v", test.owner, snippets, err)
+		}
+	}
+	for _, test := range []struct {
+		owner string
+		slug  string
+	}{{firstOwner, firstSlug}, {secondOwner, secondSlug}} {
+		snippets, err := store.SearchTopicsForOwner(t.Context(), "Dauno", test.owner, 1, 1_000)
+		if err != nil || len(snippets) != 1 || snippets[0].Slug != test.slug {
+			t.Fatalf("SearchTopicsForOwner(%q) = %#v, %v", test.owner, snippets, err)
+		}
+	}
+}
+
+func TestMemoryStore_SearchPersonTopicsByOwnerSkipsOversizedCandidate(t *testing.T) {
+	store, _ := newTestStore(t)
+	const key = domain.ConversationKey("slack:T12345678:dm:D12345678")
+	const userID = "U00000001"
+	ownerKey := domain.SlackOwnerKey(key, userID)
+	limits := domain.MemoryLimits{MaxTopics: 10, MaxLinks: 10, MaxTopicChars: 1_000}
+	for _, patch := range []domain.MemoryPatch{
+		{
+			ConversationKey: key, ExchangeTS: "1", SourceAuthorID: userID,
+			Operations: []domain.MemoryOp{{Type: domain.MemoryOpCreateTopic, TopicSlug: "large", TopicTitle: "Large", BundlePath: "people", Content: strings.Repeat("needle ", 100)}},
+		},
+		{
+			ConversationKey: key, ExchangeTS: "2", SourceAuthorID: userID,
+			Operations: []domain.MemoryOp{{Type: domain.MemoryOpCreateTopic, TopicSlug: "small", TopicTitle: "Small", BundlePath: "people", Content: "needle fits"}},
+		},
+	} {
+		if _, err := store.ApplyMemoryPatch(t.Context(), patch, limits); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := store.db.ExecContext(t.Context(), `UPDATE memory_topics SET updated_at = CASE slug WHEN ? THEN 2 ELSE 1 END`, domain.ScopedPersonTopicSlug("large", ownerKey)); err != nil {
+		t.Fatal(err)
+	}
+
+	snippets, err := store.SearchPersonTopicsByOwner(t.Context(), ownerKey, 1, len([]rune("needle fits")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snippets) != 1 || snippets[0].Slug != domain.ScopedPersonTopicSlug("small", ownerKey) || snippets[0].Content != "needle fits" {
+		t.Fatalf("SearchPersonTopicsByOwner() = %#v", snippets)
+	}
+}
+
 func TestMemoryStore_SearchTopicsCharLimit(t *testing.T) {
 	store, _ := newTestStore(t)
 
@@ -720,5 +859,77 @@ func TestMemoryStore_SearchTopicsSkipsOversizedTopHitForLaterFit(t *testing.T) {
 	}
 	if len(snippets) != 1 || snippets[0].Slug != "small" || snippets[0].Content != "needle fits" {
 		t.Fatalf("SearchTopics() = %#v; want later fitting result", snippets)
+	}
+}
+
+func TestMemoryStore_ApplyPatchStoresBundlePath(t *testing.T) {
+	store, _ := newTestStore(t)
+	patch := domain.MemoryPatch{
+		ConversationKey: "slack:T12345678:dm:D12345678", ExchangeTS: "1", SourceAuthorID: "U12345678",
+		Operations: []domain.MemoryOp{
+			{Type: domain.MemoryOpCreateTopic, TopicSlug: "alpha", TopicTitle: "Alpha", Content: "content", BundlePath: "projects"},
+		},
+	}
+	limits := domain.MemoryLimits{MaxTopics: 10, MaxLinks: 10, MaxTopicChars: 1000}
+	if _, err := store.ApplyMemoryPatch(t.Context(), patch, limits); err != nil {
+		t.Fatal(err)
+	}
+	topic, err := store.GetTopic(t.Context(), "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topic.BundlePath != "projects" {
+		t.Fatalf("BundlePath = %q, want projects", topic.BundlePath)
+	}
+}
+
+func TestMemoryStore_ApplyPatchDefaultsInvalidBundlePathToTopics(t *testing.T) {
+	store, _ := newTestStore(t)
+	patch := domain.MemoryPatch{
+		ConversationKey: "slack:T12345678:dm:D12345678", ExchangeTS: "1", SourceAuthorID: "U12345678",
+		Operations: []domain.MemoryOp{
+			{Type: domain.MemoryOpCreateTopic, TopicSlug: "alpha", TopicTitle: "Alpha", Content: "content", BundlePath: "/invalid//path"},
+		},
+	}
+	limits := domain.MemoryLimits{MaxTopics: 10, MaxLinks: 10, MaxTopicChars: 1000}
+	if _, err := store.ApplyMemoryPatch(t.Context(), patch, limits); err != nil {
+		t.Fatal(err)
+	}
+	topic, err := store.GetTopic(t.Context(), "alpha")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topic.BundlePath != "topics" {
+		t.Fatalf("BundlePath = %q, want topics", topic.BundlePath)
+	}
+}
+
+func TestMemoryStore_ReadProjectionSnapshotIncludesAllData(t *testing.T) {
+	store, _ := newTestStore(t)
+	patch := domain.MemoryPatch{
+		ConversationKey: "slack:T12345678:dm:D12345678", ExchangeTS: "1", SourceAuthorID: "U12345678",
+		Operations: []domain.MemoryOp{
+			{Type: domain.MemoryOpCreateTopic, TopicSlug: "a", TopicTitle: "A", Content: "content a", BundlePath: "facts"},
+			{Type: domain.MemoryOpCreateTopic, TopicSlug: "b", TopicTitle: "B", Content: "content b", BundlePath: "people"},
+		},
+	}
+	limits := domain.MemoryLimits{MaxTopics: 10, MaxLinks: 10, MaxTopicChars: 1000}
+	if _, err := store.ApplyMemoryPatch(t.Context(), patch, limits); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := store.ReadProjectionSnapshot(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Topics) != 2 {
+		t.Fatalf("topics = %d", len(snapshot.Topics))
+	}
+	for _, topic := range snapshot.Topics {
+		if len(snapshot.Revisions[topic.ID]) == 0 {
+			t.Fatalf("no revisions for topic %s", topic.Slug)
+		}
+		if len(snapshot.Evidence[topic.ID]) == 0 {
+			t.Fatalf("no evidence for topic %s", topic.Slug)
+		}
 	}
 }

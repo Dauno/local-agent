@@ -287,6 +287,136 @@ func TestOpenExistingUpgradesV5ExchangeIntentsAsPrepared(t *testing.T) {
 	}
 }
 
+func TestOpenExistingUpgradesV7TopicsWithDefaultBundlePath(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v7.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := dataSourceName(path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range []func(context.Context, *sql.Tx) error{migrateV1, migrateV2, migrateV3, migrateV4, migrateV5, migrateV6, migrateV7} {
+		if err := migration(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_topics (id, slug, title, description, status, tags, content, current_rev, created_at, updated_at)
+		VALUES ('mem_existing', 'existing', 'Existing', '', 'active', '[]', 'content', 1, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 7"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	topic, err := store.GetTopic(ctx, "existing")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if topic.BundlePath != "topics" {
+		t.Fatalf("migrated topic bundle_path = %q, want topics", topic.BundlePath)
+	}
+
+	var defaultPath string
+	if err := store.db.QueryRowContext(ctx,
+		`SELECT dflt_value FROM pragma_table_info('memory_topics') WHERE name = 'bundle_path'`,
+	).Scan(&defaultPath); err != nil {
+		t.Fatal(err)
+	}
+	if defaultPath != "'topics'" {
+		t.Fatalf("bundle_path default = %q, want 'topics'", defaultPath)
+	}
+}
+
+func TestOpenExistingUpgradesV8PersonTopicWithUnambiguousOwner(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "v8.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := dataSourceName(path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, migration := range []func(context.Context, *sql.Tx) error{migrateV1, migrateV2, migrateV3, migrateV4, migrateV5, migrateV6, migrateV7, migrateV8} {
+		if err := migration(ctx, tx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_topics (id, slug, title, description, status, tags, bundle_path, content, current_rev, created_at, updated_at)
+		VALUES ('mem_legacy', 'person-dauno', 'Dauno', '', 'active', '[]', 'people', 'legacy identity', 1, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	revision, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_topic_revisions (topic_id, revision_number, content, change_reason, created_at)
+		VALUES ('mem_legacy', 1, 'legacy identity', 'created', 1)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	revisionID, err := revision.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_evidence (topic_revision, source_key, source_ts, author_id, type)
+		VALUES (?, 'slack:T12345678:dm:D12345678', '1', 'U12345678', 'source')`, revisionID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = 8"); err != nil {
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		t.Fatal(err)
+	}
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var ownerKey string
+	if err := store.db.QueryRowContext(ctx, `SELECT owner_key FROM memory_topics WHERE id = 'mem_legacy'`).Scan(&ownerKey); err != nil {
+		t.Fatal(err)
+	}
+	if ownerKey != "slack:T12345678:user:U12345678" {
+		t.Fatalf("legacy topic owner_key = %q, want inferred owner", ownerKey)
+	}
+}
+
 func newTestStore(t *testing.T) (*Store, string) {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "local-agent.db")

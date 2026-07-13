@@ -154,7 +154,7 @@ func (a *fakeAgent) Respond(ctx context.Context, req port.AgentRequest) (string,
 
 type fakeRecall struct{ snippets []domain.MemorySnippet }
 
-func (r fakeRecall) Recall(context.Context, string) ([]domain.MemorySnippet, error) {
+func (r fakeRecall) Recall(context.Context, string, string) ([]domain.MemorySnippet, error) {
 	return append([]domain.MemorySnippet(nil), r.snippets...), nil
 }
 

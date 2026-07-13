@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"unicode"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -57,8 +58,8 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	return &Service{cfg: cfg, store: deps.Store, logger: deps.Logger, sanitize: deps.SanitizeContent}, nil
 }
 
-func (s *Service) Recall(ctx context.Context, query string) ([]domain.MemorySnippet, error) {
-	snippets, _, err := s.recall(ctx, query)
+func (s *Service) Recall(ctx context.Context, query, ownerKey string) ([]domain.MemorySnippet, error) {
+	snippets, _, err := s.recall(ctx, query, ownerKey)
 	return snippets, err
 }
 
@@ -98,11 +99,22 @@ func (s *Service) RelevantTopics(ctx context.Context, messages []domain.Message)
 
 // TrustedEntityOperations resolves candidate entity slugs exactly so an
 // existing entity is revised even when FTS recall is capped or misses it.
-func (s *Service) TrustedEntityOperations(ctx context.Context, messages []domain.Message) ([]domain.MemoryOp, error) {
+func (s *Service) TrustedEntityOperations(ctx context.Context, conversationKey domain.ConversationKey, messages []domain.Message) ([]domain.MemoryOp, error) {
 	candidates := domain.EntityMemoryCandidates(messages)
+	ownerKey := ""
+	for _, message := range messages {
+		if message.Role == domain.RoleUser {
+			ownerKey = domain.SlackOwnerKey(conversationKey, message.UserID)
+			break
+		}
+	}
 	topics := make([]domain.TopicReference, 0, len(candidates))
 	for _, candidate := range candidates {
-		topic, err := s.store.GetTopicReference(ctx, candidate.Slug)
+		slug := candidate.Slug
+		if candidate.BundlePath == "people" {
+			slug = domain.ScopedPersonTopicSlug(slug, ownerKey)
+		}
+		topic, err := s.store.GetTopicReference(ctx, slug)
 		if err != nil {
 			return nil, err
 		}
@@ -110,10 +122,10 @@ func (s *Service) TrustedEntityOperations(ctx context.Context, messages []domain
 			topics = append(topics, *topic)
 		}
 	}
-	return domain.TrustedEntityMemoryOperations(messages, topics), nil
+	return domain.TrustedEntityMemoryOperations(messages, topics, ownerKey), nil
 }
 
-func (s *Service) recall(ctx context.Context, query string) ([]domain.MemorySnippet, Outcome, error) {
+func (s *Service) recall(ctx context.Context, query, ownerKey string) ([]domain.MemorySnippet, Outcome, error) {
 	if !s.cfg.Recall.Enabled || strings.TrimSpace(query) == "" {
 		return nil, OutcomeRecallEmpty, nil
 	}
@@ -122,16 +134,82 @@ func (s *Service) recall(ctx context.Context, query string) ([]domain.MemorySnip
 		ctx, cancel = context.WithTimeout(ctx, s.cfg.Recall.Timeout)
 		defer cancel()
 	}
-	snippets, err := s.store.SearchTopics(ctx, query, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
+	fts, err := s.store.SearchTopicsForOwner(ctx, query, ownerKey, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
 	if err != nil {
 		s.logger.Warn("memory recall failed", "error", err)
 		return nil, OutcomeRecallError, err
+	}
+	snippets := fts
+	if isFirstPersonMemoryQuery(query) && strings.TrimSpace(ownerKey) != "" {
+		// First-person questions need provenance recall in addition to normal FTS.
+		personal, personalErr := s.store.SearchPersonTopicsByOwner(ctx, ownerKey, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
+		if personalErr != nil {
+			s.logger.Warn("personal memory recall failed", "error", personalErr)
+		} else {
+			snippets = mergeRecallSnippets(fts, personal, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
+		}
 	}
 	if len(snippets) == 0 {
 		return nil, OutcomeRecallEmpty, nil
 	}
 	s.logger.Debug("memory recall matched", "topics", len(snippets))
 	return snippets, OutcomeRecallHit, nil
+}
+
+func isFirstPersonMemoryQuery(query string) bool {
+	words := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsNumber(r)
+	})
+	has := func(values ...string) bool {
+		for _, word := range words {
+			for _, value := range values {
+				if word == value {
+					return true
+				}
+			}
+		}
+		return false
+	}
+	hasPhrase := func(first, second string) bool {
+		for index := 0; index+1 < len(words); index++ {
+			if words[index] == first && words[index+1] == second {
+				return true
+			}
+		}
+		return false
+	}
+	return ((hasPhrase("de", "mi") || hasPhrase("de", "mí") || hasPhrase("sobre", "mi") || hasPhrase("sobre", "mí") || hasPhrase("about", "me")) &&
+		has("sabes", "sabe", "recuerdas", "recuerda", "conoces", "conoce", "know", "remember")) ||
+		(has("quien", "quién", "who") && has("soy", "am"))
+}
+
+func mergeRecallSnippets(first, second []domain.MemorySnippet, maxTopics, maxChars int) []domain.MemorySnippet {
+	if maxTopics <= 0 {
+		maxTopics = 3
+	}
+	if maxChars <= 0 {
+		maxChars = 2_000
+	}
+	seen := make(map[domain.TopicID]struct{}, len(first)+len(second))
+	result := make([]domain.MemorySnippet, 0, maxTopics)
+	remaining := maxChars
+	for _, snippets := range [][]domain.MemorySnippet{first, second} {
+		for _, snippet := range snippets {
+			if len(result) == maxTopics {
+				return result
+			}
+			if _, exists := seen[snippet.TopicID]; exists {
+				continue
+			}
+			if len([]rune(snippet.Content)) > remaining {
+				continue
+			}
+			seen[snippet.TopicID] = struct{}{}
+			result = append(result, snippet)
+			remaining -= len([]rune(snippet.Content))
+		}
+	}
+	return result
 }
 
 func (s *Service) ValidateAndApply(ctx context.Context, patch domain.MemoryPatch) (Outcome, error) {

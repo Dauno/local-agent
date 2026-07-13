@@ -130,7 +130,7 @@ func TestProcessOutboxAppliesTrustedEntityOperationsWhenCuratorFails(t *testing.
 				t.Fatal(err)
 			}
 			processOutbox(t.Context(), store, curator, memoryService, memoryprojector.New(), t.TempDir(), 1, slog.New(slog.NewTextHandler(io.Discard, nil)))
-			topic, err := store.GetTopic(t.Context(), "person-dauno")
+			topic, err := store.GetTopic(t.Context(), domain.ScopedPersonTopicSlug("person-dauno", domain.SlackOwnerKey(key, "U12345678")))
 			if err != nil || topic.CurrentRev != 1 {
 				t.Fatalf("trusted topic = %#v, %v", topic, err)
 			}

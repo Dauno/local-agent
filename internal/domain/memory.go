@@ -57,6 +57,8 @@ type Topic struct {
 	Content     string
 	Status      TopicStatus
 	Tags        []string
+	BundlePath  string
+	OwnerKey    string
 	CurrentRev  int
 	CreatedAt   time.Time
 	UpdatedAt   time.Time
@@ -134,6 +136,8 @@ type MemoryOp struct {
 	TopicDesc  string
 	Tags       []string
 
+	BundlePath string
+
 	Content      string
 	ChangeReason string
 
@@ -208,6 +212,7 @@ type EntityMemoryCandidate struct {
 	Title        string
 	Description  string
 	Tags         []string
+	BundlePath   string
 	Content      string
 	ChangeReason string
 	SearchQuery  string
@@ -236,18 +241,22 @@ func EntityMemorySearchQueries(messages []Message) []string {
 // operations. Exact supplied slugs are revised; otherwise a new topic is
 // proposed. Existing validation, budgets, evidence, and receipt idempotency
 // still apply after this pure policy step.
-func TrustedEntityMemoryOperations(messages []Message, topics []TopicReference) []MemoryOp {
+func TrustedEntityMemoryOperations(messages []Message, topics []TopicReference, ownerKey string) []MemoryOp {
 	bySlug := make(map[string]TopicReference, len(topics))
 	for _, topic := range topics {
 		bySlug[topic.Slug] = topic
 	}
 	var operations []MemoryOp
 	for _, candidate := range EntityMemoryCandidates(messages) {
-		op := MemoryOp{
-			TopicSlug: candidate.Slug, TopicTitle: candidate.Title, TopicDesc: candidate.Description,
-			Tags: append([]string(nil), candidate.Tags...), Content: candidate.Content, ChangeReason: candidate.ChangeReason,
+		slug := candidate.Slug
+		if candidate.BundlePath == "people" {
+			slug = ScopedPersonTopicSlug(slug, ownerKey)
 		}
-		if topic, exists := bySlug[candidate.Slug]; exists && topic.Revision > 0 {
+		op := MemoryOp{
+			TopicSlug: slug, TopicTitle: candidate.Title, TopicDesc: candidate.Description,
+			Tags: append([]string(nil), candidate.Tags...), BundlePath: candidate.BundlePath, Content: candidate.Content, ChangeReason: candidate.ChangeReason,
+		}
+		if topic, exists := bySlug[slug]; exists && topic.Revision > 0 {
 			op.Type = MemoryOpRevise
 			op.ExpectedRev = topic.Revision
 		} else {
@@ -256,6 +265,25 @@ func TrustedEntityMemoryOperations(messages []Message, topics []TopicReference) 
 		operations = append(operations, op)
 	}
 	return operations
+}
+
+// SlackOwnerKey scopes personal memory to a stable Slack workspace and user.
+// Conversation keys are canonicalized before they reach memory processing.
+func SlackOwnerKey(key ConversationKey, userID string) string {
+	parts := strings.Split(string(key), ":")
+	if len(parts) < 4 || parts[0] != "slack" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(userID) == "" {
+		return ""
+	}
+	return "slack:" + parts[1] + ":user:" + userID
+}
+
+// ScopedPersonTopicSlug keeps same-name self-declared identities disjoint.
+func ScopedPersonTopicSlug(slug, ownerKey string) string {
+	suffix := memorySlug(ownerKey)
+	if suffix == "" || strings.HasSuffix(slug, "-"+suffix) {
+		return slug
+	}
+	return slug + "-" + suffix
 }
 
 // EntityMemoryCandidates recognizes only self-declared identity/role facts
@@ -287,7 +315,7 @@ func entityMemoryCandidate(message string) (EntityMemoryCandidate, bool) {
 	text := strings.TrimSpace(message)
 	if name, role, ok := selfDeclaredIdentity(text); ok {
 		return EntityMemoryCandidate{
-			Slug: "person-" + memorySlug(name), Title: name, Description: "Self-declared person and role.",
+			Slug: "person-" + memorySlug(name), Title: name, BundlePath: "people", Description: "Self-declared person and role.",
 			Tags: []string{"person", "role"}, Content: fmt.Sprintf("%s se identifica como %s.", name, role),
 			ChangeReason: "self-declared identity and role", SearchQuery: name,
 		}, true
@@ -298,8 +326,15 @@ func entityMemoryCandidate(message string) (EntityMemoryCandidate, bool) {
 			return EntityMemoryCandidate{}, false
 		}
 		kind := entityFactKind(subject)
+		bundlePath := "facts"
+		switch kind {
+		case "project":
+			bundlePath = "projects"
+		case "system":
+			bundlePath = "systems"
+		}
 		return EntityMemoryCandidate{
-			Slug: kind + "-" + memorySlug(subject), Title: sentenceTitle(subject), Description: "Explicitly remembered user-supplied fact.",
+			Slug: kind + "-" + memorySlug(subject), Title: sentenceTitle(subject), BundlePath: bundlePath, Description: "Explicitly remembered user-supplied fact.",
 			Tags: []string{kind, "explicit-memory-request"}, Content: sentenceTitle(fact) + ".",
 			ChangeReason: "explicit remember or save request", SearchQuery: subject,
 		}, true
@@ -332,11 +367,18 @@ func selfDeclaredIdentity(text string) (string, string, bool) {
 	return "", "", false
 }
 
+var deicticPrefixPattern = regexp.MustCompile(`^(?i)\s*(?:esto|este|esta|eso|esa|this|that|it|ello)\s*[:,]?\s*`)
+
+func normalizeExplicitFact(fact string) string {
+	return deicticPrefixPattern.ReplaceAllString(fact, "")
+}
+
 func explicitMemoryFact(text string) (string, bool) {
 	lower := strings.ToLower(strings.TrimSpace(text))
 	for _, prefix := range []string{"recuerda que ", "recuerda ", "guarda que ", "guarda ", "remember that ", "remember ", "save that ", "save "} {
 		if strings.HasPrefix(lower, prefix) {
 			fact := strings.TrimSpace(strings.TrimRight(text[len(prefix):], ".!?"))
+			fact = normalizeExplicitFact(fact)
 			return fact, fact != ""
 		}
 	}
@@ -439,6 +481,31 @@ func ValidateSlug(slug string) error {
 	}
 	if !slugPattern.MatchString(slug) {
 		return fmt.Errorf("topic slug %q must match %s", slug, slugPattern.String())
+	}
+	return nil
+}
+
+func ValidateBundlePath(path string) error {
+	if strings.TrimSpace(path) == "" {
+		return errors.New("bundle path must not be empty")
+	}
+	if strings.HasPrefix(path, "/") {
+		return fmt.Errorf("bundle path %q must not be absolute", path)
+	}
+	if strings.HasSuffix(path, "/") {
+		return fmt.Errorf("bundle path %q must not end with a slash", path)
+	}
+	if strings.Contains(path, "//") {
+		return fmt.Errorf("bundle path %q must not contain double slashes", path)
+	}
+	segments := strings.Split(path, "/")
+	for i, segment := range segments {
+		if segment == "." || segment == ".." {
+			return fmt.Errorf("bundle path %q contains reserved segment %q", path, segment)
+		}
+		if err := ValidateSlug(segment); err != nil {
+			return fmt.Errorf("bundle path segment %d in %q: %w", i+1, path, err)
+		}
 	}
 	return nil
 }

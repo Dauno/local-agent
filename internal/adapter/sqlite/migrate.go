@@ -51,6 +51,14 @@ func migrate(ctx context.Context, db *sql.DB) error {
 			if err := migrateV7(ctx, tx); err != nil {
 				return err
 			}
+		case 8:
+			if err := migrateV8(ctx, tx); err != nil {
+				return err
+			}
+		case 9:
+			if err := migrateV9(ctx, tx); err != nil {
+				return err
+			}
 		default:
 			return fmt.Errorf("no SQLite migration registered for version %d", version)
 		}
@@ -65,6 +73,45 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+// migrateV9 adds immutable ownership for person topics. Legacy topics are
+// claimed only when their evidence identifies one Slack workspace and user.
+// Ambiguous or evidence-free topics remain unowned.
+func migrateV9(ctx context.Context, tx *sql.Tx) error {
+	if err := execMigration(ctx, tx, 9, []string{
+		`ALTER TABLE memory_topics ADD COLUMN owner_key TEXT NOT NULL DEFAULT ''`,
+		`WITH inferred_owners AS (
+			SELECT r.topic_id,
+				'slack:' || substr(e.source_key, 7, instr(substr(e.source_key, 7), ':') - 1) || ':user:' || e.author_id AS owner_key
+			FROM memory_topic_revisions r
+			JOIN memory_evidence e ON e.topic_revision = r.id
+			WHERE e.source_key GLOB 'slack:*:*' AND length(e.author_id) > 0
+		), unambiguous_owners AS (
+			SELECT topic_id, MIN(owner_key) AS owner_key
+			FROM inferred_owners
+			GROUP BY topic_id
+			HAVING COUNT(DISTINCT owner_key) = 1
+		)
+		UPDATE memory_topics
+		SET owner_key = (
+			SELECT owner_key FROM unambiguous_owners WHERE topic_id = memory_topics.id
+		)
+		WHERE bundle_path = 'people'
+			AND id IN (SELECT topic_id FROM unambiguous_owners)`,
+		`CREATE INDEX memory_topics_by_owner ON memory_topics (owner_key, bundle_path, updated_at DESC)`,
+		`CREATE TRIGGER memory_topics_require_person_owner
+			BEFORE INSERT ON memory_topics
+			WHEN NEW.bundle_path = 'people' AND length(NEW.owner_key) = 0
+			BEGIN SELECT RAISE(ABORT, 'person topic requires an owner'); END`,
+		`CREATE TRIGGER memory_topics_owner_immutable
+			BEFORE UPDATE OF owner_key ON memory_topics
+			WHEN OLD.owner_key != NEW.owner_key
+			BEGIN SELECT RAISE(ABORT, 'person topic owner is immutable'); END`,
+	}); err != nil {
+		return err
+	}
+	return nil
+}
+
 func execMigration(ctx context.Context, tx *sql.Tx, version int, statements []string) error {
 	for i, stmt := range statements {
 		if _, err := tx.ExecContext(ctx, stmt); err != nil {
@@ -72,6 +119,14 @@ func execMigration(ctx context.Context, tx *sql.Tx, version int, statements []st
 		}
 	}
 	return nil
+}
+
+// migrateV8 adds bundle_path to memory_topics so the projector can render
+// topics into an OKF directory tree. Existing topics default to 'topics'.
+func migrateV8(ctx context.Context, tx *sql.Tx) error {
+	return execMigration(ctx, tx, 8, []string{
+		`ALTER TABLE memory_topics ADD COLUMN bundle_path TEXT NOT NULL DEFAULT 'topics'`,
+	})
 }
 
 // migrateV7 adds the Slack metadata correlation used to prove a prepared

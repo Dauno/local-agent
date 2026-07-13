@@ -107,7 +107,7 @@ func TestProposePatchPrioritizesTrustedSpanishEntityFacts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	patch, err := curator.ProposePatch(t.Context(), "slack:T12345678:dm:D12345678", "1", []domain.Message{{Role: domain.RoleUser, Content: "Mi nombre es Dauno y soy el creador de local-agent"}}, nil)
+	patch, err := curator.ProposePatch(t.Context(), "slack:T12345678:dm:D12345678", "1", []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "Mi nombre es Dauno y soy el creador de local-agent"}}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +115,7 @@ func TestProposePatchPrioritizesTrustedSpanishEntityFacts(t *testing.T) {
 		t.Fatalf("operations = %#v", patch.Operations)
 	}
 	op := patch.Operations[0]
-	if op.Type != domain.MemoryOpCreateTopic || op.TopicSlug != "person-dauno" || op.Content != "Dauno se identifica como creador de local-agent." {
+	if op.Type != domain.MemoryOpCreateTopic || op.TopicSlug != domain.ScopedPersonTopicSlug("person-dauno", "slack:T12345678:user:U12345678") || op.Content != "Dauno se identifica como creador de local-agent." {
 		t.Fatalf("trusted operation = %#v", op)
 	}
 	for _, want := range []string{"self-declared identity", "explicit remember or save request", "people, systems, projects, roles, decisions, preferences, and operational state"} {

@@ -10,6 +10,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -23,139 +24,266 @@ func New() *Projector {
 	return &Projector{}
 }
 
-func (p *Projector) Project(ctx context.Context, store port.MemoryStore, outputDir string) error {
+func (p *Projector) Project(ctx context.Context, reader port.ProjectionReader, outputDir string) error {
 	if err := makeSafeDir(outputDir); err != nil {
 		return fmt.Errorf("create memory directory: %w", err)
 	}
 
-	topics, err := store.ListTopics(ctx)
+	snapshot, err := reader.ReadProjectionSnapshot(ctx)
 	if err != nil {
-		return fmt.Errorf("list topics for projection: %w", err)
+		return fmt.Errorf("read projection snapshot: %w", err)
 	}
 
-	topicsDir := filepath.Join(outputDir, "topics")
-	if err := makeSafeDir(topicsDir); err != nil {
-		return fmt.Errorf("create topics directory: %w", err)
+	stagingDir := filepath.Join(filepath.Dir(outputDir), ".okf-staging-"+filepath.Base(outputDir))
+	if err := os.RemoveAll(stagingDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clean staging directory: %w", err)
+	}
+	if err := makeSafeDir(stagingDir); err != nil {
+		return fmt.Errorf("create staging directory: %w", err)
 	}
 
-	for _, topic := range topics {
-		if err := domain.ValidateSlug(topic.Slug); err != nil {
-			return fmt.Errorf("unsafe topic slug %q: %w", topic.Slug, err)
-		}
-		revisions, revErr := store.ListRevisions(ctx, topic.ID)
-		if revErr != nil {
-			return fmt.Errorf("list revisions for topic %q: %w", topic.Slug, revErr)
-		}
-		links, linkErr := store.GetTopicLinks(ctx, topic.ID)
-		if linkErr != nil {
-			return fmt.Errorf("list links for topic %q: %w", topic.Slug, linkErr)
-		}
-		evidence, evErr := store.GetEvidence(ctx, topic.ID)
-		if evErr != nil {
-			return fmt.Errorf("list evidence for topic %q: %w", topic.Slug, evErr)
-		}
-		if err := writeTopicFile(topicsDir, topic, revisions, links, evidence); err != nil {
-			return fmt.Errorf("write topic file %q: %w", topic.Slug, err)
-		}
-	}
-	if err := removeStaleTopicFiles(topicsDir, topics); err != nil {
-		return fmt.Errorf("remove stale topic projection: %w", err)
+	if err := renderBundle(stagingDir, snapshot); err != nil {
+		_ = os.RemoveAll(stagingDir)
+		return err
 	}
 
-	if err := writeIndexFile(outputDir, topics); err != nil {
-		return fmt.Errorf("write index: %w", err)
+	backupDir := filepath.Join(filepath.Dir(outputDir), ".okf-backup-"+filepath.Base(outputDir))
+	if err := os.RemoveAll(backupDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("clean backup directory: %w", err)
 	}
-	if err := writeTopicsIndex(topicsDir, topics); err != nil {
-		return fmt.Errorf("write topics index: %w", err)
+	if _, err := os.Stat(outputDir); err == nil {
+		if err := os.Rename(outputDir, backupDir); err != nil {
+			return fmt.Errorf("backup current bundle: %w", err)
+		}
 	}
-	if err := writeLogFile(outputDir, topics); err != nil {
-		return fmt.Errorf("write log: %w", err)
+
+	if err := os.Rename(stagingDir, outputDir); err != nil {
+		_ = os.Rename(backupDir, outputDir)
+		return fmt.Errorf("promote staging to bundle: %w", err)
 	}
+
+	if err := os.RemoveAll(backupDir); err != nil {
+		return fmt.Errorf("remove backup after promotion: %w", err)
+	}
+
 	return nil
 }
 
-func writeIndexFile(dir string, topics []domain.Topic) error {
+func renderBundle(dir string, snapshot port.ProjectionSnapshot) error {
+	topicByID := make(map[domain.TopicID]domain.Topic, len(snapshot.Topics))
+	for _, topic := range snapshot.Topics {
+		topicByID[topic.ID] = topic
+	}
+
+	for _, topic := range snapshot.Topics {
+		if err := domain.ValidateSlug(topic.Slug); err != nil {
+			return fmt.Errorf("unsafe topic slug %q: %w", topic.Slug, err)
+		}
+		if !utf8.ValidString(topic.Title) || !utf8.ValidString(topic.Content) {
+			return fmt.Errorf("topic %q contains invalid UTF-8", topic.Slug)
+		}
+		bundlePath := topic.BundlePath
+		if bundlePath == "" {
+			bundlePath = "topics"
+		}
+		topicDir := filepath.Join(dir, filepath.FromSlash(bundlePath))
+		if err := makeSafeDir(topicDir); err != nil {
+			return fmt.Errorf("create topic directory %q: %w", bundlePath, err)
+		}
+		revisions := snapshot.Revisions[topic.ID]
+		links := snapshot.Links[topic.ID]
+		evidence := snapshot.Evidence[topic.ID]
+		if err := writeTopicFile(topicDir, topic, revisions, links, evidence, topicByID, snapshot.Topics); err != nil {
+			return fmt.Errorf("write topic %q: %w", topic.Slug, err)
+		}
+	}
+
+	dirs, childrenByDir := collectOKFDirs(snapshot.Topics)
+	for _, d := range dirs {
+		if d == "" {
+			continue
+		}
+		topicsHere := childrenByDir[d]
+		if err := writeNestedIndex(dir, d, topicsHere, childrenByDir, snapshot.Topics); err != nil {
+			return fmt.Errorf("write nested index %q: %w", d, err)
+		}
+	}
+
+	allChildren := childrenByDir[""]
+	if err := writeRootIndex(dir, allChildren, childrenByDir, snapshot.Topics); err != nil {
+		return fmt.Errorf("write root index: %w", err)
+	}
+	if err := writeOKFLog(dir, snapshot); err != nil {
+		return fmt.Errorf("write log: %w", err)
+	}
+	return removeStaleOKFFiles(dir, snapshot.Topics)
+}
+
+type dirEntry struct {
+	path  string
+	isDir bool
+}
+
+func collectOKFDirs(topics []domain.Topic) ([]string, map[string][]dirEntry) {
+	childrenByDir := map[string][]dirEntry{}
+	seenDirs := map[string]struct{}{}
+	for _, topic := range topics {
+		p := topic.BundlePath
+		if p == "" {
+			p = "topics"
+		}
+		childrenByDir[p] = append(childrenByDir[p], dirEntry{path: p})
+		for parent := filepath.Dir(p); parent != "."; parent = filepath.Dir(parent) {
+			if existing := childrenByDir[parent]; len(existing) == 0 || existing[len(existing)-1].path != p {
+				childrenByDir[parent] = append(childrenByDir[parent], dirEntry{path: p, isDir: true})
+			}
+		}
+		childrenByDir[""] = append(childrenByDir[""], dirEntry{path: p, isDir: true})
+		seenDirs[p] = struct{}{}
+		for parent := filepath.Dir(p); parent != "."; parent = filepath.Dir(parent) {
+			seenDirs[parent] = struct{}{}
+		}
+	}
+	dirs := make([]string, 0, len(seenDirs))
+	for d := range seenDirs {
+		dirs = append(dirs, d)
+	}
+	sort.Strings(dirs)
+	return dirs, childrenByDir
+}
+
+func writeRootIndex(dir string, children []dirEntry, childrenByDir map[string][]dirEntry, topics []domain.Topic) error {
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("okf_version: \"0.1\"\n")
-	b.WriteString("type: Memory Index\n")
-	b.WriteString(fmt.Sprintf("generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
 	b.WriteString("---\n\n")
 	b.WriteString("# Memory Index\n\n")
-	b.WriteString("This bundle contains curated agent memory organized by topic.\n\n")
-	b.WriteString("## Topics\n\n")
-	if len(topics) == 0 {
-		b.WriteString("_No topics yet._\n")
-	} else {
-		for _, topic := range topics {
-			b.WriteString(fmt.Sprintf("- [%s](topics/%s.md) (rev %d, %s)\n", topic.Title, topic.Slug, topic.CurrentRev, topic.UpdatedAt.Format("2006-01-02")))
+	b.WriteString("Curated agent memory organized by topic.\n\n")
+
+	topicByID := make(map[domain.TopicID]domain.Topic, len(topics))
+	for _, t := range topics {
+		topicByID[t.ID] = t
+	}
+
+	seen := map[string]struct{}{}
+	sort.Slice(children, func(i, j int) bool { return children[i].path < children[j].path })
+	for _, child := range children {
+		dirPath := child.path
+		if _, ok := seen[dirPath]; ok {
+			continue
 		}
+		seen[dirPath] = struct{}{}
+		b.WriteString(fmt.Sprintf("- [%s](%s/index.md)\n", dirPath, dirPath))
 	}
 	b.WriteString("\nSee [Change Log](log.md) for revision history.\n")
 	return atomicWrite(filepath.Join(dir, "index.md"), b.String())
 }
 
-func writeTopicsIndex(dir string, topics []domain.Topic) error {
+func writeNestedIndex(rootDir, bundlePath string, entries []dirEntry, childrenByDir map[string][]dirEntry, topics []domain.Topic) error {
 	var b strings.Builder
-	b.WriteString("---\n")
-	b.WriteString("type: Topics Directory\n")
-	b.WriteString(fmt.Sprintf("generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
-	b.WriteString("---\n\n")
-	b.WriteString("# Topics\n\n")
-	if len(topics) == 0 {
-		b.WriteString("_No topics yet._\n")
-	} else {
-		for _, topic := range topics {
-			b.WriteString(fmt.Sprintf("- [%s](%s.md) — %s\n", topic.Title, topic.Slug, topic.Description))
+	b.WriteString("# " + filepath.Base(bundlePath) + "\n\n")
+
+	topicByID := make(map[domain.TopicID]domain.Topic, len(topics))
+	for _, t := range topics {
+		topicByID[t.ID] = t
+	}
+
+	seen := map[string]struct{}{}
+	for _, entry := range entries {
+		if entry.path == bundlePath {
+			continue
+		}
+		name := entry.path
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		if strings.HasPrefix(name, bundlePath+"/") {
+			rel := name[len(bundlePath)+1:]
+			if strings.Contains(rel, "/") {
+				rel = rel[:strings.Index(rel, "/")]
+				b.WriteString(fmt.Sprintf("- [%s](%s/index.md)\n", rel, rel))
+			}
 		}
 	}
-	return atomicWrite(filepath.Join(dir, "index.md"), b.String())
+
+	for _, topic := range topics {
+		tp := topic.BundlePath
+		if tp == "" {
+			tp = "topics"
+		}
+		if tp != bundlePath {
+			continue
+		}
+		b.WriteString(fmt.Sprintf("- [%s](%s.md)\n", topic.Title, topic.Slug))
+	}
+
+	indexPath := filepath.Join(rootDir, filepath.FromSlash(bundlePath), "index.md")
+	return atomicWrite(indexPath, b.String())
 }
 
-func writeLogFile(dir string, topics []domain.Topic) error {
+func writeOKFLog(dir string, snapshot port.ProjectionSnapshot) error {
 	var b strings.Builder
-	b.WriteString("---\n")
-	b.WriteString("type: Memory Change Log\n")
-	b.WriteString(fmt.Sprintf("generated: %s\n", time.Now().UTC().Format(time.RFC3339)))
-	b.WriteString("---\n\n")
 	b.WriteString("# Change Log\n\n")
-	b.WriteString("Newest-first chronological record of memory topic updates.\n\n")
 
-	type logEntry struct {
-		title   string
-		slug    string
-		rev     int
-		updated time.Time
-		status  domain.TopicStatus
+	type revEntry struct {
+		title      string
+		slug       string
+		bundlePath string
+		rev        int
+		createdAt  time.Time
+		status     domain.TopicStatus
 	}
-	var entries []logEntry
-	for _, topic := range topics {
-		entries = append(entries, logEntry{
-			title: topic.Title, slug: topic.Slug, rev: topic.CurrentRev,
-			updated: topic.UpdatedAt, status: topic.Status,
-		})
+	var entries []revEntry
+	for _, topic := range snapshot.Topics {
+		revisions := snapshot.Revisions[topic.ID]
+		for _, rev := range revisions {
+			entries = append(entries, revEntry{
+				title: topic.Title, slug: topic.Slug, bundlePath: topic.BundlePath,
+				rev: rev.RevisionNumber, createdAt: rev.CreatedAt, status: topic.Status,
+			})
+		}
 	}
 	sort.Slice(entries, func(i, j int) bool {
-		return entries[i].updated.After(entries[j].updated)
+		return entries[i].createdAt.After(entries[j].createdAt)
 	})
 
 	if len(entries) == 0 {
 		b.WriteString("_No changes recorded._\n")
 	} else {
+		byDate := make(map[string][]revEntry)
+		var dates []string
 		for _, entry := range entries {
-			statusTag := ""
-			if entry.status == domain.TopicStatusArchived {
-				statusTag = " [archived]"
+			dateKey := entry.createdAt.Format("2006-01-02")
+			if _, ok := byDate[dateKey]; !ok {
+				dates = append(dates, dateKey)
 			}
-			b.WriteString(fmt.Sprintf("- %s: [%s](topics/%s.md) updated to revision %d%s\n",
-				entry.updated.Format("2006-01-02 15:04"),
-				entry.title, entry.slug, entry.rev, statusTag))
+			byDate[dateKey] = append(byDate[dateKey], entry)
+		}
+		sort.Sort(sort.Reverse(sort.StringSlice(dates)))
+		for _, dateKey := range dates {
+			b.WriteString(fmt.Sprintf("## %s\n\n", dateKey))
+			dayEntries := byDate[dateKey]
+			for _, entry := range dayEntries {
+				bp := entry.bundlePath
+				if bp == "" {
+					bp = "topics"
+				}
+				link := fmt.Sprintf("/%s/%s.md", bp, entry.slug)
+				statusTag := ""
+				if entry.status == domain.TopicStatusArchived {
+					statusTag = " [archived]"
+				}
+				b.WriteString(fmt.Sprintf("- [%s](%s) revision %d%s\n",
+					entry.title, link, entry.rev, statusTag))
+			}
+			b.WriteString("\n")
 		}
 	}
 	return atomicWrite(filepath.Join(dir, "log.md"), b.String())
 }
 
-func writeTopicFile(dir string, topic domain.Topic, revisions []domain.TopicRevision, links []domain.TopicLink, evidence []domain.Evidence) error {
+func writeTopicFile(dir string, topic domain.Topic, revisions []domain.TopicRevision, links []domain.TopicLink, evidence []domain.Evidence, topicByID map[domain.TopicID]domain.Topic, allTopics []domain.Topic) error {
 	var b strings.Builder
 
 	description := topic.Description
@@ -172,7 +300,7 @@ func writeTopicFile(dir string, topic domain.Topic, revisions []domain.TopicRevi
 	}
 
 	b.WriteString("---\n")
-	b.WriteString("type: Agent Memory Topic\n")
+	b.WriteString(fmt.Sprintf("type: %s\n", yamlString("Agent Memory Topic")))
 	b.WriteString(fmt.Sprintf("title: %s\n", yamlString(topic.Title)))
 	b.WriteString(fmt.Sprintf("description: %s\n", yamlString(description)))
 	b.WriteString(fmt.Sprintf("resource: local-agent://memory/topics/%s\n", topic.Slug))
@@ -191,7 +319,7 @@ func writeTopicFile(dir string, topic domain.Topic, revisions []domain.TopicRevi
 		for _, rev := range revisions {
 			b.WriteString(fmt.Sprintf("## Revision %d (%s)\n\n", rev.RevisionNumber, rev.CreatedAt.Format("2006-01-02 15:04")))
 			if rev.ChangeReason != "" {
-				b.WriteString(fmt.Sprintf("_%s_\n\n", rev.ChangeReason))
+				b.WriteString(fmt.Sprintf("_%s_\n\n", escapeMarkdownText(rev.ChangeReason)))
 			}
 		}
 	}
@@ -200,16 +328,32 @@ func writeTopicFile(dir string, topic domain.Topic, revisions []domain.TopicRevi
 		b.WriteString("# Related Topics\n\n")
 		for _, link := range links {
 			if link.SourceTopicID == topic.ID {
-				b.WriteString(fmt.Sprintf("- Links to topic `%s`: %s\n", link.TargetTopicID, link.Relation))
+				target := topicByID[link.TargetTopicID]
+				if target.Slug != "" {
+					tp := target.BundlePath
+					if tp == "" {
+						tp = "topics"
+					}
+					targetLink := fmt.Sprintf("/%s/%s.md", tp, target.Slug)
+					b.WriteString(fmt.Sprintf("- Depends on [%s](%s): %s\n", escapeMarkdownText(target.Title), targetLink, escapeMarkdownText(link.Relation)))
+				}
 			} else {
-				b.WriteString(fmt.Sprintf("- Linked from topic `%s`: %s\n", link.SourceTopicID, link.Relation))
+				source := topicByID[link.SourceTopicID]
+				if source.Slug != "" {
+					sp := source.BundlePath
+					if sp == "" {
+						sp = "topics"
+					}
+					sourceLink := fmt.Sprintf("/%s/%s.md", sp, source.Slug)
+					b.WriteString(fmt.Sprintf("- Referenced by [%s](%s): %s\n", escapeMarkdownText(source.Title), sourceLink, escapeMarkdownText(link.Relation)))
+				}
 			}
 		}
 		b.WriteString("\n")
 	}
 
 	if len(evidence) > 0 {
-		b.WriteString("# Citations\n\n")
+		b.WriteString("# Provenance\n\n")
 		for _, ev := range evidence {
 			b.WriteString(fmt.Sprintf("- `%s` `%s` (by %s, type: %s)\n", ev.SourceKey, ev.SourceTS, ev.AuthorID, ev.Type))
 		}
@@ -217,6 +361,18 @@ func writeTopicFile(dir string, topic domain.Topic, revisions []domain.TopicRevi
 	}
 
 	return atomicWrite(filepath.Join(dir, topic.Slug+".md"), b.String())
+}
+
+func escapeMarkdownText(value string) string {
+	var b strings.Builder
+	for _, r := range value {
+		switch r {
+		case '[', ']', '(', ')', '#', '*', '_', '`', '\\':
+			b.WriteRune('\\')
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
 }
 
 func atomicWrite(path string, content string) error {
@@ -255,7 +411,7 @@ func atomicWrite(path string, content string) error {
 }
 
 func yamlString(value string) string {
-	return strconv.Quote(value) // JSON strings are valid YAML scalars and cannot inject front matter.
+	return strconv.Quote(value)
 }
 
 func makeSafeDir(path string) error {
@@ -289,35 +445,42 @@ func makeSafeDir(path string) error {
 	return nil
 }
 
-func removeStaleTopicFiles(dir string, topics []domain.Topic) error {
-	wanted := map[string]struct{}{"index.md": {}}
+func removeStaleOKFFiles(rootDir string, topics []domain.Topic) error {
+	wanted := map[string]struct{}{}
 	for _, topic := range topics {
-		wanted[topic.Slug+".md"] = struct{}{}
-	}
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return err
-	}
-	for _, entry := range entries {
-		if !strings.HasSuffix(entry.Name(), ".md") {
-			continue
+		bp := topic.BundlePath
+		if bp == "" {
+			bp = "topics"
 		}
-		if _, keep := wanted[entry.Name()]; keep {
-			continue
+		wanted[filepath.Join(bp, topic.Slug+".md")] = struct{}{}
+		if dir := filepath.Dir(bp); dir != "." {
+			for parent := dir; parent != "."; parent = filepath.Dir(parent) {
+				wanted[filepath.Join(parent, "index.md")] = struct{}{}
+			}
 		}
-		info, err := entry.Info()
+		wanted[filepath.Join(bp, "index.md")] = struct{}{}
+	}
+	// Always keep root index.md and log.md
+	wanted["index.md"] = struct{}{}
+	wanted["log.md"] = struct{}{}
+
+	return filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if info.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("stale projection %q is a symlink", entry.Name())
+		if d.IsDir() {
+			return nil
 		}
-		if !info.Mode().IsRegular() {
-			continue
-		}
-		if err := os.Remove(filepath.Join(dir, entry.Name())); err != nil {
+		rel, err := filepath.Rel(rootDir, path)
+		if err != nil {
 			return err
 		}
-	}
-	return nil
+		if _, keep := wanted[filepath.ToSlash(rel)]; keep {
+			return nil
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("stale projection %q is a symlink", rel)
+		}
+		return os.Remove(path)
+	})
 }

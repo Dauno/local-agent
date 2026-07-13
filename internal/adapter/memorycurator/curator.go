@@ -78,8 +78,17 @@ func (c *Curator) ProposePatch(
 	if err != nil {
 		return domain.MemoryPatch{}, err
 	}
-	patch.Operations = mergeTrustedEntityOperations(domain.TrustedEntityMemoryOperations(messages, topics), patch.Operations)
+	patch.Operations = mergeTrustedEntityOperations(domain.TrustedEntityMemoryOperations(messages, topics, ownerKey(conversationKey, messages)), patch.Operations)
 	return patch, nil
+}
+
+func ownerKey(conversationKey domain.ConversationKey, messages []domain.Message) string {
+	for _, message := range messages {
+		if message.Role == domain.RoleUser {
+			return domain.SlackOwnerKey(conversationKey, message.UserID)
+		}
+	}
+	return ""
 }
 
 func (c *Curator) buildPrompt(key domain.ConversationKey, messages []domain.Message, topics []domain.TopicReference) string {
@@ -105,7 +114,7 @@ func (c *Curator) buildPrompt(key domain.ConversationKey, messages []domain.Mess
 	b.WriteString("## Instructions\n\n")
 	b.WriteString("Output a JSON array of operations. Each operation has a `type` field and relevant fields.\n\n")
 	b.WriteString("Valid operation types:\n")
-	b.WriteString("- `create_topic`: Create a new topic. Fields: topic_slug (kebab-case), topic_title, topic_desc, tags (array), content (markdown), change_reason.\n")
+	b.WriteString("- `create_topic`: Create a new topic. Fields: topic_slug (kebab-case), topic_title, topic_desc, tags (array), bundle_path (one of: people, projects, systems, facts; default facts), content (markdown), change_reason.\n")
 	b.WriteString("- `revise`: Update current knowledge. Fields: topic_slug, expected_rev (integer), content, change_reason.\n")
 	b.WriteString("- `correct`: Correct prior knowledge. Fields: topic_slug, expected_rev (integer), content, change_reason.\n")
 	b.WriteString("- `decide`: Record a decision on a topic. Fields: topic_slug, expected_rev (integer), decision (text).\n")
@@ -117,6 +126,7 @@ func (c *Curator) buildPrompt(key domain.ConversationKey, messages []domain.Mess
 	b.WriteString("- Only propose operations when the conversation contains durable knowledge.\n")
 	b.WriteString("- Facts about people, systems, projects, roles, decisions, preferences, and operational state are eligible when reusable.\n")
 	b.WriteString("- Prioritize a self-declared identity or role and an explicit remember or save request when they supply a reusable fact.\n")
+	b.WriteString("- Choose bundle_path for new topics: 'people' for identity/role, 'projects' for project facts, 'systems' for system facts, 'facts' for other facts.\n")
 	b.WriteString("- Do NOT create topics for ephemeral or trivial exchanges.\n")
 	b.WriteString("- Use kebab-case for slugs: lowercase letters, numbers, hyphens only.\n")
 	b.WriteString("- Content must be concise, factual, and well-structured.\n")
@@ -205,6 +215,7 @@ type curatorOp struct {
 	TopicTitle      string   `json:"topic_title"`
 	TopicDesc       string   `json:"topic_desc"`
 	Tags            []string `json:"tags,omitempty"`
+	BundlePath      string   `json:"bundle_path,omitempty"`
 	Content         string   `json:"content,omitempty"`
 	ChangeReason    string   `json:"change_reason,omitempty"`
 	ExpectedRev     int      `json:"expected_rev,omitempty"`
@@ -237,6 +248,7 @@ func (c *Curator) parsePatch(conversationKey domain.ConversationKey, exchangeTS 
 			TopicTitle:      op.TopicTitle,
 			TopicDesc:       op.TopicDesc,
 			Tags:            op.Tags,
+			BundlePath:      op.BundlePath,
 			Content:         op.Content,
 			ChangeReason:    op.ChangeReason,
 			ExpectedRev:     op.ExpectedRev,
