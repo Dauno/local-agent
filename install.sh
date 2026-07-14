@@ -47,18 +47,15 @@ command -v go >/dev/null 2>&1 || {
             ;;
     esac
 }
-command -v git >/dev/null 2>&1 || { echo "ERROR: Git is not installed or not in PATH."; exit 1; }
-
 REPO="Dauno/local-agent"
-REPO_URL="${REPO_URL:-https://github.com/${REPO}.git}"
 VERSION="${VERSION:-}"
 DATE="${DATE:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
 DEST_DIR="${PREFIX:-$HOME/.local-agent/bin}"
 BIN="local-agent"
 
 cleanup() {
-    if [[ -n "${clone_dir:-}" ]]; then
-        rm -rf "$clone_dir"
+    if [[ -n "${source_dir:-}" ]]; then
+        rm -rf "$source_dir"
     fi
     if [[ -n "${build_dir:-}" ]]; then
         rm -rf "$build_dir"
@@ -67,22 +64,35 @@ cleanup() {
 trap cleanup EXIT
 
 if [[ -z "$VERSION" ]] && [[ -f "go.mod" ]] && grep -q "github.com/Dauno/slack-local-agent" go.mod 2>/dev/null; then
+    command -v git >/dev/null 2>&1 || { echo "ERROR: git is required when installing from a local checkout."; exit 1; }
     proj_dir="$(pwd)"
     VERSION="$(git -C "$proj_dir" describe --tags --exact-match HEAD 2>/dev/null || echo dev)"
 else
+    command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required to download a release."; exit 1; }
+    command -v tar >/dev/null 2>&1 || { echo "ERROR: tar is required to extract a release."; exit 1; }
+
     if [[ -z "$VERSION" ]]; then
-        command -v curl >/dev/null 2>&1 || { echo "ERROR: curl is required to resolve the latest release."; exit 1; }
-        VERSION="$(curl -fsSL "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/^[[:space:]]*"tag_name": "\([^"]*\)".*/\1/p')"
+        VERSION="$(curl -fsSL --retry 3 "https://api.github.com/repos/${REPO}/releases/latest" | sed -n 's/^[[:space:]]*"tag_name": "\([^"]*\)".*/\1/p')"
         [[ -n "$VERSION" ]] || { echo "ERROR: Unable to resolve the latest release."; exit 1; }
     fi
 
-    echo "Cloning ${REPO_URL} at ${VERSION}..."
-    clone_dir="$(mktemp -d)"
-    git clone --depth 1 --branch "$VERSION" "$REPO_URL" "$clone_dir"
-    proj_dir="$clone_dir"
+    echo "Downloading ${REPO} ${VERSION}..."
+    source_dir="$(mktemp -d)"
+    curl -fsSL --retry 3 "https://api.github.com/repos/${REPO}/tarball/${VERSION}" | tar -xzf - -C "$source_dir"
+
+    source_entries=("$source_dir"/*)
+    if [[ ${#source_entries[@]} -ne 1 ]] || [[ ! -d "${source_entries[0]}" ]]; then
+        echo "ERROR: Release archive has an unexpected layout."
+        exit 1
+    fi
+    proj_dir="${source_entries[0]}"
+    archive_commit="${proj_dir##*-}"
+    if [[ ! "$archive_commit" =~ ^[0-9a-f]{7,40}$ ]]; then
+        archive_commit="unknown"
+    fi
 fi
 
-COMMIT="${COMMIT:-$(git -C "$proj_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)}"
+COMMIT="${COMMIT:-${archive_commit:-$(git -C "$proj_dir" rev-parse --short HEAD 2>/dev/null || echo unknown)}}"
 LDFLAGS="-s -w -X github.com/Dauno/slack-local-agent/internal/buildinfo.Version=${VERSION} -X github.com/Dauno/slack-local-agent/internal/buildinfo.Commit=${COMMIT} -X github.com/Dauno/slack-local-agent/internal/buildinfo.Date=${DATE}"
 
 echo "Building ${BIN}..."
