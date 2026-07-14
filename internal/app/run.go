@@ -294,16 +294,19 @@ func (a *Application) Run(ctx context.Context) error {
 		toolFactory := toolfactory.New(store, sandboxService)
 
 		rtInstruction := ""
+		rtGlobalInstruction := ""
 		if rootDef != nil {
 			rtInstruction = rootDef.Instruction
+			rtGlobalInstruction = rootDef.GlobalInstruction
 		}
 
 		runtime, rtErr := adkagent.NewRuntime(adkagent.RuntimeConfig{
-			AgentName:      agentName,
-			Instruction:    rtInstruction,
-			SessionService: sessionSvc,
-			Model:          llm,
-			ToolFactory:    toolFactory,
+			AgentName:         agentName,
+			Instruction:       rtInstruction,
+			GlobalInstruction: rtGlobalInstruction,
+			SessionService:    sessionSvc,
+			Model:             llm,
+			ToolFactory:       toolFactory,
 		})
 		if rtErr != nil {
 			return redactor.Error(fmt.Errorf("initialize ADK runtime: %w", rtErr))

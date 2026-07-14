@@ -130,6 +130,7 @@ profiles:
 agent_class: LlmAgent
 name: root_agent
 model: test/default
+global_instruction: policy here
 instruction: test
 `), 0o644); err != nil {
 		t.Fatal(err)

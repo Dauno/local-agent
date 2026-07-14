@@ -24,21 +24,23 @@ import (
 
 // RuntimeConfig holds the dependencies for a durable ADK agent runtime.
 type RuntimeConfig struct {
-	AgentName      string
-	Instruction    string
-	SessionService session.Service
-	Model          model.LLM
-	ToolFactory    port.AgentToolFactory
+	AgentName         string
+	Instruction       string
+	GlobalInstruction string
+	SessionService    session.Service
+	Model             model.LLM
+	ToolFactory       port.AgentToolFactory
 }
 
 // Runtime adapts ADK's llmagent + durable session service into the
 // application's port.AgentRuntime boundary.
 type Runtime struct {
-	agentName      string
-	instruction    string
-	sessionService session.Service
-	model          model.LLM
-	toolFactory    port.AgentToolFactory
+	agentName         string
+	instruction       string
+	globalInstruction string
+	sessionService    session.Service
+	model             model.LLM
+	toolFactory       port.AgentToolFactory
 }
 
 var _ port.AgentRuntime = (*Runtime)(nil)
@@ -58,11 +60,12 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		return nil, errors.New("session service is required")
 	}
 	return &Runtime{
-		agentName:      cfg.AgentName,
-		instruction:    cfg.Instruction,
-		sessionService: cfg.SessionService,
-		model:          cfg.Model,
-		toolFactory:    cfg.ToolFactory,
+		agentName:         cfg.AgentName,
+		instruction:       cfg.Instruction,
+		globalInstruction: cfg.GlobalInstruction,
+		sessionService:    cfg.SessionService,
+		model:             cfg.Model,
+		toolFactory:       cfg.ToolFactory,
 	}, nil
 }
 
@@ -74,21 +77,20 @@ func adkSessionID(key domain.ConversationKey) string {
 // buildAgent constructs a per-turn llmagent with tools and before-model callback.
 func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agent.Agent, error) {
 	instruction := r.instruction
-	if instruction != "" {
-		instruction = instruction + "\n\n" + ImmutablePolicy()
-	} else {
+	if instruction == "" {
 		instruction = BaseInstruction(r.agentName)
-	}
-	if len(tools) > 0 {
-		instruction += " You may use only the registered function tools when they are relevant. Their arguments and results remain subject to application policy."
+		if len(tools) > 0 {
+			instruction += " You may use only the registered function tools when they are relevant. Their arguments and results remain subject to application policy."
+		}
 	}
 
 	agentCfg := llmagent.Config{
-		Name:            technicalName,
-		Description:     "Slack conversational assistant with tools",
-		Model:           r.model,
-		Mode:            llmagent.ModeChat,
-		IncludeContents: llmagent.IncludeContentsDefault,
+		Name:              technicalName,
+		Description:       "Slack conversational assistant with tools",
+		Model:             r.model,
+		Mode:              llmagent.ModeChat,
+		IncludeContents:   llmagent.IncludeContentsDefault,
+		GlobalInstruction: r.globalInstruction,
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
 			return instruction, nil
 		},
