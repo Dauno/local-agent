@@ -1,0 +1,19 @@
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+    flash-json:
+        model: deepseek-v4-flash
+        extra_body:
+            response_format:
+                type: json_object
+        generate_content_config:
+            temperature: 0
+            max_output_tokens: 1200
+    flash-reasoning:
+        model: deepseek-v4-flash
+        reasoning_effort: xhigh
+        extra_body:
+            thinking:
+                type: enabled

@@ -592,6 +592,9 @@ func isInstructionLikeMemoryText(value string) bool {
 		if isPersistentAssistantInstruction(words) {
 			return true
 		}
+		if isSafeMemoryReferenceIdentifier(sentence) {
+			continue
+		}
 		if imperativeMemoryVerb(words[0]) || isFormatOrOutputDirective(words) || (len(words) > 1 && words[0] == "you" && modalMemoryVerb(words[1])) ||
 			(len(words) > 2 && words[0] == "you" && words[1] == "are" && words[2] == "now") ||
 			(len(words) > 1 && words[0] == "do" && words[1] == "not") || words[0] == "never" {
@@ -599,6 +602,11 @@ func isInstructionLikeMemoryText(value string) bool {
 		}
 	}
 	return false
+}
+
+func isSafeMemoryReferenceIdentifier(value string) bool {
+	value = strings.Trim(strings.TrimSpace(value), "-`*_#[]() \t")
+	return value == string(CapReadFile)
 }
 
 func isSpanishInstructionLikeMemoryText(value string) bool {

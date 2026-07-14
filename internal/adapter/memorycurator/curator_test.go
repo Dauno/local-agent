@@ -118,7 +118,7 @@ func TestProposePatchPrioritizesTrustedSpanishEntityFacts(t *testing.T) {
 	if op.Type != domain.MemoryOpCreateTopic || op.TopicSlug != domain.ScopedPersonTopicSlug("person-dauno", "slack:T12345678:user:U12345678") || op.Content != "Dauno se identifica como creador de local-agent." {
 		t.Fatalf("trusted operation = %#v", op)
 	}
-	for _, want := range []string{"self-declared identity", "explicit remember or save request", "people, systems, projects, roles, decisions, preferences, and operational state"} {
+	for _, want := range []string{"self-declared identity", "explicit remember or save request", "people, systems, projects, roles, decisions, preferences, and operational state", "declarative reference material", "`read_file`"} {
 		if !strings.Contains(llm.prompt, want) {
 			t.Fatalf("prompt missing %q:\n%s", want, llm.prompt)
 		}
