@@ -68,6 +68,19 @@ Backward compat: `port.Agent.Respond` still wired in `run.go`. The bot use case 
 5. `HandleConfirmation` validates actor, expiry, status (not consumed), marks consumed atomically, calls `runtime.Resume()`
 6. Replay protection: `MarkConsumed` rejects duplicate approvals
 
+### Slack Markdown delivery
+
+- All `ResponsePublisher` text is standard Markdown and is sent with
+  `chat.postMessage.markdown_text`; no top-level `text` or app-generated blocks.
+- `internal/adapter/slack` owns control-sequence neutralization and deterministic
+  splitting at 11,900 Unicode code points, including multipart labels.
+- Renderer `markdown_v1` metadata contains correlation ID, one-based part index,
+  part count, and submitted-part SHA-256 digest.
+- Recovery reconstructs `markdown_v1` parts from canonical sanitized content and
+  fails closed on missing, duplicate, reordered, edited, or inconsistent parts.
+- Upgrades and rollbacks across renderer formats require operator-run
+  `init --reset-state`; `run` never performs a destructive migration.
+
 ### OpenAI function calling
 
 `openaillm` adapter translates:

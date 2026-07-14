@@ -4,11 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
 	slackapi "github.com/slack-go/slack"
 
@@ -17,37 +15,50 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/secure"
 )
 
-const (
-	// SlackChunkRunes is deliberately below Slack's 3,500-character safety
-	// boundary and includes any multipart prefix.
-	SlackChunkRunes = 3499
-	defaultPace     = time.Second
-)
+const defaultPace = time.Second
+
+type postRequest struct {
+	channelID     string
+	markdown      string
+	threadTS      string
+	correlationID string
+	renderMode    string
+	partIndex     int
+	partCount     int
+	contentSHA256 string
+}
 
 type postClient interface {
-	PostMessage(context.Context, string, string, string, string) (string, error)
+	PostMessage(ctx context.Context, req postRequest) (string, error)
 }
 
 type sdkPostClient struct {
 	client *slackapi.Client
 }
 
-func (c sdkPostClient) PostMessage(ctx context.Context, channelID, text, threadTS, correlationID string) (string, error) {
+func (c sdkPostClient) PostMessage(ctx context.Context, req postRequest) (string, error) {
 	options := []slackapi.MsgOption{
-		slackapi.MsgOptionText(text, false),
+		slackapi.MsgOptionMarkdownText(req.markdown),
 		slackapi.MsgOptionDisableLinkUnfurl(),
 		slackapi.MsgOptionDisableMediaUnfurl(),
 	}
-	if threadTS != "" {
-		options = append(options, slackapi.MsgOptionTS(threadTS))
+	if req.threadTS != "" {
+		options = append(options, slackapi.MsgOptionTS(req.threadTS))
 	}
-	if correlationID != "" {
+	if req.correlationID != "" {
+		payload := map[string]any{
+			"correlation_id": req.correlationID,
+			"render_mode":    req.renderMode,
+			"part_index":     req.partIndex,
+			"part_count":     req.partCount,
+			"content_sha256": req.contentSHA256,
+		}
 		options = append(options, slackapi.MsgOptionMetadata(slackapi.SlackMetadata{
 			EventType:    "local_agent.assistant_exchange",
-			EventPayload: map[string]any{"correlation_id": correlationID},
+			EventPayload: payload,
 		}))
 	}
-	_, timestamp, err := c.client.PostMessageContext(ctx, channelID, options...)
+	_, timestamp, err := c.client.PostMessageContext(ctx, req.channelID, options...)
 	return timestamp, err
 }
 
@@ -95,7 +106,11 @@ func (p *Publisher) Publish(ctx context.Context, target domain.ReplyTarget, text
 		return port.PublishedResponse{}, errors.New("Slack response text is required")
 	}
 
-	chunks := SplitResponse(text)
+	chunks := renderMarkdownV1(text)
+	if len(chunks) == 0 {
+		return port.PublishedResponse{}, errors.New("markdown splitting produced no parts")
+	}
+
 	result := port.PublishedResponse{}
 	channel := p.channelPace(target.ChannelID)
 	channel.mu.Lock()
@@ -104,7 +119,17 @@ func (p *Publisher) Publish(ctx context.Context, target domain.ReplyTarget, text
 		if err := p.waitForChannel(ctx, channel); err != nil {
 			return result, fmt.Errorf("pace Slack channel %s: %w", target.ChannelID, err)
 		}
-		timestamp, err := p.postWithRetry(ctx, target, chunk, target.CorrelationID)
+		req := postRequest{
+			channelID:     target.ChannelID,
+			markdown:      chunk,
+			threadTS:      target.ThreadTS,
+			correlationID: target.CorrelationID,
+			renderMode:    markdownRenderMode,
+			partIndex:     index + 1,
+			partCount:     len(chunks),
+			contentSHA256: contentSHA256(chunk),
+		}
+		timestamp, err := p.postWithRetry(ctx, req)
 		channel.lastAttempt = p.now()
 		if err != nil {
 			safeErr := secure.NewRedactor().Error(err)
@@ -132,14 +157,14 @@ func (p *Publisher) waitForChannel(ctx context.Context, channel *channelPace) er
 	return p.sleep(ctx, wait)
 }
 
-func (p *Publisher) postWithRetry(ctx context.Context, target domain.ReplyTarget, text, correlationID string) (string, error) {
+func (p *Publisher) postWithRetry(ctx context.Context, req postRequest) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
 		callCtx := ctx
 		cancel := func() {}
 		if p.timeout > 0 {
 			callCtx, cancel = context.WithTimeout(ctx, p.timeout)
 		}
-		timestamp, err := p.client.PostMessage(callCtx, target.ChannelID, text, target.ThreadTS, correlationID)
+		timestamp, err := p.client.PostMessage(callCtx, req)
 		cancel()
 		if err == nil {
 			return timestamp, nil
@@ -149,83 +174,12 @@ func (p *Publisher) postWithRetry(ctx context.Context, target domain.ReplyTarget
 		if attempt != 0 || !errors.As(err, &rateLimited) {
 			return "", err
 		}
-		p.logger.Warn("Slack response rate limited; retrying once", "channel_id", target.ChannelID, "retry_after", rateLimited.RetryAfter)
+		p.logger.Warn("Slack response rate limited; retrying once", "channel_id", req.channelID, "retry_after", rateLimited.RetryAfter)
 		if err := p.sleep(ctx, max(rateLimited.RetryAfter, 0)); err != nil {
 			return "", err
 		}
 	}
 	return "", errors.New("Slack response retry exhausted")
-}
-
-// SplitResponse returns Slack-safe chunks. Character limits count Unicode code
-// points, and multipart prefixes are included in the limit.
-func SplitResponse(text string) []string {
-	return splitResponse(text, SlackChunkRunes)
-}
-
-func splitResponse(text string, limit int) []string {
-	if text == "" {
-		return nil
-	}
-	if limit <= 0 || utf8.RuneCountInString(text) <= limit {
-		return []string{text}
-	}
-
-	runeCount := utf8.RuneCountInString(text)
-	maxDigits := len(strconv.Itoa(runeCount))
-	var chunks []string
-	for digits := 1; digits <= maxDigits; digits++ {
-		// "(" + n + "/" + N + ") "
-		contentLimit := limit - (2*digits + 4)
-		if contentLimit <= 0 {
-			continue
-		}
-		candidate := splitContent(text, contentLimit)
-		if len(candidate) <= maxChunkCount(digits) {
-			chunks = candidate
-			break
-		}
-	}
-	if len(chunks) == 0 {
-		// This can only occur with an impractically small custom test limit.
-		return []string{text}
-	}
-
-	total := len(chunks)
-	for index := range chunks {
-		chunks[index] = fmt.Sprintf("(%d/%d) %s", index+1, total, chunks[index])
-	}
-	return chunks
-}
-
-func splitContent(text string, limit int) []string {
-	remaining := []rune(text)
-	chunks := make([]string, 0, len(remaining)/limit+1)
-	for len(remaining) > limit {
-		cut := limit
-		advance := limit
-		for index := limit - 1; index > 1; index-- {
-			if remaining[index-1] == '\n' && remaining[index] == '\n' {
-				cut = index + 1
-				advance = index + 1
-				break
-			}
-		}
-		chunks = append(chunks, string(remaining[:cut]))
-		remaining = remaining[advance:]
-	}
-	if len(remaining) != 0 {
-		chunks = append(chunks, string(remaining))
-	}
-	return chunks
-}
-
-func maxChunkCount(digits int) int {
-	value := 1
-	for range digits {
-		value *= 10
-	}
-	return value - 1
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) error {

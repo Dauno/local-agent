@@ -2,10 +2,11 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"slices"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -123,14 +124,14 @@ func (r *HistoryReader) RecentHistory(ctx context.Context, invocation domain.Inv
 		return port.History{}, fmt.Errorf("read Slack conversation history: %w", safeErr)
 	}
 
-	history := mapHistory(messages, r.botUserID)
+	history := mapHistory(messages, r.botUserID, limits.MaxChars)
 	history.Messages = domain.LimitMessages(history.Messages, limits)
 	return history, nil
 }
 
 // FindPublishedAssistantExchange provides fail-closed crash recovery. It
-// returns a timestamp only when every expected bot-authored chunk carries the
-// prepared exchange's exact Slack metadata correlation ID.
+// validates render mode, part identity, and content digest without requiring
+// exact returned message.text equality.
 func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, intent port.AssistantExchangeIntent) (string, bool, error) {
 	if r == nil || r.client == nil {
 		return "", false, errors.New("Slack history client is required")
@@ -146,7 +147,7 @@ func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, inte
 	}
 	defer cancel()
 
-	const recoveryHistoryLimit = 100 // Slack's bounded history page is the strongest available recovery window.
+	const recoveryHistoryLimit = 100
 	var (
 		messages []slackapi.Message
 		err      error
@@ -163,38 +164,106 @@ func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, inte
 		safeErr := secure.NewRedactor().Error(err)
 		return "", false, fmt.Errorf("read Slack conversation for assistant exchange recovery: %w", safeErr)
 	}
-	chunks := SplitResponse(intent.Content)
-	matched := make([]slackapi.Message, 0, len(chunks))
-	for _, message := range messages {
-		if message.User == r.botUserID && message.Metadata.EventType == "local_agent.assistant_exchange" &&
-			metadataCorrelationID(message) == intent.CorrelationID {
-			matched = append(matched, message)
-		}
+
+	expectedParts := renderMarkdownV1(intent.Content)
+	if len(expectedParts) == 0 {
+		return "", false, errors.New("no expected parts from markdown splitter")
 	}
-	if len(matched) != len(chunks) {
+
+	matched := make([]slackapi.Message, 0, len(expectedParts))
+	for _, message := range messages {
+		if message.Metadata.EventType != "local_agent.assistant_exchange" {
+			continue
+		}
+		md := parseExchangeMetadata(message)
+		if md.CorrelationID != intent.CorrelationID {
+			continue
+		}
+		if message.User != r.botUserID || message.Hidden || message.Edited != nil || len(message.Files) != 0 {
+			return "", false, nil
+		}
+		if md.RenderMode != markdownRenderMode || md.PartCount != len(expectedParts) ||
+			md.PartIndex < 1 || md.PartIndex > len(expectedParts) || message.Timestamp == "" {
+			return "", false, nil
+		}
+		expectedDigest := contentSHA256(expectedParts[md.PartIndex-1])
+		if md.ContentSHA256 != expectedDigest {
+			return "", false, nil
+		}
+		matched = append(matched, message)
+	}
+
+	if len(matched) != len(expectedParts) {
 		return "", false, nil
 	}
-	sort.SliceStable(matched, func(i, j int) bool {
-		return parseSlackTimestamp(matched[i].Timestamp).Before(parseSlackTimestamp(matched[j].Timestamp))
-	})
-	for index, chunk := range chunks {
-		message := matched[index]
-		if message.Timestamp == "" || message.Hidden || message.Edited != nil || len(message.Files) != 0 || message.Text != chunk {
+
+	seen := make(map[int]bool)
+	byIndex := make([]slackapi.Message, len(expectedParts))
+	for _, message := range matched {
+		md := parseExchangeMetadata(message)
+		if seen[md.PartIndex] {
+			return "", false, nil // duplicate part index
+		}
+		seen[md.PartIndex] = true
+		byIndex[md.PartIndex-1] = message
+	}
+	if len(seen) != len(expectedParts) {
+		return "", false, nil
+	}
+
+	for index := 1; index < len(byIndex); index++ {
+		previous := parseSlackTimestamp(byIndex[index-1].Timestamp)
+		current := parseSlackTimestamp(byIndex[index].Timestamp)
+		if previous.IsZero() || current.IsZero() || !previous.Before(current) {
 			return "", false, nil
 		}
 	}
-	return matched[len(matched)-1].Timestamp, true, nil
+
+	return byIndex[len(byIndex)-1].Timestamp, true, nil
 }
 
-func metadataCorrelationID(message slackapi.Message) string {
-	correlationID, _ := message.Metadata.EventPayload["correlation_id"].(string)
-	return correlationID
+type exchangeMetadata struct {
+	CorrelationID string
+	RenderMode    string
+	PartIndex     int
+	PartCount     int
+	ContentSHA256 string
 }
 
-func mapHistory(messages []slackapi.Message, botUserID string) port.History {
+func parseExchangeMetadata(message slackapi.Message) exchangeMetadata {
+	var md exchangeMetadata
+	md.CorrelationID, _ = message.Metadata.EventPayload["correlation_id"].(string)
+	md.RenderMode, _ = message.Metadata.EventPayload["render_mode"].(string)
+	md.ContentSHA256, _ = message.Metadata.EventPayload["content_sha256"].(string)
+	md.PartIndex, _ = metadataInt(message.Metadata.EventPayload["part_index"])
+	md.PartCount, _ = metadataInt(message.Metadata.EventPayload["part_count"])
+	return md
+}
+
+func metadataInt(value any) (int, bool) {
+	switch number := value.(type) {
+	case float64:
+		if number != math.Trunc(number) || number < 1 || number > float64(math.MaxInt) {
+			return 0, false
+		}
+		return int(number), true
+	case json.Number:
+		parsed, err := number.Int64()
+		if err != nil || parsed < 1 || parsed > int64(math.MaxInt) {
+			return 0, false
+		}
+		return int(parsed), true
+	case int:
+		return number, number > 0
+	default:
+		return 0, false
+	}
+}
+
+func mapHistory(messages []slackapi.Message, botUserID string, maxChars int) port.History {
 	history := port.History{Messages: make([]domain.Message, 0, len(messages))}
 	for _, message := range messages {
-		if strings.TrimSpace(message.Text) == "" || message.User == "" || message.Hidden || message.Edited != nil || len(message.Files) != 0 {
+		if message.User == "" || message.Hidden || message.Edited != nil || len(message.Files) != 0 {
 			continue
 		}
 
@@ -203,19 +272,152 @@ func mapHistory(messages []slackapi.Message, botUserID string) port.History {
 			role = domain.RoleAssistant
 			history.BotParticipated = true
 		} else if message.SubType != "" {
-			// Bot-authored messages from this app are kept above; unsupported
-			// user/system subtypes do not become model context.
 			continue
 		}
+
+		content := message.Text
+		if content == "" {
+			content = extractPlainTextFromBlocks(message.Blocks.BlockSet, maxChars)
+		}
+		if strings.TrimSpace(content) == "" {
+			if role == domain.RoleAssistant {
+				// Bot participated in a translated message with no visible text.
+				// Keep the message out of model context since we have no text to offer.
+				continue
+			}
+			continue
+		}
+
 		history.Messages = append(history.Messages, domain.Message{
 			Role:       role,
-			Content:    message.Text,
+			Content:    content,
 			UserID:     message.User,
 			ExternalTS: message.Timestamp,
 			CreatedAt:  parseSlackTimestamp(message.Timestamp),
 		})
 	}
 	return history
+}
+
+func extractPlainTextFromBlocks(blocks []slackapi.Block, maxChars int) string {
+	if len(blocks) == 0 {
+		return ""
+	}
+	builder := newBoundedTextBuilder(maxChars)
+	for _, block := range blocks {
+		switch b := block.(type) {
+		case *slackapi.MarkdownBlock:
+			builder.WriteString(b.Text)
+			builder.AppendByte('\n')
+		case *slackapi.SectionBlock:
+			if b.Text != nil {
+				builder.WriteString(b.Text.Text)
+				builder.AppendByte('\n')
+			}
+		case *slackapi.RichTextBlock:
+			for _, element := range b.Elements {
+				appendRichText(&builder, element)
+			}
+			builder.AppendByte('\n')
+		case *slackapi.TableBlock:
+			appendTable(&builder, b)
+		}
+	}
+	return strings.TrimRight(builder.String(), "\n")
+}
+
+type boundedTextBuilder struct {
+	builder   strings.Builder
+	remaining int
+}
+
+func newBoundedTextBuilder(limit int) boundedTextBuilder {
+	return boundedTextBuilder{remaining: max(limit, 0)}
+}
+
+func (b *boundedTextBuilder) WriteString(text string) {
+	if b.remaining == 0 || text == "" {
+		return
+	}
+	runes := []rune(text)
+	if len(runes) > b.remaining {
+		runes = runes[:b.remaining]
+	}
+	b.builder.WriteString(string(runes))
+	b.remaining -= len(runes)
+}
+
+func (b *boundedTextBuilder) AppendByte(value byte) {
+	if b.remaining > 0 {
+		b.builder.WriteByte(value)
+		b.remaining--
+	}
+}
+
+func (b *boundedTextBuilder) String() string { return b.builder.String() }
+func (b *boundedTextBuilder) Len() int       { return b.builder.Len() }
+
+func appendRichText(builder *boundedTextBuilder, element slackapi.RichTextElement) {
+	switch e := element.(type) {
+	case *slackapi.RichTextSection:
+		appendSectionElements(builder, e.Elements)
+	case *slackapi.RichTextList:
+		for _, item := range e.Elements {
+			if text := builder.String(); len(text) > 0 && text[len(text)-1] != '\n' {
+				builder.AppendByte('\n')
+			}
+			builder.WriteString("- ")
+			if section, ok := item.(*slackapi.RichTextSection); ok {
+				appendSectionElements(builder, section.Elements)
+			}
+		}
+	case *slackapi.RichTextPreformatted:
+		appendSectionElements(builder, e.Elements)
+	case *slackapi.RichTextQuote:
+		appendSectionElements(builder, e.Elements)
+	}
+}
+
+func appendSectionElements(builder *boundedTextBuilder, elements []slackapi.RichTextSectionElement) {
+	for _, el := range elements {
+		switch sub := el.(type) {
+		case *slackapi.RichTextSectionTextElement:
+			builder.WriteString(sub.Text)
+		case *slackapi.RichTextSectionLinkElement:
+			if sub.Text != "" {
+				builder.WriteString(sub.Text)
+			} else {
+				builder.WriteString(sub.URL)
+			}
+		case *slackapi.RichTextSectionEmojiElement:
+			builder.WriteString(":" + sub.Name + ":")
+		}
+	}
+}
+
+func appendTable(builder *boundedTextBuilder, table *slackapi.TableBlock) {
+	for _, row := range table.Rows {
+		for index, cell := range row {
+			if index > 0 {
+				builder.WriteString(" | ")
+			}
+			switch value := cell.(type) {
+			case *slackapi.TableRawTextCell:
+				builder.WriteString(value.Text)
+			case *slackapi.TableRawNumberCell:
+				if value.Text != "" {
+					builder.WriteString(value.Text)
+				} else {
+					builder.WriteString(strconv.FormatFloat(value.Value, 'f', -1, 64))
+				}
+			case *slackapi.TableRichTextCell:
+				for _, element := range value.Elements {
+					appendRichText(builder, element)
+				}
+			}
+		}
+		builder.AppendByte('\n')
+	}
 }
 
 func parseSlackTimestamp(timestamp string) time.Time {

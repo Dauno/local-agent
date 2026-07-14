@@ -6,11 +6,13 @@ profiles:
     flash-json:
         model: deepseek-v4-flash
         extra_body:
+            thinking:
+                type: disabled
             response_format:
                 type: json_object
         generate_content_config:
             temperature: 0
-            max_output_tokens: 1200
+            max_output_tokens: 2400
     flash-reasoning:
         model: deepseek-v4-flash
         reasoning_effort: xhigh

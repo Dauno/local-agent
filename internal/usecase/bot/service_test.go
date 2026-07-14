@@ -411,6 +411,9 @@ func TestReconcileConfirmationsRepublishesOnlyUnprovenPendingDelivery(t *testing
 	if len(publisher.calls) != 1 || publisher.calls[0].target.CorrelationID != "confirmation:wrapper" {
 		t.Fatalf("republished calls = %#v", publisher.calls)
 	}
+	if text := publisher.calls[0].text; !strings.Contains(text, "**Call ID**") || strings.Contains(text, "\n*Call ID*") {
+		t.Fatalf("confirmation prompt is not standard Markdown: %q", text)
+	}
 	if confirmations.pending[0].Status != port.ConfirmationPublished {
 		t.Fatalf("delivery status = %q", confirmations.pending[0].Status)
 	}

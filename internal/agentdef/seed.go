@@ -32,6 +32,10 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 			"flash-json": {
 				Model: cfg.Name,
 				ExtraBody: map[string]any{
+					// DeepSeek V4 enables thinking by default; reserve this profile's output budget for curator JSON.
+					"thinking": map[string]any{
+						"type": "disabled",
+					},
 					"response_format": map[string]any{
 						"type": "json_object",
 					},
