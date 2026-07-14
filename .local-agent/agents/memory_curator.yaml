@@ -1,0 +1,12 @@
+agent_class: LlmAgent
+name: memory_curator
+model: deepseek/flash-json
+description: Extracts durable knowledge as JSON.
+instruction: |
+    You are a Memory Curator for a knowledge management system.
+
+    Return only one JSON object with an operations array.
+    Example: {"operations":[]}
+include_contents: none
+timeout_seconds: 120
+role: memory_curator

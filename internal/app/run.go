@@ -170,6 +170,10 @@ func (a *Application) Run(ctx context.Context) error {
 	redactionSecrets = append(redactionSecrets, botToken, appToken)
 	redactor := secure.NewRedactor(redactionSecrets...)
 	logger := logging.New(a.logOutput, cfg.Runtime.LogLevel, redactor)
+	if concrete, ok := curatorLLM.(*memoryCuratorLLM); ok {
+		concrete.logger = logger
+		concrete.sanitize = redactor.String
+	}
 
 	if llm == nil {
 		return redactor.Error(errors.New("model client not initialized"))
@@ -339,7 +343,7 @@ func (a *Application) Run(ctx context.Context) error {
 			}
 		}
 		if curatorLLM == nil {
-			curatorLLM = &memoryCuratorLLM{llm: llm}
+			curatorLLM = &memoryCuratorLLM{llm: llm, logger: logger, sanitize: redactor.String}
 		}
 		curator, curErr := memorycurator.New(curatorLLM, memorycurator.Config{
 			Timeout: curTimeout, ModelCalls: modelCalls,
@@ -455,11 +459,15 @@ func (w *redactingWriter) Write(data []byte) (int, error) {
 }
 
 type memoryCuratorLLM struct {
-	llm                   *openaillm.OpenAICompatibleLLM
+	llm                   model.LLM
 	generateContentConfig *agentdef.GenerateContentConfig
+	logger                port.Logger
+	sanitize              func(string) string
 }
 
 var _ memorycurator.LLM = (*memoryCuratorLLM)(nil)
+
+var errCuratorResponseIncomplete = errors.New("curator model response incomplete")
 
 func (m *memoryCuratorLLM) GenerateText(ctx context.Context, prompt string) (string, error) {
 	request := &model.LLMRequest{
@@ -471,17 +479,29 @@ func (m *memoryCuratorLLM) GenerateText(ctx context.Context, prompt string) (str
 		request.Config = buildGenaiConfig(m.generateContentConfig)
 	}
 	var response string
+	var finishReason genai.FinishReason
 	for resp, err := range m.llm.GenerateContent(ctx, request, false) {
 		if err != nil {
 			return "", err
 		}
 		if resp != nil && resp.Content != nil {
+			finishReason = resp.FinishReason
 			for _, part := range resp.Content.Parts {
 				if part != nil && part.Text != "" {
 					response += part.Text
 				}
 			}
 		}
+	}
+	if m.logger != nil {
+		loggedResponse := response
+		if m.sanitize != nil {
+			loggedResponse = m.sanitize(loggedResponse)
+		}
+		m.logger.Debug("memory curator model response", "finish_reason", finishReason, "response_chars", len([]rune(response)), "response", loggedResponse)
+	}
+	if finishReason != "" && finishReason != genai.FinishReasonStop {
+		return "", fmt.Errorf("%w: finish_reason=%s response_chars=%d", errCuratorResponseIncomplete, finishReason, len([]rune(response)))
 	}
 	return response, nil
 }
@@ -604,13 +624,18 @@ func processOutbox(
 					return
 				}
 			}
-			if len(trusted) == 0 {
+			if errors.Is(err, errCuratorResponseIncomplete) && len(trusted) == 0 {
+				logger.Warn("memory curator response incomplete; discarding optional patch", "item_id", item.ID, "error", err)
+				patch = domain.MemoryPatch{ConversationKey: item.ConversationKey, ExchangeTS: item.ExchangeTS}
+			} else if len(trusted) == 0 {
 				logger.Warn("memory curator proposal failed", "item_id", item.ID, "error", err)
 				retryOutbox(ctx, store, item, maxRetries, err)
 				return
 			}
-			logger.Warn("memory curator proposal failed; applying trusted entity operations", "item_id", item.ID, "error", err)
-			patch = domain.MemoryPatch{ConversationKey: item.ConversationKey, ExchangeTS: item.ExchangeTS}
+			if len(trusted) > 0 {
+				logger.Warn("memory curator proposal failed; applying trusted entity operations", "item_id", item.ID, "error", err)
+				patch = domain.MemoryPatch{ConversationKey: item.ConversationKey, ExchangeTS: item.ExchangeTS}
+			}
 		}
 		patch.Operations = mergeTrustedEntityOperations(trusted, patch.Operations)
 		for _, message := range messages {
@@ -619,9 +644,14 @@ func processOutbox(
 				break
 			}
 		}
-		if err := memoryService.Validate(patch); err != nil && len(trusted) > 0 {
-			logger.Warn("optional curator patch rejected; applying trusted entity operations", "item_id", item.ID, "error", err)
-			patch.Operations = trusted
+		if err := memoryService.Validate(patch); err != nil {
+			if len(trusted) > 0 {
+				logger.Warn("optional curator patch rejected; applying trusted entity operations", "item_id", item.ID, "error", err)
+				patch.Operations = trusted
+			} else {
+				logger.Warn("optional curator patch rejected; discarding", "item_id", item.ID, "error", err)
+				patch.Operations = nil
+			}
 		}
 
 		if _, applyErr := memoryService.ValidateAndApply(ctx, patch); applyErr != nil {

@@ -1,0 +1,12 @@
+agent_class: LlmAgent
+name: root_agent
+model: deepseek/flash-reasoning
+description: Slack conversational assistant with approved tools.
+instruction: |
+    You are Dev Agent.
+
+    Answer concisely by default.
+include_contents: default
+mode: chat
+durable_session: true
+tool_scope: invocation_scoped
