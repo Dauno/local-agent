@@ -47,6 +47,8 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 
 **Usecases** (5): bootstrap, bot, doctor, memory, sandbox.
 
+**Other internal packages**: `agentdef` (agent/provider YAML definitions, stdlib+yaml.v3 only), `manifest` (Slack app manifest rendering), `secure` (credential redaction), `cli` (cobra delivery), `buildinfo` (version metadata).
+
 ### ADK durable runtime (post-TRD)
 
 The agent uses **durable ADK sessions** backed by SQLite. Key types:
@@ -103,7 +105,7 @@ Backward compat: `port.Agent.Respond` still wired in `run.go`. The bot use case 
 
 ## Data directory
 
-`.local-agent/` is gitignored. Contains: `config.yaml`, `local-agent.db` (SQLite), `app-manifest.local.yaml`, `local.env.example`, and `memory/` (OKF file projections).
+`.local-agent/` is mostly gitignored. Contains: `config.yaml`, `local-agent.db` (SQLite), `app-manifest.local.yaml`, `local.env.example`, and `memory/` (OKF file projections). Exceptions: `agents/` and `providers/` subdirs hold YAML definitions and are tracked in git.
 
 ## Testing quirks
 
@@ -129,4 +131,4 @@ Backward compat: `port.Agent.Respond` still wired in `run.go`. The bot use case 
 
 ## OpenCode config
 
-`.opencode/opencode.json` enables `lsp: true` (Go gopls), loads caveman + soul-rules instructions, and connects to ADK docs via MCP server. Skills directory has 7 Google ADK skills (scaffold, code, deploy, eval, observability, publish, workflow). No repo-local agents configured.
+`.opencode/opencode.json` enables `lsp: true` (Go gopls) and connects to ADK docs via MCP server. Skills directory has 7 Google ADK skills (scaffold, code, deploy, eval, observability, publish, workflow). No repo-local agents configured.

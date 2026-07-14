@@ -15,19 +15,18 @@ in a project-local SQLite database.
 
 ## Install
 
-With Go 1.25+ installed, install the latest release:
+With Go 1.25+ installed, download and build the latest release:
 
 ```sh
-curl -fsSL -H 'Accept: application/vnd.github.raw+json' \
-  'https://api.github.com/repos/Dauno/local-agent/contents/install.sh?ref=main' | bash
+curl -fsSL https://raw.githubusercontent.com/Dauno/local-agent/main/install.sh | bash
 ```
 
-The installer resolves the latest GitHub Release, builds its tag, and records
-that tag in `local-agent version`. Install a specific release with:
+The installer downloads the GitHub release source archive and records its tag
+and commit in `local-agent version`. Install a specific release with:
 
 ```sh
-curl -fsSL -H 'Accept: application/vnd.github.raw+json' \
-  'https://api.github.com/repos/Dauno/local-agent/contents/install.sh?ref=main' | VERSION=v0.1.0 bash
+curl -fsSL https://raw.githubusercontent.com/Dauno/local-agent/main/install.sh \
+  | VERSION=v0.2.0 bash
 ```
 
 From a local clone, `./install.sh` builds the checkout. An untagged checkout is
