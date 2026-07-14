@@ -459,13 +459,14 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 		}
 		correlationID := confirmationCorrelationID(delivery.WrapperCallID)
 		prompt := confirmationPrompt(delivery.Summary, delivery.OriginalCallID, delivery.WrapperCallID, delivery.Expiry)
+		safePrompt := s.sanitize(prompt)
 		channelKind := domain.ChannelDM
 		if delivery.ThreadTS != "" {
 			channelKind = domain.ChannelPublic
 		}
 		_, found, err := finder.FindPublishedAssistantExchange(ctx, port.AssistantExchangeIntent{
 			ChannelID: delivery.ChannelID, ChannelKind: channelKind, RootTS: delivery.ThreadTS,
-			Content: prompt, CorrelationID: correlationID,
+			Content: safePrompt, CorrelationID: correlationID,
 		})
 		if err != nil {
 			return fmt.Errorf("find confirmation %s: %w", delivery.WrapperCallID, err)
@@ -473,7 +474,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 		if !found {
 			if _, err := s.publisher.Publish(ctx, domain.ReplyTarget{
 				ChannelID: delivery.ChannelID, ThreadTS: delivery.ThreadTS, CorrelationID: correlationID,
-			}, s.sanitize(prompt)); err != nil {
+			}, safePrompt); err != nil {
 				return fmt.Errorf("republish confirmation %s: %w", delivery.WrapperCallID, err)
 			}
 		}
@@ -489,7 +490,7 @@ func confirmationCorrelationID(wrapperCallID string) string {
 }
 
 func confirmationPrompt(summary, originalCallID, wrapperCallID string, expiry time.Time) string {
-	return fmt.Sprintf(":lock: %s\n\n*Call ID*: `%s`\n*Expires*: %s\n\nReply `approve %s` or `reject %s` to proceed.",
+	return fmt.Sprintf(":lock: %s\n\n**Call ID**: `%s`\n**Expires**: %s\n\nReply `approve %s` or `reject %s` to proceed.",
 		summary, originalCallID, expiry.Format("15:04"), wrapperCallID, wrapperCallID)
 }
 

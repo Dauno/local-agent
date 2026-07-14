@@ -134,6 +134,30 @@ SLACK_APP_TOKEN=xapp-...
 Static `model.headers` are optional but deliberately reject credential-bearing
 headers. Authentication belongs in `model.api_key_env`.
 
+### Slack message formatting
+
+Responses and configured public messages use standard Markdown. Slack receives
+them through `chat.postMessage.markdown_text`; links and media do not unfurl.
+Long responses are split into labeled parts without knowingly cutting tables,
+code fences, inline links, or inline code. Model-generated Slack mention and
+broadcast control sequences are neutralized outside code.
+
+When upgrading from a binary that published Slack `mrkdwn`, stop the process,
+back up `.local-agent/` if its local history matters, then run:
+
+```sh
+local-agent init --reset-state
+```
+
+The reset deletes conversation and dedupe records, durable ADK sessions and
+events, prepared assistant exchanges, pending confirmation deliveries, tool
+execution audit records, curated memory, and memory file projections. It keeps
+configuration, provider and agent definitions, generated setup artifacts, and
+secrets. Customized `busy_message`, `model_error_message`, and
+`unauthorized_message` values must be converted from Slack-specific `mrkdwn` to
+standard Markdown. Rolling back to an older renderer requires another explicit
+state reset; `run` never resets state automatically.
+
 ### Workspace inspection
 
 Filesystem inspection is disabled by default. To let authorized Slack users

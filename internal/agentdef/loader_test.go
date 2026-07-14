@@ -722,6 +722,11 @@ func TestSeedDeepSeekProvider(t *testing.T) {
 	}
 
 	jsonProfile := p.Profiles["flash-json"]
+	if thinking, ok := jsonProfile.ExtraBody["thinking"].(map[string]any); !ok {
+		t.Error("flash-json missing thinking configuration")
+	} else if thinking["type"] != "disabled" {
+		t.Errorf("flash-json thinking type should be disabled, got %v", thinking["type"])
+	}
 	if rf, ok := jsonProfile.ExtraBody["response_format"]; !ok {
 		t.Error("flash-json missing response_format")
 	} else {

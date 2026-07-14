@@ -152,11 +152,35 @@ func TestHistoryReaderReturnsRedactedWrappedAPIErrors(t *testing.T) {
 	}
 }
 
-func TestHistoryReaderFindsPublishedAssistantExchangeByMetadataCorrelation(t *testing.T) {
+func exchangeMetadataFor(correlationID, renderMode string, partIndex, partCount int, digest string) slackapi.SlackMetadata {
+	return slackapi.SlackMetadata{
+		EventType: "local_agent.assistant_exchange",
+		EventPayload: map[string]any{
+			"correlation_id": correlationID,
+			"render_mode":    renderMode,
+			"part_index":     float64(partIndex),
+			"part_count":     float64(partCount),
+			"content_sha256": digest,
+		},
+	}
+}
+
+func TestHistoryReaderFindsPublishedAssistantExchangeByMetadataDigest(t *testing.T) {
 	t.Parallel()
+	chunks := SplitMarkdown("published reply", SlackMarkdownChunkRunes)
+	digest := contentSHA256(chunks[0])
 	client := &fakeHistoryClient{history: []slackapi.Message{
 		{Msg: slackapi.Msg{User: testBot, Text: "older reply", Timestamp: "1719999999.000001"}},
-		{Msg: slackapi.Msg{User: testBot, Text: "published reply", Timestamp: "1720000001.000002", Metadata: exchangeMetadata("intent-correlation")}},
+		{Msg: slackapi.Msg{User: testBot, Text: "translated by slack", Timestamp: "1720000001.000002", Metadata: slackapi.SlackMetadata{
+			EventType: "local_agent.assistant_exchange",
+			EventPayload: map[string]any{
+				"correlation_id": "intent-correlation",
+				"render_mode":    "markdown_v1",
+				"part_index":     float64(1),
+				"part_count":     float64(1),
+				"content_sha256": digest,
+			},
+		}}},
 	}}
 	reader := newHistoryReader(client, testBot, time.Second, nil)
 	intent := port.AssistantExchangeIntent{
@@ -172,11 +196,136 @@ func TestHistoryReaderFindsPublishedAssistantExchangeByMetadataCorrelation(t *te
 	}
 }
 
-func TestHistoryReaderDoesNotRecoverFromContentAndTimeWithoutCorrelation(t *testing.T) {
+func TestHistoryReaderRejectsRecoveryWithWrongDigest(t *testing.T) {
+	t.Parallel()
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testBot, Text: "some text", Timestamp: "1720000001.000002", Metadata: slackapi.SlackMetadata{
+			EventType: "local_agent.assistant_exchange",
+			EventPayload: map[string]any{
+				"correlation_id": "intent-correlation",
+				"render_mode":    "markdown_v1",
+				"part_index":     float64(1),
+				"part_count":     float64(1),
+				"content_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+			},
+		}}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: "published reply", CorrelationID: "intent-correlation",
+	})
+	if err != nil || found || timestamp != "" {
+		t.Fatalf("FindPublishedAssistantExchange() = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func TestHistoryReaderRecoveryUsesSameSafetyRenderingAsPublisher(t *testing.T) {
+	t.Parallel()
+	content := "Do not notify <@U12345678> or <!channel>."
+	parts := renderMarkdownV1(content)
+	client := &fakeHistoryClient{history: []slackapi.Message{{Msg: slackapi.Msg{
+		User: testBot, Timestamp: "1720000001.000002",
+		Metadata: exchangeMetadataFor("intent-correlation", markdownRenderMode, 1, 1, contentSHA256(parts[0])),
+	}}}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: content, CorrelationID: "intent-correlation",
+	})
+	if err != nil || !found || timestamp != "1720000001.000002" {
+		t.Fatalf("FindPublishedAssistantExchange() = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func TestHistoryReaderRejectsConflictingCandidateMetadata(t *testing.T) {
+	t.Parallel()
+	part := renderMarkdownV1("published reply")[0]
+	valid := exchangeMetadataFor("intent-correlation", markdownRenderMode, 1, 1, contentSHA256(part))
+	unknown := exchangeMetadataFor("intent-correlation", "markdown_v2", 1, 1, contentSHA256(part))
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000001.000001", Metadata: valid}},
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000002.000002", Metadata: unknown}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: "published reply", CorrelationID: "intent-correlation",
+	})
+	if err != nil || found || timestamp != "" {
+		t.Fatalf("conflicting recovery = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func TestHistoryReaderRejectsReorderedMultipartDelivery(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("x", SlackMarkdownChunkRunes+100)
+	parts := renderMarkdownV1(content)
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000002.000002", Metadata: exchangeMetadataFor("intent-correlation", markdownRenderMode, 1, 2, contentSHA256(parts[0]))}},
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000001.000001", Metadata: exchangeMetadataFor("intent-correlation", markdownRenderMode, 2, 2, contentSHA256(parts[1]))}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: content, CorrelationID: "intent-correlation",
+	})
+	if err != nil || found || timestamp != "" {
+		t.Fatalf("reordered recovery = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func TestHistoryReaderReturnsFinalMultipartTimestamp(t *testing.T) {
+	t.Parallel()
+	content := strings.Repeat("x", SlackMarkdownChunkRunes+100)
+	parts := renderMarkdownV1(content)
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		// conversations.history is newest first; metadata indices remain authoritative.
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000002.000002", Metadata: exchangeMetadataFor("intent-correlation", markdownRenderMode, 2, 2, contentSHA256(parts[1]))}},
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000001.000001", Metadata: exchangeMetadataFor("intent-correlation", markdownRenderMode, 1, 2, contentSHA256(parts[0]))}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: content, CorrelationID: "intent-correlation",
+	})
+	if err != nil || !found || timestamp != "1720000002.000002" {
+		t.Fatalf("multipart recovery = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func TestHistoryReaderRejectsDuplicatePart(t *testing.T) {
+	t.Parallel()
+	part := renderMarkdownV1("published reply")[0]
+	metadata := exchangeMetadataFor("intent-correlation", markdownRenderMode, 1, 1, contentSHA256(part))
+	client := &fakeHistoryClient{history: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000001.000001", Metadata: metadata}},
+		{Msg: slackapi.Msg{User: testBot, Timestamp: "1720000002.000002", Metadata: metadata}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	_, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: "published reply", CorrelationID: "intent-correlation",
+	})
+	if err != nil || found {
+		t.Fatalf("duplicate recovery found = %t, err = %v", found, err)
+	}
+}
+
+func TestHistoryReaderRejectsEditedMatchingCandidate(t *testing.T) {
+	t.Parallel()
+	part := renderMarkdownV1("published reply")[0]
+	client := &fakeHistoryClient{history: []slackapi.Message{{Msg: slackapi.Msg{
+		User: testBot, Timestamp: "1720000001.000001", Edited: &slackapi.Edited{},
+		Metadata: exchangeMetadataFor("intent-correlation", markdownRenderMode, 1, 1, contentSHA256(part)),
+	}}}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+	_, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: "published reply", CorrelationID: "intent-correlation",
+	})
+	if err != nil || found {
+		t.Fatalf("edited recovery found = %t, err = %v", found, err)
+	}
+}
+
+func TestHistoryReaderRejectsRecoveryWithoutMetadata(t *testing.T) {
 	t.Parallel()
 	client := &fakeHistoryClient{history: []slackapi.Message{
 		{Msg: slackapi.Msg{User: testBot, Text: "published reply", Timestamp: "1720000001.000002"}},
-		{Msg: slackapi.Msg{User: testBot, Text: "published reply", Timestamp: "1720000002.000002"}},
 	}}
 	reader := newHistoryReader(client, testBot, 0, nil)
 	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
@@ -189,10 +338,24 @@ func TestHistoryReaderDoesNotRecoverFromContentAndTimeWithoutCorrelation(t *test
 
 func TestHistoryReaderRequiresCorrelationOnEveryMultipartChunk(t *testing.T) {
 	t.Parallel()
-	content := strings.Repeat("x", SlackChunkRunes+1)
-	chunks := SplitResponse(content)
+	content := strings.Repeat("x", SlackMarkdownChunkRunes+100)
+	chunks := SplitMarkdown(content, SlackMarkdownChunkRunes)
+	if len(chunks) != 2 {
+		t.Fatalf("SplitMarkdown returned %d chunks, want 2", len(chunks))
+	}
+	digest0 := contentSHA256(chunks[0])
 	client := &fakeHistoryClient{history: []slackapi.Message{
-		{Msg: slackapi.Msg{User: testBot, Text: chunks[0], Timestamp: "1720000001.000001", Metadata: exchangeMetadata("intent-correlation")}},
+		{Msg: slackapi.Msg{User: testBot, Text: chunks[0], Timestamp: "1720000001.000001", Metadata: slackapi.SlackMetadata{
+			EventType: "local_agent.assistant_exchange",
+			EventPayload: map[string]any{
+				"correlation_id": "intent-correlation",
+				"render_mode":    "markdown_v1",
+				"part_index":     float64(1),
+				"part_count":     float64(2),
+				"content_sha256": digest0,
+			},
+		}}},
+		// Missing metadata on second chunk
 		{Msg: slackapi.Msg{User: testBot, Text: chunks[1], Timestamp: "1720000002.000002"}},
 	}}
 	reader := newHistoryReader(client, testBot, time.Second, nil)
@@ -204,10 +367,75 @@ func TestHistoryReaderRequiresCorrelationOnEveryMultipartChunk(t *testing.T) {
 	}
 }
 
-func exchangeMetadata(correlationID string) slackapi.SlackMetadata {
-	return slackapi.SlackMetadata{
-		EventType:    "local_agent.assistant_exchange",
-		EventPayload: map[string]any{"correlation_id": correlationID},
+func TestHistoryReaderDetectsBotParticipationWithTranslatedMessage(t *testing.T) {
+	t.Parallel()
+	client := &fakeHistoryClient{replies: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testUser, Text: "question", Timestamp: "1.1"}},
+		{Msg: slackapi.Msg{User: testBot, Text: "", Timestamp: "1.2", SubType: slackapi.MsgSubTypeBotMessage,
+			Blocks: slackapi.Blocks{BlockSet: []slackapi.Block{
+				slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", "translated response", false, false), nil, nil),
+			}},
+		}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+
+	got, err := reader.RecentHistory(context.Background(), validThreadInvocation(), domain.ContextLimits{MaxMessages: 5, MaxChars: 100})
+	if err != nil {
+		t.Fatalf("RecentHistory() error = %v", err)
+	}
+	if !got.BotParticipated {
+		t.Fatal("bot participation = false for translated message")
+	}
+	if len(got.Messages) != 2 {
+		t.Fatalf("message count = %d, want 2 (user + bot with translated content)", len(got.Messages))
+	}
+	if got.Messages[1].Content != "translated response" {
+		t.Fatalf("extracted translated content = %q", got.Messages[1].Content)
+	}
+}
+
+func TestHistoryReaderSkipsEmptyTranslatedBotMessage(t *testing.T) {
+	t.Parallel()
+	client := &fakeHistoryClient{replies: []slackapi.Message{
+		{Msg: slackapi.Msg{User: testUser, Text: "question", Timestamp: "1.1"}},
+		{Msg: slackapi.Msg{User: testBot, Text: "", Timestamp: "1.2", SubType: slackapi.MsgSubTypeBotMessage}},
+	}}
+	reader := newHistoryReader(client, testBot, time.Second, nil)
+
+	got, err := reader.RecentHistory(context.Background(), validThreadInvocation(), domain.ContextLimits{MaxMessages: 5, MaxChars: 100})
+	if err != nil {
+		t.Fatalf("RecentHistory() error = %v", err)
+	}
+	if !got.BotParticipated {
+		t.Fatal("bot participation should still be detected even with empty text")
+	}
+	if len(got.Messages) != 1 {
+		t.Fatalf("message count = %d, want 1 (only user message)", len(got.Messages))
+	}
+}
+
+func TestHistoryReaderExtractsObservedTranslatedBlocksWithinLimit(t *testing.T) {
+	t.Parallel()
+	table := slackapi.NewTableBlock("").AddRow(
+		slackapi.NewTableRawTextCell("Name"),
+		slackapi.NewTableRawTextCell("Value"),
+	).AddRow(
+		slackapi.NewTableRawTextCell("item"),
+		slackapi.NewTableRawNumberCell(42),
+	)
+	blocks := []slackapi.Block{
+		slackapi.NewMarkdownBlock("", "# Heading"),
+		table,
+	}
+	got := extractPlainTextFromBlocks(blocks, 100)
+	if got != "# Heading\nName | Value\nitem | 42" {
+		t.Fatalf("translated block text = %q", got)
+	}
+	bounded := extractPlainTextFromBlocks([]slackapi.Block{
+		slackapi.NewMarkdownBlock("", strings.Repeat("界", 50)),
+	}, 12)
+	if len([]rune(bounded)) != 12 {
+		t.Fatalf("bounded translated text has %d runes", len([]rune(bounded)))
 	}
 }
 

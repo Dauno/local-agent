@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"sync"
 	"testing"
@@ -18,65 +19,156 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
-func TestSplitResponseCountsUnicodeAndStaysBelowSlackLimit(t *testing.T) {
+func TestSplitMarkdownSinglePartBelowLimit(t *testing.T) {
 	t.Parallel()
-	short := strings.Repeat("界", SlackChunkRunes)
-	if chunks := SplitResponse(short); len(chunks) != 1 || chunks[0] != short {
-		t.Fatalf("SplitResponse(short) returned %d altered chunks", len(chunks))
+	short := "Hello world"
+	chunks := SplitMarkdown(short, SlackMarkdownChunkRunes)
+	if len(chunks) != 1 || chunks[0] != short {
+		t.Fatalf("SplitMarkdown(short) = %#v", chunks)
 	}
+}
 
-	long := strings.Repeat("界", SlackChunkRunes+1)
-	chunks := SplitResponse(long)
-	if len(chunks) != 2 {
-		t.Fatalf("SplitResponse(long) returned %d chunks, want 2", len(chunks))
+func TestSplitMarkdownMultipartStaysBelowLimit(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("界", SlackMarkdownChunkRunes+100)
+	chunks := SplitMarkdown(long, SlackMarkdownChunkRunes)
+	if len(chunks) < 2 {
+		t.Fatalf("SplitMarkdown(long) returned %d chunks, want >= 2", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if got := utf8.RuneCountInString(chunk); got > SlackMarkdownChunkRunes {
+			t.Fatalf("chunk %d has %d Unicode code points, exceeding %d", i+1, got, SlackMarkdownChunkRunes)
+		}
+	}
+}
+
+func TestSplitMarkdownPreservesBlankLineBoundaries(t *testing.T) {
+	t.Parallel()
+	// Build multi-paragraph text exceeding the limit. The splitter
+	// should produce multiple parts, splitting at blank lines.
+	paragraph := strings.Repeat("x", 100)
+	text := paragraph + "\n\n" + paragraph + "\n\n" + paragraph
+	chunks := SplitMarkdown(text, 150)
+	if len(chunks) < 2 {
+		t.Fatalf("SplitMarkdown() = %d chunks, want >= 2", len(chunks))
+	}
+}
+
+func TestSplitMarkdownPreservesFencedCodeBlocks(t *testing.T) {
+	t.Parallel()
+	text := "```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```"
+	chunks := SplitMarkdown(text, SlackMarkdownChunkRunes)
+	if len(chunks) != 1 {
+		t.Fatalf("SplitMarkdown(fenced) = %d chunks, want 1", len(chunks))
+	}
+	if !strings.Contains(chunks[0], "```go") || !strings.Contains(chunks[0], "func main") {
+		t.Fatalf("SplitMarkdown(fenced) altered fence: %q", chunks[0])
+	}
+}
+
+func TestSplitMarkdownBoundsEveryIntermediateLine(t *testing.T) {
+	t.Parallel()
+	const limit = 80
+	text := "prefix\n" + strings.Repeat("x", limit+25) + "\nsuffix"
+	for index, chunk := range SplitMarkdown(text, limit) {
+		if got := utf8.RuneCountInString(chunk); got > limit {
+			t.Fatalf("chunk %d has %d runes, want <= %d", index+1, got, limit)
+		}
+	}
+}
+
+func TestSplitMarkdownDoesNotSplitInlineLinkWhenSafeBoundaryExists(t *testing.T) {
+	t.Parallel()
+	link := "[label with space](https://example.test/path)"
+	chunks := SplitMarkdown("prefix words "+link+" trailing words", 65)
+	for _, chunk := range chunks {
+		if strings.Contains(chunk, "[label") && !strings.Contains(chunk, link) {
+			t.Fatalf("inline link was split: %#v", chunks)
+		}
+	}
+}
+
+func TestSplitMarkdownClosesAndReopensOversizedFence(t *testing.T) {
+	t.Parallel()
+	const limit = 90
+	text := "~~~go\n" + strings.Repeat("fmt.Println(\"hello\")\n", 12) + "~~~"
+	chunks := SplitMarkdown(text, limit)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want multipart fence", len(chunks))
 	}
 	for index, chunk := range chunks {
-		if got := utf8.RuneCountInString(chunk); got >= 3500 {
-			t.Fatalf("chunk %d has %d Unicode characters", index+1, got)
+		if utf8.RuneCountInString(chunk) > limit || !strings.Contains(chunk, "~~~go\n") || !strings.HasSuffix(chunk, "~~~") {
+			t.Fatalf("chunk %d is not a bounded complete fence: %q", index+1, chunk)
 		}
-		wantPrefix := fmt.Sprintf("(%d/%d) ", index+1, len(chunks))
-		if !strings.HasPrefix(chunk, wantPrefix) {
-			t.Fatalf("chunk %d = %q..., want prefix %q", index+1, chunk[:6], wantPrefix)
-		}
-	}
-	if got := joinChunkContent(chunks); got != long {
-		t.Fatal("hard-split Unicode content was altered")
 	}
 }
 
-func TestSplitResponsePrefersParagraphBoundaries(t *testing.T) {
+func TestSplitMarkdownRepeatsOversizedTableHeader(t *testing.T) {
 	t.Parallel()
-	text := "aaaa\n\nbbbb\n\ncccc"
-	chunks := splitResponse(text, 12)
-	want := []string{"(1/3) aaaa\n\n", "(2/3) bbbb\n\n", "(3/3) cccc"}
-	if fmt.Sprint(chunks) != fmt.Sprint(want) {
-		t.Fatalf("splitResponse() = %#v, want %#v", chunks, want)
-	}
-	if joinChunkContent(chunks) != text {
-		t.Fatal("paragraph splitting altered response content")
-	}
-}
-
-func TestSplitResponseHardSplitsSingleParagraphAndNumbersManyChunks(t *testing.T) {
-	t.Parallel()
-	chunks := splitResponse(strings.Repeat("x", 61), 12)
-	if len(chunks) <= 9 {
-		t.Fatalf("splitResponse() returned %d chunks, want more than 9", len(chunks))
+	const limit = 100
+	header := "| Name | Value |\n| --- | --- |\n"
+	text := header + strings.Repeat("| item | some moderately long value |\n", 8)
+	chunks := SplitMarkdown(text, limit)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want multipart table", len(chunks))
 	}
 	for index, chunk := range chunks {
-		if utf8.RuneCountInString(chunk) > 12 {
-			t.Fatalf("chunk %d exceeds limit: %q", index+1, chunk)
+		if utf8.RuneCountInString(chunk) > limit || !strings.Contains(chunk, header) {
+			t.Fatalf("chunk %d missing bounded repeated header: %q", index+1, chunk)
 		}
-		if !strings.HasPrefix(chunk, fmt.Sprintf("(%d/%d) ", index+1, len(chunks))) {
-			t.Fatalf("chunk %d has wrong prefix: %q", index+1, chunk)
-		}
-	}
-	if joinChunkContent(chunks) != strings.Repeat("x", 61) {
-		t.Fatal("hard-split content was altered")
 	}
 }
 
-func TestPublisherPostsChunksInOrderToSameTargetsAndReturnsLastTimestamp(t *testing.T) {
+func TestSplitMarkdownRepeatsOversizedListMarker(t *testing.T) {
+	t.Parallel()
+	chunks := SplitMarkdown("- "+strings.Repeat("word ", 30), 60)
+	if len(chunks) < 2 {
+		t.Fatalf("chunks = %d, want multipart list item", len(chunks))
+	}
+	for index, chunk := range chunks {
+		content := chunk[strings.Index(chunk, "\n\n")+2:]
+		if !strings.HasPrefix(content, "- ") {
+			t.Fatalf("chunk %d did not repeat list marker: %q", index+1, chunk)
+		}
+	}
+}
+
+func TestNeutralizeUnsafeControls(t *testing.T) {
+	t.Parallel()
+	tests := []struct {
+		name  string
+		input string
+		want  string
+	}{
+		{"user mention", "<@U12345678>", "&lt;@U12345678>"},
+		{"user mention with label", "<@U12345678|john>", "&lt;@U12345678|john>"},
+		{"subteam", "<!subteam^SAZ123>", "&lt;!subteam^SAZ123>"},
+		{"here", "<!here>", "&lt;!here>"},
+		{"channel", "<!channel>", "&lt;!channel>"},
+		{"everyone", "<!everyone>", "&lt;!everyone>"},
+		{"channel ref", "<#C12345678>", "&lt;#C12345678>"},
+		{"channel ref with label", "<#C12345678|general>", "&lt;#C12345678|general>"},
+		{"date", "<!date^1392734382^{date}|fallback>", "&lt;!date^1392734382^{date}|fallback>"},
+		{"normal text untouched", "Hello <world>", "Hello <world>"},
+		{"markdown link untouched", "[link](https://example.com)", "[link](https://example.com)"},
+		{"code block preserved", "```\n<@U12345678>\n```", "```\n<@U12345678>\n```"},
+		{"unclosed code block preserved", "```\n<@U12345678>\n", "```\n<@U12345678>\n"},
+		{"inline code preserved", "`<@U12345678>` <!here>", "`<@U12345678>` &lt;!here>"},
+		{"unclosed inline code does not shield controls", "`broken <!channel>", "`broken &lt;!channel>"},
+		{"tilde fence requires tilde close", "~~~\n<@U12345678>\n```\n<!channel>\n~~~\n<!here>", "~~~\n<@U12345678>\n```\n<!channel>\n~~~\n&lt;!here>"},
+		{"mixed", "Hi <!channel> and <@U123>", "Hi &lt;!channel> and &lt;@U123>"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := neutralizeUnsafeControls(tt.input)
+			if got != tt.want {
+				t.Fatalf("neutralizeUnsafeControls(%q) = %q, want %q", tt.input, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPublisherPostsChunksInOrderAndReturnsLastTimestamp(t *testing.T) {
 	t.Parallel()
 	tests := []struct {
 		name   string
@@ -100,7 +192,7 @@ func TestPublisherPostsChunksInOrderToSameTargetsAndReturnsLastTimestamp(t *test
 				return nil
 			}
 
-			text := strings.Repeat("界", SlackChunkRunes+1)
+			text := strings.Repeat("界", SlackMarkdownChunkRunes+100)
 			tt.target.CorrelationID = "intent-correlation"
 			got, err := publisher.Publish(context.Background(), tt.target, text)
 			if err != nil {
@@ -117,27 +209,35 @@ func TestPublisherPostsChunksInOrderToSameTargetsAndReturnsLastTimestamp(t *test
 				if call.channelID != tt.target.ChannelID || call.threadTS != tt.target.ThreadTS {
 					t.Fatalf("call %d target = %q/%q, want %q/%q", index+1, call.channelID, call.threadTS, tt.target.ChannelID, tt.target.ThreadTS)
 				}
-				if !strings.HasPrefix(call.text, fmt.Sprintf("(%d/2) ", index+1)) {
-					t.Fatalf("call %d text has wrong order prefix: %q", index+1, call.text[:6])
+				if call.correlationID != tt.target.CorrelationID {
+					t.Fatalf("call %d correlation = %q, want %q", index+1, call.correlationID, tt.target.CorrelationID)
 				}
 				if !call.hadDeadline {
 					t.Fatalf("call %d did not receive an API deadline", index+1)
 				}
-				if call.correlationID != tt.target.CorrelationID {
-					t.Fatalf("call %d correlation = %q, want %q", index+1, call.correlationID, tt.target.CorrelationID)
+				if call.renderMode != "markdown_v1" {
+					t.Fatalf("call %d render_mode = %q, want markdown_v1", index+1, call.renderMode)
+				}
+				if call.partIndex != index+1 || call.partCount != len(calls) {
+					t.Fatalf("call %d part = %d/%d", index+1, call.partIndex, call.partCount)
+				}
+				if call.contentSHA256 == "" {
+					t.Fatalf("call %d missing content SHA-256 digest", index+1)
 				}
 			}
 		})
 	}
 }
 
-func TestSDKPostClientAddsDurableCorrelationMetadata(t *testing.T) {
+func TestSDKPostClientUsesMarkdownTextAndMetadata(t *testing.T) {
 	t.Parallel()
 	var metadata slackapi.SlackMetadata
+	var formValues url.Values
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {
 			t.Errorf("ParseForm() error = %v", err)
 		}
+		formValues = r.Form
 		if err := json.Unmarshal([]byte(r.Form.Get("metadata")), &metadata); err != nil {
 			t.Errorf("metadata error = %v", err)
 		}
@@ -146,12 +246,43 @@ func TestSDKPostClientAddsDurableCorrelationMetadata(t *testing.T) {
 	defer server.Close()
 
 	client := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
-	timestamp, err := (sdkPostClient{client: client}).PostMessage(t.Context(), testDM, "reply", "", "intent-correlation")
+	req := postRequest{
+		channelID:     testDM,
+		markdown:      "**bold** reply",
+		threadTS:      testThread,
+		correlationID: "intent-correlation",
+		renderMode:    "markdown_v1",
+		partIndex:     1,
+		partCount:     1,
+		contentSHA256: contentSHA256("**bold** reply"),
+	}
+	timestamp, err := (sdkPostClient{client: client}).PostMessage(t.Context(), req)
 	if err != nil || timestamp != "1.1" {
 		t.Fatalf("PostMessage() = %q, %v", timestamp, err)
 	}
-	if metadata.EventType != "local_agent.assistant_exchange" || metadata.EventPayload["correlation_id"] != "intent-correlation" {
-		t.Fatalf("Slack metadata = %#v", metadata)
+	if formValues.Get("markdown_text") != "**bold** reply" {
+		t.Fatalf("markdown_text = %q, want %q", formValues.Get("markdown_text"), "**bold** reply")
+	}
+	if formValues.Get("text") != "" || formValues.Get("blocks") != "" {
+		t.Fatalf("markdown request contains conflicting text or blocks: %v", formValues)
+	}
+	if formValues.Get("thread_ts") != testThread || formValues.Get("unfurl_links") != "false" || formValues.Get("unfurl_media") != "false" {
+		t.Fatalf("thread or unfurl controls missing: %v", formValues)
+	}
+	if metadata.EventType != "local_agent.assistant_exchange" {
+		t.Fatalf("metadata.EventType = %q", metadata.EventType)
+	}
+	if metadata.EventPayload["correlation_id"] != "intent-correlation" {
+		t.Fatalf("correlation_id = %v", metadata.EventPayload["correlation_id"])
+	}
+	if metadata.EventPayload["render_mode"] != "markdown_v1" {
+		t.Fatalf("render_mode = %v", metadata.EventPayload["render_mode"])
+	}
+	if v, ok := metadata.EventPayload["part_index"].(float64); !ok || int(v) != 1 {
+		t.Fatalf("part_index = %v (%T)", metadata.EventPayload["part_index"], metadata.EventPayload["part_index"])
+	}
+	if metadata.EventPayload["content_sha256"] != contentSHA256("**bold** reply") {
+		t.Fatalf("content_sha256 = %v", metadata.EventPayload["content_sha256"])
 	}
 }
 
@@ -204,7 +335,7 @@ func TestPublisherRetriesOneRateLimitUsingRetryAfter(t *testing.T) {
 		t.Fatalf("retry sleeps = %v", sleeps)
 	}
 	calls := client.callsSnapshot()
-	if calls[0].text != calls[1].text || calls[0].channelID != calls[1].channelID || calls[0].threadTS != calls[1].threadTS {
+	if calls[0].channelID != calls[1].channelID || calls[0].threadTS != calls[1].threadTS || calls[0].markdown != calls[1].markdown {
 		t.Fatal("rate-limit retry changed the message target or content")
 	}
 }
@@ -216,7 +347,7 @@ func TestPublisherRetriesRateLimitOnlyOnceAndStops(t *testing.T) {
 	publisher := newPublisher(client, time.Second, nil)
 	publisher.sleep = func(context.Context, time.Duration) error { return nil }
 
-	_, err := publisher.Publish(context.Background(), domain.ReplyTarget{ChannelID: testDM}, strings.Repeat("x", SlackChunkRunes+1))
+	_, err := publisher.Publish(context.Background(), domain.ReplyTarget{ChannelID: testDM}, strings.Repeat("x", SlackMarkdownChunkRunes+100))
 	if !errors.Is(err, rateErr) {
 		t.Fatalf("Publish() error = %v, want wrapped rate-limit error", err)
 	}
@@ -232,7 +363,7 @@ func TestPublisherStopsAfterChunkFailureAndReturnsLastPublishedTimestamp(t *test
 	publisher := newPublisher(client, time.Second, nil)
 	publisher.sleep = func(context.Context, time.Duration) error { return nil }
 
-	text := strings.Repeat("x", 3*SlackChunkRunes)
+	text := strings.Repeat("x", 3*SlackMarkdownChunkRunes)
 	got, err := publisher.Publish(context.Background(), domain.ReplyTarget{ChannelID: testChannel, ThreadTS: testThread}, text)
 	if !errors.Is(err, wantErr) {
 		t.Fatalf("Publish() error = %v, want wrapped post error", err)
@@ -276,7 +407,7 @@ func TestPublisherStopsImmediatelyOnNonRateLimitFailure(t *testing.T) {
 	slept := false
 	publisher.sleep = func(context.Context, time.Duration) error { slept = true; return nil }
 
-	_, err := publisher.Publish(context.Background(), domain.ReplyTarget{ChannelID: testDM}, strings.Repeat("x", SlackChunkRunes+1))
+	_, err := publisher.Publish(context.Background(), domain.ReplyTarget{ChannelID: testDM}, strings.Repeat("x", SlackMarkdownChunkRunes+100))
 	if !errors.Is(err, wantErr) || client.callCount() != 1 || slept {
 		t.Fatalf("Publish() error = %v, calls = %d, slept = %v", err, client.callCount(), slept)
 	}
@@ -305,24 +436,15 @@ func TestPublisherValidatesInput(t *testing.T) {
 	}
 }
 
-func joinChunkContent(chunks []string) string {
-	var joined strings.Builder
-	for _, chunk := range chunks {
-		separator := strings.Index(chunk, ") ")
-		if separator < 0 {
-			joined.WriteString(chunk)
-			continue
-		}
-		joined.WriteString(chunk[separator+2:])
-	}
-	return joined.String()
-}
-
 type postCall struct {
 	channelID     string
-	text          string
+	markdown      string
 	threadTS      string
 	correlationID string
+	renderMode    string
+	partIndex     int
+	partCount     int
+	contentSHA256 string
 	hadDeadline   bool
 }
 
@@ -337,11 +459,21 @@ type fakePostClient struct {
 	responses []postResponse
 }
 
-func (c *fakePostClient) PostMessage(ctx context.Context, channelID, text, threadTS, correlationID string) (string, error) {
+func (c *fakePostClient) PostMessage(ctx context.Context, req postRequest) (string, error) {
 	_, hadDeadline := ctx.Deadline()
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.calls = append(c.calls, postCall{channelID: channelID, text: text, threadTS: threadTS, correlationID: correlationID, hadDeadline: hadDeadline})
+	c.calls = append(c.calls, postCall{
+		channelID:     req.channelID,
+		markdown:      req.markdown,
+		threadTS:      req.threadTS,
+		correlationID: req.correlationID,
+		renderMode:    req.renderMode,
+		partIndex:     req.partIndex,
+		partCount:     req.partCount,
+		contentSHA256: req.contentSHA256,
+		hadDeadline:   hadDeadline,
+	})
 	index := len(c.calls) - 1
 	if index >= len(c.responses) {
 		return fmt.Sprintf("ts-%d", index+1), nil
