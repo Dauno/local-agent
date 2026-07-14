@@ -30,17 +30,18 @@ type GenerateContentConfig struct {
 }
 
 type AgentDef struct {
-	AgentClass      string `yaml:"agent_class"`
-	Name            string `yaml:"name"`
-	Model           string `yaml:"model"`
-	Description     string `yaml:"description,omitempty"`
-	Instruction     string `yaml:"instruction"`
-	IncludeContents string `yaml:"include_contents,omitempty"`
-	Mode            string `yaml:"mode,omitempty"`
-	DurableSession  bool   `yaml:"durable_session,omitempty"`
-	ToolScope       string `yaml:"tool_scope,omitempty"`
-	TimeoutSeconds  int    `yaml:"timeout_seconds,omitempty"`
-	Role            string `yaml:"role,omitempty"`
+	AgentClass        string `yaml:"agent_class"`
+	Name              string `yaml:"name"`
+	Model             string `yaml:"model"`
+	Description       string `yaml:"description,omitempty"`
+	GlobalInstruction string `yaml:"global_instruction,omitempty"`
+	Instruction       string `yaml:"instruction"`
+	IncludeContents   string `yaml:"include_contents,omitempty"`
+	Mode              string `yaml:"mode,omitempty"`
+	DurableSession    bool   `yaml:"durable_session,omitempty"`
+	ToolScope         string `yaml:"tool_scope,omitempty"`
+	TimeoutSeconds    int    `yaml:"timeout_seconds,omitempty"`
+	Role              string `yaml:"role,omitempty"`
 }
 
 type Definitions struct {

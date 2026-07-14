@@ -278,6 +278,14 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 		errs = append(errs, fmt.Sprintf("%s: tool_scope must be invocation_scoped", prefix))
 	}
 
+	if a.Name == "root_agent" {
+		if strings.TrimSpace(a.GlobalInstruction) == "" {
+			errs = append(errs, fmt.Sprintf("%s: global_instruction must not be empty", prefix))
+		}
+	} else if a.GlobalInstruction != "" {
+		errs = append(errs, fmt.Sprintf("%s: global_instruction is only allowed on root_agent", prefix))
+	}
+
 	return errs
 }
 
