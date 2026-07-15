@@ -17,6 +17,8 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	adksession "google.golang.org/adk/v2/session"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 var _ adksession.Service = (*AdkSessionService)(nil)
@@ -237,6 +239,37 @@ func (s *AdkSessionService) List(ctx context.Context, req *adksession.ListReques
 	}
 
 	return &adksession.ListResponse{Sessions: sessions}, nil
+}
+
+// RootSessionProviderFamilies returns the provider-family marker of every
+// durable ADK session, keyed by session ID. Sessions without the marker are
+// classified as legacy openai_compatible sessions.
+func (s *AdkSessionService) RootSessionProviderFamilies(ctx context.Context) (map[string]string, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT session_id, state FROM adk_sessions`)
+	if err != nil {
+		return nil, fmt.Errorf("list session provider families: %w", err)
+	}
+	defer rows.Close()
+
+	families := make(map[string]string)
+	for rows.Next() {
+		var sessionID, stateJSON string
+		if err := rows.Scan(&sessionID, &stateJSON); err != nil {
+			return nil, fmt.Errorf("scan session provider family: %w", err)
+		}
+		family := domain.ProviderFamilyOpenAICompatible
+		var state map[string]any
+		if err := json.Unmarshal([]byte(stateJSON), &state); err == nil {
+			if value, ok := state[domain.ProviderFamilyStateKey].(string); ok && strings.TrimSpace(value) != "" {
+				family = value
+			}
+		}
+		families[sessionID] = family
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate session provider families: %w", err)
+	}
+	return families, nil
 }
 
 func (s *AdkSessionService) Delete(ctx context.Context, req *adksession.DeleteRequest) error {

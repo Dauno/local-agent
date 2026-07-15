@@ -14,6 +14,7 @@ import (
 	"github.com/slack-go/slack/socketmode"
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
@@ -24,7 +25,6 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
-	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
@@ -72,7 +72,10 @@ func (a *Application) Run(ctx context.Context) error {
 	}
 
 	var (
-		llm              *openaillm.OpenAICompatibleLLM
+		rootModel        model.LLM
+		rootFamily       = domain.ProviderFamilyOpenAICompatible
+		rootIsAgentCLI   bool
+		rootAgentTools   []tool.Tool
 		curatorLLM       memorycurator.LLM
 		agentName        string
 		rootDef          *agentdef.AgentDef
@@ -84,7 +87,10 @@ func (a *Application) Run(ctx context.Context) error {
 		appToken         string
 		modelBaseURL     string
 		redactionSecrets []string
+		redactor         secure.Redactor
+		logger           *logging.Logger
 	)
+	describedCLIProviders := make(map[string]bool)
 
 	if defs != nil {
 		rootDefCandidate, ok := defs.Agents["root_agent"]
@@ -112,22 +118,39 @@ func (a *Application) Run(ctx context.Context) error {
 		if err := requiredSlackTokens(botToken, appToken); err != nil {
 			return err
 		}
+		for _, environment := range providerEnvs {
+			redactionSecrets = append(redactionSecrets, values[environment])
+		}
+		redactionSecrets = append(redactionSecrets, botToken, appToken)
+		// Construct redaction before any child-process handshake can emit a
+		// diagnostic containing inherited credentials.
+		redactor = secure.NewRedactor(redactionSecrets...)
+		logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, redactor)
 
 		resolved, err := defs.ResolveModel(rootDef.Model)
 		if err != nil {
 			return fmt.Errorf("resolve root agent model: %w", err)
 		}
-		apiKey = values[resolved.APIKeyEnv]
-		if strings.TrimSpace(apiKey) == "" {
-			return fmt.Errorf("%s is not configured. Run: local-agent init", resolved.APIKeyEnv)
-		}
-		redactionSecrets = append(redactionSecrets, apiKey)
-		llm, err = newModelFromResolved(resolved, apiKey)
+		builtRoot, rootSecret, err := newModelForResolved(ctx, resolved, values, cfg, paths, logger, redactor.String)
 		if err != nil {
-			return fmt.Errorf("build root model client: %w", err)
+			return redactor.Error(fmt.Errorf("build root model client: %w", err))
 		}
-
-		modelBaseURL = resolved.BaseURL
+		if err := handshakeSelectedAgentCLI(ctx, resolved, builtRoot, describedCLIProviders); err != nil {
+			return redactor.Error(fmt.Errorf("validate root agent model: %w", err))
+		}
+		rootModel = builtRoot
+		if resolved.IsAgentCLI() {
+			rootIsAgentCLI = true
+			rootFamily = domain.ProviderFamilyAgentCLI
+			modelBaseURL = "agent_cli:" + resolved.Provider.Name
+		} else {
+			apiKey = rootSecret
+			modelBaseURL = resolved.BaseURL
+		}
+		rootAgentTools, err = buildRootAgentTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders)
+		if err != nil {
+			return redactor.Error(err)
+		}
 
 		if cfg.Memory.Enabled {
 			if curatorDef == nil {
@@ -137,14 +160,12 @@ func (a *Application) Run(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("resolve curator model: %w", err)
 			}
-			curatorAPIKey := values[curatorResolved.APIKeyEnv]
-			if strings.TrimSpace(curatorAPIKey) == "" {
-				return fmt.Errorf("%s is not configured. Run: local-agent init", curatorResolved.APIKeyEnv)
-			}
-			redactionSecrets = append(redactionSecrets, curatorAPIKey)
-			curatorModel, err := newModelFromResolved(curatorResolved, curatorAPIKey)
+			curatorModel, _, err := newModelForResolved(ctx, curatorResolved, values, cfg, paths, logger, redactor.String)
 			if err != nil {
-				return fmt.Errorf("build curator model client: %w", err)
+				return redactor.Error(fmt.Errorf("build curator model client: %w", err))
+			}
+			if err := handshakeSelectedAgentCLI(ctx, curatorResolved, curatorModel, describedCLIProviders); err != nil {
+				return redactor.Error(fmt.Errorf("validate curator model: %w", err))
 			}
 			curatorLLM = &memoryCuratorLLM{
 				llm:                   curatorModel,
@@ -156,15 +177,14 @@ func (a *Application) Run(ctx context.Context) error {
 			if err != nil {
 				return fmt.Errorf("resolve attachment analyzer model: %w", err)
 			}
-			attachmentAPIKey := values[attachmentResolved.APIKeyEnv]
-			if strings.TrimSpace(attachmentAPIKey) == "" {
-				return fmt.Errorf("%s is not configured. Run: local-agent init", attachmentResolved.APIKeyEnv)
+			if err := validateAttachmentModel(attachmentResolved); err != nil {
+				return err
 			}
-			redactionSecrets = append(redactionSecrets, attachmentAPIKey)
-			attachmentModel, err = newModelFromResolved(attachmentResolved, attachmentAPIKey)
+			attachmentBuilt, _, err := newModelForResolved(ctx, attachmentResolved, values, cfg, paths, logger, redactor.String)
 			if err != nil {
-				return fmt.Errorf("build attachment analyzer model client: %w", err)
+				return redactor.Error(fmt.Errorf("build attachment analyzer model client: %w", err))
 			}
+			attachmentModel = attachmentBuilt
 		}
 
 		agentName = rootDef.Name
@@ -180,24 +200,24 @@ func (a *Application) Run(ctx context.Context) error {
 		if secretErr != nil {
 			return secretErr
 		}
-		redactionSecrets = append(redactionSecrets, apiKey)
-		llm, err = newModel(cfg.Model, apiKey)
+		redactionSecrets = append(redactionSecrets, apiKey, botToken, appToken)
+		redactor = secure.NewRedactor(redactionSecrets...)
+		logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, redactor)
+		legacyModel, err := newModel(cfg.Model, apiKey)
 		if err != nil {
 			return fmt.Errorf("build model client: %w", err)
 		}
+		rootModel = legacyModel
 		agentName = cfg.Agent.Name
 		modelBaseURL = cfg.Model.BaseURL
 	}
 
-	redactionSecrets = append(redactionSecrets, botToken, appToken)
-	redactor := secure.NewRedactor(redactionSecrets...)
-	logger := logging.New(a.logOutput, cfg.Runtime.LogLevel, redactor)
 	if concrete, ok := curatorLLM.(*memoryCuratorLLM); ok {
 		concrete.logger = logger
 		concrete.sanitize = redactor.String
 	}
 
-	if llm == nil {
+	if rootModel == nil {
 		return redactor.Error(errors.New("model client not initialized"))
 	}
 
@@ -228,7 +248,7 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 	}
 
-	agent, err := adkagent.New(agentName, llm)
+	agent, err := adkagent.New(agentName, rootModel)
 	if err != nil {
 		return redactor.Error(err)
 	}
@@ -307,28 +327,41 @@ func (a *Application) Run(ctx context.Context) error {
 
 	sessionSvc := adaptersqlite.NewAdkSessionService(store)
 	if sessionSvc != nil {
-		var sandboxService *sandboxusecase.Service
-		if cfg.Sandbox.Enabled {
-			projects := paths.SandboxProjectRoots
-			if len(projects) == 0 {
-				projects = cfg.Sandbox.Projects
-			}
-			executor, err := fssandbox.New(projects, cfg.Sandbox.MaxOutputBytes)
-			if err != nil {
-				return redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
-			}
-			sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
-				AllowedCapabilities: []domain.Capability{
-					domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees,
-				},
-				CommandTimeout: time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
-				MaxOutputBytes: cfg.Sandbox.MaxOutputBytes,
-			}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(store), Executor: executor})
-			if err != nil {
-				return redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
-			}
+		families, famErr := sessionSvc.RootSessionProviderFamilies(ctx)
+		if famErr != nil {
+			return redactor.Error(fmt.Errorf("inspect durable session provider families: %w", famErr))
 		}
-		toolFactory := toolfactory.New(store, sandboxService)
+		if err := enforceProviderFamily(families, rootFamily); err != nil {
+			return redactor.Error(err)
+		}
+
+		// A CLI-backed root receives no local-agent ADK function tools: the
+		// external CLI cannot return portable ADK function calls.
+		var toolFactory port.AgentToolFactory
+		if !rootIsAgentCLI {
+			var sandboxService *sandboxusecase.Service
+			if cfg.Sandbox.Enabled {
+				projects := paths.SandboxProjectRoots
+				if len(projects) == 0 {
+					projects = cfg.Sandbox.Projects
+				}
+				executor, err := fssandbox.New(projects, cfg.Sandbox.MaxOutputBytes)
+				if err != nil {
+					return redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
+				}
+				sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
+					AllowedCapabilities: []domain.Capability{
+						domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees,
+					},
+					CommandTimeout: time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
+					MaxOutputBytes: cfg.Sandbox.MaxOutputBytes,
+				}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(store), Executor: executor})
+				if err != nil {
+					return redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
+				}
+			}
+			toolFactory = toolfactory.New(store, sandboxService)
+		}
 
 		rtInstruction := ""
 		rtGlobalInstruction := ""
@@ -342,8 +375,10 @@ func (a *Application) Run(ctx context.Context) error {
 			Instruction:       rtInstruction,
 			GlobalInstruction: rtGlobalInstruction,
 			SessionService:    sessionSvc,
-			Model:             llm,
+			Model:             rootModel,
 			ToolFactory:       toolFactory,
+			StaticTools:       rootAgentTools,
+			ProviderFamily:    rootFamily,
 		})
 		if rtErr != nil {
 			return redactor.Error(fmt.Errorf("initialize ADK runtime: %w", rtErr))
@@ -383,7 +418,7 @@ func (a *Application) Run(ctx context.Context) error {
 			}
 		}
 		if curatorLLM == nil {
-			curatorLLM = &memoryCuratorLLM{llm: llm, logger: logger, sanitize: redactor.String}
+			curatorLLM = &memoryCuratorLLM{llm: rootModel, logger: logger, sanitize: redactor.String}
 		}
 		curator, curErr := memorycurator.New(curatorLLM, memorycurator.Config{
 			Timeout: curTimeout, ModelCalls: modelCalls,

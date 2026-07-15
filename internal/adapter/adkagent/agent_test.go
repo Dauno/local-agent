@@ -12,6 +12,7 @@ import (
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/genai"
 
@@ -466,6 +467,45 @@ func TestRuntimeLegacyFallbackUsesBaseInstructionWhenNoInstruction(t *testing.T)
 	}
 	if len(requests[0].tools) != 1 {
 		t.Fatalf("legacy fallback tools = %#v, want one registered tool", requests[0].tools)
+	}
+}
+
+func TestRuntimeCombinesStaticAndInvocationTools(t *testing.T) {
+	t.Parallel()
+
+	newTool := func(name string) tool.Tool {
+		t.Helper()
+		created, err := functiontool.New(functiontool.Config{Name: name, Description: name + " test tool"},
+			func(agent.Context, struct{}) (map[string]any, error) { return map[string]any{"ok": true}, nil })
+		if err != nil {
+			t.Fatal(err)
+		}
+		return created
+	}
+
+	llm := &fakeLLM{response: func(*model.LLMRequest) string { return "ok" }}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName:      "Dev Agent",
+		Instruction:    "Use the registered tools when relevant.",
+		Model:          llm,
+		SessionService: session.InMemoryService(),
+		StaticTools:    []tool.Tool{newTool("delegate_agent")},
+		ToolFactory:    staticToolFactory{tools: []any{newTool("invocation_tool")}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := runtime.Run(t.Context(), port.AgentRequest{
+		ConversationKey: "slack:T123:dm:D123",
+		Messages:        []domain.Message{{Role: domain.RoleUser, Content: "delegate this", UserID: "U123"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	requests := llm.recorded()
+	if len(requests) != 1 || len(requests[0].tools) != 2 {
+		t.Fatalf("tools = %#v, want static and invocation tools", requests)
 	}
 }
 

@@ -30,6 +30,12 @@ type RuntimeConfig struct {
 	SessionService    session.Service
 	Model             model.LLM
 	ToolFactory       port.AgentToolFactory
+	// StaticTools are reusable ADK tools composed at startup, such as AgentTool
+	// wrappers. Invocation-scoped tools continue to come from ToolFactory.
+	StaticTools []tool.Tool
+	// ProviderFamily is stamped onto new durable sessions and compared
+	// defensively before each turn. Empty defaults to openai_compatible.
+	ProviderFamily string
 }
 
 // Runtime adapts ADK's llmagent + durable session service into the
@@ -41,6 +47,8 @@ type Runtime struct {
 	sessionService    session.Service
 	model             model.LLM
 	toolFactory       port.AgentToolFactory
+	staticTools       []tool.Tool
+	providerFamily    string
 }
 
 var _ port.AgentRuntime = (*Runtime)(nil)
@@ -59,6 +67,10 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if cfg.SessionService == nil {
 		return nil, errors.New("session service is required")
 	}
+	providerFamily := cfg.ProviderFamily
+	if providerFamily == "" {
+		providerFamily = domain.ProviderFamilyOpenAICompatible
+	}
 	return &Runtime{
 		agentName:         cfg.AgentName,
 		instruction:       cfg.Instruction,
@@ -66,6 +78,8 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		sessionService:    cfg.SessionService,
 		model:             cfg.Model,
 		toolFactory:       cfg.ToolFactory,
+		staticTools:       append([]tool.Tool(nil), cfg.StaticTools...),
+		providerFamily:    providerFamily,
 	}, nil
 }
 
@@ -137,7 +151,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	ephemeralCtx := buildBeforeModelContext(req)
 
 	// Build tools for this turn.
-	var tools []tool.Tool
+	tools := append([]tool.Tool(nil), r.staticTools...)
 	if r.toolFactory != nil {
 		rawTools := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
 		for _, raw := range rawTools {
@@ -182,8 +196,11 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 		return port.AgentTurn{}, errors.New("confirmation actor is required")
 	}
 	sessionID := adkSessionID(decision.ConversationKey)
+	if _, err := r.ensureSession(ctx, sessionID); err != nil {
+		return port.AgentTurn{}, fmt.Errorf("ensure ADK session for resume: %w", err)
+	}
 
-	var tools []tool.Tool
+	tools := append([]tool.Tool(nil), r.staticTools...)
 	if r.toolFactory != nil {
 		for _, raw := range r.toolFactory.ToolsForInvocation(decision.Actor, decision.ConversationKey) {
 			if t, ok := raw.(tool.Tool); ok {
@@ -238,6 +255,9 @@ func (r *Runtime) ensureSession(ctx context.Context, sessionID string) (session.
 		AppName:   applicationName,
 		UserID:    ephemeralUserID,
 		SessionID: sessionID,
+		State: map[string]any{
+			domain.ProviderFamilyStateKey: r.providerFamily,
+		},
 	})
 	if err != nil {
 		// Session may already exist from a previous turn or crash recovery.
@@ -249,9 +269,35 @@ func (r *Runtime) ensureSession(ctx context.Context, sessionID string) (session.
 		if getErr != nil {
 			return nil, fmt.Errorf("create session: %w (get also failed: %v)", err, getErr)
 		}
+		if familyErr := r.checkProviderFamily(resp.Session); familyErr != nil {
+			return nil, familyErr
+		}
 		return resp.Session, nil
 	}
 	return created.Session, nil
+}
+
+// ErrProviderFamilyMismatch indicates a durable session created by a different
+// provider family. Structured history is never flattened across families.
+var ErrProviderFamilyMismatch = errors.New("durable session provider family mismatch")
+
+// checkProviderFamily defensively re-validates the stored provider family
+// before a turn. Sessions without the marker are legacy openai_compatible.
+func (r *Runtime) checkProviderFamily(sess session.Session) error {
+	if sess == nil {
+		return nil
+	}
+	stored := domain.ProviderFamilyOpenAICompatible
+	if value, err := sess.State().Get(domain.ProviderFamilyStateKey); err == nil {
+		if text, ok := value.(string); ok && strings.TrimSpace(text) != "" {
+			stored = text
+		}
+	}
+	if stored != r.providerFamily {
+		return fmt.Errorf("%w: session %q was created by provider family %q but %q is configured. Run: local-agent init --reset-state",
+			ErrProviderFamilyMismatch, sess.ID(), stored, r.providerFamily)
+	}
+	return nil
 }
 
 // --- turn execution ---

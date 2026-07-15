@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
@@ -37,6 +38,25 @@ func (d failingDatabase) CheckDatabase(context.Context, string) error { return d
 type fakeLive struct {
 	bot, app, context, model int
 	modelAPIKey              string
+}
+
+type fakeCLI struct {
+	models        []string
+	describeCalls int
+	authCalls     int
+}
+
+func (f *fakeCLI) CheckProvider(_ context.Context, resolved *agentdef.ResolvedModel, _ config.Config, _ string, describe bool) (string, error) {
+	f.models = append(f.models, resolved.Model)
+	if describe {
+		f.describeCalls++
+	}
+	return "profile validated", nil
+}
+
+func (f *fakeCLI) CheckAuthentication(context.Context, *agentdef.ResolvedModel) (string, error) {
+	f.authCalls++
+	return "authenticated", nil
 }
 
 func (f *fakeLive) CheckSlackBot(context.Context, string) error         { f.bot++; return nil }
@@ -210,4 +230,194 @@ func TestDatabaseUsesTypedRemediation(t *testing.T) {
 		}
 	}
 	t.Fatal("SQLite result missing")
+}
+
+func TestDoctorValidatesEverySelectedCLIProfileAndDescribesProviderOnce(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorCLIDefinitions(t, stateDir, false)
+
+	cli := &fakeCLI{}
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Memory.Enabled = true
+		cfg.Sandbox.Enabled = true
+		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+		return cfg, nil
+	}
+	deps.CLI = cli
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), false)
+	if report.ExitCode() != 0 {
+		t.Fatalf("doctor failed: %#v", report.Results)
+	}
+	if len(cli.models) != 2 || cli.models[0] != "anthropic/root" || cli.models[1] != "anthropic/curator" {
+		t.Fatalf("selected CLI profiles not all validated: %v", cli.models)
+	}
+	if cli.describeCalls != 1 {
+		t.Fatalf("shared CLI provider described %d times, want 1", cli.describeCalls)
+	}
+}
+
+func TestDoctorRejectsAgentCLIAttachmentAnalyzer(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorCLIDefinitions(t, stateDir, true)
+
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Sandbox.Enabled = true
+		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+		return cfg, nil
+	}
+	deps.CLI = &fakeCLI{}
+	service, _ := New(deps)
+	report := service.Run(t.Context(), false)
+	if report.ExitCode() != 1 {
+		t.Fatalf("expected attachment incompatibility, got %#v", report.Results)
+	}
+	for _, result := range report.Results {
+		if result.Name == "agent definitions" && strings.Contains(result.Detail, "attachment_analyzer cannot use an agent_cli") {
+			return
+		}
+	}
+	t.Fatalf("actionable attachment incompatibility missing: %#v", report.Results)
+}
+
+func TestDoctorValidatesReferencedAgentTool(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		filepath.Join(stateDir, "providers", "deepseek.yaml"): `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  root:
+    model: deepseek-v4-flash
+`,
+		filepath.Join(stateDir, "providers", "opencode.yaml"): `
+name: opencode
+type: agent_cli
+shim:
+  command: self
+  args: [shim, opencode]
+profiles:
+  build:
+    model: opencode/big-pickle
+`,
+		filepath.Join(stateDir, "agents", "root_agent.yaml"): `
+agent_class: LlmAgent
+name: root_agent
+model: deepseek/root
+global_instruction: policy
+instruction: delegate coding tasks
+agent_tools: [opencode_worker]
+`,
+		filepath.Join(stateDir, "agents", "opencode_worker.yaml"): `
+agent_class: LlmAgent
+name: opencode_worker
+model: opencode/build
+description: Handles delegated coding tasks.
+instruction: complete the delegated task
+include_contents: none
+`,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cli := &fakeCLI{}
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Memory.Enabled = false
+		cfg.Sandbox.Enabled = true
+		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+		return cfg, nil
+	}
+	deps.CLI = cli
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), false)
+	if report.ExitCode() != 0 {
+		t.Fatalf("doctor failed: %#v", report.Results)
+	}
+	if len(cli.models) != 1 || cli.models[0] != "opencode/big-pickle" || cli.describeCalls != 1 {
+		t.Fatalf("agent tool CLI validation = models %v, describes %d", cli.models, cli.describeCalls)
+	}
+}
+
+func writeDoctorCLIDefinitions(t *testing.T, stateDir string, includeAttachment bool) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	provider := `
+name: opencode
+type: agent_cli
+shim:
+  command: self
+  args: [shim, opencode]
+profiles:
+  root:
+    model: anthropic/root
+  curator:
+    model: anthropic/curator
+  attachment:
+    model: anthropic/attachment
+`
+	rootAgent := `
+agent_class: LlmAgent
+name: root_agent
+model: opencode/root
+global_instruction: policy
+instruction: root
+`
+	curator := `
+agent_class: LlmAgent
+name: memory_curator
+model: opencode/curator
+instruction: curate
+`
+	files := map[string]string{
+		filepath.Join(stateDir, "providers", "opencode.yaml"):    provider,
+		filepath.Join(stateDir, "agents", "root_agent.yaml"):     rootAgent,
+		filepath.Join(stateDir, "agents", "memory_curator.yaml"): curator,
+	}
+	if includeAttachment {
+		files[filepath.Join(stateDir, "agents", "attachment_analyzer.yaml")] = `
+agent_class: LlmAgent
+name: attachment_analyzer
+model: opencode/attachment
+instruction: inspect image
+`
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 }

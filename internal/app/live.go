@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"os/exec"
 	"strings"
 
 	slackapi "github.com/slack-go/slack"
@@ -123,4 +125,49 @@ func newModelFromResolved(resolved *agentdef.ResolvedModel, apiKey string) (*ope
 		opts = append(opts, openaillm.WithExtraBody(resolved.ExtraBody))
 	}
 	return openaillm.New(opts...)
+}
+
+// cliProviderChecker implements doctor.CLIProviderChecker for agent_cli
+// providers through the same construction and handshake path used at startup.
+type cliProviderChecker struct{}
+
+func (cliProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, cfg config.Config, projectRoot string, describe bool) (string, error) {
+	paths, err := cfg.ResolvePaths(projectRoot)
+	if err != nil {
+		return "", err
+	}
+	cliModel, err := buildAgentCLIModel(ctx, resolved, cfg, paths, nil, nil)
+	if err != nil {
+		return "", err
+	}
+	description, err := handshakeAgentCLI(ctx, cliModel, describe)
+	if err != nil {
+		return "", err
+	}
+	if describe {
+		return fmt.Sprintf("shim %s (%s) maps CLI version %s; profile validated", description.Name, description.ShimVersion, description.CLIVersion), nil
+	}
+	return "profile validated", nil
+}
+
+func (cliProviderChecker) CheckAuthentication(ctx context.Context, _ *agentdef.ResolvedModel) (string, error) {
+	// OpenCode is the only agent CLI supported by this release. The check
+	// reports saved-login status without making a model call; output is never
+	// echoed because it may reference account identifiers.
+	executable, err := exec.LookPath("opencode")
+	if err != nil {
+		return "", fmt.Errorf("opencode executable not found: %w", err)
+	}
+	command := exec.CommandContext(ctx, executable, "auth", "list")
+	// Authentication output can contain account identifiers. Discard it while
+	// still draining both streams so memory use remains bounded.
+	command.Stdout = io.Discard
+	command.Stderr = io.Discard
+	if err := command.Run(); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return "", fmt.Errorf("opencode auth list cancelled: %w", ctxErr)
+		}
+		return "", fmt.Errorf("opencode auth list failed: %w", err)
+	}
+	return "opencode auth list succeeded; saved credentials are available", nil
 }

@@ -112,6 +112,28 @@ func SeedMemoryCurator(modelRef string) AgentDef {
 	}
 }
 
+// SeedOpenCodeProviderExample returns the inactive agent_cli provider example
+// written as opencode.yaml.example. Activating it is an explicit operator
+// action; init never changes active agents.
+func SeedOpenCodeProviderExample() Provider {
+	return Provider{
+		Name: "opencode",
+		Type: ProviderTypeAgentCLI,
+		Shim: &ShimConfig{
+			Command: "self",
+			Args:    []string{"shim", "opencode"},
+		},
+		Profiles: map[string]Profile{
+			"build": {
+				Model:    "anthropic/model-name",
+				Agent:    "build",
+				Approval: ApprovalAuto,
+				Variant:  "high",
+			},
+		},
+	}
+}
+
 func copyStringMap(m map[string]string) map[string]string {
 	if m == nil {
 		return nil

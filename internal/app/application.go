@@ -86,6 +86,7 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		ConfigPath: configPath,
 		Secrets:    envfile.NewResolver(filepath.Join(a.root, config.DefaultEnvFile)),
 		Database:   databaseChecker{},
+		CLI:        cliProviderChecker{},
 	}
 	if includeLive {
 		dependencies.Live = liveChecker{}
