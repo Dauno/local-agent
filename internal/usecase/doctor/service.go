@@ -49,13 +49,23 @@ type LiveChecker interface {
 	CheckResolvedModel(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error
 }
 
+// CLIProviderCheck is the typed result of one offline agent_cli provider
+// check. ShimName is the trusted mapper identity returned by the cli-v1
+// describe exchange; it is empty when describe was not performed.
+type CLIProviderCheck struct {
+	Detail   string
+	ShimName string
+}
+
 // CLIProviderChecker validates a selected agent_cli provider. The offline
 // check covers shim command resolution, project canonicalization, and the
 // cli-v1 describe/validate handshake. The live check reports the CLI's saved
-// authentication status without making a model call.
+// authentication status without making a model call; it selects the
+// application-owned command from the trusted mapper identity, never from the
+// configurable provider name or shim-supplied argv.
 type CLIProviderChecker interface {
-	CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, cfg config.Config, projectRoot string, describe bool) (string, error)
-	CheckAuthentication(ctx context.Context, resolved *agentdef.ResolvedModel) (string, error)
+	CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, cfg config.Config, projectRoot string, describe bool) (CLIProviderCheck, error)
+	CheckAuthentication(ctx context.Context, resolved *agentdef.ResolvedModel, shimName string) (string, error)
 }
 
 type Dependencies struct {
@@ -281,6 +291,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		}
 	}
 
+	shimNames := make(map[string]string)
 	if pathErr == nil {
 		var cliModels []selectedModel
 		for _, selected := range selectedModels {
@@ -299,7 +310,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			providerName := selected.resolved.Provider.Name
 			describe := !described[providerName]
 			resultName := "agent CLI provider (" + selected.agent + ")"
-			detail, err := s.deps.CLI.CheckProvider(ctx, selected.resolved, cfg, projectRoot, describe)
+			check, err := s.deps.CLI.CheckProvider(ctx, selected.resolved, cfg, projectRoot, describe)
 			if err != nil {
 				report.fail(resultName, redactor.String(err.Error()),
 					"Verify the shim command, the installed CLI version, selected profile, and sandbox.projects registration.", false)
@@ -307,8 +318,9 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			}
 			if describe {
 				described[providerName] = true
+				shimNames[providerName] = check.ShimName
 			}
-			report.pass(resultName, detail)
+			report.pass(resultName, check.Detail)
 		}
 	}
 
@@ -352,18 +364,25 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	if s.deps.CLI != nil {
 		authChecked := make(map[string]bool)
 		for _, selected := range selectedModels {
-			if !selected.resolved.IsAgentCLI() || authChecked[selected.resolved.Provider.Name] {
+			if !selected.resolved.IsAgentCLI() {
 				continue
 			}
-			authChecked[selected.resolved.Provider.Name] = true
+			providerName := selected.resolved.Provider.Name
+			shimName := shimNames[providerName]
+			// A missing identity means describe failed and already produced the
+			// actionable provider result. Do not add a misleading auth failure.
+			if strings.TrimSpace(shimName) == "" || authChecked[providerName] {
+				continue
+			}
+			authChecked[providerName] = true
 			liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.ModelTimeoutSeconds)
-			detail, err := s.deps.CLI.CheckAuthentication(liveCtx, selected.resolved)
+			detail, err := s.deps.CLI.CheckAuthentication(liveCtx, selected.resolved, shimName)
 			cancel()
 			if err != nil {
-				report.fail("agent CLI authentication ("+selected.resolved.Provider.Name+")", redactor.String(err.Error()),
-					"Log in to the agent CLI (for example: opencode auth login) so it can reuse its saved credentials.", false)
+				report.fail("agent CLI authentication ("+providerName+")", redactor.String(err.Error()),
+					"Log in to the agent CLI (for example: opencode auth login or codex login) so it can reuse its saved credentials.", false)
 			} else {
-				report.pass("agent CLI authentication ("+selected.resolved.Provider.Name+")", detail)
+				report.pass("agent CLI authentication ("+providerName+")", detail)
 			}
 		}
 	}

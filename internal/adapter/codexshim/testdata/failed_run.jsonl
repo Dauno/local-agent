@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"thr_9z8y7x6w"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"Partial answer before failure"}}
+{"type":"turn.failed","error":{"message":"Unexpected server error"}}
