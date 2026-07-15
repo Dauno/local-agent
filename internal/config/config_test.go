@@ -57,6 +57,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 				ProfileCacheTTLMinutes:      60,
 				ConversationCacheTTLMinutes: 15,
 			},
+			Files: config.SlackFilesConfig{MaxBytesPerFile: 5 * 1024 * 1024, MaxProcessedChars: 20_000},
 		},
 		Memory: config.MemoryConfig{
 			Enabled:               false,
@@ -143,6 +144,9 @@ slack:
     timeout_seconds: 5
     profile_cache_ttl_minutes: 60
     conversation_cache_ttl_minutes: 15
+  files:
+    max_bytes_per_file: 5242880
+    max_processed_chars: 20000
 memory:
   enabled: false
   directory: ""
@@ -181,6 +185,9 @@ model:
 slack:
   allow_all_users: true
   allowed_user_ids: null
+  files:
+    max_bytes_per_file: 1048576
+    max_processed_chars: 4096
 `))
 	if err != nil {
 		t.Fatalf("Parse() error: %v", err)
@@ -200,6 +207,9 @@ slack:
 	}
 	if cfg.Slack.AllowedUserIDs == nil || len(cfg.Slack.AllowedUserIDs) != 0 {
 		t.Fatalf("allowed_user_ids should normalize to an empty slice: %#v", cfg.Slack.AllowedUserIDs)
+	}
+	if cfg.Slack.Files.MaxBytesPerFile != 1048576 || cfg.Slack.Files.MaxProcessedChars != 4096 {
+		t.Fatalf("slack.files overrides not decoded: %#v", cfg.Slack.Files)
 	}
 }
 
@@ -303,6 +313,8 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 	cfg.Slack.AllowedUserIDs = []string{"not-a-user"}
 	cfg.Slack.AllowedTeamIDs = []string{"U12345678"}
 	cfg.Slack.AllowedChannelIDs = []string{"D12345678"}
+	cfg.Slack.Files.MaxBytesPerFile = 5*1024*1024 + 1
+	cfg.Slack.Files.MaxProcessedChars = 20_001
 
 	err := cfg.Validate()
 	var validation *config.ValidationError
@@ -326,6 +338,8 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 		"slack.allowed_user_ids[0]",
 		"slack.allowed_team_ids[0]",
 		"slack.allowed_channel_ids[0]",
+		"slack.files.max_bytes_per_file",
+		"slack.files.max_processed_chars",
 	} {
 		if !validation.Has(field) {
 			t.Errorf("validation did not report %s: %v", field, err)

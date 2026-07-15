@@ -23,6 +23,13 @@ const (
 	TriggerThreadReply   Trigger = "thread_reply"
 )
 
+type Attachment struct {
+	ID       string
+	Name     string
+	MIMEType string
+	Size     int64
+}
+
 type Invocation struct {
 	EventID     string
 	EventType   string
@@ -33,6 +40,7 @@ type Invocation struct {
 	EventTS     string
 	ThreadTS    string
 	Text        string
+	Attachments []Attachment
 	Trigger     Trigger
 }
 
@@ -57,8 +65,24 @@ func (i Invocation) Validate() error {
 	if strings.TrimSpace(i.EventType) == "" {
 		return fmt.Errorf("Slack event type is required")
 	}
-	if strings.TrimSpace(i.Text) == "" {
-		return fmt.Errorf("Slack message text is required")
+	hasText := strings.TrimSpace(i.Text) != ""
+	hasAttachments := len(i.Attachments) > 0
+	if !hasText && !hasAttachments {
+		return fmt.Errorf("Slack message must have text or at least one attachment")
+	}
+	for idx, a := range i.Attachments {
+		if strings.TrimSpace(a.ID) == "" {
+			return fmt.Errorf("attachment %d: ID is required", idx)
+		}
+		if strings.TrimSpace(a.Name) == "" {
+			return fmt.Errorf("attachment %d: name is required", idx)
+		}
+		if strings.TrimSpace(a.MIMEType) == "" {
+			return fmt.Errorf("attachment %d: MIME type is required", idx)
+		}
+		if a.Size < 0 {
+			return fmt.Errorf("attachment %d: size must not be negative", idx)
+		}
 	}
 	switch i.ChannelKind {
 	case ChannelDM, ChannelPublic, ChannelPrivate:
@@ -115,6 +139,10 @@ func (i Invocation) ReplyTarget() ReplyTarget {
 		rootTS = i.EventTS
 	}
 	return ReplyTarget{ChannelID: i.ChannelID, ThreadTS: rootTS}
+}
+
+func (i Invocation) ProcessingID(attachmentIndex int) string {
+	return fmt.Sprintf("%s:%s:%s:att-%d", i.TeamID, i.ChannelID, i.EventTS, attachmentIndex)
 }
 
 func (i Invocation) DedupeKeys() []string {

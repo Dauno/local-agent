@@ -76,6 +76,30 @@ func (s *fakeStore) AppendMessage(_ context.Context, metadata domain.Conversatio
 }
 func (*fakeStore) CleanupDedupe(context.Context, time.Time) error { return nil }
 
+type fakeFileLoader struct {
+	calls  int
+	loaded port.LoadedAttachment
+	err    error
+}
+
+func (l *fakeFileLoader) Load(context.Context, domain.Attachment, int64) (port.LoadedAttachment, error) {
+	l.calls++
+	return l.loaded, l.err
+}
+
+type fakeAttachmentProcessor struct {
+	calls     int
+	requests  []port.AttachmentRequest
+	processed port.ProcessedAttachment
+	err       error
+}
+
+func (p *fakeAttachmentProcessor) Process(_ context.Context, request port.AttachmentRequest) (port.ProcessedAttachment, error) {
+	p.calls++
+	p.requests = append(p.requests, request)
+	return p.processed, p.err
+}
+
 type fakeAgent struct {
 	response  string
 	err       error
@@ -158,20 +182,22 @@ func (f *fakeExchangeFinder) FindPublishedAssistantExchange(_ context.Context, i
 }
 
 type fakeExchangeWriter struct {
-	calls       int
-	prepares    int
-	published   int
-	discards    int
-	metadata    domain.ConversationMetadata
-	message     domain.Message
-	prepared    port.PreparedAssistantExchange
-	err         error
-	onAppend    func()
-	publishedTS string
+	calls          int
+	prepares       int
+	published      int
+	discards       int
+	metadata       domain.ConversationMetadata
+	message        domain.Message
+	prepared       port.PreparedAssistantExchange
+	err            error
+	onAppend       func()
+	publishedTS    string
+	memoryEligible bool
 }
 
-func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, _ domain.ConversationMetadata, _ domain.Message, _ int) (port.PreparedAssistantExchange, error) {
+func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, _ domain.ConversationMetadata, _ domain.Message, _ int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
 	w.prepares++
+	w.memoryEligible = memoryEligible
 	if w.prepared.ID == "" {
 		w.prepared = port.PreparedAssistantExchange{ID: "intent", CorrelationID: "intent-correlation"}
 	}
@@ -439,7 +465,7 @@ func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) 
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if writer.prepares != 1 || writer.published != 1 || writer.publishedTS != "1700000002.000003" || writer.calls != 1 {
+	if writer.prepares != 1 || writer.published != 1 || writer.publishedTS != "1700000002.000003" || writer.calls != 1 || !writer.memoryEligible {
 		t.Fatalf("atomic writer = %#v", writer)
 	}
 	if got := publisher.calls[0].target.CorrelationID; got != "intent-correlation" {
@@ -447,6 +473,67 @@ func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) 
 	}
 	if len(store.appended) != 1 || store.appended[0].Role != domain.RoleUser {
 		t.Fatalf("assistant bypassed atomic writer: %#v", store.appended)
+	}
+}
+
+func TestHandleAttachmentBoundsCurrentTurnAndKeepsDurableDelivery(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	agent := &fakeAgent{response: "answer"}
+	publisher := &fakePublisher{}
+	writer := &fakeExchangeWriter{}
+	service := newTestService(t, store, agent, &fakeHistory{}, publisher, func(cfg *Config) {
+		cfg.ContextLimits.MaxChars = 500
+	})
+	loader := &fakeFileLoader{loaded: port.LoadedAttachment{
+		ID: "F00000001", Name: "notes.txt", MIMEType: "text/plain", Data: []byte("source"),
+	}}
+	processor := &fakeAttachmentProcessor{processed: port.ProcessedAttachment{
+		Name: "notes.txt", MIMEType: "text/plain", Text: strings.Repeat("界", 500),
+	}}
+	service.fileLoader = loader
+	service.attachmentProc = processor
+	service.maxAttachmentBytes = 5 * 1024 * 1024
+	service.maxAttachmentChars = 400
+	service.AddMemory(nil, writer)
+
+	invocation := botInvocation()
+	invocation.Text = "review"
+	invocation.Attachments = []domain.Attachment{{ID: "F00000001", Name: "notes.txt", MIMEType: "text/plain", Size: 6}}
+	outcome, err := service.Handle(t.Context(), invocation)
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if loader.calls != 1 || processor.calls != 1 || len(agent.context) != 1 {
+		t.Fatalf("attachment flow loader=%d processor=%d context=%#v", loader.calls, processor.calls, agent.context)
+	}
+	current := agent.context[0].Content
+	if len([]rune(current)) > 500 || !strings.Contains(current, "[TRUNCATED:") || !strings.HasSuffix(current, "</attachments>") {
+		t.Fatalf("bounded current turn (%d runes) = %q", len([]rune(current)), current)
+	}
+	if writer.prepares != 1 || writer.published != 1 || writer.calls != 1 || writer.memoryEligible {
+		t.Fatalf("attachment durable exchange = %#v", writer)
+	}
+	if got := publisher.calls[0].target.CorrelationID; got != "intent-correlation" {
+		t.Fatalf("attachment correlation ID = %q", got)
+	}
+	if len(store.appended) != 1 || store.appended[0].Content != "review" {
+		t.Fatalf("persisted attachment turn = %#v", store.appended)
+	}
+}
+
+func TestRenderAttachmentsKeepsFramingWithinUnicodeBudget(t *testing.T) {
+	const maxChars = 360
+	rendered, err := renderAttachments([]port.ProcessedAttachment{{
+		Name: "x.txt", MIMEType: "text/plain", Text: strings.Repeat("🚀", 300),
+	}}, maxChars)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len([]rune(rendered)); got > maxChars {
+		t.Fatalf("rendered attachment has %d runes, max %d", got, maxChars)
+	}
+	if !strings.Contains(rendered, "</attachment>") || !strings.HasSuffix(rendered, "</attachments>") || !strings.Contains(rendered, "[TRUNCATED:") {
+		t.Fatalf("rendered framing is incomplete: %q", rendered)
 	}
 }
 

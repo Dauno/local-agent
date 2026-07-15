@@ -12,10 +12,12 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
+	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fssandbox"
 	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
@@ -75,6 +77,8 @@ func (a *Application) Run(ctx context.Context) error {
 		agentName        string
 		rootDef          *agentdef.AgentDef
 		curatorDef       *agentdef.AgentDef
+		attachmentDef    *agentdef.AgentDef
+		attachmentModel  model.LLM
 		apiKey           string
 		botToken         string
 		appToken         string
@@ -90,6 +94,9 @@ func (a *Application) Run(ctx context.Context) error {
 		rootDef = &rootDefCandidate
 		if cur, ok := defs.Agents["memory_curator"]; ok {
 			curatorDef = &cur
+		}
+		if attachment, ok := defs.Agents["attachment_analyzer"]; ok {
+			attachmentDef = &attachment
 		}
 
 		providerEnvs := defs.RequiredAPIKeyEnvs()
@@ -142,6 +149,21 @@ func (a *Application) Run(ctx context.Context) error {
 			curatorLLM = &memoryCuratorLLM{
 				llm:                   curatorModel,
 				generateContentConfig: curatorResolved.GenerateContentConfig,
+			}
+		}
+		if attachmentDef != nil {
+			attachmentResolved, err := defs.ResolveModel(attachmentDef.Model)
+			if err != nil {
+				return fmt.Errorf("resolve attachment analyzer model: %w", err)
+			}
+			attachmentAPIKey := values[attachmentResolved.APIKeyEnv]
+			if strings.TrimSpace(attachmentAPIKey) == "" {
+				return fmt.Errorf("%s is not configured. Run: local-agent init", attachmentResolved.APIKeyEnv)
+			}
+			redactionSecrets = append(redactionSecrets, attachmentAPIKey)
+			attachmentModel, err = newModelFromResolved(attachmentResolved, attachmentAPIKey)
+			if err != nil {
+				return fmt.Errorf("build attachment analyzer model client: %w", err)
 			}
 		}
 
@@ -231,6 +253,17 @@ func (a *Application) Run(ctx context.Context) error {
 	slackTimeout := time.Duration(cfg.Runtime.SlackAPITimeoutSeconds) * time.Second
 	publisher := slackadapter.NewPublisher(api, slackTimeout, logger)
 	history := slackadapter.NewHistoryReader(api, auth.UserID, slackTimeout, logger)
+	fileLoader := slackadapter.NewFileLoader(api, botToken, slackTimeout)
+	artifactSvc := artifact.InMemoryService()
+	attachmentInstruction := ""
+	attachmentTimeout := 120 * time.Second
+	if attachmentDef != nil {
+		attachmentInstruction = attachmentDef.Instruction
+		if attachmentDef.TimeoutSeconds > 0 {
+			attachmentTimeout = time.Duration(attachmentDef.TimeoutSeconds) * time.Second
+		}
+	}
+	attachmentProc := adkartifact.NewProcessor(artifactSvc, attachmentModel, attachmentInstruction, attachmentTimeout, modelCalls)
 	if cfg.Memory.Enabled {
 		if err := store.ReconcileAssistantExchanges(ctx, history); err != nil {
 			return redactor.Error(fmt.Errorf("reconcile assistant exchanges: %w", err))
@@ -262,7 +295,11 @@ func (a *Application) Run(ctx context.Context) error {
 	}, botusecase.Dependencies{
 		Store: store, Agent: agent, History: history, Publisher: publisher, Logger: logger,
 		ModelCalls: modelCalls, SanitizeContent: redactor.String,
-		Enricher: contextEnricher,
+		Enricher:           contextEnricher,
+		FileLoader:         fileLoader,
+		AttachmentProc:     attachmentProc,
+		MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile),
+		MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars,
 	})
 	if err != nil {
 		return err
@@ -284,8 +321,8 @@ func (a *Application) Run(ctx context.Context) error {
 				AllowedCapabilities: []domain.Capability{
 					domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees,
 				},
-				CommandTimeout:      time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
-				MaxOutputBytes:      cfg.Sandbox.MaxOutputBytes,
+				CommandTimeout: time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
+				MaxOutputBytes: cfg.Sandbox.MaxOutputBytes,
 			}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(store), Executor: executor})
 			if err != nil {
 				return redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))

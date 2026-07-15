@@ -122,7 +122,7 @@ type MemoryRetriever interface {
 // published, then finalizes it and its curation work item after publishing.
 // A staged exchange can be reconciled if the post-publish database write fails.
 type AssistantExchangeWriter interface {
-	PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int) (PreparedAssistantExchange, error)
+	PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int, memoryEligible bool) (PreparedAssistantExchange, error)
 	MarkAssistantExchangePublished(ctx context.Context, intentID, assistantTS string) error
 	FinalizeAssistantExchange(ctx context.Context, intentID string) error
 	DiscardAssistantExchange(ctx context.Context, intentID string) error
@@ -212,6 +212,35 @@ type ProjectionReader interface {
 // truth.
 type OKFProjector interface {
 	Project(ctx context.Context, reader ProjectionReader, outputDir string) error
+}
+
+// --- Attachment handling ---
+
+type LoadedAttachment struct {
+	ID       string
+	Name     string
+	MIMEType string
+	Data     []byte
+}
+
+type FileLoader interface {
+	Load(ctx context.Context, attachment domain.Attachment, maxBytes int64) (LoadedAttachment, error)
+}
+
+type AttachmentRequest struct {
+	ProcessingID string
+	UserID       string
+	Attachment   LoadedAttachment
+}
+
+type ProcessedAttachment struct {
+	Name     string
+	MIMEType string
+	Text     string
+}
+
+type AttachmentProcessor interface {
+	Process(ctx context.Context, request AttachmentRequest) (ProcessedAttachment, error)
 }
 
 // --- Confirmation delivery (Phase 2) ---

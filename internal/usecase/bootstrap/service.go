@@ -189,6 +189,16 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, fmt.Errorf("create memory curator definition: %w", err)
 	}
 
+	attachmentAnalyzer := agentdef.SeedAttachmentAnalyzer("provider/profile")
+	attachmentAnalyzerData, err := agentdef.MarshalAgentDef(attachmentAnalyzer)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("marshal attachment analyzer template: %w", err)
+	}
+	attachmentAnalyzerData = append([]byte("# Rename this file to attachment_analyzer.yaml after replacing provider/profile.\n"), attachmentAnalyzerData...)
+	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "attachment_analyzer.yaml.example"), attachmentAnalyzerData, 0o644); err != nil {
+		return Snapshot{}, fmt.Errorf("create attachment analyzer template: %w", err)
+	}
+
 	if err := s.files.CheckRegularFileOrMissing(ctx, paths.DatabaseFile); err != nil {
 		return Snapshot{}, fmt.Errorf("validate SQLite path: %w", err)
 	}

@@ -6,6 +6,10 @@ Go 1.25 Slack Socket Mode agent using Google ADK + OpenAI-compatible LLM.
 
 `cmd/local-agent/main.go` — one binary, cobra CLI.
 
+## Entrypoint
+
+`cmd/local-agent/main.go` — one binary, cobra CLI.
+
 ## Build & dev commands
 
 ```sh
@@ -43,7 +47,7 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 | `internal/adapter` | Concrete implementations. | Must not import other adapters (composed in `internal/app`). |
 | `internal/app` | Composition root. | Must not import CLI layer. |
 
-**Adapters** (12): adkagent, envfile, fsproject, fssandbox, logging, memorycurator, memoryprojector, modelcalllimiter, openaillm, slack, sqlite, toolfactory.
+**Adapters** (13): adkagent, adkartifact, envfile, fsproject, fssandbox, logging, memorycurator, memoryprojector, modelcalllimiter, openaillm, slack, sqlite, toolfactory.
 
 **Usecases** (5): bootstrap, bot, doctor, memory, sandbox.
 

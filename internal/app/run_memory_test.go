@@ -35,7 +35,7 @@ func TestProcessOutboxReschedulesModelSaturationWithoutUsingRetries(t *testing.T
 		t.Fatal(err)
 	}
 	assistant := domain.Message{Role: domain.RoleAssistant, Content: "the fact is durable", ExternalTS: "2", CreatedAt: time.Now().UTC()}
-	prepared, err := store.PrepareAssistantExchange(t.Context(), metadata, assistant, 10)
+	prepared, err := store.PrepareAssistantExchange(t.Context(), metadata, assistant, 10, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,7 +113,7 @@ func TestProcessOutboxAppliesTrustedEntityOperationsWhenCuratorFails(t *testing.
 				t.Fatal(err)
 			}
 			assistant := domain.Message{Role: domain.RoleAssistant, Content: "noted", ExternalTS: "2", CreatedAt: time.Now().UTC()}
-			prepared, err := store.PrepareAssistantExchange(t.Context(), metadata, assistant, 10)
+			prepared, err := store.PrepareAssistantExchange(t.Context(), metadata, assistant, 10, true)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -161,7 +161,7 @@ func TestProcessOutboxDiscardsInvalidOptionalPatchWithoutRetry(t *testing.T) {
 		t.Fatal(err)
 	}
 	assistant := domain.Message{Role: domain.RoleAssistant, Content: "sandbox description", ExternalTS: "2", CreatedAt: time.Now().UTC()}
-	prepared, err := store.PrepareAssistantExchange(t.Context(), metadata, assistant, 10)
+	prepared, err := store.PrepareAssistantExchange(t.Context(), metadata, assistant, 10, true)
 	if err != nil {
 		t.Fatal(err)
 	}

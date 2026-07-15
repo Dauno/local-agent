@@ -80,6 +80,93 @@ func TestDedupeKeys(t *testing.T) {
 	}
 }
 
+func TestInvocationValidateWithAttachments(t *testing.T) {
+	tests := []struct {
+		name string
+		inv  Invocation
+		ok   bool
+	}{
+		{
+			name: "attachment-only mention",
+			inv: Invocation{
+				EventID: "Ev123", EventType: "app_mention",
+				TeamID: "T12345678", ChannelID: "C12345678", ChannelKind: ChannelPublic,
+				UserID: "U12345678", EventTS: "1700000000.000001",
+				Attachments: []Attachment{{ID: "F00000001", Name: "file.txt", MIMEType: "text/plain", Size: 100}},
+				Trigger: TriggerMention,
+			},
+			ok: true,
+		},
+		{
+			name: "text-and-attachment DM",
+			inv: Invocation{
+				EventType: "message.im", TeamID: "T12345678", ChannelID: "D12345678",
+				ChannelKind: ChannelDM, UserID: "U12345678", EventTS: "1700000000.000001",
+				Text: "check this file", Trigger: TriggerDirectMessage,
+				Attachments: []Attachment{{ID: "F00000001", Name: "file.txt", MIMEType: "text/plain", Size: 100}},
+			},
+			ok: true,
+		},
+		{
+			name: "empty text and no attachments",
+			inv: Invocation{
+				EventID: "Ev123", EventType: "app_mention",
+				TeamID: "T12345678", ChannelID: "C12345678", ChannelKind: ChannelPublic,
+				UserID: "U12345678", EventTS: "1700000000.000001",
+				Text: "   ", Trigger: TriggerMention,
+			},
+			ok: false,
+		},
+		{
+			name: "attachment with missing ID",
+			inv: Invocation{
+				EventID: "Ev123", EventType: "app_mention",
+				TeamID: "T12345678", ChannelID: "C12345678", ChannelKind: ChannelPublic,
+				UserID: "U12345678", EventTS: "1700000000.000001",
+				Attachments: []Attachment{{Name: "file.txt", MIMEType: "text/plain", Size: 100}},
+				Trigger: TriggerMention,
+			},
+			ok: false,
+		},
+		{
+			name: "attachment with negative size",
+			inv: Invocation{
+				EventID: "Ev123", EventType: "app_mention",
+				TeamID: "T12345678", ChannelID: "C12345678", ChannelKind: ChannelPublic,
+				UserID: "U12345678", EventTS: "1700000000.000001",
+				Attachments: []Attachment{{ID: "F00000001", Name: "file.txt", MIMEType: "text/plain", Size: -1}},
+				Trigger: TriggerMention,
+			},
+			ok: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.inv.Validate()
+			if tt.ok && err != nil {
+				t.Fatalf("Validate() = %v; want nil", err)
+			}
+			if !tt.ok && err == nil {
+				t.Fatal("Validate() = nil; want error")
+			}
+		})
+	}
+}
+
+func TestProcessingID(t *testing.T) {
+	i := validInvocation()
+	got := i.ProcessingID(0)
+	want := "T12345678:C12345678:1700000000.000001:att-0"
+	if got != want {
+		t.Fatalf("ProcessingID(0) = %q, want %q", got, want)
+	}
+	got = i.ProcessingID(3)
+	want = "T12345678:C12345678:1700000000.000001:att-3"
+	if got != want {
+		t.Fatalf("ProcessingID(3) = %q, want %q", got, want)
+	}
+}
+
 func TestAccessPolicy(t *testing.T) {
 	i := validInvocation()
 	tests := []struct {

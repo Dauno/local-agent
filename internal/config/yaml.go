@@ -65,6 +65,10 @@ var configSchema = []schemaField{
 			{name: "profile_cache_ttl_minutes"},
 			{name: "conversation_cache_ttl_minutes"},
 		}},
+		{name: "files", children: []schemaField{
+			{name: "max_bytes_per_file"},
+			{name: "max_processed_chars"},
+		}},
 	}},
 	{name: "memory", children: []schemaField{
 		{name: "enabled"},
