@@ -58,6 +58,7 @@ func TestRenderIncludesIdentitySocketModeScopesAndEvents(t *testing.T) {
 		"channels:history",
 		"channels:read",
 		"chat:write",
+		"files:read",
 		"groups:history",
 		"groups:read",
 		"im:history",

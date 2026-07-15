@@ -110,6 +110,36 @@ func TestRouterRoutesSupportedInvocations(t *testing.T) {
 				Text: "continua", Trigger: domain.TriggerThreadReply,
 			},
 		},
+		{
+			name:      "attachment-only app mention",
+			innerType: slackevents.AppMention,
+			data: slackevents.AppMentionEvent{
+				Type: "app_mention", User: testUser, Text: "<@U00000001>",
+				TimeStamp: testTS, Channel: testChannel,
+				Files: []slackapi.File{{ID: "F00000001", Name: "notes.txt", Mimetype: "text/plain", Size: 12}},
+			},
+			want: domain.Invocation{
+				EventID: testEventID, EventType: "app_mention", TeamID: testTeam, ChannelID: testChannel,
+				ChannelKind: domain.ChannelPublic, UserID: testUser, EventTS: testTS,
+				Attachments: []domain.Attachment{{ID: "F00000001", Name: "notes.txt", MIMEType: "text/plain", Size: 12}},
+				Trigger:     domain.TriggerMention,
+			},
+		},
+		{
+			name:      "direct message file share",
+			innerType: slackevents.Message,
+			data: slackevents.MessageEvent{
+				Type: "message", User: testUser, TimeStamp: testTS, Channel: testDM,
+				ChannelType: slackevents.ChannelTypeIM, SubType: slackapi.MsgSubTypeFileShare,
+				Message: &slackapi.Msg{User: testUser, Files: []slackapi.File{{ID: "F00000002", Name: "main.go", Mimetype: "text/plain", Size: 25}}},
+			},
+			want: domain.Invocation{
+				EventID: testEventID, EventType: "message", TeamID: testTeam, ChannelID: testDM,
+				ChannelKind: domain.ChannelDM, UserID: testUser, EventTS: testTS,
+				Attachments: []domain.Attachment{{ID: "F00000002", Name: "main.go", MIMEType: "text/plain", Size: 25}},
+				Trigger:     domain.TriggerDirectMessage,
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -188,7 +218,7 @@ func TestRouterIgnoresUnsupportedOrUnsafeEvents(t *testing.T) {
 		}()},
 		{name: "message subtype", event: func() slackevents.EventsAPIEvent {
 			m := baseMessage()
-			m.SubType = slackapi.MsgSubTypeFileShare
+			m.SubType = "message_changed"
 			return callbackEvent(slackevents.Message, m)
 		}()},
 		{name: "nested subtype", event: func() slackevents.EventsAPIEvent {
@@ -245,7 +275,7 @@ func TestRouterIgnoresUnsupportedOrUnsafeEvents(t *testing.T) {
 			m.Edited = &slackevents.Edited{}
 			return callbackEvent(slackevents.AppMention, m)
 		}()},
-		{name: "app mention with file", event: func() slackevents.EventsAPIEvent {
+		{name: "app mention with malformed file metadata", event: func() slackevents.EventsAPIEvent {
 			m := baseMention()
 			m.Files = []slackapi.File{{ID: "F00000001"}}
 			return callbackEvent(slackevents.AppMention, m)

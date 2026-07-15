@@ -98,7 +98,7 @@ func TestMemoryStore_AssistantExchangeIsAtomicAndSurvivesRetention(t *testing.T)
 		t.Fatal(err)
 	}
 	assistant := domain.Message{Role: domain.RoleAssistant, Content: "source reply", ExternalTS: "2", CreatedAt: now.Add(time.Second)}
-	prepared, err := store.PrepareAssistantExchange(ctx, metadata, assistant, 1)
+	prepared, err := store.PrepareAssistantExchange(ctx, metadata, assistant, 1, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -132,6 +132,40 @@ func TestMemoryStore_AssistantExchangeIsAtomicAndSurvivesRetention(t *testing.T)
 	}
 }
 
+func TestMemoryStore_IneligibleAssistantExchangePersistsWithoutOutbox(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := t.Context()
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	metadata := domain.ConversationMetadata{Key: key, TeamID: "T12345678", ChannelID: "D12345678", ChannelKind: domain.ChannelDM, LastTS: "2"}
+	now := time.Now().UTC()
+	if err := store.AppendMessage(ctx, metadata, domain.Message{Role: domain.RoleUser, Content: "attachment text", UserID: "U12345678", ExternalTS: "1", CreatedAt: now}, 10); err != nil {
+		t.Fatal(err)
+	}
+	assistant := domain.Message{Role: domain.RoleAssistant, Content: "attachment answer", CreatedAt: now.Add(time.Second)}
+	prepared, err := store.PrepareAssistantExchange(ctx, metadata, assistant, 10, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAssistantExchangePublished(ctx, prepared.ID, "2"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.FinalizeAssistantExchange(ctx, prepared.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	messages, err := store.RecentMessages(ctx, key, 10)
+	if err != nil || len(messages) != 2 || messages[1].Content != "attachment answer" {
+		t.Fatalf("persisted messages = %#v, %v", messages, err)
+	}
+	var outboxCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM memory_outbox`).Scan(&outboxCount); err != nil {
+		t.Fatal(err)
+	}
+	if outboxCount != 0 {
+		t.Fatalf("ineligible exchange created %d outbox rows", outboxCount)
+	}
+}
+
 func TestMemoryStore_AssistantExchangeRollsBackWhenEnqueueTransactionFails(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := t.Context()
@@ -143,7 +177,7 @@ func TestMemoryStore_AssistantExchangeRollsBackWhenEnqueueTransactionFails(t *te
 	conflicting := metadata
 	conflicting.ChannelID = "D99999999" // Existing canonical key makes the transaction fail.
 	assistant := domain.Message{Role: domain.RoleAssistant, Content: "reply", ExternalTS: "2", CreatedAt: time.Now().UTC()}
-	prepared, err := store.PrepareAssistantExchange(ctx, conflicting, assistant, 10)
+	prepared, err := store.PrepareAssistantExchange(ctx, conflicting, assistant, 10, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,7 +206,7 @@ func TestMemoryStore_DoesNotFinalizePreparedExchangeBeforePublish(t *testing.T) 
 		t.Fatal(err)
 	}
 	assistant := domain.Message{Role: domain.RoleAssistant, Content: "published reply", CreatedAt: time.Now().UTC()}
-	prepared, err := store.PrepareAssistantExchange(ctx, metadata, assistant, 10)
+	prepared, err := store.PrepareAssistantExchange(ctx, metadata, assistant, 10, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -199,7 +233,7 @@ func TestMemoryStore_ReconcilesPublishedExchangeAndPreservesSlackTimestamp(t *te
 	if err := store.AppendMessage(ctx, metadata, domain.Message{Role: domain.RoleUser, Content: "remember this", UserID: "U12345678", ExternalTS: "1", CreatedAt: time.Now().UTC()}, 10); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := store.PrepareAssistantExchange(ctx, metadata, domain.Message{Role: domain.RoleAssistant, Content: "published reply", CreatedAt: time.Now().UTC()}, 10)
+	prepared, err := store.PrepareAssistantExchange(ctx, metadata, domain.Message{Role: domain.RoleAssistant, Content: "published reply", CreatedAt: time.Now().UTC()}, 10, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -229,7 +263,7 @@ func TestMemoryStore_RecoversRemotePublishBeforeLocalFinalization(t *testing.T) 
 	if err := store.AppendMessage(ctx, metadata, domain.Message{Role: domain.RoleUser, Content: "remember this", UserID: "U12345678", ExternalTS: "1", CreatedAt: time.Now().UTC()}, 10); err != nil {
 		t.Fatal(err)
 	}
-	prepared, err := store.PrepareAssistantExchange(ctx, metadata, domain.Message{Role: domain.RoleAssistant, Content: "published reply", CreatedAt: time.Now().UTC()}, 10)
+	prepared, err := store.PrepareAssistantExchange(ctx, metadata, domain.Message{Role: domain.RoleAssistant, Content: "published reply", CreatedAt: time.Now().UTC()}, 10, true)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -254,7 +288,7 @@ func TestMemoryStore_LeavesPreparedExchangesUnresolvedWhenTheyShareRemoteTimesta
 		t.Fatal(err)
 	}
 	for range 2 {
-		if _, err := store.PrepareAssistantExchange(ctx, metadata, domain.Message{Role: domain.RoleAssistant, Content: "same reply", CreatedAt: time.Now().UTC()}, 10); err != nil {
+		if _, err := store.PrepareAssistantExchange(ctx, metadata, domain.Message{Role: domain.RoleAssistant, Content: "same reply", CreatedAt: time.Now().UTC()}, 10, true); err != nil {
 			t.Fatal(err)
 		}
 	}

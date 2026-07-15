@@ -74,6 +74,12 @@ type SlackConfig struct {
 	AllowedTeamIDs      []string           `yaml:"allowed_team_ids"`
 	AllowedChannelIDs   []string           `yaml:"allowed_channel_ids"`
 	Context             SlackContextConfig `yaml:"context"`
+	Files               SlackFilesConfig   `yaml:"files"`
+}
+
+type SlackFilesConfig struct {
+	MaxBytesPerFile   int `yaml:"max_bytes_per_file"`
+	MaxProcessedChars int `yaml:"max_processed_chars"`
 }
 
 type SlackContextConfig struct {
@@ -155,6 +161,10 @@ func Default() Config {
 				TimeoutSeconds:              5,
 				ProfileCacheTTLMinutes:      60,
 				ConversationCacheTTLMinutes: 15,
+			},
+			Files: SlackFilesConfig{
+				MaxBytesPerFile:   5 * 1024 * 1024,
+				MaxProcessedChars: 20_000,
 			},
 		},
 		Memory: MemoryConfig{

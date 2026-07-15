@@ -184,6 +184,41 @@ func TestGenerateContentSendsConfiguredChatCompletionAndReturnsOnlyAssistantText
 	}
 }
 
+func TestRequestParamsPreservesTextAndImagePartOrder(t *testing.T) {
+	server := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(server.Close)
+	llm := mustTestLLM(t, server.URL)
+	request := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			genai.NewPartFromBytes([]byte("png"), "image/png"),
+			genai.NewPartFromText("between"),
+			genai.NewPartFromBytes([]byte("jpg"), "image/jpeg"),
+		},
+	}}}
+	params, err := llm.requestParams(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	messages := body["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	got := make([]string, 0, len(content))
+	for _, raw := range content {
+		got = append(got, raw.(map[string]any)["type"].(string))
+	}
+	if strings.Join(got, ",") != "image_url,text,image_url" {
+		t.Fatalf("content part order = %v", got)
+	}
+}
+
 func TestGenerateContentReturnsProviderAndEmptyResponseErrors(t *testing.T) {
 	t.Parallel()
 
@@ -347,7 +382,7 @@ func TestGenerateContentRejectsUnsupportedRequestsBeforeHTTP(t *testing.T) {
 		want   error
 	}{
 		{name: "stream", req: textRequest(), stream: true, want: ErrStreamingUnsupported},
-		{name: "non text part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("image"), "image/png")}}}}, want: ErrUnsupportedPart},
+		{name: "non text part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("binary"), "application/pdf")}}}}, want: ErrUnsupportedPart},
 		{name: "thought part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "reasoning", Thought: true}}}}}, want: ErrUnsupportedPart},
 		{name: "thought signature", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", ThoughtSignature: []byte("signature")}}}}}, want: ErrUnsupportedPart},
 		{name: "part metadata", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", PartMetadata: map[string]any{"source": "test"}}}}}}, want: ErrUnsupportedPart},

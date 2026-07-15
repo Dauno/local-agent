@@ -1,6 +1,7 @@
 package openaillm
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -65,6 +66,8 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 	var texts []string
 	var functionCalls []*genai.FunctionCall
 	var functionResponses []*genai.FunctionResponse
+	var imageParts []*genai.Part
+	var orderedContentParts []*genai.Part
 
 	for _, part := range content.Parts {
 		if part == nil {
@@ -75,16 +78,27 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 			functionCalls = append(functionCalls, part.FunctionCall)
 		case part.FunctionResponse != nil:
 			functionResponses = append(functionResponses, part.FunctionResponse)
+		case part.InlineData != nil:
+			if supportedImageMIME(part.InlineData.MIMEType) {
+				imageParts = append(imageParts, part)
+				orderedContentParts = append(orderedContentParts, part)
+			} else {
+				return nil, ErrUnsupportedPart
+			}
 		default:
-			if part.ToolCall != nil || part.ToolResponse != nil || part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+			if part.ToolCall != nil || part.ToolResponse != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
 				return nil, ErrUnsupportedPart
 			}
 			texts = append(texts, part.Text)
+			orderedContentParts = append(orderedContentParts, part)
 		}
 	}
 
 	if len(functionCalls) > 0 && len(functionResponses) > 0 {
 		return nil, errors.New("content cannot mix function calls and responses")
+	}
+	if len(imageParts) > 0 && (len(functionCalls) > 0 || len(functionResponses) > 0) {
+		return nil, errors.New("content cannot mix images with function calls or responses")
 	}
 	if len(functionCalls) > 0 {
 		if content.Role != genai.RoleModel {
@@ -137,16 +151,53 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 	}
 
 	text := strings.Join(texts, "")
-	if strings.TrimSpace(text) == "" {
-		return nil, errors.New("content must have non-empty text")
+	hasImages := len(imageParts) > 0
+
+	if !hasImages {
+		if strings.TrimSpace(text) == "" {
+			return nil, errors.New("content must have non-empty text")
+		}
+		switch content.Role {
+		case "", genai.RoleUser:
+			return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(text)}, nil
+		case genai.RoleModel:
+			return []openai.ChatCompletionMessageParamUnion{openai.AssistantMessage(text)}, nil
+		default:
+			return nil, fmt.Errorf("unsupported ADK role %q", content.Role)
+		}
 	}
-	switch content.Role {
-	case "", genai.RoleUser:
-		return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(text)}, nil
-	case genai.RoleModel:
-		return []openai.ChatCompletionMessageParamUnion{openai.AssistantMessage(text)}, nil
+
+	// Image content parts: build multipart user message.
+	if content.Role != genai.RoleUser && content.Role != "" {
+		return nil, fmt.Errorf("image content requires user role, got %q", content.Role)
+	}
+
+	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(orderedContentParts))
+	for _, part := range orderedContentParts {
+		if part.InlineData != nil {
+			dataURL := "data:" + part.InlineData.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(part.InlineData.Data)
+			parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+				URL: dataURL,
+			}))
+			continue
+		}
+		if part.Text != "" {
+			parts = append(parts, openai.TextContentPart(part.Text))
+		}
+	}
+	if len(parts) == 0 {
+		return nil, errors.New("image content has no text or images")
+	}
+
+	return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(parts)}, nil
+}
+
+func supportedImageMIME(mimeType string) bool {
+	switch strings.ToLower(mimeType) {
+	case "image/png", "image/jpeg", "image/webp", "image/gif":
+		return true
 	default:
-		return nil, fmt.Errorf("unsupported ADK role %q", content.Role)
+		return false
 	}
 }
 
@@ -162,7 +213,13 @@ func textFromContent(content *genai.Content) (string, error) {
 		if part.FunctionCall != nil || part.FunctionResponse != nil || part.ToolCall != nil || part.ToolResponse != nil {
 			return "", ErrUnsupportedPart
 		}
-		if part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+		if part.InlineData != nil {
+			if strings.HasPrefix(part.InlineData.MIMEType, "image/") {
+				continue
+			}
+			return "", ErrUnsupportedPart
+		}
+		if part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
 			return "", ErrUnsupportedPart
 		}
 		text.WriteString(part.Text)

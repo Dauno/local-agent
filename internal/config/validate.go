@@ -124,6 +124,19 @@ func Validate(cfg Config) error {
 	validateIDs(&problems, "slack.allowed_team_ids", cfg.Slack.AllowedTeamIDs, slackTeamIDPattern, "a plausible Slack team ID beginning with T")
 	validateIDs(&problems, "slack.allowed_channel_ids", cfg.Slack.AllowedChannelIDs, slackChannelIDPattern, "a plausible Slack public or private channel ID beginning with C or G")
 
+	const maxFileBytes = 5 * 1024 * 1024
+	const maxFileChars = 20_000
+	if cfg.Slack.Files.MaxBytesPerFile <= 0 {
+		add("slack.files.max_bytes_per_file", "must be greater than zero")
+	} else if cfg.Slack.Files.MaxBytesPerFile > maxFileBytes {
+		add("slack.files.max_bytes_per_file", fmt.Sprintf("must not exceed %d", maxFileBytes))
+	}
+	if cfg.Slack.Files.MaxProcessedChars <= 0 {
+		add("slack.files.max_processed_chars", "must be greater than zero")
+	} else if cfg.Slack.Files.MaxProcessedChars > maxFileChars {
+		add("slack.files.max_processed_chars", fmt.Sprintf("must not exceed %d", maxFileChars))
+	}
+
 	if cfg.Slack.Context.Enabled {
 		if cfg.Slack.Context.MaxChars <= 0 {
 			add("slack.context.max_chars", "must be greater than zero when enabled")

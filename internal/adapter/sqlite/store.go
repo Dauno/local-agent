@@ -184,7 +184,12 @@ func (s *Store) AppendMessage(
 
 // PrepareAssistantExchange records the complete exchange before publishing so a
 // later database failure cannot lose a reply Slack has already accepted.
-func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int) (port.PreparedAssistantExchange, error) {
+type sourceMessagesWrapper struct {
+	MemoryEligible bool              `json:"memory_eligible"`
+	Messages       []json.RawMessage `json:"messages"`
+}
+
+func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
 	if message.Role != domain.RoleAssistant {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("assistant exchange requires assistant role, got %q", message.Role)
 	}
@@ -201,7 +206,10 @@ func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.Co
 		return port.PreparedAssistantExchange{}, err
 	}
 	source = append(source, message)
-	payload, err := json.Marshal(source)
+	payload, err := json.Marshal(sourceMessagesWrapper{
+		MemoryEligible: memoryEligible,
+		Messages:       marshalMessages(source),
+	})
 	if err != nil {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("encode assistant exchange source: %w", err)
 	}
@@ -278,21 +286,23 @@ func (s *Store) FinalizeAssistantExchange(ctx context.Context, intentID string) 
 	if err := appendMessageTx(ctx, tx, metadata, message, intent.Retain); err != nil {
 		return err
 	}
-	source, err := intent.sourceWithAssistant(message)
+	source, eligible, err := decodeSourceMessages(intent.SourceMessages, message)
 	if err != nil {
 		return err
 	}
-	payload, err := json.Marshal(source)
-	if err != nil {
-		return fmt.Errorf("encode finalized assistant exchange: %w", err)
-	}
-	nowNanos := time.Now().UTC().UnixNano()
-	if _, err := tx.ExecContext(ctx, `
-		INSERT INTO memory_outbox (conversation_key, exchange_ts, source_messages, status, attempts, next_attempt, created_at, updated_at)
-		VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)`,
-		string(metadata.Key), message.ExternalTS, string(payload), nowNanos, nowNanos, nowNanos,
-	); err != nil {
-		return fmt.Errorf("enqueue assistant exchange: %w", err)
+	if eligible {
+		payload, err := json.Marshal(source)
+		if err != nil {
+			return fmt.Errorf("encode finalized assistant exchange: %w", err)
+		}
+		nowNanos := time.Now().UTC().UnixNano()
+		if _, err := tx.ExecContext(ctx, `
+			INSERT INTO memory_outbox (conversation_key, exchange_ts, source_messages, status, attempts, next_attempt, created_at, updated_at)
+			VALUES (?, ?, ?, 'pending', 0, ?, ?, ?)`,
+			string(metadata.Key), message.ExternalTS, string(payload), nowNanos, nowNanos, nowNanos,
+		); err != nil {
+			return fmt.Errorf("enqueue assistant exchange: %w", err)
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_exchange_intents WHERE id = ?`, intentID); err != nil {
 		return fmt.Errorf("delete finalized assistant exchange intent: %w", err)
@@ -450,16 +460,52 @@ func (i assistantExchangeIntent) finderIntent() port.AssistantExchangeIntent {
 	}
 }
 
-func (i assistantExchangeIntent) sourceWithAssistant(assistant domain.Message) ([]domain.Message, error) {
+func marshalMessages(messages []domain.Message) []json.RawMessage {
+	result := make([]json.RawMessage, 0, len(messages))
+	for _, msg := range messages {
+		encoded, err := json.Marshal(msg)
+		if err != nil {
+			continue
+		}
+		result = append(result, json.RawMessage(encoded))
+	}
+	return result
+}
+
+func decodeSourceMessages(sourceMessagesJSON string, assistant domain.Message) ([]domain.Message, bool, error) {
+	var wrapper sourceMessagesWrapper
+	if err := json.Unmarshal([]byte(sourceMessagesJSON), &wrapper); err == nil && len(wrapper.Messages) > 0 {
+		eligible := wrapper.MemoryEligible
+		source := make([]domain.Message, 0, len(wrapper.Messages))
+		for _, raw := range wrapper.Messages {
+			var msg domain.Message
+			if err := json.Unmarshal(raw, &msg); err != nil {
+				return nil, false, fmt.Errorf("decode assistant exchange source message: %w", err)
+			}
+			source = append(source, msg)
+		}
+		if len(source) == 0 || source[len(source)-1].Role != domain.RoleAssistant {
+			return nil, false, errors.New("prepared assistant exchange source is invalid")
+		}
+		source[len(source)-1] = assistant
+		return source, eligible, nil
+	}
+
+	// Legacy format: plain message array. Treated as memory-eligible.
 	var source []domain.Message
-	if err := json.Unmarshal([]byte(i.SourceMessages), &source); err != nil {
-		return nil, fmt.Errorf("decode assistant exchange source: %w", err)
+	if err := json.Unmarshal([]byte(sourceMessagesJSON), &source); err != nil {
+		return nil, false, fmt.Errorf("decode assistant exchange source: %w", err)
 	}
 	if len(source) == 0 || source[len(source)-1].Role != domain.RoleAssistant {
-		return nil, errors.New("prepared assistant exchange source is invalid")
+		return nil, false, errors.New("prepared assistant exchange source is invalid")
 	}
 	source[len(source)-1] = assistant
-	return source, nil
+	return source, true, nil
+}
+
+func (i assistantExchangeIntent) sourceWithAssistant(assistant domain.Message) ([]domain.Message, error) {
+	source, _, err := decodeSourceMessages(i.SourceMessages, assistant)
+	return source, err
 }
 
 func appendMessageTx(ctx context.Context, tx *sql.Tx, metadata domain.ConversationMetadata, message domain.Message, retain int) error {
