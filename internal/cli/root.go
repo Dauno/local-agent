@@ -71,6 +71,7 @@ func NewRoot(backend Backend, streams Streams) (*cobra.Command, error) {
 		newRunCommand(backend),
 		newManifestCommand(backend, streams),
 		newVersionCommand(backend, streams),
+		newShimCommand(streams),
 	)
 	return root, nil
 }

@@ -1,0 +1,10 @@
+name: opencode
+type: agent_cli
+shim:
+  command: self
+  args: [shim, opencode]
+profiles:
+  smoke:
+    model: opencode/big-pickle
+    agent: build
+    approval: reject

@@ -199,6 +199,22 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, fmt.Errorf("create attachment analyzer template: %w", err)
 	}
 
+	openCodeProvider := agentdef.SeedOpenCodeProviderExample()
+	openCodeData, err := agentdef.MarshalProvider(openCodeProvider)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("marshal OpenCode provider template: %w", err)
+	}
+	openCodeData = append([]byte(
+		"# Rename this file to opencode.yaml to enable the OpenCode agent CLI provider.\n"+
+			"# Requirements: OpenCode installed and logged in, sandbox.enabled: true with the\n"+
+			"# local-agent application root registered in sandbox.projects, and a native\n"+
+			"# OpenCode model reference in profiles.\n"+
+			"# Switching root_agent.model between provider families requires:\n"+
+			"#   local-agent init --reset-state\n"), openCodeData...)
+	if _, err := s.files.CreateFile(ctx, filepath.Join(providersDir, "opencode.yaml.example"), openCodeData, 0o644); err != nil {
+		return Snapshot{}, fmt.Errorf("create OpenCode provider template: %w", err)
+	}
+
 	if err := s.files.CheckRegularFileOrMissing(ctx, paths.DatabaseFile); err != nil {
 		return Snapshot{}, fmt.Errorf("validate SQLite path: %w", err)
 	}

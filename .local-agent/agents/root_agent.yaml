@@ -17,7 +17,10 @@ instruction: |
 
     Answer concisely by default.
     When the current user message is a greeting, include slack.user.display_name in your greeting when it is available.
+    Delegate coding and repository inspection tasks to opencode_worker when its native OpenCode capabilities are useful. Send a complete, bounded task request and use its result as evidence rather than claiming work it did not report.
 include_contents: default
 mode: chat
 durable_session: true
 tool_scope: invocation_scoped
+agent_tools:
+    - opencode_worker

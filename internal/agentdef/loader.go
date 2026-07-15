@@ -97,6 +97,9 @@ func loadProviders(dir string) (map[string]Provider, error) {
 		if err := decodeStrictYAML(data, &p); err != nil {
 			return nil, fmt.Errorf("parse provider file %q: %w", entry.Name(), err)
 		}
+		if err := validateProviderFieldPresence(data, p); err != nil {
+			return nil, fmt.Errorf("parse provider file %q: %w", entry.Name(), err)
+		}
 		if _, exists := providers[p.Name]; exists {
 			return nil, fmt.Errorf("duplicate provider name %q in %q", p.Name, entry.Name())
 		}
@@ -148,6 +151,97 @@ func decodeStrictYAML(data []byte, target any) error {
 	return nil
 }
 
+// validateProviderFieldPresence rejects type-specific fields even when YAML
+// decodes them to an indistinguishable empty Go value.
+func validateProviderFieldPresence(data []byte, provider Provider) error {
+	var document yaml.Node
+	if err := yaml.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	root := yamlDocumentRoot(&document)
+	if root == nil || root.Kind != yaml.MappingNode {
+		return nil
+	}
+
+	var providerForbidden, profileForbidden []string
+	switch provider.Type {
+	case ProviderTypeAgentCLI:
+		providerForbidden = []string{"base_url", "api_key_env", "headers"}
+		profileForbidden = []string{"reasoning_effort", "extra_body", "generate_content_config"}
+	case ProviderTypeOpenAICompatible:
+		providerForbidden = []string{"shim"}
+		profileForbidden = []string{"agent", "approval", "variant"}
+	default:
+		return nil
+	}
+
+	prefix := fmt.Sprintf("provider %q", provider.Name)
+	var errs []string
+	for _, field := range providerForbidden {
+		if mappingHasKey(root, field) {
+			if provider.Type == ProviderTypeOpenAICompatible {
+				errs = append(errs, fmt.Sprintf("%s: %s is only valid for %s providers", prefix, field, ProviderTypeAgentCLI))
+			} else {
+				errs = append(errs, fmt.Sprintf("%s: %s is invalid for %s providers", prefix, field, provider.Type))
+			}
+		}
+	}
+	profiles := mappingValue(root, "profiles")
+	if profiles != nil && profiles.Kind == yaml.MappingNode {
+		for index := 0; index+1 < len(profiles.Content); index += 2 {
+			profileName := profiles.Content[index].Value
+			profileNode := dereferenceAlias(profiles.Content[index+1])
+			if profileNode == nil || profileNode.Kind != yaml.MappingNode {
+				continue
+			}
+			for _, field := range profileForbidden {
+				if mappingHasKey(profileNode, field) {
+					if provider.Type == ProviderTypeOpenAICompatible {
+						errs = append(errs, fmt.Sprintf("%s profile %q: %s is only valid for %s profiles", prefix, profileName, field, ProviderTypeAgentCLI))
+					} else {
+						errs = append(errs, fmt.Sprintf("%s profile %q: %s is invalid for %s profiles", prefix, profileName, field, provider.Type))
+					}
+				}
+			}
+		}
+	}
+	if len(errs) > 0 {
+		return errors.New(strings.Join(errs, "; "))
+	}
+	return nil
+}
+
+func yamlDocumentRoot(document *yaml.Node) *yaml.Node {
+	if document == nil || len(document.Content) == 0 {
+		return nil
+	}
+	return dereferenceAlias(document.Content[0])
+}
+
+func dereferenceAlias(node *yaml.Node) *yaml.Node {
+	for node != nil && node.Kind == yaml.AliasNode {
+		node = node.Alias
+	}
+	return node
+}
+
+func mappingHasKey(mapping *yaml.Node, key string) bool {
+	return mappingValue(mapping, key) != nil
+}
+
+func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
+	mapping = dereferenceAlias(mapping)
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return nil
+	}
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		if mapping.Content[index].Value == key {
+			return dereferenceAlias(mapping.Content[index+1])
+		}
+	}
+	return nil
+}
+
 func validateDefinitions(defs *Definitions) error {
 	var errs []string
 
@@ -163,6 +257,7 @@ func validateDefinitions(defs *Definitions) error {
 	for _, a := range defs.Agents {
 		errs = append(errs, validateAgent(a, defs.Providers)...)
 	}
+	errs = append(errs, validateAgentTools(defs)...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid agent definitions: %s", strings.Join(errs, "; "))
@@ -177,9 +272,35 @@ func validateProvider(p Provider) []string {
 	if strings.TrimSpace(p.Name) == "" {
 		errs = append(errs, "provider name must not be empty")
 	}
-	if p.Type != "openai_compatible" {
-		errs = append(errs, fmt.Sprintf("%s: type must be openai_compatible", prefix))
+	switch p.Type {
+	case ProviderTypeOpenAICompatible:
+		errs = append(errs, validateOpenAICompatibleProvider(prefix, p)...)
+	case ProviderTypeAgentCLI:
+		errs = append(errs, validateAgentCLIProvider(prefix, p)...)
+	default:
+		errs = append(errs, fmt.Sprintf("%s: type must be %s or %s", prefix, ProviderTypeOpenAICompatible, ProviderTypeAgentCLI))
 	}
+	if len(p.Profiles) == 0 {
+		errs = append(errs, fmt.Sprintf("%s: at least one profile is required", prefix))
+	}
+
+	seenProfiles := make(map[string]struct{})
+	for name, profile := range p.Profiles {
+		if strings.TrimSpace(name) == "" {
+			errs = append(errs, fmt.Sprintf("%s: profile name must not be empty", prefix))
+			continue
+		}
+		if _, exists := seenProfiles[name]; exists {
+			errs = append(errs, fmt.Sprintf("%s: duplicate profile %q", prefix, name))
+		}
+		seenProfiles[name] = struct{}{}
+		errs = append(errs, validateProfile(prefix, p.Type, name, profile)...)
+	}
+	return errs
+}
+
+func validateOpenAICompatibleProvider(prefix string, p Provider) []string {
+	var errs []string
 	if err := validateBaseURL(p.BaseURL); err != nil {
 		errs = append(errs, fmt.Sprintf("%s: %s", prefix, err))
 	}
@@ -197,41 +318,87 @@ func validateProvider(p Provider) []string {
 			errs = append(errs, fmt.Sprintf("%s: header %q must not contain a newline", prefix, name))
 		}
 	}
-	if len(p.Profiles) == 0 {
-		errs = append(errs, fmt.Sprintf("%s: at least one profile is required", prefix))
-	}
-
-	seenProfiles := make(map[string]struct{})
-	for name, profile := range p.Profiles {
-		if strings.TrimSpace(name) == "" {
-			errs = append(errs, fmt.Sprintf("%s: profile name must not be empty", prefix))
-			continue
-		}
-		if _, exists := seenProfiles[name]; exists {
-			errs = append(errs, fmt.Sprintf("%s: duplicate profile %q", prefix, name))
-		}
-		seenProfiles[name] = struct{}{}
-		errs = append(errs, validateProfile(prefix, name, profile)...)
+	if p.Shim != nil {
+		errs = append(errs, fmt.Sprintf("%s: shim is only valid for %s providers", prefix, ProviderTypeAgentCLI))
 	}
 	return errs
 }
 
-func validateProfile(providerPrefix, name string, profile Profile) []string {
+func validateAgentCLIProvider(prefix string, p Provider) []string {
+	var errs []string
+	if p.BaseURL != "" {
+		errs = append(errs, fmt.Sprintf("%s: base_url is invalid for %s providers", prefix, ProviderTypeAgentCLI))
+	}
+	if p.APIKeyEnv != "" {
+		errs = append(errs, fmt.Sprintf("%s: api_key_env is invalid for %s providers", prefix, ProviderTypeAgentCLI))
+	}
+	if len(p.Headers) > 0 {
+		errs = append(errs, fmt.Sprintf("%s: headers are invalid for %s providers", prefix, ProviderTypeAgentCLI))
+	}
+	if p.Shim == nil {
+		errs = append(errs, fmt.Sprintf("%s: shim is required for %s providers", prefix, ProviderTypeAgentCLI))
+		return errs
+	}
+	if strings.TrimSpace(p.Shim.Command) == "" {
+		errs = append(errs, fmt.Sprintf("%s: shim.command must not be empty", prefix))
+	}
+	if strings.ContainsAny(p.Shim.Command, "\r\n\x00") {
+		errs = append(errs, fmt.Sprintf("%s: shim.command must be a single line", prefix))
+	}
+	for index, arg := range p.Shim.Args {
+		if strings.TrimSpace(arg) == "" {
+			errs = append(errs, fmt.Sprintf("%s: shim.args[%d] must not be empty", prefix, index))
+		}
+		if strings.ContainsAny(arg, "\r\n\x00") {
+			errs = append(errs, fmt.Sprintf("%s: shim.args[%d] must be a single line", prefix, index))
+		}
+	}
+	return errs
+}
+
+func validateProfile(providerPrefix, providerType, name string, profile Profile) []string {
 	var errs []string
 	prefix := fmt.Sprintf("%s profile %q", providerPrefix, name)
 
 	if strings.TrimSpace(profile.Model) == "" {
 		errs = append(errs, fmt.Sprintf("%s: model must not be empty", prefix))
 	}
-	if _, err := json.Marshal(profile.ExtraBody); err != nil {
-		errs = append(errs, fmt.Sprintf("%s: extra_body must contain JSON-compatible values: %v", prefix, err))
-	}
-	if _, present := profile.ExtraBody["stream"]; present {
-		errs = append(errs, fmt.Sprintf("%s: extra_body.stream is reserved", prefix))
-	}
 
-	if profile.GenerateContentConfig != nil && profile.GenerateContentConfig.MaxOutputTokens < 0 {
-		errs = append(errs, fmt.Sprintf("%s: generate_content_config.max_output_tokens must not be negative", prefix))
+	switch providerType {
+	case ProviderTypeAgentCLI:
+		if profile.ReasoningEffort != "" {
+			errs = append(errs, fmt.Sprintf("%s: reasoning_effort is invalid for %s profiles", prefix, ProviderTypeAgentCLI))
+		}
+		if len(profile.ExtraBody) > 0 {
+			errs = append(errs, fmt.Sprintf("%s: extra_body is invalid for %s profiles", prefix, ProviderTypeAgentCLI))
+		}
+		if profile.GenerateContentConfig != nil {
+			errs = append(errs, fmt.Sprintf("%s: generate_content_config is invalid for %s profiles", prefix, ProviderTypeAgentCLI))
+		}
+		switch profile.Approval {
+		case "", ApprovalReject, ApprovalAuto:
+		default:
+			errs = append(errs, fmt.Sprintf("%s: approval must be %s or %s", prefix, ApprovalReject, ApprovalAuto))
+		}
+	default:
+		if profile.Agent != "" {
+			errs = append(errs, fmt.Sprintf("%s: agent is only valid for %s profiles", prefix, ProviderTypeAgentCLI))
+		}
+		if profile.Approval != "" {
+			errs = append(errs, fmt.Sprintf("%s: approval is only valid for %s profiles", prefix, ProviderTypeAgentCLI))
+		}
+		if profile.Variant != "" {
+			errs = append(errs, fmt.Sprintf("%s: variant is only valid for %s profiles", prefix, ProviderTypeAgentCLI))
+		}
+		if _, err := json.Marshal(profile.ExtraBody); err != nil {
+			errs = append(errs, fmt.Sprintf("%s: extra_body must contain JSON-compatible values: %v", prefix, err))
+		}
+		if _, present := profile.ExtraBody["stream"]; present {
+			errs = append(errs, fmt.Sprintf("%s: extra_body.stream is reserved", prefix))
+		}
+		if profile.GenerateContentConfig != nil && profile.GenerateContentConfig.MaxOutputTokens < 0 {
+			errs = append(errs, fmt.Sprintf("%s: generate_content_config.max_output_tokens must not be negative", prefix))
+		}
 	}
 
 	return errs
@@ -287,6 +454,67 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	}
 
 	return errs
+}
+
+func validateAgentTools(defs *Definitions) []string {
+	var errs []string
+	for _, owner := range defs.Agents {
+		if len(owner.AgentTools) == 0 {
+			continue
+		}
+		prefix := fmt.Sprintf("agent %q", owner.Name)
+		if owner.Name != "root_agent" {
+			errs = append(errs, fmt.Sprintf("%s: agent_tools is only allowed on root_agent", prefix))
+		}
+		if provider, ok := providerForAgent(owner, defs.Providers); ok && provider.Type != ProviderTypeOpenAICompatible {
+			errs = append(errs, fmt.Sprintf("%s: agent_tools requires an %s root model", prefix, ProviderTypeOpenAICompatible))
+		}
+
+		seen := make(map[string]struct{}, len(owner.AgentTools))
+		for index, name := range owner.AgentTools {
+			if strings.TrimSpace(name) == "" {
+				errs = append(errs, fmt.Sprintf("%s: agent_tools[%d] must not be empty", prefix, index))
+				continue
+			}
+			if _, duplicate := seen[name]; duplicate {
+				errs = append(errs, fmt.Sprintf("%s: duplicate agent tool %q", prefix, name))
+				continue
+			}
+			seen[name] = struct{}{}
+
+			target, exists := defs.Agents[name]
+			if !exists {
+				errs = append(errs, fmt.Sprintf("%s: unknown agent tool %q", prefix, name))
+				continue
+			}
+			if target.Name == owner.Name {
+				errs = append(errs, fmt.Sprintf("%s: cannot reference itself as an agent tool", prefix))
+				continue
+			}
+			if strings.TrimSpace(target.Description) == "" {
+				errs = append(errs, fmt.Sprintf("agent tool %q: description must not be empty", name))
+			}
+			if len(target.AgentTools) > 0 {
+				errs = append(errs, fmt.Sprintf("agent tool %q: nested agent_tools are not supported", name))
+			}
+			if target.DurableSession || target.ToolScope != "" || target.Role != "" {
+				errs = append(errs, fmt.Sprintf("agent tool %q: durable_session, tool_scope, and role are not supported", name))
+			}
+			if provider, ok := providerForAgent(target, defs.Providers); ok && provider.Type != ProviderTypeAgentCLI {
+				errs = append(errs, fmt.Sprintf("agent tool %q: model must use an %s provider", name, ProviderTypeAgentCLI))
+			}
+		}
+	}
+	return errs
+}
+
+func providerForAgent(agent AgentDef, providers map[string]Provider) (Provider, bool) {
+	providerName, _, ok := splitModelReference(agent.Model)
+	if !ok {
+		return Provider{}, false
+	}
+	provider, ok := providers[providerName]
+	return provider, ok
 }
 
 func splitModelReference(modelRef string) (providerName, profileName string, ok bool) {

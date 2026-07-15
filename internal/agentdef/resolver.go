@@ -2,6 +2,7 @@ package agentdef
 
 import (
 	"fmt"
+	"strings"
 )
 
 func (d *Definitions) ResolveModel(modelRef string) (*ResolvedModel, error) {
@@ -20,31 +21,52 @@ func (d *Definitions) ResolveModel(modelRef string) (*ResolvedModel, error) {
 	}
 
 	resolved := &ResolvedModel{
-		Provider:              provider,
-		Profile:               profile,
-		Model:                 profile.Model,
-		BaseURL:               provider.BaseURL,
-		APIKeyEnv:             provider.APIKeyEnv,
-		Headers:               provider.Headers,
-		ReasoningEffort:       profile.ReasoningEffort,
-		ExtraBody:             profile.ExtraBody,
-		GenerateContentConfig: profile.GenerateContentConfig,
+		Provider: provider,
+		Profile:  profile,
+		Model:    profile.Model,
 	}
 
-	if resolved.Headers == nil {
-		resolved.Headers = make(map[string]string)
-	}
-	if resolved.ExtraBody == nil {
-		resolved.ExtraBody = make(map[string]any)
+	switch provider.Type {
+	case ProviderTypeAgentCLI:
+		if provider.Shim != nil {
+			resolved.Shim = *provider.Shim
+		}
+		resolved.Agent = profile.Agent
+		resolved.Approval = profile.Approval
+		if resolved.Approval == "" {
+			resolved.Approval = ApprovalReject
+		}
+		resolved.Variant = profile.Variant
+	default:
+		resolved.BaseURL = provider.BaseURL
+		resolved.APIKeyEnv = provider.APIKeyEnv
+		resolved.Headers = provider.Headers
+		resolved.ReasoningEffort = profile.ReasoningEffort
+		resolved.ExtraBody = profile.ExtraBody
+		resolved.GenerateContentConfig = profile.GenerateContentConfig
+		if resolved.Headers == nil {
+			resolved.Headers = make(map[string]string)
+		}
+		if resolved.ExtraBody == nil {
+			resolved.ExtraBody = make(map[string]any)
+		}
 	}
 
 	return resolved, nil
 }
 
+// RequiredAPIKeyEnvs returns environment variable names only for provider
+// types that require a model API key. agent_cli providers contribute nothing.
 func (d *Definitions) RequiredAPIKeyEnvs() []string {
 	seen := make(map[string]struct{})
 	var envs []string
 	for _, p := range d.Providers {
+		if p.Type == ProviderTypeAgentCLI {
+			continue
+		}
+		if strings.TrimSpace(p.APIKeyEnv) == "" {
+			continue
+		}
 		if _, ok := seen[p.APIKeyEnv]; !ok {
 			seen[p.APIKeyEnv] = struct{}{}
 			envs = append(envs, p.APIKeyEnv)
