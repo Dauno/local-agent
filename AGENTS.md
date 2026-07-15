@@ -2,6 +2,8 @@
 
 Go 1.25 Slack Socket Mode agent using Google ADK + OpenAI-compatible LLM.
 
+Module path is `github.com/Dauno/slack-local-agent` (not the directory name `local-agent`).
+
 ## Build & dev commands
 
 ```sh
@@ -25,6 +27,7 @@ No Makefile, no CI workflows, no `.golangci.yml`. `go vet` is the only lint.
 | `bin/local-agent manifest [--write]` | renders Slack manifest |
 | `bin/local-agent version` | build info |
 | `bin/local-agent shim opencode` | hidden; cli-v1 mapper process for the `agent_cli` provider (reads one NDJSON request on stdin) |
+| `bin/local-agent shim codex` | hidden; cli-v1 mapper for Codex CLI (same NDJSON contract) |
 
 ## Architecture
 
@@ -38,17 +41,18 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 | `internal/adapter` | Concrete implementations. | Must not import other adapters (composed in `internal/app`). |
 | `internal/app` | Composition root. | Must not import CLI layer. |
 
-**Adapters** (15): adkagent, adkartifact, agentcli, envfile, fsproject, fssandbox, logging, memorycurator, memoryprojector, modelcalllimiter, openaillm, opencodeshim, slack, sqlite, toolfactory.
+**Adapters** (16): adkagent, adkartifact, agentcli, codexshim, envfile, fsproject, fssandbox, logging, memorycurator, memoryprojector, modelcalllimiter, openaillm, opencodeshim, slack, sqlite, toolfactory.
 
 **Usecases** (5): bootstrap, bot, doctor, memory, sandbox.
 
-**Other internal packages**: `agentdef` (agent/provider YAML definitions, stdlib+yaml.v3 only), `cliprotocol` (stdlib-only `cli-v1` NDJSON wire contract between the `agent_cli` adapter and shim processes), `manifest` (Slack app manifest rendering), `secure` (credential redaction), `cli` (cobra delivery; also hosts the hidden `shim opencode` mapper command), `buildinfo` (version metadata), `config` (path resolution).
+**Other internal packages**: `agentdef` (agent/provider YAML definitions, stdlib+yaml.v3 only), `cliprotocol` (stdlib-only `cli-v1` NDJSON wire contract between the `agent_cli` adapter and shim processes), `manifest` (Slack app manifest rendering), `secure` (credential redaction), `cli` (cobra delivery; also hosts the hidden `shim opencode` and `shim codex` mapper commands), `buildinfo` (version metadata), `config` (path resolution).
 
 ### Agent CLI provider (`agent_cli`)
 
 - Second provider type beside `openai_compatible`. Declarative YAML: `shim.command` (`self` or PATH executable) + `shim.args`; profiles carry `model`, optional `agent`, `approval` (`reject` default | `auto`), `variant`. HTTP fields are rejected for `agent_cli` and vice versa.
 - `internal/adapter/agentcli` implements ADK `model.LLM` by spawning one shim process per model call: one `cli-v1` NDJSON request on stdin, bounded stdout/stderr, process-group kill on cancellation. Text-only: ADK tools, function history, images, and streaming are rejected before launch.
 - `internal/adapter/opencodeshim` maps `cli-v1` to `opencode run --format json` (prompt on stdin, never argv; `--auto` only for `approval: auto`; never `--share`/`--continue`/`--session`). Accepts exactly OpenCode `1.17.20` in `describe`; `validate` checks the model catalog and primary agents.
+- `internal/adapter/codexshim` maps `cli-v1` to `codex exec --json --ephemeral --color never -` (prompt on stdin via the `-` sentinel, never argv). Accepts exactly Codex CLI `0.144.1` in `describe`; `validate` checks the bundled model catalog (`codex debug models --bundled`), reasoning efforts (`variant` → `model_reasoning_effort`), rejects non-empty `agent`, and requires the working directory to be inside a Git worktree. `approval: reject` → `--sandbox read-only`, `auto` → `--sandbox workspace-write`; always `--ask-for-approval never`, never `--yolo`/full access/resume/output-file flags. Codex reuses its saved CLI login (no API key env); `doctor --live` checks auth per trusted shim identity (`opencode auth list` / `codex login status`, unknown identities fail closed).
 - Every run receives the full canonical `sandbox.projects` registry; the app root must be registered. A CLI-backed root gets **no** ADK tool factory.
 - An `openai_compatible` root may declare `agent_tools` referencing leaf `agent_cli` agents. They are exposed through ADK `AgentTool`, use isolated in-memory child sessions, inherit the root global instruction, and do not change the durable root provider family.
 - Durable sessions are stamped with `local_agent_provider_family` state; startup and each turn fail closed on family mismatch (`init --reset-state` to switch families).
@@ -61,7 +65,7 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - `port.AgentTurn` carries `Text` and optional `*PendingConfirmation`.
 - `adkagent.Runtime` constructs per-turn `llmagent` with tools from `AgentToolFactory`. Session IDs: `adk:{conversation-key}`.
 - `adaptersqlite.AdkSessionService` implements ADK's `session.Service` using `database/sql` (no GORM).
-- Backward compat: `port.Agent.Respond` still wired in `run.go`. Bot use case branches: `runtime != nil` → `handleRuntimeTurn()`, else legacy path.
+- Backward compat: `port.Agent.Respond` still wired in `internal/app/run.go`. Bot use case branches: `runtime != nil` → `handleRuntimeTurn()`, else legacy path.
 
 ### Confirmation flow
 

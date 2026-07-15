@@ -42,20 +42,32 @@ type fakeLive struct {
 
 type fakeCLI struct {
 	models        []string
+	shimName      string
+	providerErr   error
 	describeCalls int
 	authCalls     int
+	authShims     []string
 }
 
-func (f *fakeCLI) CheckProvider(_ context.Context, resolved *agentdef.ResolvedModel, _ config.Config, _ string, describe bool) (string, error) {
+func (f *fakeCLI) CheckProvider(_ context.Context, resolved *agentdef.ResolvedModel, _ config.Config, _ string, describe bool) (CLIProviderCheck, error) {
 	f.models = append(f.models, resolved.Model)
+	if f.providerErr != nil {
+		return CLIProviderCheck{}, f.providerErr
+	}
 	if describe {
 		f.describeCalls++
+		name := f.shimName
+		if name == "" {
+			name = "opencode"
+		}
+		return CLIProviderCheck{Detail: "profile validated", ShimName: name}, nil
 	}
-	return "profile validated", nil
+	return CLIProviderCheck{Detail: "profile validated"}, nil
 }
 
-func (f *fakeCLI) CheckAuthentication(context.Context, *agentdef.ResolvedModel) (string, error) {
+func (f *fakeCLI) CheckAuthentication(_ context.Context, _ *agentdef.ResolvedModel, shimName string) (string, error) {
 	f.authCalls++
+	f.authShims = append(f.authShims, shimName)
 	return "authenticated", nil
 }
 
@@ -261,6 +273,72 @@ func TestDoctorValidatesEverySelectedCLIProfileAndDescribesProviderOnce(t *testi
 	}
 	if cli.describeCalls != 1 {
 		t.Fatalf("shared CLI provider described %d times, want 1", cli.describeCalls)
+	}
+}
+
+func TestLiveDoctorAuthenticatesWithRetainedShimIdentity(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorCLIDefinitions(t, stateDir, false)
+
+	cli := &fakeCLI{shimName: "codex"}
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Memory.Enabled = true
+		cfg.Sandbox.Enabled = true
+		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+		return cfg, nil
+	}
+	deps.CLI = cli
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), true)
+	if report.ExitCode() != 0 {
+		t.Fatalf("doctor failed: %#v", report.Results)
+	}
+	if cli.authCalls != 1 {
+		t.Fatalf("shared CLI provider authenticated %d times, want 1", cli.authCalls)
+	}
+	if len(cli.authShims) != 1 || cli.authShims[0] != "codex" {
+		t.Fatalf("authentication did not receive retained mapper identity: %v", cli.authShims)
+	}
+}
+
+func TestLiveDoctorSkipsAuthenticationWhenProviderDescribeFails(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorCLIDefinitions(t, stateDir, false)
+
+	cli := &fakeCLI{providerErr: errors.New("cli-v1 describe failed")}
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Memory.Enabled = true
+		cfg.Sandbox.Enabled = true
+		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+		return cfg, nil
+	}
+	deps.CLI = cli
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), true)
+	if report.ExitCode() != 1 {
+		t.Fatalf("provider failure should remain actionable: %#v", report.Results)
+	}
+	if cli.authCalls != 0 {
+		t.Fatalf("authentication ran without a trusted shim identity: %d calls", cli.authCalls)
+	}
+	for _, result := range report.Results {
+		if strings.HasPrefix(result.Name, "agent CLI authentication") {
+			t.Fatalf("misleading authentication result emitted after describe failure: %#v", result)
+		}
 	}
 }
 

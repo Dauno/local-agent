@@ -16,6 +16,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
 
 type liveChecker struct{}
@@ -131,43 +132,61 @@ func newModelFromResolved(resolved *agentdef.ResolvedModel, apiKey string) (*ope
 // providers through the same construction and handshake path used at startup.
 type cliProviderChecker struct{}
 
-func (cliProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, cfg config.Config, projectRoot string, describe bool) (string, error) {
+func (cliProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, cfg config.Config, projectRoot string, describe bool) (doctor.CLIProviderCheck, error) {
 	paths, err := cfg.ResolvePaths(projectRoot)
 	if err != nil {
-		return "", err
+		return doctor.CLIProviderCheck{}, err
 	}
 	cliModel, err := buildAgentCLIModel(ctx, resolved, cfg, paths, nil, nil)
 	if err != nil {
-		return "", err
+		return doctor.CLIProviderCheck{}, err
 	}
 	description, err := handshakeAgentCLI(ctx, cliModel, describe)
 	if err != nil {
-		return "", err
+		return doctor.CLIProviderCheck{}, err
 	}
 	if describe {
-		return fmt.Sprintf("shim %s (%s) maps CLI version %s; profile validated", description.Name, description.ShimVersion, description.CLIVersion), nil
+		return doctor.CLIProviderCheck{
+			Detail:   fmt.Sprintf("shim %s (%s) maps CLI version %s; profile validated", description.Name, description.ShimVersion, description.CLIVersion),
+			ShimName: description.Name,
+		}, nil
 	}
-	return "profile validated", nil
+	return doctor.CLIProviderCheck{Detail: "profile validated"}, nil
 }
 
-func (cliProviderChecker) CheckAuthentication(ctx context.Context, _ *agentdef.ResolvedModel) (string, error) {
-	// OpenCode is the only agent CLI supported by this release. The check
-	// reports saved-login status without making a model call; output is never
-	// echoed because it may reference account identifiers.
-	executable, err := exec.LookPath("opencode")
-	if err != nil {
-		return "", fmt.Errorf("opencode executable not found: %w", err)
+// CheckAuthentication reports saved-login status for a known mapper identity
+// without making a model call. The command is application-owned and selected
+// from the trusted describe name; shims can never supply authentication argv.
+// Native output can contain account identifiers, so both streams are drained
+// and discarded.
+func (cliProviderChecker) CheckAuthentication(ctx context.Context, _ *agentdef.ResolvedModel, shimName string) (string, error) {
+	var (
+		executable string
+		args       []string
+		success    string
+	)
+	switch shimName {
+	case "opencode":
+		executable, args = "opencode", []string{"auth", "list"}
+		success = "opencode auth list succeeded; saved credentials are available"
+	case "codex":
+		executable, args = "codex", []string{"login", "status"}
+		success = "codex login status succeeded; saved credentials are available"
+	default:
+		return "", fmt.Errorf("authentication status for shim %q is not supported by this release", shimName)
 	}
-	command := exec.CommandContext(ctx, executable, "auth", "list")
-	// Authentication output can contain account identifiers. Discard it while
-	// still draining both streams so memory use remains bounded.
+	resolved, err := exec.LookPath(executable)
+	if err != nil {
+		return "", fmt.Errorf("%s executable not found: %w", executable, err)
+	}
+	command := exec.CommandContext(ctx, resolved, args...)
 	command.Stdout = io.Discard
 	command.Stderr = io.Discard
 	if err := command.Run(); err != nil {
 		if ctxErr := ctx.Err(); ctxErr != nil {
-			return "", fmt.Errorf("opencode auth list cancelled: %w", ctxErr)
+			return "", fmt.Errorf("%s %s cancelled: %w", executable, strings.Join(args, " "), ctxErr)
 		}
-		return "", fmt.Errorf("opencode auth list failed: %w", err)
+		return "", fmt.Errorf("%s %s failed: %w", executable, strings.Join(args, " "), err)
 	}
-	return "opencode auth list succeeded; saved credentials are available", nil
+	return success, nil
 }

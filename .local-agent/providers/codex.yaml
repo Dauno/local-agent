@@ -1,0 +1,10 @@
+name: codex
+type: agent_cli
+shim:
+  command: self
+  args: [shim, codex]
+profiles:
+  smoke:
+    model: gpt-5.6-luna
+    approval: reject
+    variant: high
