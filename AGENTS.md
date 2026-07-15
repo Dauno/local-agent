@@ -2,14 +2,6 @@
 
 Go 1.25 Slack Socket Mode agent using Google ADK + OpenAI-compatible LLM.
 
-## Entrypoint
-
-`cmd/local-agent/main.go` — one binary, cobra CLI.
-
-## Entrypoint
-
-`cmd/local-agent/main.go` — one binary, cobra CLI.
-
 ## Build & dev commands
 
 ```sh
