@@ -73,6 +73,7 @@ type SlackConfig struct {
 	AllowedUserIDs      []string           `yaml:"allowed_user_ids"`
 	AllowedTeamIDs      []string           `yaml:"allowed_team_ids"`
 	AllowedChannelIDs   []string           `yaml:"allowed_channel_ids"`
+	PartLabels          bool               `yaml:"part_labels"`
 	Context             SlackContextConfig `yaml:"context"`
 	Files               SlackFilesConfig   `yaml:"files"`
 }
@@ -155,6 +156,7 @@ func Default() Config {
 			AllowedUserIDs:      []string{},
 			AllowedTeamIDs:      []string{},
 			AllowedChannelIDs:   []string{},
+			PartLabels:          true,
 			Context: SlackContextConfig{
 				Enabled:                     false,
 				MaxChars:                    1500,

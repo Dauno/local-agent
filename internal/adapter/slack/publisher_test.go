@@ -22,7 +22,7 @@ import (
 func TestSplitMarkdownSinglePartBelowLimit(t *testing.T) {
 	t.Parallel()
 	short := "Hello world"
-	chunks := SplitMarkdown(short, SlackMarkdownChunkRunes)
+	chunks := SplitMarkdown(short, SlackMarkdownChunkRunes, true)
 	if len(chunks) != 1 || chunks[0] != short {
 		t.Fatalf("SplitMarkdown(short) = %#v", chunks)
 	}
@@ -31,7 +31,7 @@ func TestSplitMarkdownSinglePartBelowLimit(t *testing.T) {
 func TestSplitMarkdownMultipartStaysBelowLimit(t *testing.T) {
 	t.Parallel()
 	long := strings.Repeat("界", SlackMarkdownChunkRunes+100)
-	chunks := SplitMarkdown(long, SlackMarkdownChunkRunes)
+	chunks := SplitMarkdown(long, SlackMarkdownChunkRunes, true)
 	if len(chunks) < 2 {
 		t.Fatalf("SplitMarkdown(long) returned %d chunks, want >= 2", len(chunks))
 	}
@@ -48,7 +48,7 @@ func TestSplitMarkdownPreservesBlankLineBoundaries(t *testing.T) {
 	// should produce multiple parts, splitting at blank lines.
 	paragraph := strings.Repeat("x", 100)
 	text := paragraph + "\n\n" + paragraph + "\n\n" + paragraph
-	chunks := SplitMarkdown(text, 150)
+	chunks := SplitMarkdown(text, 150, true)
 	if len(chunks) < 2 {
 		t.Fatalf("SplitMarkdown() = %d chunks, want >= 2", len(chunks))
 	}
@@ -57,7 +57,7 @@ func TestSplitMarkdownPreservesBlankLineBoundaries(t *testing.T) {
 func TestSplitMarkdownPreservesFencedCodeBlocks(t *testing.T) {
 	t.Parallel()
 	text := "```go\nfunc main() {\n\tfmt.Println(\"hello\")\n}\n```"
-	chunks := SplitMarkdown(text, SlackMarkdownChunkRunes)
+	chunks := SplitMarkdown(text, SlackMarkdownChunkRunes, true)
 	if len(chunks) != 1 {
 		t.Fatalf("SplitMarkdown(fenced) = %d chunks, want 1", len(chunks))
 	}
@@ -70,7 +70,7 @@ func TestSplitMarkdownBoundsEveryIntermediateLine(t *testing.T) {
 	t.Parallel()
 	const limit = 80
 	text := "prefix\n" + strings.Repeat("x", limit+25) + "\nsuffix"
-	for index, chunk := range SplitMarkdown(text, limit) {
+	for index, chunk := range SplitMarkdown(text, limit, true) {
 		if got := utf8.RuneCountInString(chunk); got > limit {
 			t.Fatalf("chunk %d has %d runes, want <= %d", index+1, got, limit)
 		}
@@ -80,7 +80,7 @@ func TestSplitMarkdownBoundsEveryIntermediateLine(t *testing.T) {
 func TestSplitMarkdownDoesNotSplitInlineLinkWhenSafeBoundaryExists(t *testing.T) {
 	t.Parallel()
 	link := "[label with space](https://example.test/path)"
-	chunks := SplitMarkdown("prefix words "+link+" trailing words", 65)
+	chunks := SplitMarkdown("prefix words "+link+" trailing words", 65, true)
 	for _, chunk := range chunks {
 		if strings.Contains(chunk, "[label") && !strings.Contains(chunk, link) {
 			t.Fatalf("inline link was split: %#v", chunks)
@@ -92,7 +92,7 @@ func TestSplitMarkdownClosesAndReopensOversizedFence(t *testing.T) {
 	t.Parallel()
 	const limit = 90
 	text := "~~~go\n" + strings.Repeat("fmt.Println(\"hello\")\n", 12) + "~~~"
-	chunks := SplitMarkdown(text, limit)
+	chunks := SplitMarkdown(text, limit, true)
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %d, want multipart fence", len(chunks))
 	}
@@ -108,7 +108,7 @@ func TestSplitMarkdownRepeatsOversizedTableHeader(t *testing.T) {
 	const limit = 100
 	header := "| Name | Value |\n| --- | --- |\n"
 	text := header + strings.Repeat("| item | some moderately long value |\n", 8)
-	chunks := SplitMarkdown(text, limit)
+	chunks := SplitMarkdown(text, limit, true)
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %d, want multipart table", len(chunks))
 	}
@@ -121,7 +121,7 @@ func TestSplitMarkdownRepeatsOversizedTableHeader(t *testing.T) {
 
 func TestSplitMarkdownRepeatsOversizedListMarker(t *testing.T) {
 	t.Parallel()
-	chunks := SplitMarkdown("- "+strings.Repeat("word ", 30), 60)
+	chunks := SplitMarkdown("- "+strings.Repeat("word ", 30), 60, true)
 	if len(chunks) < 2 {
 		t.Fatalf("chunks = %d, want multipart list item", len(chunks))
 	}
@@ -181,7 +181,7 @@ func TestPublisherPostsChunksInOrderAndReturnsLastTimestamp(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			client := &fakePostClient{responses: []postResponse{{timestamp: "1.1"}, {timestamp: "1.2"}}}
-			publisher := newPublisher(client, 2*time.Second, nil)
+			publisher := newPublisher(client, 2*time.Second, nil, true)
 			publisher.pace = time.Second
 			now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 			publisher.now = func() time.Time { return now }
@@ -288,7 +288,7 @@ func TestSDKPostClientUsesMarkdownTextAndMetadata(t *testing.T) {
 
 func TestPublisherPacesAcrossResponsesPerChannel(t *testing.T) {
 	client := &fakePostClient{responses: []postResponse{{timestamp: "1.1"}, {timestamp: "1.2"}, {timestamp: "2.1"}}}
-	publisher := newPublisher(client, time.Second, nil)
+	publisher := newPublisher(client, time.Second, nil, true)
 	publisher.pace = time.Second
 	now := time.Date(2026, 7, 9, 12, 0, 0, 0, time.UTC)
 	publisher.now = func() time.Time { return now }
@@ -317,7 +317,7 @@ func TestPublisherRetriesOneRateLimitUsingRetryAfter(t *testing.T) {
 	t.Parallel()
 	rateErr := &slackapi.RateLimitedError{RetryAfter: 37 * time.Millisecond}
 	client := &fakePostClient{responses: []postResponse{{err: rateErr}, {timestamp: "2.2"}}}
-	publisher := newPublisher(client, time.Second, nil)
+	publisher := newPublisher(client, time.Second, nil, true)
 	var sleeps []time.Duration
 	publisher.sleep = func(_ context.Context, duration time.Duration) error {
 		sleeps = append(sleeps, duration)
@@ -344,7 +344,7 @@ func TestPublisherRetriesRateLimitOnlyOnceAndStops(t *testing.T) {
 	t.Parallel()
 	rateErr := &slackapi.RateLimitedError{RetryAfter: time.Millisecond}
 	client := &fakePostClient{responses: []postResponse{{err: rateErr}, {err: rateErr}, {timestamp: "unexpected"}}}
-	publisher := newPublisher(client, time.Second, nil)
+	publisher := newPublisher(client, time.Second, nil, true)
 	publisher.sleep = func(context.Context, time.Duration) error { return nil }
 
 	_, err := publisher.Publish(context.Background(), domain.ReplyTarget{ChannelID: testDM}, strings.Repeat("x", SlackMarkdownChunkRunes+100))
@@ -360,7 +360,7 @@ func TestPublisherStopsAfterChunkFailureAndReturnsLastPublishedTimestamp(t *test
 	t.Parallel()
 	wantErr := errors.New("Slack unavailable xoxb-123456789-secret")
 	client := &fakePostClient{responses: []postResponse{{timestamp: "3.1"}, {err: wantErr}, {timestamp: "unexpected"}}}
-	publisher := newPublisher(client, time.Second, nil)
+	publisher := newPublisher(client, time.Second, nil, true)
 	publisher.sleep = func(context.Context, time.Duration) error { return nil }
 
 	text := strings.Repeat("x", 3*SlackMarkdownChunkRunes)
@@ -383,7 +383,7 @@ func TestPublisherCancellationDuringRetryWaitStopsRetry(t *testing.T) {
 	t.Parallel()
 	rateErr := &slackapi.RateLimitedError{RetryAfter: time.Hour}
 	client := &fakePostClient{responses: []postResponse{{err: rateErr}, {timestamp: "unexpected"}}}
-	publisher := newPublisher(client, time.Second, nil)
+	publisher := newPublisher(client, time.Second, nil, true)
 	ctx, cancel := context.WithCancel(context.Background())
 	publisher.sleep = func(ctx context.Context, _ time.Duration) error {
 		cancel()
@@ -403,7 +403,7 @@ func TestPublisherStopsImmediatelyOnNonRateLimitFailure(t *testing.T) {
 	t.Parallel()
 	wantErr := errors.New("post failed")
 	client := &fakePostClient{responses: []postResponse{{err: wantErr}, {timestamp: "unexpected"}}}
-	publisher := newPublisher(client, time.Second, nil)
+	publisher := newPublisher(client, time.Second, nil, true)
 	slept := false
 	publisher.sleep = func(context.Context, time.Duration) error { slept = true; return nil }
 
@@ -422,9 +422,9 @@ func TestPublisherValidatesInput(t *testing.T) {
 		target    domain.ReplyTarget
 		text      string
 	}{
-		{name: "missing client", publisher: newPublisher(nil, time.Second, nil), target: domain.ReplyTarget{ChannelID: testDM}, text: "ok"},
-		{name: "missing channel", publisher: newPublisher(validClient, time.Second, nil), text: "ok"},
-		{name: "empty text", publisher: newPublisher(validClient, time.Second, nil), target: domain.ReplyTarget{ChannelID: testDM}, text: " \n "},
+		{name: "missing client", publisher: newPublisher(nil, time.Second, nil, true), target: domain.ReplyTarget{ChannelID: testDM}, text: "ok"},
+		{name: "missing channel", publisher: newPublisher(validClient, time.Second, nil, true), text: "ok"},
+		{name: "empty text", publisher: newPublisher(validClient, time.Second, nil, true), target: domain.ReplyTarget{ChannelID: testDM}, text: " \n "},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -491,4 +491,51 @@ func (c *fakePostClient) callCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return len(c.calls)
+}
+
+func TestSplitMarkdownNoLabelsMultipartWithoutPrefix(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("界", SlackMarkdownChunkRunes+100)
+	chunks := SplitMarkdown(long, SlackMarkdownChunkRunes, false)
+	if len(chunks) < 2 {
+		t.Fatalf("SplitMarkdown(long, false) returned %d chunks, want >= 2", len(chunks))
+	}
+	for i, chunk := range chunks {
+		if strings.HasPrefix(chunk, "Part ") {
+			t.Fatalf("chunk %d has unexpected Part prefix: %q", i+1, chunk)
+		}
+		if got := utf8.RuneCountInString(chunk); got > SlackMarkdownChunkRunes {
+			t.Fatalf("chunk %d has %d Unicode code points, exceeding %d", i+1, got, SlackMarkdownChunkRunes)
+		}
+	}
+}
+
+func TestSplitMarkdownNoLabelsChunksWithinLimit(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("a", 3*SlackMarkdownChunkRunes)
+	chunks := SplitMarkdown(long, SlackMarkdownChunkRunes, false)
+	for i, chunk := range chunks {
+		if got := utf8.RuneCountInString(chunk); got > SlackMarkdownChunkRunes {
+			t.Fatalf("chunk %d has %d runes, want <= %d", i+1, got, SlackMarkdownChunkRunes)
+		}
+	}
+}
+
+func TestSplitMarkdownNoLabelsMayHaveFewerParts(t *testing.T) {
+	t.Parallel()
+	long := strings.Repeat("界", SlackMarkdownChunkRunes+100)
+	withLabels := SplitMarkdown(long, SlackMarkdownChunkRunes, true)
+	withoutLabels := SplitMarkdown(long, SlackMarkdownChunkRunes, false)
+	if len(withoutLabels) > len(withLabels) {
+		t.Fatalf("without labels has %d parts, with labels has %d; expected <= ", len(withoutLabels), len(withLabels))
+	}
+}
+
+func TestSplitMarkdownNoLabelsShortTextIdenticalToOriginal(t *testing.T) {
+	t.Parallel()
+	short := "Hello world"
+	got := SplitMarkdown(short, SlackMarkdownChunkRunes, false)
+	if len(got) != 1 || got[0] != short {
+		t.Fatalf("SplitMarkdown(short, false) = %#v, want [%q]", got, short)
+	}
 }
