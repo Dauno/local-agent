@@ -14,7 +14,6 @@ import (
 	"github.com/slack-go/slack/socketmode"
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
@@ -72,23 +71,23 @@ func (a *Application) Run(ctx context.Context) error {
 	}
 
 	var (
-		rootModel        model.LLM
-		rootFamily       = domain.ProviderFamilyOpenAICompatible
-		rootIsAgentCLI   bool
-		rootAgentTools   []tool.Tool
-		curatorLLM       memorycurator.LLM
-		agentName        string
-		rootDef          *agentdef.AgentDef
-		curatorDef       *agentdef.AgentDef
-		attachmentDef    *agentdef.AgentDef
-		attachmentModel  model.LLM
-		apiKey           string
-		botToken         string
-		appToken         string
-		modelBaseURL     string
-		redactionSecrets []string
-		redactor         secure.Redactor
-		logger           *logging.Logger
+		rootModel          model.LLM
+		rootFamily         = domain.ProviderFamilyOpenAICompatible
+		rootIsAgentCLI     bool
+		preparedAgentTools []preparedAgentTool
+		curatorLLM         memorycurator.LLM
+		agentName          string
+		rootDef            *agentdef.AgentDef
+		curatorDef         *agentdef.AgentDef
+		attachmentDef      *agentdef.AgentDef
+		attachmentModel    model.LLM
+		apiKey             string
+		botToken           string
+		appToken           string
+		modelBaseURL       string
+		redactionSecrets   []string
+		redactor           secure.Redactor
+		logger             *logging.Logger
 	)
 	describedCLIProviders := make(map[string]bool)
 
@@ -147,7 +146,7 @@ func (a *Application) Run(ctx context.Context) error {
 			apiKey = rootSecret
 			modelBaseURL = resolved.BaseURL
 		}
-		rootAgentTools, err = buildRootAgentTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders)
+		preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders)
 		if err != nil {
 			return redactor.Error(err)
 		}
@@ -271,8 +270,8 @@ func (a *Application) Run(ctx context.Context) error {
 	}
 
 	slackTimeout := time.Duration(cfg.Runtime.SlackAPITimeoutSeconds) * time.Second
-	publisher := slackadapter.NewPublisher(api, slackTimeout, logger)
-	history := slackadapter.NewHistoryReader(api, auth.UserID, slackTimeout, logger)
+	publisher := slackadapter.NewPublisher(api, slackTimeout, logger, cfg.Slack.PartLabels)
+	history := slackadapter.NewHistoryReader(api, auth.UserID, slackTimeout, logger, cfg.Slack.PartLabels)
 	fileLoader := slackadapter.NewFileLoader(api, botToken, slackTimeout)
 	artifactSvc := artifact.InMemoryService()
 	attachmentInstruction := ""
@@ -361,6 +360,13 @@ func (a *Application) Run(ctx context.Context) error {
 				}
 			}
 			toolFactory = toolfactory.New(store, sandboxService)
+			if len(preparedAgentTools) > 0 {
+				globalInstruction := ""
+				if rootDef != nil {
+					globalInstruction = rootDef.GlobalInstruction
+				}
+				toolFactory = newCompositeAgentToolFactory(toolFactory, preparedAgentTools, globalInstruction)
+			}
 		}
 
 		rtInstruction := ""
@@ -377,7 +383,6 @@ func (a *Application) Run(ctx context.Context) error {
 			SessionService:    sessionSvc,
 			Model:             rootModel,
 			ToolFactory:       toolFactory,
-			StaticTools:       rootAgentTools,
 			ProviderFamily:    rootFamily,
 		})
 		if rtErr != nil {

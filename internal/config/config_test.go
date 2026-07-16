@@ -50,6 +50,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			AllowedUserIDs:      []string{},
 			AllowedTeamIDs:      []string{},
 			AllowedChannelIDs:   []string{},
+			PartLabels:          true,
 			Context: config.SlackContextConfig{
 				Enabled:                     false,
 				MaxChars:                    1500,
@@ -138,6 +139,7 @@ slack:
   allowed_user_ids: []
   allowed_team_ids: []
   allowed_channel_ids: []
+  part_labels: true
   context:
     enabled: false
     max_chars: 1500
@@ -621,5 +623,44 @@ func TestResolvePathsUsesCanonicalProjectRootForSandboxProjects(t *testing.T) {
 	wantAPI := filepath.Join(filepath.Dir(physicalRoot), "api")
 	if paths.SandboxProjectRoots["api"] != wantAPI {
 		t.Fatalf("api = %q, want %q", paths.SandboxProjectRoots["api"], wantAPI)
+	}
+}
+
+func TestParsePartLabelsDefaultsToTrue(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte(`agent:
+  name: test
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if !cfg.Slack.PartLabels {
+		t.Fatal("part_labels should default to true")
+	}
+}
+
+func TestParsePartLabelsExplicitFalse(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte(`slack:
+  part_labels: false
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if cfg.Slack.PartLabels {
+		t.Fatal("part_labels should be false when explicitly set")
+	}
+}
+
+func TestParsePartLabelsExplicitTrue(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte(`slack:
+  part_labels: true
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if !cfg.Slack.PartLabels {
+		t.Fatal("part_labels should be true when explicitly set")
 	}
 }

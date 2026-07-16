@@ -58,6 +58,7 @@ var configSchema = []schemaField{
 		{name: "allowed_user_ids"},
 		{name: "allowed_team_ids"},
 		{name: "allowed_channel_ids"},
+		{name: "part_labels"},
 		{name: "context", children: []schemaField{
 			{name: "enabled"},
 			{name: "max_chars"},
