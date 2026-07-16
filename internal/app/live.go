@@ -99,17 +99,6 @@ func (liveChecker) CheckResolvedModel(ctx context.Context, resolved *agentdef.Re
 	return errors.New("model endpoint returned no response")
 }
 
-func newModel(cfg config.ModelConfig, apiKey string) (*openaillm.OpenAICompatibleLLM, error) {
-	return openaillm.New(
-		openaillm.WithAPIKey(apiKey),
-		openaillm.WithBaseURL(cfg.BaseURL),
-		openaillm.WithHeaders(cfg.Headers),
-		openaillm.WithModel(cfg.Name),
-		openaillm.WithReasoningEffort(cfg.ReasoningEffort),
-		openaillm.WithExtraBody(cfg.ExtraBody),
-	)
-}
-
 func newModelFromResolved(resolved *agentdef.ResolvedModel, apiKey string) (*openaillm.OpenAICompatibleLLM, error) {
 	opts := []openaillm.Option{
 		openaillm.WithAPIKey(apiKey),

@@ -7,7 +7,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 	"time"
 
 	"google.golang.org/adk/v2/model"
@@ -22,40 +21,6 @@ import (
 
 // cliHandshakeTimeout bounds the startup describe and validate exchanges.
 const cliHandshakeTimeout = 60 * time.Second
-
-// newModelForResolved is the provider-neutral model factory. It returns the
-// constructed model and, for providers that require one, the resolved API key
-// so the caller can register it for redaction. agent_cli providers require no
-// API key.
-func newModelForResolved(
-	ctx context.Context,
-	resolved *agentdef.ResolvedModel,
-	values map[string]string,
-	cfg config.Config,
-	paths config.Paths,
-	logger port.Logger,
-	sanitize func(string) string,
-) (model.LLM, string, error) {
-	if resolved == nil {
-		return nil, "", errors.New("resolved model is required")
-	}
-	if resolved.IsAgentCLI() {
-		cliModel, err := buildAgentCLIModel(ctx, resolved, cfg, paths, logger, sanitize)
-		if err != nil {
-			return nil, "", err
-		}
-		return cliModel, "", nil
-	}
-	apiKey := values[resolved.APIKeyEnv]
-	if strings.TrimSpace(apiKey) == "" {
-		return nil, "", fmt.Errorf("%s is not configured. Run: local-agent init", resolved.APIKeyEnv)
-	}
-	httpModel, err := newModelFromResolved(resolved, apiKey)
-	if err != nil {
-		return nil, "", err
-	}
-	return httpModel, apiKey, nil
-}
 
 // buildAgentCLIModel constructs an agent CLI model from trusted configuration.
 // Startup and doctor perform the cli-v1 handshake explicitly after construction.
