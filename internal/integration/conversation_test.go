@@ -18,8 +18,8 @@ func TestConversationContextSurvivesRestartAndRemainsIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	firstAgent := &recordingAgent{responses: []string{"first answer"}}
-	firstService := integrationService(t, store, firstAgent)
+	firstRuntime := &recordingRuntime{responses: []string{"first answer"}}
+	firstService := integrationService(t, store, firstRuntime)
 	if outcome, err := firstService.Handle(t.Context(), dmInvocation("Ev1", "D12345678", "1700000000.000001", "first question")); err != nil || outcome != botusecase.OutcomeResponded {
 		t.Fatalf("first outcome=%q err=%v", outcome, err)
 	}
@@ -32,8 +32,8 @@ func TestConversationContextSurvivesRestartAndRemainsIsolated(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer reopened.Close()
-	secondAgent := &recordingAgent{responses: []string{"second answer", "isolated answer"}}
-	secondService := integrationService(t, reopened, secondAgent)
+	secondRuntime := &recordingRuntime{responses: []string{"second answer", "isolated answer"}}
+	secondService := integrationService(t, reopened, secondRuntime)
 	if outcome, err := secondService.Handle(t.Context(), dmInvocation("Ev2", "D12345678", "1700000001.000002", "second question")); err != nil || outcome != botusecase.OutcomeResponded {
 		t.Fatalf("second outcome=%q err=%v", outcome, err)
 	}
@@ -41,7 +41,7 @@ func TestConversationContextSurvivesRestartAndRemainsIsolated(t *testing.T) {
 		t.Fatalf("isolated outcome=%q err=%v", outcome, err)
 	}
 
-	contexts := secondAgent.contextsSnapshot()
+	contexts := secondRuntime.contextsSnapshot()
 	if len(contexts) != 2 {
 		t.Fatalf("model contexts=%d", len(contexts))
 	}
@@ -62,14 +62,14 @@ func TestConversationContextSurvivesRestartAndRemainsIsolated(t *testing.T) {
 	}
 }
 
-func integrationService(t *testing.T, store port.ConversationStore, agent port.Agent) *botusecase.Service {
+func integrationService(t *testing.T, store port.ConversationStore, runtime port.AgentRuntime) *botusecase.Service {
 	t.Helper()
 	service, err := botusecase.New(botusecase.Config{
 		AccessPolicy:   domain.AccessPolicy{AllowedUserIDs: []string{"U12345678"}},
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20_000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
-	}, botusecase.Dependencies{Store: store, Agent: agent, Publisher: integrationPublisher{}})
+	}, botusecase.Dependencies{Store: store, Runtime: runtime, Publisher: integrationPublisher{}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,27 +84,31 @@ func dmInvocation(eventID, channelID, timestamp, text string) domain.Invocation 
 	}
 }
 
-type recordingAgent struct {
+type recordingRuntime struct {
 	mu        sync.Mutex
 	responses []string
 	contexts  [][]domain.Message
 }
 
-func (a *recordingAgent) Respond(_ context.Context, req port.AgentRequest) (string, error) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	a.contexts = append(a.contexts, append([]domain.Message(nil), req.Messages...))
-	response := a.responses[0]
-	a.responses = a.responses[1:]
-	return response, nil
+func (r *recordingRuntime) Run(_ context.Context, req port.AgentRequest) (port.AgentTurn, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.contexts = append(r.contexts, append([]domain.Message(nil), req.Messages...))
+	response := r.responses[0]
+	r.responses = r.responses[1:]
+	return port.AgentTurn{Text: response}, nil
 }
 
-func (a *recordingAgent) contextsSnapshot() [][]domain.Message {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	result := make([][]domain.Message, len(a.contexts))
-	for index := range a.contexts {
-		result[index] = append([]domain.Message(nil), a.contexts[index]...)
+func (r *recordingRuntime) Resume(_ context.Context, _ domain.ConfirmationDecision) (port.AgentTurn, error) {
+	return port.AgentTurn{}, nil
+}
+
+func (r *recordingRuntime) contextsSnapshot() [][]domain.Message {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([][]domain.Message, len(r.contexts))
+	for index := range r.contexts {
+		result[index] = append([]domain.Message(nil), r.contexts[index]...)
 	}
 	return result
 }

@@ -29,7 +29,7 @@ func TestSharedModelCallLimitIncludesForegroundAndCurator(t *testing.T) {
 		ContextLimits: domain.ContextLimits{MaxMessages: 30, MaxChars: 20_000}, RetainMessages: 100, MaxConcurrentCalls: 1,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
 	}, botusecase.Dependencies{
-		Store: store, Agent: blockingForegroundAgent{started: started, unblock: unblock}, Publisher: integrationPublisher{}, ModelCalls: shared,
+		Store: store, Runtime: blockingForegroundRuntime{started: started, unblock: unblock}, Publisher: integrationPublisher{}, ModelCalls: shared,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -70,15 +70,19 @@ func TestSharedModelCallLimitIncludesForegroundAndCurator(t *testing.T) {
 	}
 }
 
-type blockingForegroundAgent struct {
+type blockingForegroundRuntime struct {
 	started chan<- struct{}
 	unblock <-chan struct{}
 }
 
-func (a blockingForegroundAgent) Respond(_ context.Context, _ port.AgentRequest) (string, error) {
-	a.started <- struct{}{}
-	<-a.unblock
-	return "answer", nil
+func (r blockingForegroundRuntime) Run(_ context.Context, _ port.AgentRequest) (port.AgentTurn, error) {
+	r.started <- struct{}{}
+	<-r.unblock
+	return port.AgentTurn{Text: "answer"}, nil
+}
+
+func (r blockingForegroundRuntime) Resume(_ context.Context, _ domain.ConfirmationDecision) (port.AgentTurn, error) {
+	return port.AgentTurn{}, nil
 }
 
 type countingCuratorLLM struct{ calls int }
