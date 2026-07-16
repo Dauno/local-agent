@@ -14,7 +14,6 @@ import (
 	"github.com/slack-go/slack/socketmode"
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
@@ -483,19 +482,6 @@ func (a *Application) Run(ctx context.Context) error {
 	return nil
 }
 
-func requiredSecrets(cfg config.Config, values map[string]string) (apiKey, botToken, appToken string, err error) {
-	apiKey = values[cfg.Model.APIKeyEnv]
-	botToken = values[bootstrap.SlackBotTokenEnv]
-	appToken = values[bootstrap.SlackAppTokenEnv]
-	if strings.TrimSpace(apiKey) == "" {
-		return "", "", "", fmt.Errorf("%s is not configured. Run: local-agent init", cfg.Model.APIKeyEnv)
-	}
-	if err := requiredSlackTokens(botToken, appToken); err != nil {
-		return "", "", "", err
-	}
-	return apiKey, botToken, appToken, nil
-}
-
 func requiredSlackTokens(botToken, appToken string) error {
 	if strings.TrimSpace(botToken) == "" {
 		return errors.New("SLACK_BOT_TOKEN is not configured. Run: local-agent init")
@@ -536,81 +522,6 @@ func (w *redactingWriter) Write(data []byte) (int, error) {
 		return 0, err
 	}
 	return len(data), nil
-}
-
-type memoryCuratorLLM struct {
-	llm                   model.LLM
-	generateContentConfig *agentdef.GenerateContentConfig
-	logger                port.Logger
-	sanitize              func(string) string
-}
-
-var _ memorycurator.LLM = (*memoryCuratorLLM)(nil)
-
-var errCuratorResponseIncomplete = errors.New("curator model response incomplete")
-
-func (m *memoryCuratorLLM) GenerateText(ctx context.Context, prompt string) (string, error) {
-	request := &model.LLMRequest{
-		Contents: []*genai.Content{
-			genai.NewContentFromText(prompt, genai.RoleUser),
-		},
-	}
-	if m.generateContentConfig != nil {
-		request.Config = buildGenaiConfig(m.generateContentConfig)
-	}
-	var response string
-	var finishReason genai.FinishReason
-	for resp, err := range m.llm.GenerateContent(ctx, request, false) {
-		if err != nil {
-			return "", err
-		}
-		if resp != nil && resp.Content != nil {
-			finishReason = resp.FinishReason
-			for _, part := range resp.Content.Parts {
-				if part != nil && part.Text != "" {
-					response += part.Text
-				}
-			}
-		}
-	}
-	if m.logger != nil {
-		loggedResponse := response
-		if m.sanitize != nil {
-			loggedResponse = m.sanitize(loggedResponse)
-		}
-		m.logger.Debug("memory curator model response", "finish_reason", finishReason, "response_chars", len([]rune(response)), "response", loggedResponse)
-	}
-	if finishReason != "" && finishReason != genai.FinishReasonStop {
-		return "", fmt.Errorf("%w: finish_reason=%s response_chars=%d", errCuratorResponseIncomplete, finishReason, len([]rune(response)))
-	}
-	return response, nil
-}
-
-func buildGenaiConfig(cfg *agentdef.GenerateContentConfig) *genai.GenerateContentConfig {
-	if cfg == nil {
-		return nil
-	}
-	c := &genai.GenerateContentConfig{}
-	if cfg.Temperature != nil {
-		temp := float32(*cfg.Temperature)
-		c.Temperature = &temp
-	}
-	if cfg.MaxOutputTokens > 0 {
-		tokens := int32(cfg.MaxOutputTokens)
-		c.MaxOutputTokens = tokens
-	}
-	if cfg.TopP != nil {
-		topP := float32(*cfg.TopP)
-		c.TopP = &topP
-	}
-	if cfg.TopK != nil {
-		topK := float32(*cfg.TopK)
-		c.TopK = &topK
-	}
-	if len(cfg.StopSequences) > 0 {
-		c.StopSequences = cfg.StopSequences
-	}
-	return c
 }
 
 func runMemoryCurator(
