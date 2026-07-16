@@ -51,20 +51,20 @@ func TestEntityMemoryCuratesSpanishFactAndRecallsItForFirstPersonQueryAcrossThre
 		t.Fatalf("evidence = %#v, %v", evidence, err)
 	}
 
-	agent := &memoryRecordingAgent{}
+	runtime := &memoryRecordingRuntime{}
 	service, err := botusecase.New(botusecase.Config{
 		AccessPolicy:  domain.AccessPolicy{AllowedUserIDs: []string{"U12345678"}},
 		ContextLimits: domain.ContextLimits{MaxMessages: 30, MaxChars: 20_000}, RetainMessages: 100, MaxConcurrentCalls: 1,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
-	}, botusecase.Dependencies{Store: store, Agent: agent, Publisher: integrationPublisher{}, Memory: memoryService})
+	}, botusecase.Dependencies{Store: store, Runtime: runtime, Publisher: integrationPublisher{}, Memory: memoryService})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if outcome, err := service.Handle(t.Context(), dmInvocation("entity-recall", "D87654321", "1700000000.000002", "que sabes de mi?")); err != nil || outcome != botusecase.OutcomeResponded {
 		t.Fatalf("Handle() = %q, %v", outcome, err)
 	}
-	if len(agent.memory) != 1 || agent.memory[0].Slug != slug || agent.memory[0].Content != "Dauno se identifica como creador de local-agent." {
-		t.Fatalf("cross-thread recalled memory = %#v", agent.memory)
+	if len(runtime.memory) != 1 || runtime.memory[0].Slug != slug || runtime.memory[0].Content != "Dauno se identifica como creador de local-agent." {
+		t.Fatalf("cross-thread recalled memory = %#v", runtime.memory)
 	}
 }
 
@@ -86,7 +86,7 @@ func TestEntityMemoryDoesNotPersistSpanishDirective(t *testing.T) {
 		t.Fatal(err)
 	}
 	patch, err := curator.ProposePatch(t.Context(), "slack:T12345678:dm:D12345678", "1", []domain.Message{{
-		Role: domain.RoleUser, Content: "Recuerda que el asistente debe contestar siempre en inglés", UserID: "U12345678",
+		Role: domain.RoleUser, Content: "Recuerda que el asistente debe contestar siempre en ingl\u00e9s", UserID: "U12345678",
 	}}, nil)
 	if err != nil {
 		t.Fatal(err)
@@ -130,12 +130,12 @@ func TestEntityMemoryPreservesFTSForThirdPersonAndMixedQuestions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	agent := &memoryRecordingAgent{}
+	runtime := &memoryRecordingRuntime{}
 	service, err := botusecase.New(botusecase.Config{
 		AccessPolicy:  domain.AccessPolicy{AllowedUserIDs: []string{"U12345678"}},
 		ContextLimits: domain.ContextLimits{MaxMessages: 30, MaxChars: 20_000}, RetainMessages: 100, MaxConcurrentCalls: 1,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
-	}, botusecase.Dependencies{Store: store, Agent: agent, Publisher: integrationPublisher{}, Memory: memoryService})
+	}, botusecase.Dependencies{Store: store, Runtime: runtime, Publisher: integrationPublisher{}, Memory: memoryService})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -151,11 +151,11 @@ func TestEntityMemoryPreservesFTSForThirdPersonAndMixedQuestions(t *testing.T) {
 		if outcome, err := service.Handle(t.Context(), dmInvocation(test.eventID, "D87654321", test.timestamp, test.query)); err != nil || outcome != botusecase.OutcomeResponded {
 			t.Fatalf("Handle(%q) = %q, %v", test.query, outcome, err)
 		}
-		if !containsMemorySlug(agent.memory, "project-atlas") {
-			t.Fatalf("FTS topic missing for %q: %#v", test.query, agent.memory)
+		if !containsMemorySlug(runtime.memory, "project-atlas") {
+			t.Fatalf("FTS topic missing for %q: %#v", test.query, runtime.memory)
 		}
-		if test.eventID == "mixed" && !containsMemorySlug(agent.memory, domain.ScopedPersonTopicSlug("person-dauno", ownerKey)) {
-			t.Fatalf("personal topic missing from mixed recall: %#v", agent.memory)
+		if test.eventID == "mixed" && !containsMemorySlug(runtime.memory, domain.ScopedPersonTopicSlug("person-dauno", ownerKey)) {
+			t.Fatalf("personal topic missing from mixed recall: %#v", runtime.memory)
 		}
 	}
 }
@@ -175,11 +175,13 @@ func (entityMemoryLLM) GenerateText(context.Context, string) (string, error) {
 	return `{"operations":[]}`, nil
 }
 
-type memoryRecordingAgent struct{ memory []domain.MemorySnippet }
+type memoryRecordingRuntime struct{ memory []domain.MemorySnippet }
 
-func (a *memoryRecordingAgent) Respond(_ context.Context, req port.AgentRequest) (string, error) {
-	a.memory = append([]domain.MemorySnippet(nil), req.Memory...)
-	return "ok", nil
+func (r *memoryRecordingRuntime) Run(_ context.Context, req port.AgentRequest) (port.AgentTurn, error) {
+	r.memory = append([]domain.MemorySnippet(nil), req.Memory...)
+	return port.AgentTurn{Text: "ok"}, nil
 }
 
-var _ port.Agent = (*memoryRecordingAgent)(nil)
+func (r *memoryRecordingRuntime) Resume(_ context.Context, _ domain.ConfirmationDecision) (port.AgentTurn, error) {
+	return port.AgentTurn{}, nil
+}
