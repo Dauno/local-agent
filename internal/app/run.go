@@ -246,10 +246,6 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 	}
 
-	agent, err := adkagent.New(agentName, rootModel)
-	if err != nil {
-		return redactor.Error(err)
-	}
 	modelCalls := modelcalllimiter.New(cfg.Runtime.MaxConcurrentModelCalls)
 
 	sdkLog := log.New(&redactingWriter{target: a.logOutput, redactor: redactor}, "slack: ", log.LstdFlags)
@@ -311,7 +307,7 @@ func (a *Application) Run(ctx context.Context) error {
 		ModelErrorMessage:   cfg.Runtime.ModelErrorMessage,
 		UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 	}, botusecase.Dependencies{
-		Store: store, Agent: agent, History: history, Publisher: publisher, Logger: logger,
+		Store: store, History: history, Publisher: publisher, Logger: logger,
 		ModelCalls: modelCalls, SanitizeContent: redactor.String,
 		Enricher:           contextEnricher,
 		FileLoader:         fileLoader,

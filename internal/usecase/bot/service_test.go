@@ -100,18 +100,6 @@ func (p *fakeAttachmentProcessor) Process(_ context.Context, request port.Attach
 	return p.processed, p.err
 }
 
-type fakeAgent struct {
-	response  string
-	err       error
-	calls     int
-	context   []domain.Message
-	memory    []domain.MemorySnippet
-	agentCtx  domain.AgentContext
-	block     <-chan struct{}
-	started   chan<- struct{}
-	onRespond func()
-}
-
 type fakeRuntime struct {
 	runTurn        port.AgentTurn
 	resumeTurn     port.AgentTurn
@@ -120,11 +108,27 @@ type fakeRuntime struct {
 	resumeDecision domain.ConfirmationDecision
 	runCalls       int
 	resumeCalls    int
+	block          <-chan struct{}
+	started        chan<- struct{}
+	onRun          func()
 }
 
-func (r *fakeRuntime) Run(_ context.Context, request port.AgentRequest) (port.AgentTurn, error) {
+func (r *fakeRuntime) Run(ctx context.Context, request port.AgentRequest) (port.AgentTurn, error) {
 	r.runCalls++
 	r.runRequest = request
+	if r.onRun != nil {
+		r.onRun()
+	}
+	if r.started != nil {
+		r.started <- struct{}{}
+	}
+	if r.block != nil {
+		select {
+		case <-r.block:
+		case <-ctx.Done():
+			return port.AgentTurn{}, ctx.Err()
+		}
+	}
 	return r.runTurn, r.err
 }
 
@@ -226,27 +230,6 @@ func (*fakeExchangeWriter) ReconcileAssistantExchanges(context.Context, port.Ass
 	return nil
 }
 
-func (a *fakeAgent) Respond(ctx context.Context, req port.AgentRequest) (string, error) {
-	a.calls++
-	a.context = append([]domain.Message(nil), req.Messages...)
-	a.memory = append([]domain.MemorySnippet(nil), req.Memory...)
-	a.agentCtx = req.Context
-	if a.onRespond != nil {
-		a.onRespond()
-	}
-	if a.started != nil {
-		a.started <- struct{}{}
-	}
-	if a.block != nil {
-		select {
-		case <-a.block:
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-	}
-	return a.response, a.err
-}
-
 type fakeRecall struct{ snippets []domain.MemorySnippet }
 
 func (r fakeRecall) Recall(context.Context, string, string) ([]domain.MemorySnippet, error) {
@@ -330,7 +313,7 @@ func botInvocation() domain.Invocation {
 	}
 }
 
-func newTestService(t *testing.T, store *fakeStore, agent *fakeAgent, history *fakeHistory, publisher *fakePublisher, mutate func(*Config)) *Service {
+func newTestService(t *testing.T, store *fakeStore, runtime *fakeRuntime, history *fakeHistory, publisher *fakePublisher, mutate func(*Config)) *Service {
 	t.Helper()
 	cfg := Config{
 		AccessPolicy:   domain.AccessPolicy{AllowedUserIDs: []string{"U12345678"}},
@@ -341,8 +324,11 @@ func newTestService(t *testing.T, store *fakeStore, agent *fakeAgent, history *f
 	if mutate != nil {
 		mutate(&cfg)
 	}
+	if runtime == nil {
+		runtime = &fakeRuntime{runTurn: port.AgentTurn{Text: "default answer"}}
+	}
 	service, err := New(cfg, Dependencies{
-		Store: store, Agent: agent, History: history, Publisher: publisher,
+		Store: store, Runtime: runtime, History: history, Publisher: publisher,
 		Clock: fakeClock{now: time.Unix(1700000000, 0)},
 	})
 	if err != nil {
@@ -353,17 +339,17 @@ func newTestService(t *testing.T, store *fakeStore, agent *fakeAgent, history *f
 
 func TestHandleAuthorizedDM(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "answer"}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
 	history := &fakeHistory{}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, agent, history, publisher, nil)
+	service := newTestService(t, store, runtime, history, publisher, nil)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome = %q, err = %v", outcome, err)
 	}
-	if agent.calls != 1 || len(agent.context) != 1 || agent.context[0].Content != "hello" {
-		t.Fatalf("unexpected model calls/context: %d %#v", agent.calls, agent.context)
+	if runtime.runCalls != 1 || len(runtime.runRequest.Messages) != 1 || runtime.runRequest.Messages[0].Content != "hello" {
+		t.Fatalf("unexpected model calls/context: %d %#v", runtime.runCalls, runtime.runRequest.Messages)
 	}
 	if len(store.appended) != 2 || store.appended[0].Role != domain.RoleUser || store.appended[1].Role != domain.RoleAssistant {
 		t.Fatalf("unexpected persisted messages: %#v", store.appended)
@@ -375,7 +361,7 @@ func TestHandleAuthorizedDM(t *testing.T) {
 
 func TestHandleRuntimeReceivesCanonicalConversationKey(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	service := newTestService(t, store, &fakeAgent{}, &fakeHistory{}, &fakePublisher{}, nil)
+	service := newTestService(t, store, &fakeRuntime{}, &fakeHistory{}, &fakePublisher{}, nil)
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "durable answer"}}
 	service.AddRuntime(runtime, nil)
 
@@ -395,7 +381,7 @@ func TestHandleConfirmationBindsActorAndConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	service := newTestService(t, store, &fakeAgent{}, &fakeHistory{}, &fakePublisher{}, nil)
+	service := newTestService(t, store, &fakeRuntime{}, &fakeHistory{}, &fakePublisher{}, nil)
 	runtime := &fakeRuntime{resumeTurn: port.AgentTurn{Text: "completed"}}
 	confirmations := &fakeConfirmationStore{delivery: &port.ConfirmationDelivery{
 		WrapperCallID: "wrapper", OriginalCallID: "original", SessionID: "adk:" + string(key),
@@ -423,7 +409,7 @@ func TestHandleConfirmationBindsActorAndConversation(t *testing.T) {
 
 func TestReconcileConfirmationsRepublishesOnlyUnprovenPendingDelivery(t *testing.T) {
 	publisher := &fakePublisher{}
-	service := newTestService(t, &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}, &fakeAgent{}, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}, &fakeRuntime{}, &fakeHistory{}, publisher, nil)
 	confirmations := &fakeConfirmationStore{pending: []port.ConfirmationDelivery{{
 		WrapperCallID: "wrapper", OriginalCallID: "original", ChannelID: "D12345678",
 		Summary: "Delete worktree", Expiry: time.Now().Add(time.Hour), Status: port.ConfirmationPending,
@@ -458,7 +444,7 @@ func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) 
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	writer := &fakeExchangeWriter{}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, &fakeAgent{response: "answer"}, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, publisher, nil)
 	service.AddMemory(nil, writer)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
@@ -478,10 +464,10 @@ func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) 
 
 func TestHandleAttachmentBoundsCurrentTurnAndKeepsDurableDelivery(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "answer"}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
 	publisher := &fakePublisher{}
 	writer := &fakeExchangeWriter{}
-	service := newTestService(t, store, agent, &fakeHistory{}, publisher, func(cfg *Config) {
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, func(cfg *Config) {
 		cfg.ContextLimits.MaxChars = 500
 	})
 	loader := &fakeFileLoader{loaded: port.LoadedAttachment{
@@ -503,10 +489,10 @@ func TestHandleAttachmentBoundsCurrentTurnAndKeepsDurableDelivery(t *testing.T) 
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if loader.calls != 1 || processor.calls != 1 || len(agent.context) != 1 {
-		t.Fatalf("attachment flow loader=%d processor=%d context=%#v", loader.calls, processor.calls, agent.context)
+	if loader.calls != 1 || processor.calls != 1 || len(runtime.runRequest.Messages) != 1 {
+		t.Fatalf("attachment flow loader=%d processor=%d messages=%#v", loader.calls, processor.calls, runtime.runRequest.Messages)
 	}
-	current := agent.context[0].Content
+	current := runtime.runRequest.Messages[0].Content
 	if len([]rune(current)) > 500 || !strings.Contains(current, "[TRUNCATED:") || !strings.HasSuffix(current, "</attachments>") {
 		t.Fatalf("bounded current turn (%d runes) = %q", len([]rune(current)), current)
 	}
@@ -542,7 +528,7 @@ func TestHandlePublishesOnlyAfterExchangeIntentIsPrepared(t *testing.T) {
 	writer := &fakeExchangeWriter{err: errors.New("database unavailable")}
 	preparedAtPublish := false
 	publisher := &fakePublisher{onPublish: func() { preparedAtPublish = writer.prepares == 1 }}
-	service := newTestService(t, store, &fakeAgent{response: "answer"}, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, publisher, nil)
 	service.AddMemory(nil, writer)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
@@ -559,27 +545,27 @@ func TestHandlePublishesOnlyAfterExchangeIntentIsPrepared(t *testing.T) {
 
 func TestHandleEnforcesCombinedMessageAndRenderedMemoryBudget(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "answer"}
-	service := newTestService(t, store, agent, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
+	service := newTestService(t, store, runtime, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
 		cfg.ContextLimits.MaxChars = 500
 	})
 	service.AddMemory(fakeRecall{snippets: []domain.MemorySnippet{{Title: "Topic", RevisionNumber: 1, Content: strings.Repeat("é", 200)}}}, nil)
 	if outcome, err := service.Handle(t.Context(), botInvocation()); err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if len(agent.memory) != 1 {
-		t.Fatalf("memory = %#v", agent.memory)
+	if len(runtime.runRequest.Memory) != 1 {
+		t.Fatalf("memory = %#v", runtime.runRequest.Memory)
 	}
-	if got := len([]rune(agent.context[0].Content)) + len([]rune(domain.RenderMemoryReference(agent.memory))); got > 500 {
+	if got := len([]rune(runtime.runRequest.Messages[0].Content)) + len([]rune(domain.RenderMemoryReference(runtime.runRequest.Memory))); got > 500 {
 		t.Fatalf("combined model context has %d runes, exceeds 500", got)
 	}
 }
 
 func TestHandleAuthorizedMentionRepliesInItsThread(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "channel answer"}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "channel answer"}}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, agent, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	invocation := botInvocation()
 	invocation.EventType = "app_mention"
 	invocation.ChannelID = "C12345678"
@@ -599,10 +585,10 @@ func TestHandleAuthorizedMentionRepliesInItsThread(t *testing.T) {
 
 func TestUnauthorizedClaimsDedupeButTouchesNoConversation(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "must not run"}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "must not run"}}
 	history := &fakeHistory{}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, agent, history, publisher, func(cfg *Config) {
+	service := newTestService(t, store, runtime, history, publisher, func(cfg *Config) {
 		cfg.AccessPolicy.AllowedUserIDs = []string{"U99999999"}
 	})
 
@@ -610,8 +596,8 @@ func TestUnauthorizedClaimsDedupeButTouchesNoConversation(t *testing.T) {
 	if err != nil || outcome != OutcomeDenied {
 		t.Fatalf("outcome = %q, err = %v", outcome, err)
 	}
-	if store.claimCalls != 1 || store.hasCalls != 0 || len(store.appended) != 0 || agent.calls != 0 || history.calls != 0 {
-		t.Fatalf("unauthorized side effects: store=%#v agent=%d history=%d", store, agent.calls, history.calls)
+	if store.claimCalls != 1 || store.hasCalls != 0 || len(store.appended) != 0 || runtime.runCalls != 0 || history.calls != 0 {
+		t.Fatalf("unauthorized side effects: store=%#v runtime=%d history=%d", store, runtime.runCalls, history.calls)
 	}
 	if len(publisher.calls) != 1 || publisher.calls[0].text != "denied" {
 		t.Fatalf("unexpected denial publish: %#v", publisher.calls)
@@ -624,24 +610,24 @@ func TestUnauthorizedClaimsDedupeButTouchesNoConversation(t *testing.T) {
 
 func TestDuplicateHasNoVisibleOrModelEffect(t *testing.T) {
 	store := &fakeStore{claimed: true, recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "answer"}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, agent, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	outcome, err := service.Handle(t.Context(), botInvocation())
-	if err != nil || outcome != OutcomeDuplicate || agent.calls != 0 || len(publisher.calls) != 0 {
-		t.Fatalf("duplicate processing: outcome=%q err=%v calls=%d publishes=%d", outcome, err, agent.calls, len(publisher.calls))
+	if err != nil || outcome != OutcomeDuplicate || runtime.runCalls != 0 || len(publisher.calls) != 0 {
+		t.Fatalf("duplicate processing: outcome=%q err=%v calls=%d publishes=%d", outcome, err, runtime.runCalls, len(publisher.calls))
 	}
 }
 
 func TestThreadFollowupCanRecoverParticipation(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "answer"}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
 	history := &fakeHistory{history: port.History{
 		BotParticipated: true,
 		Messages:        []domain.Message{{Role: domain.RoleAssistant, Content: "previous", ExternalTS: "1699999999.000001"}},
 	}}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, agent, history, publisher, nil)
+	service := newTestService(t, store, runtime, history, publisher, nil)
 	i := botInvocation()
 	i.EventID, i.EventType, i.ChannelID, i.ChannelKind = "Ev2", "message.channels", "C12345678", domain.ChannelPublic
 	i.EventTS, i.ThreadTS, i.Trigger = "1700000001.000002", "1700000000.000001", domain.TriggerThreadReply
@@ -650,16 +636,16 @@ func TestThreadFollowupCanRecoverParticipation(t *testing.T) {
 	if err != nil || outcome != OutcomeResponded || history.calls != 1 {
 		t.Fatalf("outcome=%q err=%v history=%d", outcome, err, history.calls)
 	}
-	if len(agent.context) != 2 || agent.context[0].Content != "previous" {
-		t.Fatalf("recovered context not passed to model: %#v", agent.context)
+	if len(runtime.runRequest.Messages) != 2 || runtime.runRequest.Messages[0].Content != "previous" {
+		t.Fatalf("recovered context not passed to model: %#v", runtime.runRequest.Messages)
 	}
 }
 
 func TestModelFailureKeepsOnlyUserMessage(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{err: errors.New("upstream failed")}
+	runtime := &fakeRuntime{err: errors.New("upstream failed")}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, agent, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomeModelFailed {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
@@ -674,8 +660,9 @@ func TestModelFailureKeepsOnlyUserMessage(t *testing.T) {
 
 func TestPublishFailureDoesNotPersistAssistant(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
 	publisher := &fakePublisher{err: errors.New("Slack unavailable")}
-	service := newTestService(t, store, &fakeAgent{response: "answer"}, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomePublishFailed {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
@@ -689,7 +676,7 @@ func TestPublishErrorRetainsPreparedExchangeForRecovery(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	writer := &fakeExchangeWriter{}
 	publisher := &fakePublisher{err: errors.New("connection closed after Slack accepted reply")}
-	service := newTestService(t, store, &fakeAgent{response: "answer"}, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, publisher, nil)
 	service.AddMemory(nil, writer)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
@@ -701,12 +688,12 @@ func TestPublishErrorRetainsPreparedExchangeForRecovery(t *testing.T) {
 	}
 }
 
-func TestSharedModelPermitOnlyCoversAgentRespond(t *testing.T) {
+func TestSharedModelPermitOnlyCoversModelCall(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	limiter := &trackingModelCallLimiter{}
-	var agentPermitAvailable, publishReleased, persistReleased bool
-	agent := &fakeAgent{response: "answer", onRespond: func() {
-		_, agentPermitAvailable = limiter.TryAcquire()
+	var modelPermitAvailable, publishReleased, persistReleased bool
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}, onRun: func() {
+		_, modelPermitAvailable = limiter.TryAcquire()
 	}}
 	publisher := &fakePublisher{onPublish: func() {
 		release, acquired := limiter.TryAcquire()
@@ -722,7 +709,7 @@ func TestSharedModelPermitOnlyCoversAgentRespond(t *testing.T) {
 			release()
 		}
 	}}
-	service := newTestService(t, store, agent, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	service.modelCalls = limiter
 	service.AddMemory(nil, writer)
 
@@ -730,22 +717,22 @@ func TestSharedModelPermitOnlyCoversAgentRespond(t *testing.T) {
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if agentPermitAvailable || !publishReleased || !persistReleased {
-		t.Fatalf("shared permit states: agentPermitAvailable=%t publishReleased=%t persistReleased=%t", agentPermitAvailable, publishReleased, persistReleased)
+	if modelPermitAvailable || !publishReleased || !persistReleased {
+		t.Fatalf("shared permit states: modelPermitAvailable=%t publishReleased=%t persistReleased=%t", modelPermitAvailable, publishReleased, persistReleased)
 	}
 }
 
 func TestEnrichmentRunsBeforeModelTimeoutAndSharedPermit(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	limiter := &trackingModelCallLimiter{}
-	var enrichmentPermitAvailable, agentPermitAvailable bool
+	var enrichmentPermitAvailable, modelPermitAvailable bool
 	enricher := &fakeEnricher{
 		context: domain.AgentContext{MaxChars: 10, Facts: []domain.ContextFact{{Key: "k", Value: "v"}}},
 	}
-	agent := &fakeAgent{response: "answer", onRespond: func() {
-		_, agentPermitAvailable = limiter.TryAcquire()
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}, onRun: func() {
+		_, modelPermitAvailable = limiter.TryAcquire()
 	}}
-	service := newTestService(t, store, agent, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
+	service := newTestService(t, store, runtime, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
 		cfg.ModelTimeout = 10 * time.Millisecond
 	})
 	service.modelCalls = limiter
@@ -763,22 +750,22 @@ func TestEnrichmentRunsBeforeModelTimeoutAndSharedPermit(t *testing.T) {
 		time.Sleep(time.Millisecond)
 		close(delayedRelease)
 	}()
-	agent.block = delayedRelease
+	runtime.block = delayedRelease
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if !enrichmentPermitAvailable || agentPermitAvailable || enricher.calls != 1 || len(agent.agentCtx.Facts) != 1 {
-		t.Fatalf("enrichment/model permit state: enrichment=%t agent=%t calls=%d context=%#v", enrichmentPermitAvailable, agentPermitAvailable, enricher.calls, agent.agentCtx)
+	if !enrichmentPermitAvailable || modelPermitAvailable || enricher.calls != 1 || len(runtime.runRequest.Context.Facts) != 1 {
+		t.Fatalf("enrichment/model permit state: enrichment=%t model=%t calls=%d context=%#v", enrichmentPermitAvailable, modelPermitAvailable, enricher.calls, runtime.runRequest.Context)
 	}
 }
 
 func TestSecretsAreSanitizedOnlyForPersistence(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	agent := &fakeAgent{response: "answer contains xoxb-sensitive-token"}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer contains xoxb-sensitive-token"}}
 	publisher := &fakePublisher{}
-	service := newTestService(t, store, agent, &fakeHistory{}, publisher, nil)
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	service.sanitize = func(value string) string {
 		return strings.ReplaceAll(value, "xoxb-sensitive-token", "xoxb-****oken")
 	}
@@ -788,8 +775,8 @@ func TestSecretsAreSanitizedOnlyForPersistence(t *testing.T) {
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if agent.context[0].Content != invocation.Text {
-		t.Fatalf("model did not receive the authorized current message: %#v", agent.context)
+	if runtime.runRequest.Messages[0].Content != invocation.Text {
+		t.Fatalf("model did not receive the authorized current message: %#v", runtime.runRequest.Messages)
 	}
 	for _, message := range store.appended {
 		if strings.Contains(message.Content, "xoxb-sensitive-token") {
@@ -817,9 +804,9 @@ func TestHandleReturnsBusyWithoutPersistingOrQueueing(t *testing.T) {
 			store := &fakeStore{claimAll: true, recent: make(map[domain.ConversationKey][]domain.Message)}
 			block := make(chan struct{})
 			started := make(chan struct{}, 1)
-			agent := &fakeAgent{response: "answer", block: block, started: started}
+			runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}, block: block, started: started}
 			publisher := &fakePublisher{}
-			service := newTestService(t, store, agent, &fakeHistory{}, publisher, func(cfg *Config) {
+			service := newTestService(t, store, runtime, &fakeHistory{}, publisher, func(cfg *Config) {
 				cfg.MaxConcurrentCalls = tt.maxCalls
 			})
 
@@ -844,8 +831,8 @@ func TestHandleReturnsBusyWithoutPersistingOrQueueing(t *testing.T) {
 			store.mu.Lock()
 			persistedWhileBusy := len(store.appended)
 			store.mu.Unlock()
-			if persistedWhileBusy != 1 || agent.calls != 1 {
-				t.Fatalf("busy invocation persisted or invoked model: messages=%d model_calls=%d", persistedWhileBusy, agent.calls)
+			if persistedWhileBusy != 1 || runtime.runCalls != 1 {
+				t.Fatalf("busy invocation persisted or invoked model: messages=%d model_calls=%d", persistedWhileBusy, runtime.runCalls)
 			}
 			publisher.mu.Lock()
 			busyPublished := len(publisher.calls) == 1 && publisher.calls[0].text == "busy"
