@@ -19,3 +19,9 @@ profiles:
         extra_body:
             thinking:
                 type: enabled
+    pro-reasoning:
+        model: deepseek-v4-pro
+        reasoning_effort: xhigh
+        extra_body:
+            thinking:
+                type: enabled
