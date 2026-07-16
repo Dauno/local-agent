@@ -445,6 +445,106 @@ include_contents: none
 	}
 }
 
+func TestDoctorValidatesScopedOpenAICompatibleAgentToolCredentialsWithoutCLI(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	files := map[string]string{
+		filepath.Join(stateDir, "providers", "deepseek.yaml"): `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  root:
+    model: deepseek-v4-flash
+`,
+		filepath.Join(stateDir, "providers", "explorer.yaml"): `
+name: explorer
+type: openai_compatible
+base_url: https://explorer.example.test
+api_key_env: EXPLORER_API_KEY
+profiles:
+  scout:
+    model: explorer-scout
+`,
+		filepath.Join(stateDir, "agents", "root_agent.yaml"): `
+agent_class: LlmAgent
+name: root_agent
+model: deepseek/root
+global_instruction: policy
+instruction: delegate exploration tasks
+agent_tools: [explore]
+`,
+		filepath.Join(stateDir, "agents", "explore.yaml"): `
+agent_class: LlmAgent
+name: explore
+model: explorer/scout
+description: Explores registered projects and returns read-only evidence.
+instruction: investigate the delegated request
+include_contents: none
+tool_scope: invocation_scoped
+`,
+	}
+	for path, content := range files {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	cli := &fakeCLI{}
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Memory.Enabled = false
+		cfg.Sandbox.Enabled = true
+		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+		return cfg, nil
+	}
+	deps.CLI = cli
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), false)
+	if report.ExitCode() != 1 {
+		t.Fatalf("doctor accepted a missing scoped child credential: %#v", report.Results)
+	}
+	missingChildKey := false
+	for _, result := range report.Results {
+		if result.Name == "model API key (explore)" && strings.Contains(result.Detail, "EXPLORER_API_KEY is not set") {
+			missingChildKey = true
+		}
+	}
+	if !missingChildKey {
+		t.Fatalf("missing scoped child credential was not reported: %#v", report.Results)
+	}
+
+	deps.Secrets = fakeSecrets{values: map[string]string{
+		"DEEPSEEK_API_KEY": "secret-model-key",
+		"EXPLORER_API_KEY": "secret-explorer-key",
+		SlackBotTokenKey:   "xoxb-secret-token",
+		SlackAppTokenKey:   "xapp-secret-token",
+	}}
+	service, err = New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = service.Run(t.Context(), false)
+	if report.ExitCode() != 0 {
+		t.Fatalf("doctor failed: %#v", report.Results)
+	}
+	if len(cli.models) != 0 || cli.describeCalls != 0 || cli.authCalls != 0 {
+		t.Fatalf("openai_compatible agent tool triggered CLI validation: %#v", cli)
+	}
+}
+
 func writeDoctorCLIDefinitions(t *testing.T, stateDir string, includeAttachment bool) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {

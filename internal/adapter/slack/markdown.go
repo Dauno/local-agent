@@ -34,8 +34,8 @@ type fenceSpec struct {
 	length int
 }
 
-func renderMarkdownV1(text string) []string {
-	return SplitMarkdown(neutralizeUnsafeControls(text), SlackMarkdownChunkRunes)
+func renderMarkdownV1(text string, showLabels bool) []string {
+	return SplitMarkdown(neutralizeUnsafeControls(text), SlackMarkdownChunkRunes, showLabels)
 }
 
 func neutralizeUnsafeControls(text string) string {
@@ -161,12 +161,12 @@ func countByteRun(text string, start int, value byte) int {
 
 // SplitMarkdown creates deterministic, bounded Slack delivery parts. Multipart
 // labels and any repeated Markdown structure are delivery-only artifacts.
-func SplitMarkdown(text string, limit int) []string {
+func SplitMarkdown(text string, limit int, showLabels bool) []string {
 	if text == "" || limit <= 0 {
 		return nil
 	}
 	parts := splitMarkdownContent(text, limit)
-	if len(parts) <= 1 {
+	if len(parts) <= 1 || !showLabels {
 		return parts
 	}
 

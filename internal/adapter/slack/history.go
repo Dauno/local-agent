@@ -56,24 +56,25 @@ func (c sdkHistoryClient) ConversationHistory(ctx context.Context, channelID, la
 
 // HistoryReader recovers bounded Slack context without persisting it.
 type HistoryReader struct {
-	client    historyClient
-	botUserID string
-	timeout   time.Duration
-	logger    port.Logger
+	client     historyClient
+	botUserID  string
+	timeout    time.Duration
+	logger     port.Logger
+	partLabels bool
 }
 
-func NewHistoryReader(client *slackapi.Client, botUserID string, timeout time.Duration, logger port.Logger) *HistoryReader {
+func NewHistoryReader(client *slackapi.Client, botUserID string, timeout time.Duration, logger port.Logger, partLabels bool) *HistoryReader {
 	var history historyClient
 	if client != nil {
 		history = sdkHistoryClient{client: client}
 	}
-	return newHistoryReader(history, botUserID, timeout, logger)
+	return newHistoryReader(history, botUserID, timeout, logger, partLabels)
 }
 
-func newHistoryReader(client historyClient, botUserID string, timeout time.Duration, logger port.Logger) *HistoryReader {
+func newHistoryReader(client historyClient, botUserID string, timeout time.Duration, logger port.Logger, partLabels bool) *HistoryReader {
 	return &HistoryReader{
 		client: client, botUserID: botUserID, timeout: timeout,
-		logger: loggerOrDiscard(logger),
+		logger: loggerOrDiscard(logger), partLabels: partLabels,
 	}
 }
 
@@ -165,7 +166,7 @@ func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, inte
 		return "", false, fmt.Errorf("read Slack conversation for assistant exchange recovery: %w", safeErr)
 	}
 
-	expectedParts := renderMarkdownV1(intent.Content)
+	expectedParts := renderMarkdownV1(intent.Content, r.partLabels)
 	if len(expectedParts) == 0 {
 		return "", false, errors.New("no expected parts from markdown splitter")
 	}

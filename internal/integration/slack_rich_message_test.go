@@ -51,7 +51,7 @@ func TestSlackMarkdownPublicationReconcilesTranslatedHistory(t *testing.T) {
 	defer server.Close()
 
 	client := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
-	publisher := adapterslack.NewPublisher(client, time.Second, nil)
+	publisher := adapterslack.NewPublisher(client, time.Second, nil, true)
 	published, err := publisher.Publish(t.Context(), domain.ReplyTarget{
 		ChannelID: channelID, CorrelationID: correlation,
 	}, canonicalText)
@@ -62,7 +62,7 @@ func TestSlackMarkdownPublicationReconcilesTranslatedHistory(t *testing.T) {
 		t.Fatalf("posted markdown = %q", postedMarkdown)
 	}
 
-	reader := adapterslack.NewHistoryReader(client, botUserID, time.Second, nil)
+	reader := adapterslack.NewHistoryReader(client, botUserID, time.Second, nil, true)
 	timestamp, found, err := reader.FindPublishedAssistantExchange(t.Context(), port.AssistantExchangeIntent{
 		ChannelID: channelID, ChannelKind: domain.ChannelDM, Content: canonicalText, CorrelationID: correlation,
 	})

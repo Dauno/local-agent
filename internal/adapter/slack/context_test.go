@@ -346,9 +346,9 @@ func TestContextEnricher_CacheHit_AvoidsDuplicateAPICalls(t *testing.T) {
 	client.channelInfos["C12345678"] = slackChannelInfo{name: "cached-channel", topic: "cached", purpose: "cached"}
 
 	enricher := NewContextEnricher(nil, client, ContextEnricherConfig{
-		Enabled:                true,
-		ProfileCacheTTL:        10 * time.Minute,
-		ConversationCacheTTL:   10 * time.Minute,
+		Enabled:              true,
+		ProfileCacheTTL:      10 * time.Minute,
+		ConversationCacheTTL: 10 * time.Minute,
 	})
 
 	// First call

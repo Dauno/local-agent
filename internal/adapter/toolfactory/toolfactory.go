@@ -35,38 +35,52 @@ func New(store port.ConversationStore, sb *sandboxusecase.Service) *Factory {
 	return &Factory{store: store, sandbox: sb}
 }
 
-// ToolsForInvocation implements port.AgentToolFactory.
-func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) []any {
+// ToolsForInvocation implements port.AgentToolFactory. A tool construction
+// failure returns an error instead of a partial tool list.
+func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) ([]any, error) {
 	if f == nil || f.store == nil {
-		return nil
+		return nil, nil
 	}
 
 	tools := make([]any, 0, 8)
 
 	// Conversation tool.
-	if ro, err := f.listMessagesTool(key); err == nil && ro != nil {
-		tools = append(tools, ro)
+	ro, err := f.listMessagesTool(key)
+	if err != nil {
+		return nil, fmt.Errorf("build list_messages tool: %w", err)
 	}
+	tools = append(tools, ro)
 
 	if f.sandbox == nil {
-		return tools
+		return tools, nil
 	}
 
 	// Read-only sandbox tools.
-	if ro, err := f.listReposTool(actor); err == nil && ro != nil {
-		tools = append(tools, ro)
+	listRepos, err := f.listReposTool(actor)
+	if err != nil {
+		return nil, fmt.Errorf("build list_repos tool: %w", err)
 	}
-	if ro, err := f.listDirectoryTool(actor); err == nil && ro != nil {
-		tools = append(tools, ro)
-	}
-	if ro, err := f.readFileTool(actor); err == nil && ro != nil {
-		tools = append(tools, ro)
-	}
-	if ro, err := f.listWorktreesTool(actor); err == nil && ro != nil {
-		tools = append(tools, ro)
-	}
+	tools = append(tools, listRepos)
 
-	return tools
+	listDirectory, err := f.listDirectoryTool(actor)
+	if err != nil {
+		return nil, fmt.Errorf("build list_directory tool: %w", err)
+	}
+	tools = append(tools, listDirectory)
+
+	readFile, err := f.readFileTool(actor)
+	if err != nil {
+		return nil, fmt.Errorf("build read_file tool: %w", err)
+	}
+	tools = append(tools, readFile)
+
+	listWorktrees, err := f.listWorktreesTool(actor)
+	if err != nil {
+		return nil, fmt.Errorf("build list_worktrees tool: %w", err)
+	}
+	tools = append(tools, listWorktrees)
+
+	return tools, nil
 }
 
 // --- read-only: conversation ---

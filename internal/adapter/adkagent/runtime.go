@@ -153,7 +153,10 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	// Build tools for this turn.
 	tools := append([]tool.Tool(nil), r.staticTools...)
 	if r.toolFactory != nil {
-		rawTools := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
+		rawTools, toolErr := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
+		if toolErr != nil {
+			return port.AgentTurn{}, fmt.Errorf("build invocation tools: %w", toolErr)
+		}
 		for _, raw := range rawTools {
 			if t, ok := raw.(tool.Tool); ok {
 				tools = append(tools, t)
@@ -202,7 +205,11 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 
 	tools := append([]tool.Tool(nil), r.staticTools...)
 	if r.toolFactory != nil {
-		for _, raw := range r.toolFactory.ToolsForInvocation(decision.Actor, decision.ConversationKey) {
+		rawTools, toolErr := r.toolFactory.ToolsForInvocation(decision.Actor, decision.ConversationKey)
+		if toolErr != nil {
+			return port.AgentTurn{}, fmt.Errorf("build invocation tools for resume: %w", toolErr)
+		}
+		for _, raw := range rawTools {
 			if t, ok := raw.(tool.Tool); ok {
 				tools = append(tools, t)
 			}
