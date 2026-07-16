@@ -990,4 +990,23 @@ func TestTrackedDefinitionsLoad(t *testing.T) {
 	if defs == nil || defs.Agents["root_agent"].GlobalInstruction == "" {
 		t.Fatal("tracked root_agent must define global_instruction")
 	}
+	root := defs.Agents["root_agent"]
+	rootTools := root.AgentTools
+	if got, want := strings.Join(rootTools, ","), "explore,opencode_worker,codex_worker"; got != want {
+		t.Fatalf("tracked root_agent.agent_tools = %v, want %v", rootTools, strings.Split(want, ","))
+	}
+	for _, policy := range []string{
+		"all registered-project exploration",
+		"explicitly asks to use OpenCode",
+		"explicitly asks to use Codex",
+		"does not by itself authorize either worker",
+	} {
+		if !strings.Contains(root.Instruction, policy) {
+			t.Fatalf("tracked root_agent instruction must contain %q", policy)
+		}
+	}
+	explore := defs.Agents["explore"]
+	if explore.ToolScope != "invocation_scoped" || explore.IncludeContents != "none" {
+		t.Fatalf("tracked explore definition = %+v", explore)
+	}
 }

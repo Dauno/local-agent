@@ -91,7 +91,10 @@ func TestFactoryWithoutSandboxExposesOnlyConversationTools(t *testing.T) {
 	if f == nil {
 		t.Fatal("factory should not be nil")
 	}
-	tools := f.ToolsForInvocation("U12345678", domain.ConversationKey("test:conv"))
+	tools, err := f.ToolsForInvocation("U12345678", domain.ConversationKey("test:conv"))
+	if err != nil {
+		t.Fatalf("ToolsForInvocation error = %v", err)
+	}
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool without sandbox, got %d", len(tools))
 	}
@@ -118,7 +121,10 @@ func TestFactoryWithSandboxExposesAllReadOnlyTools(t *testing.T) {
 	if f == nil {
 		t.Fatal("factory should not be nil")
 	}
-	tools := f.ToolsForInvocation("U12345678", domain.ConversationKey("test:conv"))
+	tools, err := f.ToolsForInvocation("U12345678", domain.ConversationKey("test:conv"))
+	if err != nil {
+		t.Fatalf("ToolsForInvocation error = %v", err)
+	}
 	if len(tools) != 5 { // list_messages + 4 sandbox tools
 		t.Fatalf("expected 5 tools with sandbox, got %d", len(tools))
 	}

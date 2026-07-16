@@ -66,13 +66,14 @@ type sleepFunc func(context.Context, time.Duration) error
 
 // Publisher implements port.ResponsePublisher using Slack chat.postMessage.
 type Publisher struct {
-	client   postClient
-	timeout  time.Duration
-	pace     time.Duration
-	sleep    sleepFunc
-	now      func() time.Time
-	logger   port.Logger
-	channels sync.Map
+	client     postClient
+	timeout    time.Duration
+	pace       time.Duration
+	sleep      sleepFunc
+	now        func() time.Time
+	logger     port.Logger
+	partLabels bool
+	channels   sync.Map
 }
 
 type channelPace struct {
@@ -80,18 +81,19 @@ type channelPace struct {
 	lastAttempt time.Time
 }
 
-func NewPublisher(client *slackapi.Client, timeout time.Duration, logger port.Logger) *Publisher {
+func NewPublisher(client *slackapi.Client, timeout time.Duration, logger port.Logger, partLabels bool) *Publisher {
 	var poster postClient
 	if client != nil {
 		poster = sdkPostClient{client: client}
 	}
-	return newPublisher(poster, timeout, logger)
+	return newPublisher(poster, timeout, logger, partLabels)
 }
 
-func newPublisher(client postClient, timeout time.Duration, logger port.Logger) *Publisher {
+func newPublisher(client postClient, timeout time.Duration, logger port.Logger, partLabels bool) *Publisher {
 	return &Publisher{
 		client: client, timeout: timeout, pace: defaultPace,
 		sleep: sleepContext, now: time.Now, logger: loggerOrDiscard(logger),
+		partLabels: partLabels,
 	}
 }
 
@@ -106,7 +108,7 @@ func (p *Publisher) Publish(ctx context.Context, target domain.ReplyTarget, text
 		return port.PublishedResponse{}, errors.New("Slack response text is required")
 	}
 
-	chunks := renderMarkdownV1(text)
+	chunks := renderMarkdownV1(text, p.partLabels)
 	if len(chunks) == 0 {
 		return port.PublishedResponse{}, errors.New("markdown splitting produced no parts")
 	}

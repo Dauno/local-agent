@@ -269,11 +269,21 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		validSecrets[key] = true
 		report.pass(name, fmt.Sprintf("%s is configured (%s)", key, secure.Mask(value)))
 	}
+	checkedModelAPIKeys := make(map[string]bool)
 	if rootCLIProvider {
 		// agent_cli providers require no model API key.
 		report.pass("model API key", "agent CLI provider requires no model API key")
 	} else {
 		checkSecret("model API key", modelAPIKeyEnv, "", "Set "+modelAPIKeyEnv+" in the process environment or .env.")
+		checkedModelAPIKeys[modelAPIKeyEnv] = true
+	}
+	for _, selected := range selectedModels {
+		if selected.resolved.IsAgentCLI() || checkedModelAPIKeys[selected.resolved.APIKeyEnv] {
+			continue
+		}
+		key := selected.resolved.APIKeyEnv
+		checkedModelAPIKeys[key] = true
+		checkSecret("model API key ("+selected.agent+")", key, "", "Set "+key+" in the process environment or .env.")
 	}
 	checkSecret("Slack bot token", SlackBotTokenKey, "xoxb-", "Set a Bot User OAuth Token beginning with xoxb-.")
 	checkSecret("Slack app token", SlackAppTokenKey, "xapp-", "Set an app-level Socket Mode token beginning with xapp- and connections:write.")

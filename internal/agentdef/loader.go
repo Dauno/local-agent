@@ -497,11 +497,22 @@ func validateAgentTools(defs *Definitions) []string {
 			if len(target.AgentTools) > 0 {
 				errs = append(errs, fmt.Sprintf("agent tool %q: nested agent_tools are not supported", name))
 			}
-			if target.DurableSession || target.ToolScope != "" || target.Role != "" {
-				errs = append(errs, fmt.Sprintf("agent tool %q: durable_session, tool_scope, and role are not supported", name))
+			if target.DurableSession || target.Role != "" {
+				errs = append(errs, fmt.Sprintf("agent tool %q: durable_session and role are not supported", name))
 			}
-			if provider, ok := providerForAgent(target, defs.Providers); ok && provider.Type != ProviderTypeAgentCLI {
-				errs = append(errs, fmt.Sprintf("agent tool %q: model must use an %s provider", name, ProviderTypeAgentCLI))
+			if provider, ok := providerForAgent(target, defs.Providers); ok {
+				switch provider.Type {
+				case ProviderTypeAgentCLI:
+					if target.ToolScope != "" {
+						errs = append(errs, fmt.Sprintf("agent tool %q: tool_scope is not supported for %s agent tools", name, ProviderTypeAgentCLI))
+					}
+				case ProviderTypeOpenAICompatible:
+					if target.ToolScope != "invocation_scoped" {
+						errs = append(errs, fmt.Sprintf("agent tool %q: %s agent tools must declare tool_scope: invocation_scoped", name, ProviderTypeOpenAICompatible))
+					}
+				default:
+					errs = append(errs, fmt.Sprintf("agent tool %q: model must use an %s or %s provider", name, ProviderTypeAgentCLI, ProviderTypeOpenAICompatible))
+				}
 			}
 		}
 	}

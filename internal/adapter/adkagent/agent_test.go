@@ -511,8 +511,68 @@ func TestRuntimeCombinesStaticAndInvocationTools(t *testing.T) {
 
 type staticToolFactory struct {
 	tools []any
+	err   error
 }
 
-func (f staticToolFactory) ToolsForInvocation(string, domain.ConversationKey) []any {
-	return f.tools
+func (f staticToolFactory) ToolsForInvocation(string, domain.ConversationKey) ([]any, error) {
+	return f.tools, f.err
+}
+
+func TestRuntimeRunPropagatesToolFactoryError(t *testing.T) {
+	t.Parallel()
+
+	factoryErr := errors.New("scoped tool construction failed")
+	llm := &fakeLLM{response: func(*model.LLMRequest) string { return "ok" }}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName:      "Dev Agent",
+		Instruction:    "Use the registered tools when relevant.",
+		Model:          llm,
+		SessionService: session.InMemoryService(),
+		ToolFactory:    staticToolFactory{err: factoryErr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runtime.Run(t.Context(), port.AgentRequest{
+		ConversationKey: "slack:T123:dm:D123",
+		Messages:        []domain.Message{{Role: domain.RoleUser, Content: "hello", UserID: "U123"}},
+	})
+	if !errors.Is(err, factoryErr) {
+		t.Fatalf("Run() error = %v, want wrapped %v", err, factoryErr)
+	}
+	if len(llm.recorded()) != 0 {
+		t.Fatal("model was called despite invocation tool construction failure")
+	}
+}
+
+func TestRuntimeResumePropagatesToolFactoryError(t *testing.T) {
+	t.Parallel()
+
+	factoryErr := errors.New("scoped tool construction failed")
+	llm := &fakeLLM{response: func(*model.LLMRequest) string { return "ok" }}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName:      "Dev Agent",
+		Instruction:    "Use the registered tools when relevant.",
+		Model:          llm,
+		SessionService: session.InMemoryService(),
+		ToolFactory:    staticToolFactory{err: factoryErr},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = runtime.Resume(t.Context(), domain.ConfirmationDecision{
+		ConversationKey: "slack:T123:dm:D123",
+		WrapperCallID:   "wrapper-1",
+		OriginalCallID:  "original-1",
+		Actor:           "U123",
+		Approved:        true,
+	})
+	if !errors.Is(err, factoryErr) {
+		t.Fatalf("Resume() error = %v, want wrapped %v", err, factoryErr)
+	}
+	if len(llm.recorded()) != 0 {
+		t.Fatal("model was called despite invocation tool construction failure")
+	}
 }

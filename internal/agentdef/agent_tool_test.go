@@ -51,6 +51,16 @@ instruction: Complete the delegated task and return a concise result.
 include_contents: none
 `
 
+const agentToolScopedExplore = `
+agent_class: LlmAgent
+name: opencode_worker
+model: deepseek/root
+description: Explores registered projects and returns read-only evidence.
+instruction: Investigate the delegated request using read-only tools.
+include_contents: none
+tool_scope: invocation_scoped
+`
+
 func TestLoadAgentToolComposition(t *testing.T) {
 	defs, err := loadAgentToolDefinitions(t, agentToolRoot, agentToolWorker)
 	if err != nil {
@@ -59,6 +69,17 @@ func TestLoadAgentToolComposition(t *testing.T) {
 	root := defs.Agents["root_agent"]
 	if len(root.AgentTools) != 1 || root.AgentTools[0] != "opencode_worker" {
 		t.Fatalf("agent_tools = %v", root.AgentTools)
+	}
+}
+
+func TestLoadScopedOpenAICompatibleAgentTool(t *testing.T) {
+	defs, err := loadAgentToolDefinitions(t, agentToolRoot, agentToolScopedExplore)
+	if err != nil {
+		t.Fatalf("load scoped openai_compatible agent tool: %v", err)
+	}
+	child := defs.Agents["opencode_worker"]
+	if child.ToolScope != "invocation_scoped" {
+		t.Fatalf("tool_scope = %q", child.ToolScope)
 	}
 }
 
@@ -88,10 +109,34 @@ func TestRejectInvalidAgentToolComposition(t *testing.T) {
 			want:   "requires an openai_compatible root model",
 		},
 		{
-			name:   "non-CLI worker",
+			name:   "openai_compatible worker without scope",
 			root:   agentToolRoot,
 			worker: strings.Replace(agentToolWorker, "opencode/build", "deepseek/root", 1),
-			want:   "model must use an agent_cli provider",
+			want:   "must declare tool_scope: invocation_scoped",
+		},
+		{
+			name:   "tool_scope on CLI worker",
+			root:   agentToolRoot,
+			worker: agentToolWorker + "tool_scope: invocation_scoped\n",
+			want:   "tool_scope is not supported for agent_cli agent tools",
+		},
+		{
+			name:   "durable child session",
+			root:   agentToolRoot,
+			worker: agentToolScopedExplore + "durable_session: true\n",
+			want:   "durable_session and role are not supported",
+		},
+		{
+			name:   "child role",
+			root:   agentToolRoot,
+			worker: agentToolScopedExplore + "role: memory_curator\n",
+			want:   "durable_session and role are not supported",
+		},
+		{
+			name:   "child global instruction",
+			root:   agentToolRoot,
+			worker: agentToolScopedExplore + "global_instruction: escalate\n",
+			want:   "global_instruction is only allowed on root_agent",
 		},
 		{
 			name:   "nested tools",
