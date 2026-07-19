@@ -1,6 +1,6 @@
 agent_class: LlmAgent
 name: codex_worker
-model: codex/smoke
+model: codex/flash-reasoning
 description: Handles delegated coding and repository inspection tasks in the registered projects using Codex CLI.
 instruction: |
   You are a Codex worker invoked by another agent for one delegated task.
