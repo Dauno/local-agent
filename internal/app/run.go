@@ -292,6 +292,74 @@ func (a *Application) Run(ctx context.Context) error {
 		ConversationCacheTTL: time.Duration(cfg.Slack.Context.ConversationCacheTTLMinutes) * time.Minute,
 	})
 
+	sessionSvc := adaptersqlite.NewAdkSessionService(store)
+	if sessionSvc == nil {
+		return errors.New("initialize ADK session service: SQLite store is unavailable")
+	}
+	families, err := sessionSvc.RootSessionProviderFamilies(ctx)
+	if err != nil {
+		return redactor.Error(fmt.Errorf("inspect durable session provider families: %w", err))
+	}
+	if err := enforceProviderFamily(families, rootFamily); err != nil {
+		return redactor.Error(err)
+	}
+
+	// A CLI-backed root receives no local-agent ADK function tools: the
+	// external CLI cannot return portable ADK function calls.
+	var toolFactory port.AgentToolFactory
+	if !rootIsAgentCLI {
+		var sandboxService *sandboxusecase.Service
+		if cfg.Sandbox.Enabled {
+			projects := paths.SandboxProjectRoots
+			if len(projects) == 0 {
+				projects = cfg.Sandbox.Projects
+			}
+			executor, err := fssandbox.New(projects, cfg.Sandbox.MaxOutputBytes)
+			if err != nil {
+				return redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
+			}
+			sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
+				AllowedCapabilities: []domain.Capability{
+					domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees,
+				},
+				CommandTimeout: time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
+				MaxOutputBytes: cfg.Sandbox.MaxOutputBytes,
+			}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(store), Executor: executor})
+			if err != nil {
+				return redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
+			}
+		}
+		toolFactory = toolfactory.New(store, sandboxService)
+		if len(preparedAgentTools) > 0 {
+			globalInstruction := ""
+			if rootDef != nil {
+				globalInstruction = rootDef.GlobalInstruction
+			}
+			toolFactory = newCompositeAgentToolFactory(toolFactory, preparedAgentTools, globalInstruction)
+		}
+	}
+
+	rtInstruction := ""
+	rtGlobalInstruction := ""
+	if rootDef != nil {
+		rtInstruction = rootDef.Instruction
+		rtGlobalInstruction = rootDef.GlobalInstruction
+	}
+
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
+		AgentName:         agentName,
+		Instruction:       rtInstruction,
+		GlobalInstruction: rtGlobalInstruction,
+		SessionService:    sessionSvc,
+		Model:             rootModel,
+		ToolFactory:       toolFactory,
+		ProviderFamily:    rootFamily,
+	})
+	if err != nil {
+		return redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
+	}
+	confirmationStore := adaptersqlite.NewConfirmationStore(store)
+
 	service, err := botusecase.New(botusecase.Config{
 		AccessPolicy: domain.AccessPolicy{
 			AllowAllUsers: cfg.Slack.AllowAllUsers, AllowedUserIDs: cfg.Slack.AllowedUserIDs,
@@ -307,9 +375,10 @@ func (a *Application) Run(ctx context.Context) error {
 		ModelErrorMessage:   cfg.Runtime.ModelErrorMessage,
 		UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 	}, botusecase.Dependencies{
-		Store: store, History: history, Publisher: publisher, Logger: logger,
+		Store: store, Runtime: runtime, History: history, Publisher: publisher, Logger: logger,
 		ModelCalls: modelCalls, SanitizeContent: redactor.String,
 		Enricher:           contextEnricher,
+		ConfirmationStore:  confirmationStore,
 		FileLoader:         fileLoader,
 		AttachmentProc:     attachmentProc,
 		MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile),
@@ -319,80 +388,13 @@ func (a *Application) Run(ctx context.Context) error {
 		return err
 	}
 
-	sessionSvc := adaptersqlite.NewAdkSessionService(store)
-	if sessionSvc != nil {
-		families, famErr := sessionSvc.RootSessionProviderFamilies(ctx)
-		if famErr != nil {
-			return redactor.Error(fmt.Errorf("inspect durable session provider families: %w", famErr))
-		}
-		if err := enforceProviderFamily(families, rootFamily); err != nil {
-			return redactor.Error(err)
-		}
-
-		// A CLI-backed root receives no local-agent ADK function tools: the
-		// external CLI cannot return portable ADK function calls.
-		var toolFactory port.AgentToolFactory
-		if !rootIsAgentCLI {
-			var sandboxService *sandboxusecase.Service
-			if cfg.Sandbox.Enabled {
-				projects := paths.SandboxProjectRoots
-				if len(projects) == 0 {
-					projects = cfg.Sandbox.Projects
-				}
-				executor, err := fssandbox.New(projects, cfg.Sandbox.MaxOutputBytes)
-				if err != nil {
-					return redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
-				}
-				sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
-					AllowedCapabilities: []domain.Capability{
-						domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees,
-					},
-					CommandTimeout: time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
-					MaxOutputBytes: cfg.Sandbox.MaxOutputBytes,
-				}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(store), Executor: executor})
-				if err != nil {
-					return redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
-				}
-			}
-			toolFactory = toolfactory.New(store, sandboxService)
-			if len(preparedAgentTools) > 0 {
-				globalInstruction := ""
-				if rootDef != nil {
-					globalInstruction = rootDef.GlobalInstruction
-				}
-				toolFactory = newCompositeAgentToolFactory(toolFactory, preparedAgentTools, globalInstruction)
-			}
-		}
-
-		rtInstruction := ""
-		rtGlobalInstruction := ""
-		if rootDef != nil {
-			rtInstruction = rootDef.Instruction
-			rtGlobalInstruction = rootDef.GlobalInstruction
-		}
-
-		runtime, rtErr := adkagent.NewRuntime(adkagent.RuntimeConfig{
-			AgentName:         agentName,
-			Instruction:       rtInstruction,
-			GlobalInstruction: rtGlobalInstruction,
-			SessionService:    sessionSvc,
-			Model:             rootModel,
-			ToolFactory:       toolFactory,
-			ProviderFamily:    rootFamily,
-		})
-		if rtErr != nil {
-			return redactor.Error(fmt.Errorf("initialize ADK runtime: %w", rtErr))
-		}
-		confirmationStore := adaptersqlite.NewConfirmationStore(store)
-		service.AddRuntime(runtime, confirmationStore)
-		if err := confirmationStore.ExpireDeliveries(ctx, time.Now().UTC()); err != nil {
-			logger.Warn("confirmation delivery expiry failed", "error", err)
-		}
-		if err := service.ReconcileConfirmations(ctx, history); err != nil {
-			return redactor.Error(fmt.Errorf("reconcile confirmation deliveries: %w", err))
-		}
-		logger.Info("ADK durable runtime enabled", "session_service", "sqlite")
+	if err := confirmationStore.ExpireDeliveries(ctx, time.Now().UTC()); err != nil {
+		logger.Warn("confirmation delivery expiry failed", "error", err)
 	}
+	if err := service.ReconcileConfirmations(ctx, history); err != nil {
+		return redactor.Error(fmt.Errorf("reconcile confirmation deliveries: %w", err))
+	}
+	logger.Info("ADK durable runtime enabled", "session_service", "sqlite")
 
 	if cfg.Memory.Enabled {
 		memorySvc, memErr := memoryusecase.New(memoryusecase.Config{

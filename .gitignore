@@ -6,6 +6,7 @@
 !.local-agent/providers/**
 .opencode/
 /bin/
+/local-agent
 coverage.out
 docs/
 .agents-cli-spec.md

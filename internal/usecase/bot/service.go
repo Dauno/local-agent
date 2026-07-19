@@ -453,11 +453,6 @@ func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.Assistant
 	s.exchange = exchange
 }
 
-func (s *Service) AddRuntime(runtime port.AgentRuntime, confirmations port.ConfirmationDeliveryStore) {
-	s.runtime = runtime
-	s.confirmationStore = confirmations
-}
-
 func (s *Service) processAttachments(ctx context.Context, invocation domain.Invocation, maxChars int) (string, error) {
 	var processed []port.ProcessedAttachment
 	for idx, att := range invocation.Attachments {

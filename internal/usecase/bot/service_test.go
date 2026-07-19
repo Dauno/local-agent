@@ -314,6 +314,10 @@ func botInvocation() domain.Invocation {
 }
 
 func newTestService(t *testing.T, store *fakeStore, runtime *fakeRuntime, history *fakeHistory, publisher *fakePublisher, mutate func(*Config)) *Service {
+	return newTestServiceWithConfirmations(t, store, runtime, history, publisher, nil, mutate)
+}
+
+func newTestServiceWithConfirmations(t *testing.T, store *fakeStore, runtime *fakeRuntime, history *fakeHistory, publisher *fakePublisher, confirmations port.ConfirmationDeliveryStore, mutate func(*Config)) *Service {
 	t.Helper()
 	cfg := Config{
 		AccessPolicy:   domain.AccessPolicy{AllowedUserIDs: []string{"U12345678"}},
@@ -328,7 +332,7 @@ func newTestService(t *testing.T, store *fakeStore, runtime *fakeRuntime, histor
 		runtime = &fakeRuntime{runTurn: port.AgentTurn{Text: "default answer"}}
 	}
 	service, err := New(cfg, Dependencies{
-		Store: store, Runtime: runtime, History: history, Publisher: publisher,
+		Store: store, Runtime: runtime, History: history, Publisher: publisher, ConfirmationStore: confirmations,
 		Clock: fakeClock{now: time.Unix(1700000000, 0)},
 	})
 	if err != nil {
@@ -361,9 +365,8 @@ func TestHandleAuthorizedDM(t *testing.T) {
 
 func TestHandleRuntimeReceivesCanonicalConversationKey(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	service := newTestService(t, store, &fakeRuntime{}, &fakeHistory{}, &fakePublisher{}, nil)
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "durable answer"}}
-	service.AddRuntime(runtime, nil)
+	service := newTestService(t, store, runtime, &fakeHistory{}, &fakePublisher{}, nil)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomeResponded {
@@ -381,14 +384,13 @@ func TestHandleConfirmationBindsActorAndConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	service := newTestService(t, store, &fakeRuntime{}, &fakeHistory{}, &fakePublisher{}, nil)
 	runtime := &fakeRuntime{resumeTurn: port.AgentTurn{Text: "completed"}}
 	confirmations := &fakeConfirmationStore{delivery: &port.ConfirmationDelivery{
 		WrapperCallID: "wrapper", OriginalCallID: "original", SessionID: "adk:" + string(key),
 		Actor: invocation.UserID, ConversationKey: key, Status: port.ConfirmationPublished,
 		Expiry: time.Now().Add(time.Hour),
 	}}
-	service.AddRuntime(runtime, confirmations)
+	service := newTestServiceWithConfirmations(t, store, runtime, &fakeHistory{}, &fakePublisher{}, confirmations, nil)
 
 	if outcome := service.HandleConfirmation(t.Context(), invocation, "wrapper", true); outcome != OutcomeResponded {
 		t.Fatalf("HandleConfirmation() = %q", outcome)
@@ -409,12 +411,11 @@ func TestHandleConfirmationBindsActorAndConversation(t *testing.T) {
 
 func TestReconcileConfirmationsRepublishesOnlyUnprovenPendingDelivery(t *testing.T) {
 	publisher := &fakePublisher{}
-	service := newTestService(t, &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}, &fakeRuntime{}, &fakeHistory{}, publisher, nil)
 	confirmations := &fakeConfirmationStore{pending: []port.ConfirmationDelivery{{
 		WrapperCallID: "wrapper", OriginalCallID: "original", ChannelID: "D12345678",
 		Summary: "Delete worktree", Expiry: time.Now().Add(time.Hour), Status: port.ConfirmationPending,
 	}}}
-	service.AddRuntime(&fakeRuntime{}, confirmations)
+	service := newTestServiceWithConfirmations(t, &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}, &fakeRuntime{}, &fakeHistory{}, publisher, confirmations, nil)
 
 	finder := &fakeExchangeFinder{}
 	if err := service.ReconcileConfirmations(t.Context(), finder); err != nil {
