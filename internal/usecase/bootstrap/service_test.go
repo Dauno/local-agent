@@ -44,6 +44,10 @@ func TestEnsureBaseArtifactsFirstRun(t *testing.T) {
 			t.Fatalf("artifact %s: info=%v err=%v", path, info, err)
 		}
 	}
+	workflowsDir := filepath.Join(snapshot.Paths.StateDir, "workflows")
+	if info, err := os.Stat(workflowsDir); err != nil || !info.IsDir() {
+		t.Fatalf("workflows directory %s: info=%v err=%v", workflowsDir, info, err)
+	}
 	if _, err := os.Stat(snapshot.Paths.EnvFile); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("EnsureBaseArtifacts created .env: %v", err)
 	}

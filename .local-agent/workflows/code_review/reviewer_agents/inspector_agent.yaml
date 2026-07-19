@@ -1,0 +1,10 @@
+agent_class: LlmAgent
+name: InspectorAgent
+model: deepseek/pro-reasoning
+description: Inspects the provided code and catalogues all findings.
+instruction: |
+  Inspect the delegated code or change request and catalogue all findings.
+  Return a structured list of observations, potential bugs, style issues, and
+  architectural concerns. Group by severity.
+include_contents: default
+output_key: raw_findings

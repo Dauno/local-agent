@@ -1,0 +1,8 @@
+agent_class: LlmAgent
+name: MixedResultPresenter
+model: deepseek/flash-reasoning
+description: Presents the external worker result.
+instruction: |
+  Return only this completed result:
+  {worker_result}
+include_contents: none

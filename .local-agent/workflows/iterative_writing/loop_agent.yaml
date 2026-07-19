@@ -1,0 +1,7 @@
+agent_class: LoopAgent
+name: RefinementLoop
+description: Reviews and refines a document until complete or bounded.
+max_iterations: 5
+sub_agents:
+  - config_path: writer_agents/critic_agent.yaml
+  - config_path: writer_agents/refiner_agent.yaml

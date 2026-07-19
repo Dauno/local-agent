@@ -1,0 +1,12 @@
+agent_class: LlmAgent
+name: CriticAgent
+model: deepseek/pro-reasoning
+description: Reviews the current draft and returns one actionable critique.
+instruction: |
+  Review this document:
+  {current_document}
+
+  Return one actionable critique. If no material issue remains, return exactly
+  NO_CHANGES_NEEDED.
+include_contents: none
+output_key: criticism

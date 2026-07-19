@@ -1,0 +1,7 @@
+agent_class: LlmAgent
+name: OpenCodeTask
+model: opencode/flash-reasoning
+description: Completes one delegated task with the configured OpenCode agent.
+instruction: |
+  Complete the delegated task and return only the final result.
+include_contents: none

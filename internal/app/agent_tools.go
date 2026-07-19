@@ -111,20 +111,23 @@ func prepareRootAgentTools(
 }
 
 // compositeAgentToolFactory composes the base invocation tool factory with the
-// prepared agent-tool children. Agent tools precede the direct root tools in
-// one deterministic list; any construction failure fails the whole turn.
+// prepared agent-tool children and workflow-tool children. Agent tools precede
+// workflow tools, and both precede direct root tools in one deterministic list;
+// any construction failure fails the whole turn.
 type compositeAgentToolFactory struct {
 	base              port.AgentToolFactory
 	children          []preparedAgentTool
+	workflowChildren  []preparedWorkflowTool
 	globalInstruction string
 }
 
 var _ port.AgentToolFactory = (*compositeAgentToolFactory)(nil)
 
-func newCompositeAgentToolFactory(base port.AgentToolFactory, children []preparedAgentTool, globalInstruction string) *compositeAgentToolFactory {
+func newCompositeAgentToolFactory(base port.AgentToolFactory, children []preparedAgentTool, workflowChildren []preparedWorkflowTool, globalInstruction string) *compositeAgentToolFactory {
 	return &compositeAgentToolFactory{
 		base:              base,
 		children:          children,
+		workflowChildren:  workflowChildren,
 		globalInstruction: globalInstruction,
 	}
 }
@@ -143,15 +146,17 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 		}
 	}
 	scoped := make([]tool.Tool, 0, len(baseRaw))
+	toolIndex := make(map[string]tool.Tool, len(baseRaw))
 	for index, raw := range baseRaw {
 		adkTool, ok := raw.(tool.Tool)
 		if !ok {
 			return nil, fmt.Errorf("invocation tool %d is not an ADK tool: %T", index, raw)
 		}
 		scoped = append(scoped, adkTool)
+		toolIndex[adkTool.Name()] = adkTool
 	}
 
-	combined := make([]any, 0, len(f.children)+len(baseRaw))
+	combined := make([]any, 0, len(f.children)+len(f.workflowChildren)+len(baseRaw))
 	for _, child := range f.children {
 		if child.cliTool != nil {
 			combined = append(combined, child.cliTool)
@@ -163,6 +168,18 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 		}
 		combined = append(combined, agenttool.New(childAgent, &agenttool.Config{}))
 	}
+
+	for idx := range f.workflowChildren {
+		workflowTool, err := f.workflowChildren[idx].buildAgentTool(invocationScope{
+			globalInstruction: f.globalInstruction,
+			toolIndex:         toolIndex,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("build workflow tool %q: %w", f.workflowChildren[idx].blueprint.ID, err)
+		}
+		combined = append(combined, workflowTool)
+	}
+
 	for _, raw := range baseRaw {
 		combined = append(combined, raw)
 	}

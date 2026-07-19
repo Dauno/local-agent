@@ -201,6 +201,34 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 					}
 					selectedModels = append(selectedModels, selectedModel{agent: agentToolName, resolved: agentToolResolved})
 				}
+				if defsErr == nil {
+					blueprints := make([]*agentdef.WorkflowBlueprint, 0, len(rootDef.WorkflowTools))
+					for _, workflowID := range rootDef.WorkflowTools {
+						bp, loadErr := defs.LoadWorkflow(paths.StateDir, workflowID)
+						if loadErr != nil {
+							defsErr = fmt.Errorf("workflow %q: %w", workflowID, loadErr)
+							break
+						}
+						blueprints = append(blueprints, bp)
+						for _, doc := range bp.OrderedDocuments() {
+							if doc.AgentClass != agentdef.AgentClassLLM || doc.LLM == nil {
+								continue
+							}
+							workflowResolved, resolveErr := defs.ResolveModel(doc.LLM.Model)
+							if resolveErr != nil {
+								defsErr = fmt.Errorf("workflow %q agent %q: resolve model %q: %w", workflowID, doc.Name, doc.LLM.Model, resolveErr)
+								break
+							}
+							selectedModels = append(selectedModels, selectedModel{agent: "workflow:" + doc.Name, resolved: workflowResolved})
+						}
+						if defsErr != nil {
+							break
+						}
+					}
+					if defsErr == nil {
+						defsErr = defs.ValidateWorkflowComposition(rootDef, blueprints, cfg.Sandbox.Enabled)
+					}
+				}
 				if defsErr == nil && cfg.Memory.Enabled {
 					curator, exists := defs.Agents["memory_curator"]
 					if !exists {

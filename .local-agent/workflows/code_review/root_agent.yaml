@@ -1,0 +1,7 @@
+agent_class: SequentialAgent
+name: CodeReviewPipeline
+description: Analyzes code and produces a structured review with findings.
+sub_agents:
+  - config_path: reviewer_agents/inspector_agent.yaml
+  - config_path: reviewer_agents/prioritizer_agent.yaml
+  - config_path: reviewer_agents/report_writer_agent.yaml

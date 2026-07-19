@@ -1,0 +1,8 @@
+agent_class: LlmAgent
+name: MixedCodexWorker
+model: codex/flash-reasoning
+description: Completes the delegated task with Codex.
+instruction: |
+  Complete the delegated task and return only the result.
+include_contents: none
+output_key: worker_result

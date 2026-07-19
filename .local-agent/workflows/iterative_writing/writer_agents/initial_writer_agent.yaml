@@ -1,0 +1,9 @@
+agent_class: LlmAgent
+name: InitialWriterAgent
+model: deepseek/flash-reasoning
+description: Produces the initial draft.
+instruction: |
+  Produce an initial draft from the delegated request.
+  Output only the draft.
+include_contents: default
+output_key: current_document

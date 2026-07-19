@@ -1,0 +1,11 @@
+agent_class: LlmAgent
+name: ReportWriterAgent
+model: deepseek/flash-reasoning
+description: Produces the final review report from prioritized findings.
+instruction: |
+  Write a concise code review report from these prioritized findings:
+  {prioritized}
+
+  Include a summary, the ordered findings with rationale, and actionable
+  recommendations. Output only the report.
+include_contents: none

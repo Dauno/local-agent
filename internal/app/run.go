@@ -74,6 +74,7 @@ func (a *Application) Run(ctx context.Context) error {
 		rootFamily         = domain.ProviderFamilyOpenAICompatible
 		rootIsAgentCLI     bool
 		preparedAgentTools []preparedAgentTool
+		preparedWorkflows  []preparedWorkflowTool
 		curatorLLM         memorycurator.LLM
 		agentName          string
 		rootDef            *agentdef.AgentDef
@@ -146,6 +147,10 @@ func (a *Application) Run(ctx context.Context) error {
 			modelBaseURL = resolved.BaseURL
 		}
 		preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders)
+		if err != nil {
+			return redactor.Error(err)
+		}
+		preparedWorkflows, err = prepareRootWorkflowTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders, paths.StateDir)
 		if err != nil {
 			return redactor.Error(err)
 		}
@@ -330,12 +335,12 @@ func (a *Application) Run(ctx context.Context) error {
 			}
 		}
 		toolFactory = toolfactory.New(store, sandboxService)
-		if len(preparedAgentTools) > 0 {
+		if len(preparedAgentTools) > 0 || len(preparedWorkflows) > 0 {
 			globalInstruction := ""
 			if rootDef != nil {
 				globalInstruction = rootDef.GlobalInstruction
 			}
-			toolFactory = newCompositeAgentToolFactory(toolFactory, preparedAgentTools, globalInstruction)
+			toolFactory = newCompositeAgentToolFactory(toolFactory, preparedAgentTools, preparedWorkflows, globalInstruction)
 		}
 	}
 

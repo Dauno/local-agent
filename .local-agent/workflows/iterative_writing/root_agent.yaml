@@ -1,0 +1,7 @@
+agent_class: SequentialAgent
+name: IterativeWritingPipeline
+description: Writes and iteratively improves a document.
+sub_agents:
+  - config_path: writer_agents/initial_writer_agent.yaml
+  - config_path: loop_agent.yaml
+  - config_path: writer_agents/final_presenter_agent.yaml

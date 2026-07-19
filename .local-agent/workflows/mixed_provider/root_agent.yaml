@@ -1,0 +1,6 @@
+agent_class: SequentialAgent
+name: MixedProviderPipeline
+description: Completes a task with Codex and presents the result with DeepSeek.
+sub_agents:
+  - config_path: codex_worker.yaml
+  - config_path: presenter.yaml
