@@ -65,6 +65,7 @@ type AgentDef struct {
 	DurableSession    bool     `yaml:"durable_session,omitempty"`
 	ToolScope         string   `yaml:"tool_scope,omitempty"`
 	AgentTools        []string `yaml:"agent_tools,omitempty"`
+	WorkflowTools     []string `yaml:"workflow_tools,omitempty"`
 	TimeoutSeconds    int      `yaml:"timeout_seconds,omitempty"`
 	Role              string   `yaml:"role,omitempty"`
 }

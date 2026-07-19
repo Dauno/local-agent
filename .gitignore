@@ -4,6 +4,8 @@
 !.local-agent/agents/**
 !.local-agent/providers/
 !.local-agent/providers/**
+!.local-agent/workflows/
+!.local-agent/workflows/**
 .opencode/
 /bin/
 /local-agent

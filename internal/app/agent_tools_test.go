@@ -279,7 +279,7 @@ func TestCompositeFactoryReturnsAgentToolsPlusDirectTools(t *testing.T) {
 	base := &fakeBaseFactory{}
 	factory := newCompositeAgentToolFactory(base, []preparedAgentTool{
 		{definition: exploreDefinition(), model: &exploringChildModel{}},
-	}, "Global policy.")
+	}, nil, "Global policy.")
 
 	raw, err := factory.ToolsForInvocation("U777", domain.ConversationKey("slack:T1:dm:D1"))
 	if err != nil {
@@ -299,7 +299,7 @@ func TestCompositeFactoryPropagatesBaseFactoryError(t *testing.T) {
 	baseErr := errors.New("base tool construction failed")
 	factory := newCompositeAgentToolFactory(&fakeBaseFactory{err: baseErr}, []preparedAgentTool{
 		{definition: exploreDefinition(), model: &exploringChildModel{}},
-	}, "Global policy.")
+	}, nil, "Global policy.")
 
 	raw, err := factory.ToolsForInvocation("U777", domain.ConversationKey("slack:T1:dm:D1"))
 	if !errors.Is(err, baseErr) {
@@ -319,7 +319,7 @@ func (nonToolBaseFactory) ToolsForInvocation(string, domain.ConversationKey) ([]
 func TestCompositeFactoryFailsInsteadOfDroppingConfiguredChild(t *testing.T) {
 	factory := newCompositeAgentToolFactory(nonToolBaseFactory{}, []preparedAgentTool{
 		{definition: exploreDefinition(), model: &exploringChildModel{}},
-	}, "Global policy.")
+	}, nil, "Global policy.")
 
 	raw, err := factory.ToolsForInvocation("U777", domain.ConversationKey("slack:T1:dm:D1"))
 	if err == nil || !strings.Contains(err.Error(), "is not an ADK tool") {
@@ -348,7 +348,7 @@ func TestCompositeFactoryKeepsCLIChildrenToolLess(t *testing.T) {
 			model:      cliChildModel,
 			cliTool:    agenttool.New(cliChild, &agenttool.Config{}),
 		},
-	}, "Global policy.")
+	}, nil, "Global policy.")
 
 	raw, err := factory.ToolsForInvocation("U777", domain.ConversationKey("slack:T1:dm:D1"))
 	if err != nil {
@@ -386,7 +386,7 @@ func TestExploreChildRunsScopedReadOnlyToolLoop(t *testing.T) {
 	childModel := &exploringChildModel{}
 	factory := newCompositeAgentToolFactory(base, []preparedAgentTool{
 		{definition: exploreDefinition(), model: childModel},
-	}, "Global policy.")
+	}, nil, "Global policy.")
 
 	raw, err := factory.ToolsForInvocation("U777", domain.ConversationKey("slack:T1:dm:D1"))
 	if err != nil {

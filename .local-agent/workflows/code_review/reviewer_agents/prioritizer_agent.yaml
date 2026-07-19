@@ -1,0 +1,12 @@
+agent_class: LlmAgent
+name: PrioritizerAgent
+model: deepseek/flash-reasoning
+description: Prioritizes raw findings into an ordered list by impact.
+instruction: |
+  Prioritize these findings by impact and urgency:
+  {raw_findings}
+
+  Return an ordered list with each finding classified as critical, high,
+  medium, or low.
+include_contents: none
+output_key: prioritized

@@ -148,11 +148,15 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 
 	agentsDir := filepath.Join(paths.StateDir, "agents")
 	providersDir := filepath.Join(paths.StateDir, "providers")
+	workflowsDir := filepath.Join(paths.StateDir, "workflows")
 	if err := s.files.EnsureDirectory(ctx, agentsDir, 0o755); err != nil {
 		return Snapshot{}, fmt.Errorf("create agents directory: %w", err)
 	}
 	if err := s.files.EnsureDirectory(ctx, providersDir, 0o755); err != nil {
 		return Snapshot{}, fmt.Errorf("create providers directory: %w", err)
+	}
+	if err := s.files.EnsureDirectory(ctx, workflowsDir, 0o755); err != nil {
+		return Snapshot{}, fmt.Errorf("create workflows directory: %w", err)
 	}
 
 	provider := agentdef.SeedDeepSeekProvider(agentdef.SeedModelConfig{

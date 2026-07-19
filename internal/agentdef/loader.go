@@ -258,6 +258,7 @@ func validateDefinitions(defs *Definitions) error {
 		errs = append(errs, validateAgent(a, defs.Providers)...)
 	}
 	errs = append(errs, validateAgentTools(defs)...)
+	errs = append(errs, validateWorkflowTools(defs)...)
 
 	if len(errs) > 0 {
 		return fmt.Errorf("invalid agent definitions: %s", strings.Join(errs, "; "))
@@ -537,6 +538,43 @@ func splitModelReference(modelRef string) (providerName, profileName string, ok 
 		return "", "", false
 	}
 	return parts[0], parts[1], true
+}
+
+func validateWorkflowTools(defs *Definitions) []string {
+	var errs []string
+	for _, owner := range defs.Agents {
+		if len(owner.WorkflowTools) == 0 {
+			continue
+		}
+		prefix := fmt.Sprintf("agent %q", owner.Name)
+		if owner.Name != "root_agent" {
+			errs = append(errs, fmt.Sprintf("%s: workflow_tools is only allowed on root_agent", prefix))
+			continue
+		}
+		if provider, ok := providerForAgent(owner, defs.Providers); !ok || provider.Type != ProviderTypeOpenAICompatible {
+			errs = append(errs, fmt.Sprintf("%s: workflow_tools requires an %s root model", prefix, ProviderTypeOpenAICompatible))
+		}
+
+		seen := make(map[string]struct{}, len(owner.WorkflowTools))
+		for index, id := range owner.WorkflowTools {
+			if strings.TrimSpace(id) == "" {
+				errs = append(errs, fmt.Sprintf("%s: workflow_tools[%d] must not be empty", prefix, index))
+				continue
+			}
+			if _, duplicate := seen[id]; duplicate {
+				errs = append(errs, fmt.Sprintf("%s: duplicate workflow tool %q", prefix, id))
+				continue
+			}
+			seen[id] = struct{}{}
+
+			if !agentNamePattern.MatchString(id) {
+				errs = append(errs, fmt.Sprintf("%s: workflow tool id %q is not a valid identifier", prefix, id))
+			}
+
+		}
+	}
+
+	return errs
 }
 
 func validateBaseURL(value string) error {

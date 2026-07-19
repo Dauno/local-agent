@@ -1,0 +1,8 @@
+agent_class: LlmAgent
+name: FinalPresenterAgent
+model: deepseek/flash-reasoning
+description: Returns the completed document as the workflow result.
+instruction: |
+  Return only the completed document:
+  {current_document}
+include_contents: none

@@ -4,7 +4,6 @@
 package toolfactory
 
 import (
-	"context"
 	"fmt"
 	"time"
 
@@ -113,7 +112,7 @@ func (f *Factory) listMessagesTool(key domain.ConversationKey) (tool.Tool, error
 			if limit <= 0 || limit > 20 {
 				limit = 5
 			}
-			msgs, err := store.RecentMessages(context.Background(), conversationKey, limit)
+			msgs, err := store.RecentMessages(ctx, conversationKey, limit)
 			if err != nil {
 				return listMessagesResult{}, fmt.Errorf("read messages: %w", err)
 			}
@@ -147,7 +146,7 @@ func (f *Factory) listReposTool(actor string) (tool.Tool, error) {
 		},
 		func(ctx agent.Context, _ struct{}) (listReposResult, error) {
 			callID := ctx.FunctionCallID()
-			result, err := sb.Run(context.Background(), callID, domain.CapListRepos, nil, actor)
+			result, err := sb.Run(ctx, callID, domain.CapListRepos, nil, actor)
 			if err != nil {
 				return listReposResult{}, err
 			}
@@ -175,7 +174,7 @@ func (f *Factory) listDirectoryTool(actor string) (tool.Tool, error) {
 		},
 		func(ctx agent.Context, args listDirectoryArgs) (listDirectoryResult, error) {
 			callID := ctx.FunctionCallID()
-			result, err := sb.Run(context.Background(), callID, domain.CapListDirectory,
+			result, err := sb.Run(ctx, callID, domain.CapListDirectory,
 				map[string]any{"project": args.Project, "path": args.Path}, actor)
 			if err != nil {
 				return listDirectoryResult{}, err
@@ -204,7 +203,7 @@ func (f *Factory) readFileTool(actor string) (tool.Tool, error) {
 		},
 		func(ctx agent.Context, args readFileArgs) (readFileResult, error) {
 			callID := ctx.FunctionCallID()
-			result, err := sb.Run(context.Background(), callID, domain.CapReadFile,
+			result, err := sb.Run(ctx, callID, domain.CapReadFile,
 				map[string]any{"project": args.Project, "path": args.Path}, actor)
 			if err != nil {
 				return readFileResult{}, err
@@ -231,7 +230,7 @@ func (f *Factory) listWorktreesTool(actor string) (tool.Tool, error) {
 		},
 		func(ctx agent.Context, args listWorktreesArgs) (listWorktreesResult, error) {
 			callID := ctx.FunctionCallID()
-			result, err := sb.Run(context.Background(), callID, domain.CapListWorktrees,
+			result, err := sb.Run(ctx, callID, domain.CapListWorktrees,
 				map[string]any{"project": args.Project}, actor)
 			if err != nil {
 				return listWorktreesResult{}, err
@@ -263,7 +262,7 @@ func (f *Factory) createWorktreeTool(actor string) (tool.Tool, error) {
 		},
 		func(ctx agent.Context, args createWorktreeArgs) (createWorktreeResult, error) {
 			callID := ctx.FunctionCallID()
-			_, err := sb.Run(context.Background(), callID, domain.CapCreateWorktree,
+			_, err := sb.Run(ctx, callID, domain.CapCreateWorktree,
 				map[string]any{"project": args.Project, "name": args.Name}, actor)
 			if err != nil {
 				return createWorktreeResult{Status: "failed"}, err
@@ -293,7 +292,7 @@ func (f *Factory) removeWorktreeTool(actor string) (tool.Tool, error) {
 		},
 		func(ctx agent.Context, args removeWorktreeArgs) (removeWorktreeResult, error) {
 			callID := ctx.FunctionCallID()
-			_, err := sb.Run(context.Background(), callID, domain.CapRemoveWorktree,
+			_, err := sb.Run(ctx, callID, domain.CapRemoveWorktree,
 				map[string]any{"project": args.Project, "name": args.Name}, actor)
 			if err != nil {
 				return removeWorktreeResult{Status: "failed"}, err

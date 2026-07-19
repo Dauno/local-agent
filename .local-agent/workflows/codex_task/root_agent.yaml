@@ -1,0 +1,7 @@
+agent_class: LlmAgent
+name: CodexTask
+model: codex/flash-reasoning
+description: Completes one delegated task with the configured Codex agent.
+instruction: |
+  Complete the delegated task and return only the final result.
+include_contents: none

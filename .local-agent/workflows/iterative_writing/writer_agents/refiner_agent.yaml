@@ -1,0 +1,17 @@
+agent_class: LlmAgent
+name: RefinerAgent
+model: deepseek/flash-reasoning
+description: Refines the document or exits the loop when complete.
+instruction: |
+  Current document:
+  {current_document}
+
+  Critique:
+  {criticism}
+
+  If the critique is exactly NO_CHANGES_NEEDED, call exit_loop. Otherwise apply
+  the critique and return only the revised document.
+include_contents: none
+output_key: current_document
+tools:
+  - name: exit_loop

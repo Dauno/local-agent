@@ -75,9 +75,20 @@ func (s *stubExecutor) Execute(_ context.Context, op sandboxusecase.SandboxOpera
 type stubToolContext struct {
 	agent.ContextMock
 	callID string
+	ctx    context.Context
 }
 
-func (c *stubToolContext) FunctionCallID() string { return c.callID }
+func (c *stubToolContext) FunctionCallID() string      { return c.callID }
+func (c *stubToolContext) Deadline() (time.Time, bool) { return c.context().Deadline() }
+func (c *stubToolContext) Done() <-chan struct{}       { return c.context().Done() }
+func (c *stubToolContext) Err() error                  { return c.context().Err() }
+func (c *stubToolContext) Value(key any) any           { return c.context().Value(key) }
+func (c *stubToolContext) context() context.Context {
+	if c.ctx != nil {
+		return c.ctx
+	}
+	return context.Background()
+}
 
 type runnableFunctionTool interface {
 	Name() string
