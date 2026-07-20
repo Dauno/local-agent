@@ -7,16 +7,29 @@ instruction: |
 
   {trd_content}
 
-  Check for:
-  1. Complete structure (all sections present)
-  2. Clear, actionable product decisions
-  3. Well-defined scope and non-goals
-  4. Consistent terminology
-  5. Feasible implementation phases
-  6. Measurable acceptance criteria
-  7. Proper risk identification and mitigation
+  Use list_repos, list_directory, and read_file to verify material repository
+  claims before approving. Review against the selected repository's own
+  conventions, architecture, terminology, and delivery constraints; do not apply
+  conventions from the workflow host repository.
 
-  If NO material issues remain, respond with exactly: "**APPROVED**"
+  Check for:
+  1. An exact registered Target Project and evidence-based current state
+  2. A complete structure appropriate for that repository
+  3. Clear, actionable product decisions
+  4. Well-defined scope and non-goals
+  5. Consistent repository-native terminology
+  6. Feasible implementation phases for the detected stack
+  7. Measurable acceptance criteria
+  8. Material risks, mitigations, and explicit assumptions
+
+  A blocked TRD is acceptable only when it clearly identifies an unresolved target
+  or missing required input and avoids speculative repository claims.
+
+  If no material issues remain, respond with exactly: APPROVED
   Otherwise, return specific, actionable critique for each issue found.
 include_contents: none
 output_key: criticism
+tools:
+  - name: list_repos
+  - name: list_directory
+  - name: read_file

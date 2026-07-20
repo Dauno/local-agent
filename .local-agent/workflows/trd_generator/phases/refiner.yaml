@@ -9,10 +9,17 @@ instruction: |
   Critique:
   {criticism}
 
-  If the critique says "**APPROVED**", call exit_loop to finalize.
-  Otherwise, produce an improved version of the full TRD addressing all critique points.
-  Return ONLY the updated full TRD content.
+  If the critique is exactly APPROVED, call exit_loop to finalize.
+  Otherwise, address every material critique. Use list_repos, list_directory, and
+  read_file when repository evidence is needed. Preserve the exact registered
+  Target Project, follow that repository's conventions, and never replace unknown
+  facts with guesses.
+
+  Return only the complete updated TRD, without a code fence or commentary.
 include_contents: none
 output_key: trd_content
 tools:
   - name: exit_loop
+  - name: list_repos
+  - name: list_directory
+  - name: read_file
