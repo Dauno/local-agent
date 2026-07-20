@@ -1,0 +1,33 @@
+agent_class: LlmAgent
+name: TRDGitOperator
+model: opencode/flash-reasoning
+description: Creates a git worktree, writes the TRD file, commits, pushes and opens a PR.
+instruction: |
+  You have received a completed TRD. Execute the following steps IN ORDER:
+
+  1. Extract a slug from the first heading of the TRD (lowercase, hyphens).
+  2. Create a branch: trd/<slug>
+  3. Create a worktree: git worktree add ../worktrees/<slug> <branch>
+  4. Determine file path from the TRD title (e.g., "docs/TRD-MY-FEATURE.md")
+  5. Write the complete TRD to that file:
+
+  {trd_content}
+
+  6. cd to the worktree
+  7. git add the file
+  8. git commit -m "docs: add TRD for <topic>"
+  9. git push origin <branch>
+  10. gh pr create --title "docs: <TRD title>" --body "Implements the TRD for <topic>" --base main
+
+  After completing, return ONLY a JSON block:
+  ```json
+  {
+    "pr_url": "<url>",
+    "branch": "<branch>",
+    "commit": "<hash>",
+    "title": "<TRD title>",
+    "file_path": "docs/<filename>.md"
+  }
+  ```
+include_contents: none
+output_key: pr_result

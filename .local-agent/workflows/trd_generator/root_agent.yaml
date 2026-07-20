@@ -1,0 +1,8 @@
+agent_class: SequentialAgent
+name: TRDGeneratorPipeline
+description: Generates a TRD from an idea, creates a worktree and opens a PR with the complete document.
+sub_agents:
+  - config_path: phases/initial_writer.yaml
+  - config_path: phases/refinement_loop.yaml
+  - config_path: phases/git_operator.yaml
+  - config_path: phases/result_presenter.yaml

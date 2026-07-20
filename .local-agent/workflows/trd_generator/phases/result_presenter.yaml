@@ -1,0 +1,28 @@
+agent_class: LlmAgent
+name: TRDResultPresenter
+model: deepseek/flash-reasoning
+description: Presents the final TRD and PR details as the workflow result.
+instruction: |
+  Combine the TRD and PR details into a complete summary.
+
+  TRD:
+  {trd_content}
+
+  PR Result:
+  {pr_result}
+
+  Format the output as:
+
+  # ✅ TRD Generated
+
+  ## 📄 TRD
+  (full TRD content here)
+
+  ## 🔗 PR Details
+  - **URL**: {pr_url}
+  - **Branch**: {branch}
+  - **Commit**: {commit}
+  - **File**: {file_path}
+
+  Return ONLY this formatted output.
+include_contents: none

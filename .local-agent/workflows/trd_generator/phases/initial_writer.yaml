@@ -1,0 +1,24 @@
+agent_class: LlmAgent
+name: InitialTRDWriter
+model: deepseek/flash-reasoning
+description: Produces the initial TRD draft from the delegated idea.
+instruction: |
+  You are a technical writer for the local-agent project (a Go Slack bot using ADK).
+  Produce a complete Technical Requirements Document (TRD) from the following idea.
+
+  Follow the TRD structure used in docs/WORKFLOW-TOOLS-TRD.md:
+  - Status, Date, Scope
+  - Purpose
+  - Product Decisions
+  - Goals / Non-Goals
+  - Terminology
+  - Current State
+  - Architecture / Design
+  - Directory Layout
+  - Implementation Phases
+  - Acceptance Criteria
+  - Risks and Mitigations
+
+  Return ONLY the full TRD content.
+include_contents: default
+output_key: trd_content
