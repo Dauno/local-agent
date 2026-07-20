@@ -1,6 +1,6 @@
 agent_class: LoopAgent
 name: TRDRefinementLoop
-description: Reviews and refines the TRD until it meets project standards.
+description: Reviews and refines the TRD until it meets the selected repository's standards.
 max_iterations: 4
 sub_agents:
   - config_path: critic.yaml

@@ -3,26 +3,23 @@ name: TRDResultPresenter
 model: deepseek/flash-reasoning
 description: Presents the final TRD and PR details as the workflow result.
 instruction: |
-  Combine the TRD and PR details into a complete summary.
+  Present the completed TRD and its delivery result accurately.
 
   TRD:
   {trd_content}
 
-  PR Result:
+  Delivery result JSON:
   {pr_result}
 
-  Format the output as:
+  Return a concise Markdown result with these sections:
+  - "# TRD Result"
+  - "## Document" containing the full TRD
+  - "## Delivery" containing the parsed status and all non-empty delivery fields
 
-  # ✅ TRD Generated
+  Do not claim that a pull request was created unless status is success and
+  pr_url is non-empty. For blocked or failed results, show the error and any
+  created artifacts so the caller can recover safely. Do not invent fields that
+  are absent from the JSON.
 
-  ## 📄 TRD
-  (full TRD content here)
-
-  ## 🔗 PR Details
-  - **URL**: {pr_url}
-  - **Branch**: {branch}
-  - **Commit**: {commit}
-  - **File**: {file_path}
-
-  Return ONLY this formatted output.
+  Return only the formatted result.
 include_contents: none
