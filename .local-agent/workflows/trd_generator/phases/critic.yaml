@@ -1,0 +1,22 @@
+agent_class: LlmAgent
+name: TRDCritic
+model: deepseek/pro-reasoning
+description: Reviews the current TRD draft and returns actionable critique.
+instruction: |
+  Review this Technical Requirements Document:
+
+  {trd_content}
+
+  Check for:
+  1. Complete structure (all sections present)
+  2. Clear, actionable product decisions
+  3. Well-defined scope and non-goals
+  4. Consistent terminology
+  5. Feasible implementation phases
+  6. Measurable acceptance criteria
+  7. Proper risk identification and mitigation
+
+  If NO material issues remain, respond with exactly: "**APPROVED**"
+  Otherwise, return specific, actionable critique for each issue found.
+include_contents: none
+output_key: criticism

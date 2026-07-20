@@ -34,3 +34,5 @@ agent_tools:
     - opencode_worker
     - codex_worker
     - improve_agent
+workflow_tools:
+    - trd_generator

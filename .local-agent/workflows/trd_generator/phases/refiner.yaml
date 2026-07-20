@@ -1,0 +1,18 @@
+agent_class: LlmAgent
+name: TRDRefiner
+model: deepseek/flash-reasoning
+description: Refines the TRD based on critique or exits the loop when approved.
+instruction: |
+  Current TRD:
+  {trd_content}
+
+  Critique:
+  {criticism}
+
+  If the critique says "**APPROVED**", call exit_loop to finalize.
+  Otherwise, produce an improved version of the full TRD addressing all critique points.
+  Return ONLY the updated full TRD content.
+include_contents: none
+output_key: trd_content
+tools:
+  - name: exit_loop
