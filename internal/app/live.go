@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os/exec"
 	"strings"
 
@@ -59,6 +60,31 @@ func (liveChecker) CheckSlackContext(ctx context.Context, botToken string) error
 		return fmt.Errorf("Slack users.info failed: %w", err)
 	}
 	return nil
+}
+
+func (liveChecker) CheckSlackCanvas(ctx context.Context, botToken string) error {
+	var grantedScopes string
+	api := slackapi.New(botToken, slackapi.OptionOnResponseHeaders(func(path string, headers http.Header) {
+		if path == "auth.test" {
+			grantedScopes = headers.Get("X-OAuth-Scopes")
+		}
+	}))
+	if _, err := api.AuthTestContext(ctx); err != nil {
+		return fmt.Errorf("Slack auth.test for Canvas check failed: %w", err)
+	}
+	if hasSlackScope(grantedScopes, "canvases:write") {
+		return nil
+	}
+	return errors.New("Slack bot token is missing canvases:write")
+}
+
+func hasSlackScope(grantedScopes, required string) bool {
+	for _, scope := range strings.Split(grantedScopes, ",") {
+		if strings.TrimSpace(scope) == required {
+			return true
+		}
+	}
+	return false
 }
 
 func (liveChecker) CheckModel(ctx context.Context, cfg config.ModelConfig, apiKey string) error {

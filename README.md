@@ -187,6 +187,31 @@ outside registered roots, and unsafe symlinks. `.env`, `.local-agent`, and
 still contain embedded secrets, so register only projects whose source may be
 sent to the configured model endpoint.
 
+### Canvas reports
+
+Standalone Slack Canvas creation is disabled by default. To expose the confirmed
+`create_canvas` tool, enable bounded Canvas output:
+
+```yaml
+canvases:
+  enabled: true
+  max_title_chars: 150
+  max_content_chars: 50000
+  max_content_bytes: 5242880
+  timeout_seconds: 30
+```
+
+Then run `local-agent manifest --write`, apply the manifest, reinstall the app,
+and run `local-agent doctor --live` to verify `canvases:write`. Slack requires a
+channel canvas on free workspaces, so this standalone-only release is not
+available there. Canvas creation always requires durable user confirmation;
+ambiguous API results are recorded and never retried automatically.
+
+Back up `.local-agent/local-agent.db` before upgrading if rollback matters. The
+Canvas operation migration raises the schema version, so older binaries reject
+the upgraded database; restore the backup or use the explicit destructive
+`init --reset-state` path when rolling back.
+
 ## Privacy
 
 Recent authorized Slack conversation messages are stored locally in SQLite.

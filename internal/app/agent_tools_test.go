@@ -202,6 +202,7 @@ type fakeBaseFactory struct {
 	readCalls  []string
 	readActor  []string
 	readOutput string
+	withCanvas bool
 }
 
 var _ port.AgentToolFactory = (*fakeBaseFactory)(nil)
@@ -237,7 +238,19 @@ func (f *fakeBaseFactory) ToolsForInvocation(actor string, key domain.Conversati
 	if err != nil {
 		return nil, err
 	}
-	return []any{listRepos, readFile}, nil
+	result := []any{listRepos, readFile}
+	if f.withCanvas {
+		createCanvas, err := functiontool.New(functiontool.Config{
+			Name: "create_canvas", RequireConfirmation: true,
+		}, func(agent.Context, struct{}) (map[string]any, error) {
+			return map[string]any{"canvas_id": "F123"}, nil
+		})
+		if err != nil {
+			return nil, err
+		}
+		result = append(result, createCanvas)
+	}
+	return result, nil
 }
 
 // exploringChildModel drives a two-step child trajectory: call read_file, then
@@ -247,6 +260,7 @@ type exploringChildModel struct {
 	stream    bool
 	sawResult bool
 	system    string
+	sawCanvas bool
 }
 
 func (*exploringChildModel) Name() string { return "explore-model" }
@@ -259,6 +273,15 @@ func (m *exploringChildModel) GenerateContent(_ context.Context, request *model.
 		for _, part := range request.Config.SystemInstruction.Parts {
 			if part != nil {
 				m.system += part.Text
+			}
+		}
+	}
+	if request != nil && request.Config != nil {
+		for _, configuredTool := range request.Config.Tools {
+			for _, declaration := range configuredTool.FunctionDeclarations {
+				if declaration.Name == "create_canvas" {
+					m.sawCanvas = true
+				}
 			}
 		}
 	}
@@ -423,7 +446,7 @@ func TestCompositeFactoryKeepsCLIChildrenToolLess(t *testing.T) {
 }
 
 func TestExploreChildRunsScopedReadOnlyToolLoop(t *testing.T) {
-	base := &fakeBaseFactory{readOutput: "package main"}
+	base := &fakeBaseFactory{readOutput: "package main", withCanvas: true}
 	childModel := &exploringChildModel{}
 	factory := newCompositeAgentToolFactory(base, []preparedAgentTool{
 		{definition: exploreDefinition(), model: childModel},
@@ -455,6 +478,9 @@ func TestExploreChildRunsScopedReadOnlyToolLoop(t *testing.T) {
 	}
 	if !childModel.sawResult {
 		t.Fatal("child model never consumed the read_file FunctionResponse")
+	}
+	if childModel.sawCanvas {
+		t.Fatal("scoped child received mutable create_canvas tool")
 	}
 	if !strings.Contains(childModel.system, "Global policy.") {
 		t.Fatalf("child system instruction missing root global instruction:\n%s", childModel.system)
