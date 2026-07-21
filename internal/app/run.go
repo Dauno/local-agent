@@ -15,6 +15,7 @@ import (
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/acpclient"
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
@@ -23,6 +24,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
+	"github.com/Dauno/slack-local-agent/internal/adapter/opencodemanager"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
@@ -34,6 +36,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
 	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
+	opencodeusecase "github.com/Dauno/slack-local-agent/internal/usecase/opencode"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 )
 
@@ -90,6 +93,7 @@ func (a *Application) Run(ctx context.Context) error {
 		logger             *logging.Logger
 	)
 	describedCLIProviders := make(map[string]bool)
+	openCodeCoordinator := opencodeusecase.NewCoordinator()
 
 	if defs != nil {
 		rootDefCandidate, ok := defs.Agents["root_agent"]
@@ -146,11 +150,15 @@ func (a *Application) Run(ctx context.Context) error {
 			apiKey = rootSecret
 			modelBaseURL = resolved.BaseURL
 		}
-		preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders)
+		preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders, func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error) {
+			return acpclient.NewWithCoordinator(resolved.Command, resolved.Args, openCodeCoordinator), nil
+		})
 		if err != nil {
 			return redactor.Error(err)
 		}
-		preparedWorkflows, err = prepareRootWorkflowTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders, paths.StateDir)
+		preparedWorkflows, err = prepareRootWorkflowTools(ctx, defs, *rootDef, values, cfg, paths, logger, redactor.String, describedCLIProviders, paths.StateDir, func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error) {
+			return acpclient.NewWithCoordinator(resolved.Command, resolved.Args, openCodeCoordinator), nil
+		}, openCodeCoordinator)
 		if err != nil {
 			return redactor.Error(err)
 		}
@@ -341,6 +349,23 @@ func (a *Application) Run(ctx context.Context) error {
 				globalInstruction = rootDef.GlobalInstruction
 			}
 			toolFactory = newCompositeAgentToolFactory(toolFactory, preparedAgentTools, preparedWorkflows, globalInstruction)
+		}
+		if defs != nil {
+			if provider, exists := defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
+				resolved, resolveErr := defs.ResolveModel("opencode/smoke")
+				if resolveErr != nil {
+					return redactor.Error(fmt.Errorf("resolve OpenCode management profile: %w", resolveErr))
+				}
+				primaryPath, pathErr := managementProbePath(paths.SandboxProjectRoots)
+				if pathErr != nil {
+					return redactor.Error(pathErr)
+				}
+				toolFactory = &openCodeManagementToolFactory{
+					base: toolFactory, runtime: acpclient.NewWithCoordinator(resolved.Command, resolved.Args, openCodeCoordinator),
+					manager: opencodemanager.New(resolved.Command), allowedIDs: cfg.OpenCode.Management.AllowedUserIDs,
+					primaryPath: primaryPath, configOptions: domainConfigOptions(resolved), coordinator: openCodeCoordinator,
+				}
+			}
 		}
 	}
 

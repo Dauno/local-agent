@@ -255,7 +255,7 @@ func TestTrackedWorkflowFixturesLoad(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, id := range []string{"iterative_writing", "code_review", "opencode_task", "codex_task", "mixed_provider"} {
+	for _, id := range []string{"iterative_writing", "code_review", "codex_task", "mixed_provider", "trd_generator"} {
 		bp, err := defs.LoadWorkflow(stateDir, id)
 		if err != nil {
 			t.Fatalf("load tracked workflow %q: %v", id, err)

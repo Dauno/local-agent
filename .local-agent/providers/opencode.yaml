@@ -1,18 +1,33 @@
 name: opencode
-type: agent_cli
-shim:
-  command: self
-  args: [shim, opencode]
+type: acp
+command: opencode
+args: [acp]
+
 profiles:
   smoke:
-    model: opencode/big-pickle
-    agent: build
-    approval: reject
+    config_options:
+      - id: model
+        value: opencode/big-pickle
+      - id: mode
+        value: build
+    permission_option_kind: reject_once
+
   flash-reasoning:
-    model: deepseek/deepseek-v4-flash
-    approval: auto
-    variant: max
+    config_options:
+      - id: model
+        value: deepseek/deepseek-v4-flash
+      - id: effort
+        value: max
+      - id: mode
+        value: build
+    permission_option_kind: allow_once
+
   pro-reasoning:
-    model: deepseek/deepseek-v4-pro
-    approval: auto
-    variant: max
+    config_options:
+      - id: model
+        value: deepseek/deepseek-v4-pro
+      - id: effort
+        value: max
+      - id: mode
+        value: build
+    permission_option_kind: allow_once

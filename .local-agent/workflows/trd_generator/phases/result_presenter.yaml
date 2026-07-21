@@ -9,7 +9,7 @@ instruction: |
   {trd_content}
 
   Delivery result JSON:
-  {pr_result}
+  {delivery_result}
 
   Return a concise Markdown result with these sections:
   - "# TRD Result"

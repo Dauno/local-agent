@@ -20,16 +20,25 @@ const (
 // Secrets are resolved separately through Model.APIKeyEnv and Slack's fixed
 // environment variable names.
 type Config struct {
-	Agent   AgentConfig   `yaml:"agent"`
-	State   StateConfig   `yaml:"state"`
-	Context ContextConfig `yaml:"context"`
-	Runtime RuntimeConfig `yaml:"runtime"`
-	Model   ModelConfig   `yaml:"model"`
-	Slack   SlackConfig   `yaml:"slack"`
-	Memory  MemoryConfig  `yaml:"memory"`
-	Sandbox SandboxConfig `yaml:"sandbox"`
+	Agent    AgentConfig    `yaml:"agent"`
+	State    StateConfig    `yaml:"state"`
+	Context  ContextConfig  `yaml:"context"`
+	Runtime  RuntimeConfig  `yaml:"runtime"`
+	Model    ModelConfig    `yaml:"model"`
+	Slack    SlackConfig    `yaml:"slack"`
+	Memory   MemoryConfig   `yaml:"memory"`
+	Sandbox  SandboxConfig  `yaml:"sandbox"`
+	OpenCode OpenCodeConfig `yaml:"opencode"`
 
 	document *sourceDocument
+}
+
+type OpenCodeConfig struct {
+	Management OpenCodeManagementConfig `yaml:"management"`
+}
+
+type OpenCodeManagementConfig struct {
+	AllowedUserIDs []string `yaml:"allowed_user_ids"`
 }
 
 type AgentConfig struct {
@@ -184,6 +193,7 @@ func Default() Config {
 			MaxTopicChars:         10000,
 			MaxPatchOps:           10,
 		},
-		Sandbox: SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 64 * 1024},
+		Sandbox:  SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 64 * 1024},
+		OpenCode: OpenCodeConfig{Management: OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
 	}
 }

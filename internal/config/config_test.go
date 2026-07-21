@@ -75,7 +75,8 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			MaxTopicChars:         10000,
 			MaxPatchOps:           10,
 		},
-		Sandbox: config.SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
+		Sandbox:  config.SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
+		OpenCode: config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
 	}
 
 	got := config.Default()
@@ -168,6 +169,9 @@ sandbox:
   projects: {}
   command_timeout_seconds: 30
   max_output_bytes: 65536
+opencode:
+  management:
+    allowed_user_ids: []
 `
 
 	if string(got) != want {
@@ -412,14 +416,15 @@ func TestResolvePaths(t *testing.T) {
 		t.Fatalf("ResolvePaths() error: %v", err)
 	}
 	want := config.Paths{
-		ProjectRoot:    root,
-		StateDir:       filepath.Join(root, "var", "state"),
-		DatabaseFile:   filepath.Join(root, "outside", "agent.db"),
-		ConfigFile:     filepath.Join(root, ".local-agent", "config.yaml"),
-		ManifestFile:   filepath.Join(root, ".local-agent", "app-manifest.local.yaml"),
-		EnvExampleFile: filepath.Join(root, ".local-agent", "local.env.example"),
-		EnvFile:        filepath.Join(root, ".env"),
-		MemoryDir:      filepath.Join(root, "var", "state", "memory"),
+		ProjectRoot:         root,
+		StateDir:            filepath.Join(root, "var", "state"),
+		DatabaseFile:        filepath.Join(root, "outside", "agent.db"),
+		ConfigFile:          filepath.Join(root, ".local-agent", "config.yaml"),
+		ManifestFile:        filepath.Join(root, ".local-agent", "app-manifest.local.yaml"),
+		EnvExampleFile:      filepath.Join(root, ".local-agent", "local.env.example"),
+		EnvFile:             filepath.Join(root, ".env"),
+		MemoryDir:           filepath.Join(root, "var", "state", "memory"),
+		OpenCodeWorktreeDir: filepath.Join(root, "var", "state", "worktrees"),
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("ResolvePaths()\n got: %#v\nwant: %#v", paths, want)
@@ -523,6 +528,20 @@ func TestParseAppliesSandboxConfig(t *testing.T) {
 	}
 	if cfg.Sandbox.MaxOutputBytes != 32768 {
 		t.Fatalf("sandbox.max_output_bytes = %d", cfg.Sandbox.MaxOutputBytes)
+	}
+}
+
+func TestParseAppliesOpenCodeManagementAllowlist(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte(`opencode:
+  management:
+    allowed_user_ids: [U12345678]
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := cfg.OpenCode.Management.AllowedUserIDs; len(got) != 1 || got[0] != "U12345678" {
+		t.Fatalf("allowed user IDs = %v", got)
 	}
 }
 

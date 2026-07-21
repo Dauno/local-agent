@@ -1,7 +1,10 @@
-agent_class: LlmAgent
+agent_class: AcpAgent
 name: TRDGitOperator
-model: opencode/flash-reasoning
+runtime: opencode/flash-reasoning
 description: Safely delivers a completed TRD to its selected repository using an isolated worktree and the repository's actual Git conventions.
+project: "{target_project}"
+additional_directories:
+  - "{worktree_root}"
 instruction: |
   Act as a cautious, repository-agnostic Git operator. The completed TRD is:
 
@@ -29,7 +32,9 @@ instruction: |
   3. Follow the repository's existing TRD/RFC/ADR location and filename pattern.
      If none exists, use docs/TRD-<UPPER-KEBAB-SLUG>.md. Never overwrite an
      existing document.
-  4. Choose a collision-free worktree path outside the target checkout. Create
+  4. Choose a collision-free child path strictly below this managed root:
+     {worktree_root}
+     Do not create a worktree anywhere else. Create
      the branch and worktree atomically from the discovered base ref, equivalent
      to: git worktree add -b <branch> <worktree-path> <base-ref>.
   5. Write the TRD exactly once inside that worktree. Do not modify the original
@@ -62,5 +67,5 @@ instruction: |
     "worktree": "<worktree path>",
     "error": "<empty or concise error>"
   }
-include_contents: none
-output_key: pr_result
+output_key: delivery_result
+output_schema: git_delivery_result

@@ -1012,3 +1012,71 @@ func TestTrackedDefinitionsLoad(t *testing.T) {
 		t.Fatalf("tracked explore definition = %+v", explore)
 	}
 }
+
+func TestLoadValidACPDefinition(t *testing.T) {
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+	writeFile(t, providersDir, "opencode.yaml", `
+name: opencode
+type: acp
+command: opencode
+args: [acp]
+profiles:
+  build:
+    config_options:
+      - id: model
+        value: test/model
+      - id: enabled
+        value: true
+    permission_option_kind: allow_once
+`)
+	writeFile(t, agentsDir, "worker.yaml", `
+agent_class: AcpAgent
+name: worker
+runtime: opencode/build
+instruction: Complete the task.
+confirmation: required
+`)
+	defs, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := defs.ResolveModel("opencode/build")
+	if err != nil || !resolved.IsACP() || resolved.Model != "" {
+		t.Fatalf("resolved = %+v, error = %v", resolved, err)
+	}
+}
+
+func TestRejectInvalidACPDefinitionContracts(t *testing.T) {
+	tests := []struct {
+		name        string
+		profileBody string
+		agentBody   string
+		want        string
+	}{
+		{name: "legacy model", profileBody: "    model: old/model\n    config_options:\n      - id: model\n        value: new/model\n", want: "model is invalid for acp"},
+		{name: "duplicate option", profileBody: "    config_options:\n      - id: model\n        value: one\n      - id: model\n        value: two\n", want: "duplicate config option"},
+		{name: "unsupported value", profileBody: "    config_options:\n      - id: model\n        value: [one]\n", want: "must be a string or boolean"},
+		{name: "missing confirmation", profileBody: "    config_options:\n      - id: model\n        value: one\n", agentBody: "agent_class: AcpAgent\nname: worker\nruntime: opencode/build\ninstruction: test\n", want: "confirmation must be required"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			agentsDir := filepath.Join(t.TempDir(), "agents")
+			providersDir := filepath.Join(t.TempDir(), "providers")
+			os.MkdirAll(agentsDir, 0o755)
+			os.MkdirAll(providersDir, 0o755)
+			writeFile(t, providersDir, "opencode.yaml", "name: opencode\ntype: acp\ncommand: opencode\nprofiles:\n  build:\n"+test.profileBody)
+			agentBody := test.agentBody
+			if agentBody == "" {
+				agentBody = "agent_class: AcpAgent\nname: worker\nruntime: opencode/build\ninstruction: test\nconfirmation: required\n"
+			}
+			writeFile(t, agentsDir, "worker.yaml", agentBody)
+			_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}

@@ -116,6 +116,9 @@ func newModelForResolved(
 		}
 		return cliModel, "", nil
 	}
+	if resolved.IsACP() {
+		return nil, "", errors.New("ACP providers are external agents, not ADK models")
+	}
 	apiKey := values[resolved.APIKeyEnv]
 	if strings.TrimSpace(apiKey) == "" {
 		return nil, "", fmt.Errorf("%s is not configured. Run: local-agent init", resolved.APIKeyEnv)

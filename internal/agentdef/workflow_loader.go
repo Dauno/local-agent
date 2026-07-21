@@ -189,9 +189,14 @@ type workflowRawDoc struct {
 	Description string `yaml:"description,omitempty"`
 	Model       string `yaml:"model,omitempty"`
 	Instruction string `yaml:"instruction,omitempty"`
+	Runtime     string `yaml:"runtime,omitempty"`
 
 	IncludeContents string `yaml:"include_contents,omitempty"`
 	OutputKey       string `yaml:"output_key,omitempty"`
+	OutputSchema    string `yaml:"output_schema,omitempty"`
+	Project         string `yaml:"project,omitempty"`
+
+	AdditionalDirectories []string `yaml:"additional_directories,omitempty"`
 
 	Tools []struct {
 		Name string         `yaml:"name"`
@@ -213,7 +218,6 @@ var unsupportedWorkflowFields = map[string]string{
 	"model_code":              "model_code",
 	"static_instruction":      "static_instruction",
 	"input_schema":            "input_schema",
-	"output_schema":           "output_schema",
 	"before_agent_callbacks":  "before_agent_callbacks",
 	"after_agent_callbacks":   "after_agent_callbacks",
 	"before_model_callbacks":  "before_model_callbacks",
@@ -289,6 +293,15 @@ func decodeWorkflowDocument(data []byte, canonicalPath, displayPath string) (Age
 			llm.Tools = append(llm.Tools, ToolRef{Name: t.Name, Args: t.Args})
 		}
 		doc.LLM = llm
+	case AgentClassAcp:
+		doc.ACP = &AcpAgentDocument{
+			Runtime:               raw.Runtime,
+			Instruction:           raw.Instruction,
+			Project:               raw.Project,
+			AdditionalDirectories: raw.AdditionalDirectories,
+			OutputKey:             raw.OutputKey,
+			OutputSchema:          raw.OutputSchema,
+		}
 	case AgentClassSequential:
 	case AgentClassLoop:
 		if raw.MaxIterations <= 0 {
@@ -352,6 +365,10 @@ func validateWorkflowClassFields(fields map[string]struct{}, class AgentClass, d
 	switch class {
 	case AgentClassLLM:
 		for _, field := range []string{"model", "instruction", "include_contents", "output_key", "tools", "disallow_transfer_to_parent", "disallow_transfer_to_peers"} {
+			allowed[field] = struct{}{}
+		}
+	case AgentClassAcp:
+		for _, field := range []string{"runtime", "instruction", "output_key", "output_schema", "project", "additional_directories"} {
 			allowed[field] = struct{}{}
 		}
 	case AgentClassSequential:
@@ -440,6 +457,9 @@ func validateWorkflowNode(doc AgentDocument, defs *Definitions, isLoopDescendant
 				} else if _, exists := p.Profiles[profileName]; !exists {
 					errs = append(errs, fmt.Sprintf("%s: unknown profile %q in provider %q", prefix, profileName, providerName))
 				} else {
+					if p.Type == ProviderTypeACP {
+						errs = append(errs, fmt.Sprintf("%s: ACP providers require agent_class: AcpAgent", prefix))
+					}
 					if p.Type == ProviderTypeAgentCLI {
 						if doc.LLM.IncludeContents != "none" {
 							errs = append(errs, fmt.Sprintf("%s: include_contents must be none for %s nodes", prefix, ProviderTypeAgentCLI))
@@ -469,6 +489,45 @@ func validateWorkflowNode(doc AgentDocument, defs *Definitions, isLoopDescendant
 			if err := validateWorkflowTool(toolRef, isLoopDescendant); err != nil {
 				errs = append(errs, fmt.Sprintf("%s: %s", prefix, err))
 			}
+		}
+	case AgentClassAcp:
+		if doc.ACP == nil {
+			errs = append(errs, fmt.Sprintf("%s: AcpAgent document is missing", prefix))
+			return errs
+		}
+		if strings.TrimSpace(doc.ACP.Runtime) == "" {
+			errs = append(errs, fmt.Sprintf("%s: runtime must not be empty", prefix))
+		} else {
+			providerName, profileName, ok := splitModelReference(doc.ACP.Runtime)
+			if !ok {
+				errs = append(errs, fmt.Sprintf("%s: runtime must be provider/profile format", prefix))
+			} else {
+				p, exists := defs.Providers[providerName]
+				if !exists {
+					errs = append(errs, fmt.Sprintf("%s: unknown runtime provider %q", prefix, providerName))
+				} else if p.Type != ProviderTypeACP {
+					errs = append(errs, fmt.Sprintf("%s: runtime provider %q must be type acp", prefix, providerName))
+				} else if _, exists := p.Profiles[profileName]; !exists {
+					errs = append(errs, fmt.Sprintf("%s: unknown runtime profile %q in provider %q", prefix, profileName, providerName))
+				}
+			}
+		}
+		if strings.TrimSpace(doc.ACP.Instruction) == "" {
+			errs = append(errs, fmt.Sprintf("%s: instruction must not be empty", prefix))
+		}
+		if doc.ACP.Project != "{target_project}" {
+			errs = append(errs, fmt.Sprintf("%s: project must be the trusted {target_project} state template", prefix))
+		}
+		for _, directory := range doc.ACP.AdditionalDirectories {
+			if directory != "{worktree_root}" {
+				errs = append(errs, fmt.Sprintf("%s: additional_directories may only contain {worktree_root}", prefix))
+			}
+		}
+		if doc.ACP.OutputSchema != "" && doc.ACP.OutputSchema != "git_delivery_result" {
+			errs = append(errs, fmt.Sprintf("%s: output_schema must be git_delivery_result", prefix))
+		}
+		if doc.ACP.OutputSchema != "" && strings.TrimSpace(doc.ACP.OutputKey) == "" {
+			errs = append(errs, fmt.Sprintf("%s: output_key is required when output_schema is set", prefix))
 		}
 	case AgentClassSequential:
 		if len(doc.SubAgents) == 0 {
