@@ -282,6 +282,7 @@ func (a *Application) Run(ctx context.Context) error {
 	history := slackadapter.NewHistoryReader(api, auth.UserID, slackTimeout, logger, cfg.Slack.PartLabels)
 	fileLoader := slackadapter.NewFileLoader(api, botToken, slackTimeout)
 	confirmationPublisher := slackadapter.NewConfirmationPublisher(api, auth.UserID, slackTimeout, logger)
+	blockPublisher := slackadapter.NewBlockPublisher(api, slackTimeout, logger)
 	artifactSvc := artifact.InMemoryService()
 	attachmentInstruction := ""
 	attachmentTimeout := 120 * time.Second
@@ -292,10 +293,8 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 	}
 	attachmentProc := adkartifact.NewProcessor(artifactSvc, attachmentModel, attachmentInstruction, attachmentTimeout, modelCalls)
-	if cfg.Memory.Enabled {
-		if err := store.ReconcileAssistantExchanges(ctx, history); err != nil {
-			return redactor.Error(fmt.Errorf("reconcile assistant exchanges: %w", err))
-		}
+	if err := store.ReconcileAssistantExchanges(ctx, history); err != nil {
+		return redactor.Error(fmt.Errorf("reconcile assistant exchanges: %w", err))
 	}
 
 	contextEnricher := slackadapter.NewContextEnricherFromSDK(logger, api, slackadapter.ContextEnricherConfig{
@@ -406,11 +405,12 @@ func (a *Application) Run(ctx context.Context) error {
 		ModelErrorMessage:   cfg.Runtime.ModelErrorMessage,
 		UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 	}, botusecase.Dependencies{
-		Store: store, Runtime: runtime, History: history, Publisher: publisher, Logger: logger,
+		Store: store, Runtime: runtime, History: history, Publisher: publisher, Logger: logger, Exchange: store,
 		ModelCalls: modelCalls, SanitizeContent: redactor.String,
 		Enricher:              contextEnricher,
 		ConfirmationStore:     confirmationStore,
 		ConfirmationPublisher: confirmationPublisher,
+		StructuredPublisher:   blockPublisher,
 		FileLoader:            fileLoader,
 		AttachmentProc:        attachmentProc,
 		MaxAttachmentBytes:    int64(cfg.Slack.Files.MaxBytesPerFile),

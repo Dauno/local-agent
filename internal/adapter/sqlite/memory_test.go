@@ -306,17 +306,46 @@ func TestMemoryStore_LeavesPreparedExchangesUnresolvedWhenTheyShareRemoteTimesta
 }
 
 type exchangeFinder struct {
-	intentID      string
-	correlationID string
-	content       string
-	timestamp     string
+	intentID         string
+	correlationID    string
+	content          string
+	presentationJSON string
+	timestamp        string
 }
 
 func (f exchangeFinder) FindPublishedAssistantExchange(_ context.Context, intent port.AssistantExchangeIntent) (string, bool, error) {
-	if (f.intentID != "" && intent.ID != f.intentID) || intent.Content != f.content || intent.CorrelationID != f.correlationID {
+	if (f.intentID != "" && intent.ID != f.intentID) || intent.Content != f.content || intent.CorrelationID != f.correlationID ||
+		(f.presentationJSON != "" && intent.PresentationJSON != f.presentationJSON) {
 		return "", false, nil
 	}
 	return f.timestamp, true, nil
+}
+
+func TestMemoryStore_RecoversStructuredExchangeWithPersistedPresentation(t *testing.T) {
+	store, _ := newTestStore(t)
+	ctx := t.Context()
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	metadata := domain.ConversationMetadata{Key: key, TeamID: "T12345678", ChannelID: "D12345678", ChannelKind: domain.ChannelDM, LastTS: "1"}
+	if err := store.AppendMessage(ctx, metadata, domain.Message{Role: domain.RoleUser, Content: "show data", UserID: "U12345678", ExternalTS: "1", CreatedAt: time.Now().UTC()}, 10); err != nil {
+		t.Fatal(err)
+	}
+	const presentationJSON = `{"FallbackMarkdown":"table fallback","Sources":null,"Table":{"Caption":"","Headers":["A"],"Rows":[["1"]],"RowHeader":0}}`
+	prepared, err := store.PrepareStructuredAssistantExchange(ctx, metadata, domain.Message{Role: domain.RoleAssistant, Content: "table fallback", CreatedAt: time.Now().UTC()}, presentationJSON, 10, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const slackTS = "1700000002.000003"
+	finder := exchangeFinder{
+		intentID: prepared.ID, correlationID: prepared.CorrelationID, content: "table fallback",
+		presentationJSON: presentationJSON, timestamp: slackTS,
+	}
+	if err := store.ReconcileAssistantExchanges(ctx, finder); err != nil {
+		t.Fatal(err)
+	}
+	messages, err := store.RecentMessages(ctx, key, 10)
+	if err != nil || len(messages) != 2 || messages[1].ExternalTS != slackTS || messages[1].Content != "table fallback" {
+		t.Fatalf("recovered structured messages = %#v, %v", messages, err)
+	}
 }
 
 func TestMemoryStore_LinkUsesCurrentRevisionProvenance(t *testing.T) {

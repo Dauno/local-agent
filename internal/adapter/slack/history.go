@@ -165,6 +165,9 @@ func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, inte
 		safeErr := secure.NewRedactor().Error(err)
 		return "", false, fmt.Errorf("read Slack conversation for assistant exchange recovery: %w", safeErr)
 	}
+	if intent.PresentationJSON != "" {
+		return findPublishedStructuredExchange(messages, r.botUserID, intent)
+	}
 
 	expectedParts := renderMarkdownV1(intent.Content, r.partLabels)
 	if len(expectedParts) == 0 {
@@ -220,6 +223,70 @@ func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, inte
 		}
 	}
 
+	return byIndex[len(byIndex)-1].Timestamp, true, nil
+}
+
+func findPublishedStructuredExchange(messages []slackapi.Message, botUserID string, intent port.AssistantExchangeIntent) (string, bool, error) {
+	var presentation domain.Presentation
+	if err := json.Unmarshal([]byte(intent.PresentationJSON), &presentation); err != nil {
+		return "", false, fmt.Errorf("decode persisted presentation: %w", err)
+	}
+	if err := domain.ValidatePresentation(presentation); err != nil {
+		return "", false, fmt.Errorf("validate persisted presentation: %w", err)
+	}
+	if presentation.FallbackMarkdown != intent.Content {
+		return "", false, errors.New("persisted presentation fallback does not match canonical content")
+	}
+	canonical, err := json.Marshal(presentation)
+	if err != nil {
+		return "", false, fmt.Errorf("encode persisted presentation: %w", err)
+	}
+	if string(canonical) != intent.PresentationJSON {
+		return "", false, errors.New("persisted presentation is not canonical JSON")
+	}
+	parts, err := renderPresentationParts(presentation, presentationBlockIdentity(intent.CorrelationID, canonical))
+	if err != nil {
+		return "", false, fmt.Errorf("reconstruct persisted presentation: %w", err)
+	}
+
+	matched := make([]slackapi.Message, 0, len(parts))
+	for _, message := range messages {
+		if message.Metadata.EventType != "local_agent.assistant_exchange" {
+			continue
+		}
+		metadata := parseExchangeMetadata(message)
+		if metadata.CorrelationID != intent.CorrelationID {
+			continue
+		}
+		if message.User != botUserID || message.Hidden || message.Edited != nil || len(message.Files) != 0 {
+			return "", false, nil
+		}
+		if metadata.RenderMode != blocksV1RenderMode || metadata.PartCount != len(parts) ||
+			metadata.PartIndex < 1 || metadata.PartIndex > len(parts) || message.Timestamp == "" ||
+			metadata.ContentSHA256 != structuredPartDigest(canonical, metadata.PartIndex) {
+			return "", false, nil
+		}
+		matched = append(matched, message)
+	}
+	if len(matched) != len(parts) {
+		return "", false, nil
+	}
+
+	byIndex := make([]slackapi.Message, len(parts))
+	for _, message := range matched {
+		index := parseExchangeMetadata(message).PartIndex - 1
+		if byIndex[index].Timestamp != "" {
+			return "", false, nil
+		}
+		byIndex[index] = message
+	}
+	for index := 1; index < len(byIndex); index++ {
+		previous := parseSlackTimestamp(byIndex[index-1].Timestamp)
+		current := parseSlackTimestamp(byIndex[index].Timestamp)
+		if previous.IsZero() || current.IsZero() || !previous.Before(current) {
+			return "", false, nil
+		}
+	}
 	return byIndex[len(byIndex)-1].Timestamp, true, nil
 }
 

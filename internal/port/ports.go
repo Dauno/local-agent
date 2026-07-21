@@ -30,12 +30,12 @@ type AgentRequest struct {
 
 // --- Structured agent runtime (replaces Agent.Respond for tool-aware turns) ---
 
-// AgentTurn is the structured result of one agent invocation. It always carries
-// assistant text; a non-nil PendingConfirmation signals that a mutable tool
-// requires user approval before execution.
+// AgentTurn is the structured result of one agent invocation. It carries
+// assistant text, a provider-neutral Presentation, or a PendingConfirmation.
 type AgentTurn struct {
 	Text                string
 	PendingConfirmation *domain.PendingConfirmation
+	Presentation        *domain.Presentation
 }
 
 // AgentRuntime runs one request or resumes a pending confirmation.
@@ -122,6 +122,7 @@ type MemoryRetriever interface {
 // A staged exchange can be reconciled if the post-publish database write fails.
 type AssistantExchangeWriter interface {
 	PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int, memoryEligible bool) (PreparedAssistantExchange, error)
+	PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int, memoryEligible bool) (PreparedAssistantExchange, error)
 	MarkAssistantExchangePublished(ctx context.Context, intentID, assistantTS string) error
 	FinalizeAssistantExchange(ctx context.Context, intentID string) error
 	DiscardAssistantExchange(ctx context.Context, intentID string) error
@@ -131,12 +132,13 @@ type AssistantExchangeWriter interface {
 // AssistantExchangeIntent is the bounded data required to prove that a
 // prepared reply was accepted by Slack after a process crash.
 type AssistantExchangeIntent struct {
-	ID            string
-	ChannelID     string
-	ChannelKind   domain.ChannelKind
-	RootTS        string
-	Content       string
-	CorrelationID string
+	ID               string
+	ChannelID        string
+	ChannelKind      domain.ChannelKind
+	RootTS           string
+	Content          string
+	CorrelationID    string
+	PresentationJSON string
 }
 
 // AssistantExchangeFinder returns an actual Slack timestamp only when every
@@ -308,6 +310,15 @@ type ConfirmationDeliveryStore interface {
 	GetByWrapperCallID(ctx context.Context, wrapperCallID string) (*ConfirmationDelivery, error)
 	ListPending(ctx context.Context) ([]ConfirmationDelivery, error)
 	ExpireDeliveries(ctx context.Context, now time.Time) error
+}
+
+// StructuredPublisher renders provider-neutral structured response data
+// (Presentation) using provider-specific rich presentation (e.g. Slack
+// Block Kit context and table blocks). It is selected by the bot only when
+// the turn contains a validated Presentation.
+type StructuredPublisher interface {
+	ValidateStructured(presentation domain.Presentation) error
+	PublishStructured(ctx context.Context, target domain.ReplyTarget, presentation domain.Presentation) (PublishedResponse, error)
 }
 
 // ConfirmationPublisher publishes and updates confirmation prompts using

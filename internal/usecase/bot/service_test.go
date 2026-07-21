@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -216,26 +217,36 @@ func (f *fakeExchangeFinder) FindPublishedAssistantExchange(_ context.Context, i
 }
 
 type fakeExchangeWriter struct {
-	calls          int
-	prepares       int
-	published      int
-	discards       int
-	metadata       domain.ConversationMetadata
-	message        domain.Message
-	prepared       port.PreparedAssistantExchange
-	err            error
-	onAppend       func()
-	publishedTS    string
-	memoryEligible bool
+	calls            int
+	prepares         int
+	structured       int
+	published        int
+	discards         int
+	metadata         domain.ConversationMetadata
+	message          domain.Message
+	prepared         port.PreparedAssistantExchange
+	err              error
+	onAppend         func()
+	publishedTS      string
+	memoryEligible   bool
+	presentationJSON string
 }
 
-func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, _ domain.ConversationMetadata, _ domain.Message, _ int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
+func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, metadata domain.ConversationMetadata, message domain.Message, _ int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
 	w.prepares++
+	w.metadata = metadata
+	w.message = message
 	w.memoryEligible = memoryEligible
 	if w.prepared.ID == "" {
 		w.prepared = port.PreparedAssistantExchange{ID: "intent", CorrelationID: "intent-correlation"}
 	}
 	return w.prepared, nil
+}
+
+func (w *fakeExchangeWriter) PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
+	w.structured++
+	w.presentationJSON = presentationJSON
+	return w.PrepareAssistantExchange(ctx, metadata, message, retain, memoryEligible)
 }
 
 func (w *fakeExchangeWriter) MarkAssistantExchangePublished(_ context.Context, _ string, assistantTS string) error {
@@ -301,6 +312,28 @@ type fakePublisher struct {
 	calls     []publishedCall
 	err       error
 	onPublish func()
+}
+
+type fakeStructuredPublisher struct {
+	calls         int
+	target        domain.ReplyTarget
+	presentation  domain.Presentation
+	validationErr error
+	err           error
+}
+
+func (p *fakeStructuredPublisher) ValidateStructured(presentation domain.Presentation) error {
+	if p.validationErr != nil {
+		return p.validationErr
+	}
+	return domain.ValidatePresentation(presentation)
+}
+
+func (p *fakeStructuredPublisher) PublishStructured(_ context.Context, target domain.ReplyTarget, presentation domain.Presentation) (port.PublishedResponse, error) {
+	p.calls++
+	p.target = target
+	p.presentation = presentation
+	return port.PublishedResponse{LastMessageTS: "1700000002.000003"}, p.err
 }
 
 func (p *fakePublisher) Publish(_ context.Context, target domain.ReplyTarget, text string) (port.PublishedResponse, error) {
@@ -390,6 +423,84 @@ func TestHandleAuthorizedDM(t *testing.T) {
 	}
 	if len(publisher.calls) != 1 || publisher.calls[0].target.ThreadTS != "" || publisher.calls[0].text != "answer" {
 		t.Fatalf("unexpected publishes: %#v", publisher.calls)
+	}
+}
+
+func TestHandleStructuredTurnSanitizesAndPersistsCanonicalFallback(t *testing.T) {
+	const secret = "xoxb-sensitive-token"
+	presentation := &domain.Presentation{
+		FallbackMarkdown: "Results " + secret,
+		Sources:          []domain.Source{{Text: "Docs " + secret, URL: "https://example.com/" + secret}},
+		Table: &domain.Table{
+			Caption: "Report " + secret,
+			Headers: []string{"Name", "Value"},
+			Rows:    [][]string{{"item", secret}},
+		},
+	}
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	writer := &fakeExchangeWriter{}
+	markdownPublisher := &fakePublisher{}
+	structuredPublisher := &fakeStructuredPublisher{}
+	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Presentation: presentation}}, &fakeHistory{}, markdownPublisher, nil)
+	service.structuredPublisher = structuredPublisher
+	service.sanitize = func(value string) string { return strings.ReplaceAll(value, secret, "redacted") }
+	service.AddMemory(nil, writer)
+	if err := domain.ValidatePresentation(sanitizePresentation(*presentation, service.sanitize)); err != nil {
+		t.Fatalf("test presentation is invalid: %v", err)
+	}
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v structured_calls=%d markdown_calls=%#v", outcome, err, structuredPublisher.calls, markdownPublisher.calls)
+	}
+	if structuredPublisher.calls != 1 || len(markdownPublisher.calls) != 0 {
+		t.Fatalf("structured calls=%d markdown calls=%#v", structuredPublisher.calls, markdownPublisher.calls)
+	}
+	if writer.structured != 1 || writer.message.Content != "Results redacted" || strings.Contains(writer.presentationJSON, secret) {
+		t.Fatalf("structured exchange=%#v", writer)
+	}
+	var persisted domain.Presentation
+	if err := json.Unmarshal([]byte(writer.presentationJSON), &persisted); err != nil {
+		t.Fatal(err)
+	}
+	if persisted.FallbackMarkdown != structuredPublisher.presentation.FallbackMarkdown || structuredPublisher.target.CorrelationID != "intent-correlation" {
+		t.Fatalf("persisted=%#v published=%#v target=%#v", persisted, structuredPublisher.presentation, structuredPublisher.target)
+	}
+}
+
+func TestHandleStructuredTurnRejectsMissingFallbackBeforeStructuredPublish(t *testing.T) {
+	presentation := &domain.Presentation{Sources: []domain.Source{{Text: "Docs", URL: "https://example.com"}}}
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	markdownPublisher := &fakePublisher{}
+	structuredPublisher := &fakeStructuredPublisher{}
+	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Presentation: presentation}}, &fakeHistory{}, markdownPublisher, nil)
+	service.structuredPublisher = structuredPublisher
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomeModelFailed {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if structuredPublisher.calls != 0 || len(markdownPublisher.calls) != 1 || markdownPublisher.calls[0].text != "model error" {
+		t.Fatalf("structured calls=%d markdown calls=%#v", structuredPublisher.calls, markdownPublisher.calls)
+	}
+}
+
+func TestHandleStructuredTurnRunsSlackPreflightBeforePreparingExchange(t *testing.T) {
+	presentation := &domain.Presentation{FallbackMarkdown: "Table", Table: &domain.Table{Headers: []string{"A"}, Rows: [][]string{{"1"}}}}
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	writer := &fakeExchangeWriter{}
+	markdownPublisher := &fakePublisher{}
+	structuredPublisher := &fakeStructuredPublisher{validationErr: errors.New("table exceeds Slack limits")}
+	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Presentation: presentation}}, &fakeHistory{}, markdownPublisher, nil)
+	service.structuredPublisher = structuredPublisher
+	service.exchange = writer
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomeModelFailed {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if writer.prepares != 0 || structuredPublisher.calls != 0 || len(markdownPublisher.calls) != 1 {
+		t.Fatalf("writer=%#v structured_calls=%d markdown_calls=%#v", writer, structuredPublisher.calls, markdownPublisher.calls)
 	}
 }
 
@@ -653,6 +764,21 @@ func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) 
 	}
 	if len(store.appended) != 1 || store.appended[0].Role != domain.RoleUser {
 		t.Fatalf("assistant bypassed atomic writer: %#v", store.appended)
+	}
+}
+
+func TestHandleAtomicExchangeDoesNotQueueMemoryWhenMemoryIsDisabled(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	writer := &fakeExchangeWriter{}
+	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, &fakePublisher{}, nil)
+	service.exchange = writer
+
+	outcome, err := service.Handle(t.Context(), botInvocation())
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if writer.prepares != 1 || writer.memoryEligible {
+		t.Fatalf("memory-disabled exchange = %#v", writer)
 	}
 }
 

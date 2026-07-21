@@ -189,7 +189,7 @@ type sourceMessagesWrapper struct {
 	Messages       []json.RawMessage `json:"messages"`
 }
 
-func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
+func (s *Store) prepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
 	if message.Role != domain.RoleAssistant {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("assistant exchange requires assistant role, got %q", message.Role)
 	}
@@ -219,10 +219,10 @@ func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.Co
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO memory_exchange_intents (
 			id, conversation_key, team_id, channel_id, channel_kind, root_ts, last_ts,
-			assistant_content, assistant_external_ts, assistant_created_at, retain, source_messages, created_at, publish_status, correlation_id
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?)`,
+			assistant_content, assistant_external_ts, assistant_created_at, retain, source_messages, created_at, publish_status, correlation_id, presentation_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?, ?)`,
 		intentID, string(metadata.Key), metadata.TeamID, metadata.ChannelID, string(metadata.ChannelKind), metadata.RootTS, metadata.LastTS,
-		message.Content, message.ExternalTS, message.CreatedAt.UnixNano(), retain, string(payload), nowNanos, correlationID,
+		message.Content, message.ExternalTS, message.CreatedAt.UnixNano(), retain, string(payload), nowNanos, correlationID, presentationJSON,
 	); err != nil {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("prepare assistant exchange: %w", err)
 	}
@@ -230,6 +230,14 @@ func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.Co
 		return port.PreparedAssistantExchange{}, fmt.Errorf("commit prepared assistant exchange: %w", err)
 	}
 	return port.PreparedAssistantExchange{ID: intentID, CorrelationID: correlationID}, nil
+}
+
+func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
+	return s.prepareAssistantExchange(ctx, metadata, message, "", retain, memoryEligible)
+}
+
+func (s *Store) PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
+	return s.prepareAssistantExchange(ctx, metadata, message, presentationJSON, retain, memoryEligible)
 }
 
 // MarkAssistantExchangePublished records Slack's actual response timestamp
@@ -416,6 +424,7 @@ type assistantExchangeIntent struct {
 	Retain              int
 	SourceMessages      string
 	PublishStatus       string
+	PresentationJSON    string
 }
 
 func (s *Store) getAssistantExchangeIntent(ctx context.Context, intentID string) (assistantExchangeIntent, error) {
@@ -430,10 +439,10 @@ func loadAssistantExchangeIntent(ctx context.Context, queryer interface {
 	var createdNanos int64
 	err := queryer.QueryRowContext(ctx, `
 		SELECT id, conversation_key, team_id, channel_id, channel_kind, root_ts, last_ts,
-			assistant_content, assistant_external_ts, assistant_created_at, retain, source_messages, publish_status, correlation_id
+			assistant_content, assistant_external_ts, assistant_created_at, retain, source_messages, publish_status, correlation_id, presentation_json
 		FROM memory_exchange_intents WHERE id = ?`, intentID,
 	).Scan(&intent.ID, &intent.ConversationKey, &intent.TeamID, &intent.ChannelID, &kind, &intent.RootTS, &intent.LastTS,
-		&intent.AssistantContent, &intent.AssistantExternalTS, &createdNanos, &intent.Retain, &intent.SourceMessages, &intent.PublishStatus, &intent.CorrelationID)
+		&intent.AssistantContent, &intent.AssistantExternalTS, &createdNanos, &intent.Retain, &intent.SourceMessages, &intent.PublishStatus, &intent.CorrelationID, &intent.PresentationJSON)
 	if err != nil {
 		return assistantExchangeIntent{}, err
 	}
@@ -457,6 +466,7 @@ func (i assistantExchangeIntent) finderIntent() port.AssistantExchangeIntent {
 	return port.AssistantExchangeIntent{
 		ID: i.ID, ChannelID: i.ChannelID, ChannelKind: i.ChannelKind,
 		RootTS: i.RootTS, Content: i.AssistantContent, CorrelationID: i.CorrelationID,
+		PresentationJSON: i.PresentationJSON,
 	}
 }
 
