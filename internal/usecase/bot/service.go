@@ -2,6 +2,7 @@ package bot
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -47,6 +48,7 @@ type Dependencies struct {
 	Enricher              port.ContextEnricher
 	ConfirmationStore     port.ConfirmationDeliveryStore
 	ConfirmationPublisher port.ConfirmationPublisher
+	StructuredPublisher   port.StructuredPublisher
 	FileLoader            port.FileLoader
 	AttachmentProc        port.AttachmentProcessor
 	MaxAttachmentBytes    int64
@@ -78,9 +80,11 @@ type Service struct {
 	sanitize              func(string) string
 	recall                port.MemoryRetriever
 	exchange              port.AssistantExchangeWriter
+	memoryEnabled         bool
 	enricher              port.ContextEnricher
 	confirmationStore     port.ConfirmationDeliveryStore
 	confirmationPublisher port.ConfirmationPublisher
+	structuredPublisher   port.StructuredPublisher
 	fileLoader            port.FileLoader
 	attachmentProc        port.AttachmentProcessor
 	maxAttachmentBytes    int64
@@ -145,6 +149,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		recall: deps.Memory, exchange: deps.Exchange, enricher: deps.Enricher,
 		confirmationStore:     deps.ConfirmationStore,
 		confirmationPublisher: deps.ConfirmationPublisher,
+		structuredPublisher:   deps.StructuredPublisher,
 		fileLoader:            deps.FileLoader, attachmentProc: deps.AttachmentProc,
 		maxAttachmentBytes: deps.MaxAttachmentBytes,
 		maxAttachmentChars: deps.MaxAttachmentChars,
@@ -330,6 +335,10 @@ func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Contex
 		return s.handlePendingConfirmation(ctx, invocation, key, turn)
 	}
 
+	if turn.Presentation != nil {
+		return s.finalizeStructuredTurn(ctx, invocation, key, turn, metadata)
+	}
+
 	return s.finalizeTurn(ctx, invocation, key, turn.Text, metadata)
 }
 
@@ -426,6 +435,119 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 	return OutcomeResponded, nil
 }
 
+func (s *Service) finalizeStructuredTurn(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey, turn port.AgentTurn, metadata domain.ConversationMetadata) (Outcome, error) {
+	presentation := sanitizePresentation(*turn.Presentation, s.sanitize)
+	if err := domain.ValidatePresentation(presentation); err != nil {
+		s.logger.Error("invalid structured presentation", "conversation_key", key, "error", err)
+		if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); publishErr != nil {
+			s.logger.Error("structured presentation error response failed", "conversation_key", key, "error", publishErr)
+			return OutcomePublishFailed, nil
+		}
+		return OutcomeModelFailed, nil
+	}
+	if s.structuredPublisher == nil {
+		s.logger.Error("structured publisher is not configured", "conversation_key", key)
+		if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); err != nil {
+			s.logger.Error("fallback error response failed", "conversation_key", key, "error", err)
+			return OutcomePublishFailed, nil
+		}
+		return OutcomeModelFailed, nil
+	}
+	if err := s.structuredPublisher.ValidateStructured(presentation); err != nil {
+		s.logger.Error("structured presentation preflight failed", "conversation_key", key, "error", err)
+		if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); publishErr != nil {
+			s.logger.Error("structured preflight error response failed", "conversation_key", key, "error", publishErr)
+			return OutcomePublishFailed, nil
+		}
+		return OutcomeModelFailed, nil
+	}
+
+	encoded, err := json.Marshal(presentation)
+	if err != nil {
+		return "", fmt.Errorf("encode structured presentation: %w", err)
+	}
+	presentationJSON := string(encoded)
+	canonicalContent := presentation.FallbackMarkdown
+
+	var prepared port.PreparedAssistantExchange
+	if s.exchange != nil {
+		intentMessage := domain.Message{
+			Role: domain.RoleAssistant, Content: canonicalContent,
+			CreatedAt: s.clock.Now().UTC(),
+		}
+		var prepareErr error
+		prepared, prepareErr = s.exchange.PrepareStructuredAssistantExchange(ctx, metadata, intentMessage, presentationJSON, s.cfg.RetainMessages, s.memoryEnabled && len(invocation.Attachments) == 0)
+		if prepareErr != nil {
+			s.logger.Error("structured assistant exchange preparation failed", "conversation_key", key, "error", prepareErr)
+			return "", fmt.Errorf("prepare structured assistant exchange: %w", prepareErr)
+		}
+	}
+
+	target := invocation.ReplyTarget()
+	target.CorrelationID = prepared.CorrelationID
+	published, err := s.structuredPublisher.PublishStructured(ctx, target, presentation)
+	if err != nil {
+		s.logger.Error("structured response publish failed", "conversation_key", key, "error", err)
+		return OutcomePublishFailed, nil
+	}
+	assistantTS := published.LastMessageTS
+	if assistantTS == "" {
+		return "", errors.New("structured publisher returned response without a timestamp")
+	}
+
+	if s.exchange != nil && prepared.ID != "" {
+		if err := s.exchange.MarkAssistantExchangePublished(ctx, prepared.ID, assistantTS); err != nil {
+			s.logger.Error("structured exchange publication marking failed", "conversation_key", key, "error", err)
+			return "", fmt.Errorf("mark structured exchange published: %w", err)
+		}
+		if err := s.exchange.FinalizeAssistantExchange(ctx, prepared.ID); err != nil {
+			s.logger.Error("structured exchange persistence failed", "conversation_key", key, "error", err)
+			return "", fmt.Errorf("persist structured exchange: %w", err)
+		}
+	} else {
+		metadata.LastTS = assistantTS
+		assistant := domain.Message{
+			Role: domain.RoleAssistant, Content: canonicalContent, ExternalTS: assistantTS,
+			CreatedAt: s.clock.Now().UTC(),
+		}
+		if err := s.store.AppendMessage(ctx, metadata, assistant, s.cfg.RetainMessages); err != nil {
+			s.logger.Error("structured message persistence failed", "conversation_key", key, "error", err)
+			return "", fmt.Errorf("persist structured message: %w", err)
+		}
+	}
+
+	s.logger.Info("structured Slack invocation completed", "conversation_key", key, "event_id", invocation.EventID)
+	return OutcomeResponded, nil
+}
+
+func sanitizePresentation(presentation domain.Presentation, sanitize func(string) string) domain.Presentation {
+	presentation.FallbackMarkdown = sanitize(presentation.FallbackMarkdown)
+	presentation.Sources = append([]domain.Source(nil), presentation.Sources...)
+	for i := range presentation.Sources {
+		presentation.Sources[i].Text = sanitize(presentation.Sources[i].Text)
+		presentation.Sources[i].URL = sanitize(presentation.Sources[i].URL)
+	}
+	if presentation.Table == nil {
+		return presentation
+	}
+	table := *presentation.Table
+	table.Caption = sanitize(table.Caption)
+	table.Headers = append([]string(nil), table.Headers...)
+	for i := range table.Headers {
+		table.Headers[i] = sanitize(table.Headers[i])
+	}
+	rows := table.Rows
+	table.Rows = make([][]string, len(rows))
+	for i, row := range rows {
+		table.Rows[i] = append([]string(nil), row...)
+		for j := range table.Rows[i] {
+			table.Rows[i][j] = sanitize(table.Rows[i][j])
+		}
+	}
+	presentation.Table = &table
+	return presentation
+}
+
 func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey, response string, metadata domain.ConversationMetadata) (Outcome, error) {
 	safeResponse := s.sanitize(response)
 	if strings.TrimSpace(safeResponse) == "" {
@@ -444,7 +566,7 @@ func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation
 			CreatedAt: s.clock.Now().UTC(),
 		}
 		var prepareErr error
-		prepared, prepareErr = s.exchange.PrepareAssistantExchange(ctx, metadata, intentMessage, s.cfg.RetainMessages, len(invocation.Attachments) == 0)
+		prepared, prepareErr = s.exchange.PrepareAssistantExchange(ctx, metadata, intentMessage, s.cfg.RetainMessages, s.memoryEnabled && len(invocation.Attachments) == 0)
 		if prepareErr != nil {
 			s.logger.Error("assistant exchange preparation failed", "conversation_key", key, "error", prepareErr)
 			return "", fmt.Errorf("prepare assistant exchange: %w", prepareErr)
@@ -497,6 +619,7 @@ func messageChars(messages []domain.Message) int {
 func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.AssistantExchangeWriter) {
 	s.recall = recall
 	s.exchange = exchange
+	s.memoryEnabled = true
 }
 
 func (s *Service) processAttachments(ctx context.Context, invocation domain.Invocation, maxChars int) (string, error) {

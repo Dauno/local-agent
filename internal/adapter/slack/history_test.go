@@ -2,7 +2,9 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -162,6 +164,61 @@ func exchangeMetadataFor(correlationID, renderMode string, partIndex, partCount 
 			"part_count":     float64(partCount),
 			"content_sha256": digest,
 		},
+	}
+}
+
+func TestHistoryReaderFindsPublishedStructuredExchangeFromCanonicalPresentation(t *testing.T) {
+	presentation := domain.Presentation{
+		FallbackMarkdown: "Large table",
+		Table:            &domain.Table{Headers: []string{"Item"}, Rows: make([][]string, 120)},
+	}
+	for index := range presentation.Table.Rows {
+		presentation.Table.Rows[index] = []string{fmt.Sprintf("item-%d", index)}
+	}
+	encoded, err := json.Marshal(presentation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	parts, err := renderPresentationParts(presentation, contentSHA256(string(encoded))[:16])
+	if err != nil {
+		t.Fatal(err)
+	}
+	messages := make([]slackapi.Message, len(parts))
+	for index := range parts {
+		messages[index] = slackapi.Message{Msg: slackapi.Msg{
+			User: testBot, Timestamp: fmt.Sprintf("172000000%d.000001", index+1),
+			Metadata: exchangeMetadataFor("intent-correlation", blocksV1RenderMode, index+1, len(parts), structuredPartDigest(encoded, index+1)),
+		}}
+	}
+	reader := newHistoryReader(&fakeHistoryClient{history: messages}, testBot, time.Second, nil, true)
+
+	timestamp, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: presentation.FallbackMarkdown,
+		CorrelationID: "intent-correlation", PresentationJSON: string(encoded),
+	})
+	if err != nil || !found || timestamp != "1720000002.000001" {
+		t.Fatalf("FindPublishedAssistantExchange() = %q, %t, %v", timestamp, found, err)
+	}
+}
+
+func TestHistoryReaderRejectsStructuredExchangeWithMarkdownMetadata(t *testing.T) {
+	presentation := domain.Presentation{FallbackMarkdown: "Source", Sources: []domain.Source{{Text: "Docs", URL: "https://example.com"}}}
+	encoded, err := json.Marshal(presentation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	client := &fakeHistoryClient{history: []slackapi.Message{{Msg: slackapi.Msg{
+		User: testBot, Timestamp: "1720000001.000001",
+		Metadata: exchangeMetadataFor("intent-correlation", markdownRenderMode, 1, 1, structuredPartDigest(encoded, 1)),
+	}}}}
+	reader := newHistoryReader(client, testBot, time.Second, nil, true)
+
+	_, found, err := reader.FindPublishedAssistantExchange(context.Background(), port.AssistantExchangeIntent{
+		ChannelID: testDM, ChannelKind: domain.ChannelDM, Content: presentation.FallbackMarkdown,
+		CorrelationID: "intent-correlation", PresentationJSON: string(encoded),
+	})
+	if err != nil || found {
+		t.Fatalf("FindPublishedAssistantExchange() found wrong renderer metadata: found=%t err=%v", found, err)
 	}
 }
 
