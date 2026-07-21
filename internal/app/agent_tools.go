@@ -194,8 +194,12 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 		if !ok {
 			return nil, fmt.Errorf("invocation tool %d is not an ADK tool: %T", index, raw)
 		}
-		scoped = append(scoped, adkTool)
-		toolIndex[adkTool.Name()] = adkTool
+		// Child agents and workflow steps receive read-only invocation tools only.
+		// create_canvas remains available to the root in baseRaw below.
+		if adkTool.Name() != "create_canvas" {
+			scoped = append(scoped, adkTool)
+			toolIndex[adkTool.Name()] = adkTool
+		}
 	}
 
 	combined := make([]any, 0, len(f.children)+len(f.workflowChildren)+len(baseRaw))

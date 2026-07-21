@@ -92,6 +92,13 @@ var configSchema = []schemaField{
 		{name: "command_timeout_seconds"},
 		{name: "max_output_bytes"},
 	}},
+	{name: "canvases", children: []schemaField{
+		{name: "enabled"},
+		{name: "max_title_chars"},
+		{name: "max_content_chars"},
+		{name: "max_content_bytes"},
+		{name: "timeout_seconds"},
+	}},
 	{name: "opencode", children: []schemaField{
 		{name: "management", children: []schemaField{
 			{name: "allowed_user_ids"},
