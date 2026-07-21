@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"iter"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -14,6 +16,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 type exitLoopCallingModel struct {
@@ -295,5 +298,47 @@ func TestWorkflowLoopExitsThroughADKExitLoopTool(t *testing.T) {
 	}
 	if !strings.Contains(presenterModel.system, "Present delegated.") {
 		t.Fatalf("presenter did not run after loop exit: %q", presenterModel.system)
+	}
+}
+
+func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "project")
+	managedBase := filepath.Join(t.TempDir(), "worktrees")
+	managedInvocation := filepath.Join(managedBase, "project", "call")
+	createdWorktree := filepath.Join(managedInvocation, "feature")
+	for _, path := range []string{project, createdWorktree} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	jsonResult := `{"status":"success","repository":"workspace","pr_url":"https://example.test/pr/1","branch":"trd/x","base_branch":"main","remote":"origin","commit":"abc","title":"Title","file_path":"docs/TRD-X.md","worktree":"` + createdWorktree + `","error":""}`
+	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: jsonResult}}
+	doc := agentdef.AgentDocument{
+		AgentClass: agentdef.AgentClassAcp,
+		Name:       "TRDGitOperator",
+		ACP: &agentdef.AcpAgentDocument{
+			Runtime: "opencode/build", Instruction: "Deliver {trd_content}.", Project: "{target_project}",
+			AdditionalDirectories: []string{"{worktree_root}"}, OutputKey: "delivery_result", OutputSchema: "git_delivery_result",
+		},
+	}
+	bp := &agentdef.WorkflowBlueprint{Root: doc}
+	root, err := buildWorkflowAgent(bp, nil, invocationScope{
+		globalInstruction: "Global.", acpRuntimes: map[string]port.ExternalAgentRuntime{"opencode/build": runtime},
+		acpResolved: map[string]*agentdef.ResolvedModel{"opencode/build": {
+			Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}, PermissionOptionKind: domain.ACPPermissionAllowOnce,
+		}},
+		projectRoots: map[string]string{"workspace": project}, worktreeRoot: managedBase,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	text, err := runWorkflow(t.Context(), root, map[string]any{
+		"target_project": "workspace", "worktree_root": managedInvocation, "trd_content": "TRD",
+	}, "deliver")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(text, `"status":"success"`) || runtime.request.PrimaryPath != project || len(runtime.request.AdditionalPaths) != 1 {
+		t.Fatalf("text = %s, request = %+v", text, runtime.request)
 	}
 }

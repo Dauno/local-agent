@@ -9,6 +9,7 @@ package agentdef
 const (
 	ProviderTypeOpenAICompatible = "openai_compatible"
 	ProviderTypeAgentCLI         = "agent_cli"
+	ProviderTypeACP              = "acp"
 )
 
 // Approval modes for agent_cli profiles.
@@ -25,6 +26,10 @@ type Provider struct {
 	Headers   map[string]string  `yaml:"headers,omitempty"`
 	Shim      *ShimConfig        `yaml:"shim,omitempty"`
 	Profiles  map[string]Profile `yaml:"profiles"`
+
+	// ACP provider fields.
+	Command string   `yaml:"command,omitempty"`
+	Args    []string `yaml:"args,omitempty"`
 }
 
 // ShimConfig is the executable mapper configuration for an agent_cli provider.
@@ -43,6 +48,15 @@ type Profile struct {
 	Agent    string `yaml:"agent,omitempty"`
 	Approval string `yaml:"approval,omitempty"`
 	Variant  string `yaml:"variant,omitempty"`
+
+	// acp profile fields.
+	ConfigOptions        []ACPConfigOption `yaml:"config_options,omitempty"`
+	PermissionOptionKind string            `yaml:"permission_option_kind,omitempty"`
+}
+
+type ACPConfigOption struct {
+	ID    string `yaml:"id"`
+	Value any    `yaml:"value"`
 }
 
 type GenerateContentConfig struct {
@@ -68,6 +82,10 @@ type AgentDef struct {
 	WorkflowTools     []string `yaml:"workflow_tools,omitempty"`
 	TimeoutSeconds    int      `yaml:"timeout_seconds,omitempty"`
 	Role              string   `yaml:"role,omitempty"`
+
+	// AcpAgent fields.
+	Runtime      string `yaml:"runtime,omitempty"`
+	Confirmation string `yaml:"confirmation,omitempty"`
 }
 
 type Definitions struct {
@@ -93,6 +111,12 @@ type ResolvedModel struct {
 	Agent    string
 	Approval string
 	Variant  string
+
+	// acp provider fields.
+	Command              string
+	Args                 []string
+	ConfigOptions        []ACPConfigOption
+	PermissionOptionKind string
 }
 
 // Type returns the resolved provider family.
@@ -106,4 +130,9 @@ func (r *ResolvedModel) Type() string {
 // IsAgentCLI reports whether the resolved model is backed by an agent CLI.
 func (r *ResolvedModel) IsAgentCLI() bool {
 	return r.Type() == ProviderTypeAgentCLI
+}
+
+// IsACP reports whether the resolved model is backed by an ACP agent.
+func (r *ResolvedModel) IsACP() bool {
+	return r.Type() == ProviderTypeACP
 }

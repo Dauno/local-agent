@@ -13,9 +13,11 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/acpclient"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
 
@@ -141,6 +143,37 @@ func (cliProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.
 		}, nil
 	}
 	return doctor.CLIProviderCheck{Detail: "profile validated"}, nil
+}
+
+type acpProviderChecker struct{}
+
+func (acpProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, projectRoots map[string]string) (string, error) {
+	client := acpclient.New(resolved.Command, resolved.Args)
+	description, err := client.Describe(ctx)
+	if err != nil {
+		return "", err
+	}
+	options := make([]domain.ACPConfigOption, 0, len(resolved.ConfigOptions))
+	for _, option := range resolved.ConfigOptions {
+		options = append(options, domain.ACPConfigOption{ID: option.ID, Value: option.Value})
+	}
+	if len(projectRoots) == 0 {
+		return "", errors.New("ACP provider has no registered project to probe")
+	}
+	for name, path := range projectRoots {
+		canonical, err := canonicalProjectPath(path)
+		if err != nil {
+			return "", fmt.Errorf("project %q: %w", name, err)
+		}
+		if err := client.Probe(ctx, canonical, nil, options); err != nil {
+			return "", fmt.Errorf("project %q: %w", name, err)
+		}
+	}
+	additional := "controlled fallback unavailable"
+	if description.SessionCapabilities.AdditionalDirectories {
+		additional = "native additionalDirectories available"
+	}
+	return fmt.Sprintf("%s %s uses ACP v%s; profile verified; %s", description.AgentInfo.Name, description.AgentInfo.Version, description.ProtocolVersion, additional), nil
 }
 
 // CheckAuthentication reports saved-login status for a known mapper identity

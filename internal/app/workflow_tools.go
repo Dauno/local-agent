@@ -2,28 +2,46 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"iter"
+	"os"
+	"path/filepath"
 	"strings"
+	"time"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/agent/workflowagents/loopagent"
 	"google.golang.org/adk/v2/agent/workflowagents/sequentialagent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/runner"
+	"google.golang.org/adk/v2/session"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/exitlooptool"
+	"google.golang.org/adk/v2/tool/functiontool"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 type preparedWorkflowTool struct {
-	blueprint *agentdef.WorkflowBlueprint
-	models    map[string]model.LLM
+	blueprint         *agentdef.WorkflowBlueprint
+	models            map[string]model.LLM
+	acpRuntimes       map[string]port.ExternalAgentRuntime
+	acpResolved       map[string]*agentdef.ResolvedModel
+	projectRoots      map[string]string
+	worktreeRoot      string
+	timeout           time.Duration
+	globalInstruction string
+	coordinator       port.OpenCodeCoordinator
 }
 
 type runnableWorkflowTool interface {
@@ -72,6 +90,11 @@ type invocationScope struct {
 	globalInstruction string
 	toolIndex         map[string]tool.Tool
 	validateOnly      bool
+	acpRuntimes       map[string]port.ExternalAgentRuntime
+	acpResolved       map[string]*agentdef.ResolvedModel
+	projectRoots      map[string]string
+	worktreeRoot      string
+	timeout           time.Duration
 }
 
 func prepareRootWorkflowTools(
@@ -85,6 +108,8 @@ func prepareRootWorkflowTools(
 	sanitize func(string) string,
 	describedCLIProviders map[string]bool,
 	stateDir string,
+	acpRuntimeFactory func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error),
+	coordinator port.OpenCodeCoordinator,
 ) ([]preparedWorkflowTool, error) {
 	if defs == nil || len(root.WorkflowTools) == 0 {
 		return nil, nil
@@ -103,8 +128,29 @@ func prepareRootWorkflowTools(
 	}
 
 	models := make(map[string]model.LLM)
+	acpRuntimes := make(map[string]port.ExternalAgentRuntime)
+	acpResolved := make(map[string]*agentdef.ResolvedModel)
 	for _, blueprint := range blueprints {
 		for _, doc := range blueprint.OrderedDocuments() {
+			if doc.AgentClass == agentdef.AgentClassAcp && doc.ACP != nil {
+				if _, exists := acpRuntimes[doc.ACP.Runtime]; exists {
+					continue
+				}
+				if acpRuntimeFactory == nil {
+					return nil, fmt.Errorf("workflow %q agent %q: ACP runtime factory is not configured", blueprint.ID, doc.Name)
+				}
+				resolved, err := defs.ResolveModel(doc.ACP.Runtime)
+				if err != nil {
+					return nil, fmt.Errorf("workflow %q agent %q: resolve ACP runtime: %w", blueprint.ID, doc.Name, err)
+				}
+				runtime, err := acpRuntimeFactory(resolved)
+				if err != nil {
+					return nil, fmt.Errorf("workflow %q agent %q: build ACP runtime: %w", blueprint.ID, doc.Name, err)
+				}
+				acpRuntimes[doc.ACP.Runtime] = runtime
+				acpResolved[doc.ACP.Runtime] = resolved
+				continue
+			}
 			if doc.AgentClass != agentdef.AgentClassLLM || doc.LLM == nil {
 				continue
 			}
@@ -133,13 +179,25 @@ func prepareRootWorkflowTools(
 		if _, err := buildWorkflowAgent(blueprint, models, invocationScope{
 			globalInstruction: root.GlobalInstruction,
 			validateOnly:      true,
+			acpRuntimes:       acpRuntimes,
+			acpResolved:       acpResolved,
+			projectRoots:      paths.SandboxProjectRoots,
+			worktreeRoot:      paths.OpenCodeWorktreeDir,
+			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
 		}); err != nil {
 			return nil, fmt.Errorf("workflow %q: build agent tree: %w", blueprint.ID, err)
 		}
 
 		prepared = append(prepared, preparedWorkflowTool{
-			blueprint: blueprint,
-			models:    models,
+			blueprint:         blueprint,
+			models:            models,
+			acpRuntimes:       acpRuntimes,
+			acpResolved:       acpResolved,
+			projectRoots:      paths.SandboxProjectRoots,
+			worktreeRoot:      paths.OpenCodeWorktreeDir,
+			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
+			globalInstruction: root.GlobalInstruction,
+			coordinator:       coordinator,
 		})
 	}
 	return prepared, nil
@@ -148,6 +206,14 @@ func prepareRootWorkflowTools(
 func (p *preparedWorkflowTool) buildAgentTool(scope invocationScope) (tool.Tool, error) {
 	if p == nil || p.blueprint == nil {
 		return nil, errors.New("workflow tool is not prepared")
+	}
+	scope.acpRuntimes = p.acpRuntimes
+	scope.acpResolved = p.acpResolved
+	scope.projectRoots = p.projectRoots
+	scope.worktreeRoot = p.worktreeRoot
+	scope.timeout = p.timeout
+	if p.blueprint.ID == "trd_generator" {
+		return p.buildTRDTool(scope)
 	}
 	workflowRoot, err := buildWorkflowAgent(p.blueprint, p.models, scope)
 	if err != nil {
@@ -161,6 +227,145 @@ func (p *preparedWorkflowTool) buildAgentTool(scope invocationScope) (tool.Tool,
 	return &nonEmptyWorkflowTool{delegate: runnable}, nil
 }
 
+func (p *preparedWorkflowTool) buildTRDTool(scope invocationScope) (tool.Tool, error) {
+	if len(p.projectRoots) == 0 {
+		return nil, errors.New("TRD workflow requires registered projects")
+	}
+	type trdArgs struct {
+		Project      string `json:"project" jsonschema:"exact registered project name"`
+		Requirements string `json:"requirements" jsonschema:"feature and design requirements"`
+	}
+	type trdResult struct {
+		Result string `json:"result"`
+	}
+	return functiontool.New(functiontool.Config{
+		Name:                p.blueprint.Root.Name,
+		Description:         p.blueprint.Description + " Requires confirmation before drafting or any Git mutation.",
+		RequireConfirmation: true,
+	}, func(ctx agent.Context, args trdArgs) (trdResult, error) {
+		if p.coordinator != nil {
+			release, acquired := p.coordinator.TryInvocation()
+			if !acquired {
+				return trdResult{}, errors.New("OpenCode maintenance is in progress")
+			}
+			defer release()
+		}
+		primaryPath, _, err := resolveACPProjects(p.projectRoots, args.Project, nil)
+		if err != nil {
+			return trdResult{}, err
+		}
+		if strings.TrimSpace(args.Requirements) == "" {
+			return trdResult{}, errors.New("TRD requirements must not be empty")
+		}
+		worktreeRoot, err := createWorkflowWorktreeRoot(p.worktreeRoot, args.Project, ctx.FunctionCallID())
+		if err != nil {
+			return trdResult{}, err
+		}
+		runtime, resolved, err := p.workflowACPRuntime()
+		if err != nil {
+			return trdResult{}, err
+		}
+		options := domainConfigOptions(resolved)
+		if err := runtime.Probe(ctx, primaryPath, []string{worktreeRoot}, options); err != nil {
+			return trdResult{}, fmt.Errorf("OpenCode ACP preflight failed: %w", err)
+		}
+
+		workflowRoot, err := buildWorkflowAgent(p.blueprint, p.models, scope)
+		if err != nil {
+			return trdResult{}, err
+		}
+		text, err := runWorkflow(ctx, workflowRoot, map[string]any{
+			"target_project": args.Project,
+			"requirements":   args.Requirements,
+			"worktree_root":  worktreeRoot,
+		}, args.Requirements)
+		if err != nil {
+			return trdResult{}, err
+		}
+		return trdResult{Result: text}, nil
+	})
+}
+
+func (p *preparedWorkflowTool) workflowACPRuntime() (port.ExternalAgentRuntime, *agentdef.ResolvedModel, error) {
+	for _, doc := range p.blueprint.OrderedDocuments() {
+		if doc.ACP == nil {
+			continue
+		}
+		runtime := p.acpRuntimes[doc.ACP.Runtime]
+		resolved := p.acpResolved[doc.ACP.Runtime]
+		if runtime == nil || resolved == nil {
+			return nil, nil, fmt.Errorf("workflow ACP runtime %q is not prepared", doc.ACP.Runtime)
+		}
+		return runtime, resolved, nil
+	}
+	return nil, nil, errors.New("TRD workflow has no ACP node")
+}
+
+func createWorkflowWorktreeRoot(base, project, callID string) (string, error) {
+	if !filepath.IsAbs(base) {
+		return "", errors.New("managed worktree root must be absolute")
+	}
+	if project == "" || filepath.Base(project) != project || project == "." || project == ".." {
+		return "", errors.New("registered project name is not safe for a managed directory")
+	}
+	if err := os.MkdirAll(base, 0o700); err != nil {
+		return "", fmt.Errorf("create managed worktree base: %w", err)
+	}
+	canonicalBase, err := filepath.EvalSymlinks(base)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed worktree base: %w", err)
+	}
+	digest := sha256.Sum256([]byte(callID))
+	directory := filepath.Join(canonicalBase, project, hex.EncodeToString(digest[:8]))
+	if err := os.MkdirAll(directory, 0o700); err != nil {
+		return "", fmt.Errorf("create managed worktree root: %w", err)
+	}
+	canonical, err := filepath.EvalSymlinks(directory)
+	if err != nil {
+		return "", err
+	}
+	relative, err := filepath.Rel(canonicalBase, canonical)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("managed worktree root escapes configured base")
+	}
+	return canonical, nil
+}
+
+func runWorkflow(ctx context.Context, root agent.Agent, state map[string]any, input string) (string, error) {
+	const appName = "local-agent-workflow"
+	sessions := session.InMemoryService()
+	created, err := sessions.Create(ctx, &session.CreateRequest{AppName: appName, UserID: "workflow", State: state})
+	if err != nil {
+		return "", err
+	}
+	run, err := runner.New(runner.Config{AppName: appName, Agent: root, SessionService: sessions})
+	if err != nil {
+		return "", err
+	}
+	var final string
+	for event, runErr := range run.Run(ctx, "workflow", created.Session.ID(), genai.NewContentFromText(input, genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeNone}) {
+		if runErr != nil {
+			return "", runErr
+		}
+		if event == nil || !event.IsFinalResponse() || event.Content == nil {
+			continue
+		}
+		var text strings.Builder
+		for _, part := range event.Content.Parts {
+			if part != nil {
+				text.WriteString(part.Text)
+			}
+		}
+		if text.Len() > 0 {
+			final = text.String()
+		}
+	}
+	if strings.TrimSpace(final) == "" {
+		return "", errors.New("workflow produced no final text")
+	}
+	return final, nil
+}
+
 func buildWorkflowAgent(bp *agentdef.WorkflowBlueprint, models map[string]model.LLM, scope invocationScope) (agent.Agent, error) {
 	return buildWorkflowNode(bp.Root, bp, models, scope, false)
 }
@@ -169,6 +374,8 @@ func buildWorkflowNode(doc agentdef.AgentDocument, bp *agentdef.WorkflowBlueprin
 	switch doc.AgentClass {
 	case agentdef.AgentClassLLM:
 		return buildLLMNode(doc, models, scope, loopAncestor)
+	case agentdef.AgentClassAcp:
+		return buildACPNode(doc, scope)
 	case agentdef.AgentClassSequential:
 		return buildSequentialNode(doc, bp, models, scope, loopAncestor)
 	case agentdef.AgentClassLoop:
@@ -179,6 +386,150 @@ func buildWorkflowNode(doc agentdef.AgentDocument, bp *agentdef.WorkflowBlueprin
 	default:
 		return nil, fmt.Errorf("agent %q: unsupported agent class %q", doc.Name, doc.AgentClass)
 	}
+}
+
+func buildACPNode(doc agentdef.AgentDocument, scope invocationScope) (agent.Agent, error) {
+	if doc.ACP == nil {
+		return nil, fmt.Errorf("agent %q: ACP document is missing", doc.Name)
+	}
+	runtime := scope.acpRuntimes[doc.ACP.Runtime]
+	resolved := scope.acpResolved[doc.ACP.Runtime]
+	if runtime == nil || resolved == nil {
+		return nil, fmt.Errorf("agent %q: ACP runtime %q is not prepared", doc.Name, doc.ACP.Runtime)
+	}
+	if doc.ACP.Project != "{target_project}" {
+		return nil, fmt.Errorf("agent %q: project must be the trusted {target_project} state template", doc.Name)
+	}
+	for _, directory := range doc.ACP.AdditionalDirectories {
+		if directory != "{worktree_root}" {
+			return nil, fmt.Errorf("agent %q: additional_directories may only contain {worktree_root}", doc.Name)
+		}
+	}
+	return agent.New(agent.Config{
+		Name:        doc.Name,
+		Description: doc.Description,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				project, err := stateString(ctx.Session().State(), "target_project")
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				primaryPath, _, err := resolveACPProjects(scope.projectRoots, project, nil)
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				var additionalPaths []string
+				if len(doc.ACP.AdditionalDirectories) > 0 {
+					worktree, stateErr := stateString(ctx.Session().State(), "worktree_root")
+					if stateErr != nil {
+						yield(nil, stateErr)
+						return
+					}
+					canonical, pathErr := canonicalManagedPath(scope.worktreeRoot, worktree)
+					if pathErr != nil {
+						yield(nil, pathErr)
+						return
+					}
+					additionalPaths = []string{canonical}
+				}
+				instruction := renderWorkflowState(doc.ACP.Instruction, ctx.Session().State())
+				result, err := runtime.Run(ctx, domain.AcpInvocationRequest{
+					PrimaryProject:       project,
+					PrimaryPath:          primaryPath,
+					AdditionalProjects:   []string{"managed_worktree_root"},
+					AdditionalPaths:      additionalPaths,
+					ProfileName:          resolved.Provider.Name,
+					ConfigOptions:        domainConfigOptions(resolved),
+					PermissionOptionKind: resolved.PermissionOptionKind,
+					GlobalInstruction:    scope.globalInstruction,
+					AgentInstruction:     instruction,
+					Task:                 "Complete the trusted workflow step and return only the requested result.",
+					Timeout:              scope.timeout,
+				})
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				output := result.Text
+				if doc.ACP.OutputSchema == "git_delivery_result" {
+					worktreeRoot, stateErr := stateString(ctx.Session().State(), "worktree_root")
+					if stateErr != nil {
+						yield(nil, stateErr)
+						return
+					}
+					parsed, parseErr := domain.ParseGitDeliveryResult([]byte(output), project, worktreeRoot)
+					if parseErr != nil {
+						yield(nil, parseErr)
+						return
+					}
+					canonical, marshalErr := json.Marshal(parsed)
+					if marshalErr != nil {
+						yield(nil, marshalErr)
+						return
+					}
+					output = string(canonical)
+				}
+				event := session.NewEvent(ctx, ctx.InvocationID())
+				event.LLMResponse = model.LLMResponse{
+					Content:      genai.NewContentFromText(output, genai.RoleModel),
+					FinishReason: genai.FinishReasonStop,
+					TurnComplete: true,
+				}
+				if doc.ACP.OutputKey != "" {
+					event.Actions.StateDelta[doc.ACP.OutputKey] = output
+				}
+				yield(event, nil)
+			}
+		},
+	})
+}
+
+func domainConfigOptions(resolved *agentdef.ResolvedModel) []domain.ACPConfigOption {
+	options := make([]domain.ACPConfigOption, 0, len(resolved.ConfigOptions))
+	for _, option := range resolved.ConfigOptions {
+		options = append(options, domain.ACPConfigOption{ID: option.ID, Value: option.Value})
+	}
+	return options
+}
+
+func stateString(state session.ReadonlyState, key string) (string, error) {
+	value, err := state.Get(key)
+	if err != nil {
+		return "", fmt.Errorf("workflow state %q is unavailable: %w", key, err)
+	}
+	text, ok := value.(string)
+	if !ok || strings.TrimSpace(text) == "" {
+		return "", fmt.Errorf("workflow state %q must be a non-empty string", key)
+	}
+	return text, nil
+}
+
+func renderWorkflowState(template string, state session.ReadonlyState) string {
+	result := template
+	for key, value := range state.All() {
+		if text, ok := value.(string); ok {
+			result = strings.ReplaceAll(result, "{"+key+"}", text)
+		}
+	}
+	return result
+}
+
+func canonicalManagedPath(root, target string) (string, error) {
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed worktree base: %w", err)
+	}
+	canonicalTarget, err := filepath.EvalSymlinks(target)
+	if err != nil {
+		return "", fmt.Errorf("resolve managed worktree path: %w", err)
+	}
+	relative, err := filepath.Rel(canonicalRoot, canonicalTarget)
+	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		return "", errors.New("managed worktree path escapes configured worktree root")
+	}
+	return canonicalTarget, nil
 }
 
 func buildLLMNode(doc agentdef.AgentDocument, models map[string]model.LLM, scope invocationScope, loopAncestor bool) (agent.Agent, error) {

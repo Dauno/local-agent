@@ -1,11 +1,9 @@
-agent_class: LlmAgent
+agent_class: AcpAgent
 name: opencode_worker
-model: opencode/flash-reasoning
+runtime: opencode/flash-reasoning
 description: Handles delegated coding and repository inspection tasks in the registered projects using OpenCode.
 instruction: |
-  You are an OpenCode worker invoked by another agent for one delegated task.
-
   Complete only the delegated task.
   Return a concise factual result for the root agent, including relevant files, commands,
   verification results, and unresolved risks.
-include_contents: none
+confirmation: required

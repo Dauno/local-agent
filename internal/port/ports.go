@@ -281,3 +281,23 @@ type ConfirmationDeliveryStore interface {
 	ListPending(ctx context.Context) ([]ConfirmationDelivery, error)
 	ExpireDeliveries(ctx context.Context, now time.Time) error
 }
+
+// ExternalAgentRuntime invokes an ACP-compatible external agent.
+type ExternalAgentRuntime interface {
+	Run(ctx context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error)
+	Probe(ctx context.Context, primaryPath string, additionalPaths []string, configOptions []domain.ACPConfigOption) error
+	Describe(ctx context.Context) (domain.ACPInitResult, error)
+}
+
+// OpenCodeManager handles OpenCode lifecycle operations.
+type OpenCodeManager interface {
+	Status(ctx context.Context) (domain.OpenCodeManagementResult, error)
+	Probe(ctx context.Context) error
+	Upgrade(ctx context.Context) (domain.OpenCodeManagementResult, error)
+	Rollback(ctx context.Context) (domain.OpenCodeManagementResult, error)
+}
+
+type OpenCodeCoordinator interface {
+	TryInvocation() (release func(), acquired bool)
+	TryMaintenance() (release func(), acquired bool)
+}

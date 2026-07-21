@@ -92,6 +92,11 @@ var configSchema = []schemaField{
 		{name: "command_timeout_seconds"},
 		{name: "max_output_bytes"},
 	}},
+	{name: "opencode", children: []schemaField{
+		{name: "management", children: []schemaField{
+			{name: "allowed_user_ids"},
+		}},
+	}},
 }
 
 // Load reads, applies defaults to, and validates a YAML config file.
@@ -303,6 +308,9 @@ func normalizeCollections(cfg *Config) {
 	}
 	if cfg.Slack.AllowedChannelIDs == nil {
 		cfg.Slack.AllowedChannelIDs = []string{}
+	}
+	if cfg.OpenCode.Management.AllowedUserIDs == nil {
+		cfg.OpenCode.Management.AllowedUserIDs = []string{}
 	}
 }
 

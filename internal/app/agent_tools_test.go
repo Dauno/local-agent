@@ -4,8 +4,11 @@ import (
 	"context"
 	"errors"
 	"iter"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
@@ -56,6 +59,44 @@ func (m *streamRecordingModel) GenerateContent(_ context.Context, request *model
 type delegatingRootModel struct {
 	calls  int
 	target string
+}
+
+type fakeExternalRuntime struct {
+	request domain.AcpInvocationRequest
+	result  domain.AcpInvocationResult
+	err     error
+	probes  int
+	runs    int
+}
+
+func (f *fakeExternalRuntime) Run(_ context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error) {
+	f.runs++
+	f.request = request
+	return f.result, f.err
+}
+
+type acpCallingRootModel struct{}
+
+func (*acpCallingRootModel) Name() string { return "acp-caller" }
+
+func (*acpCallingRootModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		yield(&model.LLMResponse{
+			Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "acp-1", Name: "opencode_worker", Args: map[string]any{"project": "workspace", "task": "change code"},
+			}}}},
+			FinishReason: genai.FinishReasonStop, TurnComplete: true,
+		}, nil)
+	}
+}
+
+func (f *fakeExternalRuntime) Probe(context.Context, string, []string, []domain.ACPConfigOption) error {
+	f.probes++
+	return f.err
+}
+
+func (f *fakeExternalRuntime) Describe(context.Context) (domain.ACPInitResult, error) {
+	return domain.ACPInitResult{ProtocolVersion: "1", AgentInfo: domain.ACPAgentInfo{Name: "fake", Version: "1"}}, f.err
 }
 
 func (*delegatingRootModel) Name() string { return "root" }
@@ -467,4 +508,80 @@ func runDelegatingTurn(t *testing.T, root agent.Agent) string {
 		}
 	}
 	return final
+}
+
+func TestACPAgentToolResolvesRegisteredProjectsAndInvokesRuntime(t *testing.T) {
+	primary := filepath.Join(t.TempDir(), "primary")
+	additional := filepath.Join(t.TempDir(), "additional")
+	for _, path := range []string{primary, additional} {
+		if err := os.MkdirAll(path, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "completed"}}
+	resolved := &agentdef.ResolvedModel{
+		Provider:             agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP},
+		ConfigOptions:        []agentdef.ACPConfigOption{{ID: "model", Value: "test/model"}},
+		PermissionOptionKind: domain.ACPPermissionAllowOnce,
+	}
+	result, err := invokeACPAgent(t.Context(), agentdef.AgentDef{Name: "opencode_worker", Description: "Runs OpenCode.", Instruction: "Do work."}, "Global.", runtime, resolved, map[string]string{"primary": primary, "additional": additional}, time.Minute, acpAgentArgs{Project: "primary", Task: "change code", AdditionalProjects: []string{"additional"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != "completed" || runtime.request.PrimaryProject != "primary" || len(runtime.request.AdditionalPaths) != 1 {
+		t.Fatalf("result = %v, request = %+v", result, runtime.request)
+	}
+	if runtime.request.PermissionOptionKind != domain.ACPPermissionAllowOnce || runtime.request.Task != "change code" {
+		t.Fatalf("request = %+v", runtime.request)
+	}
+}
+
+func TestResolveACPProjectsRejectsDuplicateAndUnknownNames(t *testing.T) {
+	root := t.TempDir()
+	projects := map[string]string{"workspace": root}
+	if _, _, err := resolveACPProjects(projects, "workspace", []string{"workspace"}); err == nil {
+		t.Fatal("expected duplicate rejection")
+	}
+	if _, _, err := resolveACPProjects(projects, "missing", nil); err == nil {
+		t.Fatal("expected unknown project rejection")
+	}
+}
+
+func TestACPAgentToolRequiresADKConfirmationBeforeRuntime(t *testing.T) {
+	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "should not run"}}
+	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}, PermissionOptionKind: domain.ACPPermissionAllowOnce}
+	toolValue, err := newAcpAgentTool(agentdef.AgentDef{Name: "opencode_worker", Description: "Runs OpenCode.", Instruction: "Do work."}, "Global.", runtime, resolved, map[string]string{"workspace": t.TempDir()}, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	root, err := llmagent.New(llmagent.Config{Name: "root_agent", Model: &acpCallingRootModel{}, Instruction: "Delegate.", Mode: llmagent.ModeChat, Tools: []tool.Tool{toolValue}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sessions := session.InMemoryService()
+	created, err := sessions.Create(t.Context(), &session.CreateRequest{AppName: "acp-confirmation-test", UserID: "U123"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := runner.New(runner.Config{AppName: "acp-confirmation-test", Agent: root, SessionService: sessions})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundConfirmation := false
+	for event, runErr := range run.Run(t.Context(), "U123", created.Session.ID(), genai.NewContentFromText("use OpenCode", genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeNone}) {
+		if runErr != nil {
+			t.Fatal(runErr)
+		}
+		if event == nil || event.Content == nil {
+			continue
+		}
+		for _, part := range event.Content.Parts {
+			if part != nil && part.FunctionCall != nil && part.FunctionCall.Name == "adk_request_confirmation" {
+				foundConfirmation = true
+			}
+		}
+	}
+	if !foundConfirmation || runtime.runs != 0 {
+		t.Fatalf("confirmation=%v runtime runs=%d", foundConfirmation, runtime.runs)
+	}
 }

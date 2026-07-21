@@ -68,6 +68,10 @@ type CLIProviderChecker interface {
 	CheckAuthentication(ctx context.Context, resolved *agentdef.ResolvedModel, shimName string) (string, error)
 }
 
+type ACPProviderChecker interface {
+	CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, projectRoots map[string]string) (string, error)
+}
+
 type Dependencies struct {
 	ConfigPath string
 	LoadConfig func(path string) (config.Config, error)
@@ -75,6 +79,7 @@ type Dependencies struct {
 	Database   DatabaseChecker
 	Live       LiveChecker
 	CLI        CLIProviderChecker
+	ACP        ACPProviderChecker
 }
 
 type Status string
@@ -194,7 +199,11 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 						defsErr = fmt.Errorf("agent tool %q is not defined", agentToolName)
 						break
 					}
-					agentToolResolved, resolveErr := defs.ResolveModel(agentTool.Model)
+					modelRef := agentTool.Model
+					if agentTool.AgentClass == "AcpAgent" {
+						modelRef = agentTool.Runtime
+					}
+					agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
 					if resolveErr != nil {
 						defsErr = fmt.Errorf("resolve agent tool %q model: %w", agentToolName, resolveErr)
 						break
@@ -211,6 +220,15 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 						}
 						blueprints = append(blueprints, bp)
 						for _, doc := range bp.OrderedDocuments() {
+							if doc.AgentClass == agentdef.AgentClassAcp && doc.ACP != nil {
+								workflowResolved, resolveErr := defs.ResolveModel(doc.ACP.Runtime)
+								if resolveErr != nil {
+									defsErr = fmt.Errorf("workflow %q agent %q: resolve runtime %q: %w", workflowID, doc.Name, doc.ACP.Runtime, resolveErr)
+									break
+								}
+								selectedModels = append(selectedModels, selectedModel{agent: "workflow:" + doc.Name, resolved: workflowResolved})
+								continue
+							}
 							if doc.AgentClass != agentdef.AgentClassLLM || doc.LLM == nil {
 								continue
 							}
@@ -306,7 +324,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		checkedModelAPIKeys[modelAPIKeyEnv] = true
 	}
 	for _, selected := range selectedModels {
-		if selected.resolved.IsAgentCLI() || checkedModelAPIKeys[selected.resolved.APIKeyEnv] {
+		if selected.resolved.IsAgentCLI() || selected.resolved.IsACP() || checkedModelAPIKeys[selected.resolved.APIKeyEnv] {
 			continue
 		}
 		key := selected.resolved.APIKeyEnv
@@ -327,6 +345,29 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		} else {
 			report.pass("SQLite", "database exists, is migrated, and is readable/writable")
 		}
+	}
+	if pathErr == nil {
+		var acpModels []selectedModel
+		for _, selected := range selectedModels {
+			if selected.resolved.IsACP() {
+				acpModels = append(acpModels, selected)
+			}
+		}
+		if len(acpModels) > 0 && s.deps.ACP == nil {
+			report.fail("ACP provider", "ACP checker is unavailable", "Reinstall local-agent with ACP support.", false)
+		}
+		for _, selected := range acpModels {
+			if s.deps.ACP == nil {
+				break
+			}
+			detail, err := s.deps.ACP.CheckProvider(ctx, selected.resolved, paths.SandboxProjectRoots)
+			if err != nil {
+				report.fail("ACP provider ("+selected.agent+")", redactor.String(err.Error()), "Verify the ACP command, saved OpenCode authentication, profile options, and registered projects.", false)
+				continue
+			}
+			report.pass("ACP provider ("+selected.agent+")", detail)
+		}
+		report.pass("OpenCode management operators", fmt.Sprintf("%d configured", len(cfg.OpenCode.Management.AllowedUserIDs)))
 	}
 
 	shimNames := make(map[string]string)

@@ -166,11 +166,14 @@ func validateProviderFieldPresence(data []byte, provider Provider) error {
 	var providerForbidden, profileForbidden []string
 	switch provider.Type {
 	case ProviderTypeAgentCLI:
-		providerForbidden = []string{"base_url", "api_key_env", "headers"}
-		profileForbidden = []string{"reasoning_effort", "extra_body", "generate_content_config"}
+		providerForbidden = []string{"base_url", "api_key_env", "headers", "command", "args"}
+		profileForbidden = []string{"reasoning_effort", "extra_body", "generate_content_config", "config_options", "permission_option_kind"}
 	case ProviderTypeOpenAICompatible:
-		providerForbidden = []string{"shim"}
-		profileForbidden = []string{"agent", "approval", "variant"}
+		providerForbidden = []string{"shim", "command", "args"}
+		profileForbidden = []string{"agent", "approval", "variant", "config_options", "permission_option_kind"}
+	case ProviderTypeACP:
+		providerForbidden = []string{"base_url", "api_key_env", "headers", "shim"}
+		profileForbidden = []string{"model", "agent", "approval", "variant", "reasoning_effort", "extra_body", "generate_content_config"}
 	default:
 		return nil
 	}
@@ -278,8 +281,10 @@ func validateProvider(p Provider) []string {
 		errs = append(errs, validateOpenAICompatibleProvider(prefix, p)...)
 	case ProviderTypeAgentCLI:
 		errs = append(errs, validateAgentCLIProvider(prefix, p)...)
+	case ProviderTypeACP:
+		errs = append(errs, validateACPProvider(prefix, p)...)
 	default:
-		errs = append(errs, fmt.Sprintf("%s: type must be %s or %s", prefix, ProviderTypeOpenAICompatible, ProviderTypeAgentCLI))
+		errs = append(errs, fmt.Sprintf("%s: type must be %s, %s, or %s", prefix, ProviderTypeOpenAICompatible, ProviderTypeAgentCLI, ProviderTypeACP))
 	}
 	if len(p.Profiles) == 0 {
 		errs = append(errs, fmt.Sprintf("%s: at least one profile is required", prefix))
@@ -357,15 +362,100 @@ func validateAgentCLIProvider(prefix string, p Provider) []string {
 	return errs
 }
 
+func validateACPProvider(prefix string, p Provider) []string {
+	var errs []string
+	if p.BaseURL != "" {
+		errs = append(errs, fmt.Sprintf("%s: base_url is invalid for %s providers", prefix, ProviderTypeACP))
+	}
+	if p.APIKeyEnv != "" {
+		errs = append(errs, fmt.Sprintf("%s: api_key_env is invalid for %s providers", prefix, ProviderTypeACP))
+	}
+	if len(p.Headers) > 0 {
+		errs = append(errs, fmt.Sprintf("%s: headers are invalid for %s providers", prefix, ProviderTypeACP))
+	}
+	if p.Shim != nil {
+		errs = append(errs, fmt.Sprintf("%s: shim is invalid for %s providers", prefix, ProviderTypeACP))
+	}
+	if strings.TrimSpace(p.Command) == "" {
+		errs = append(errs, fmt.Sprintf("%s: command is required for %s providers", prefix, ProviderTypeACP))
+	}
+	if strings.ContainsAny(p.Command, "\r\n\x00") {
+		errs = append(errs, fmt.Sprintf("%s: command must be a single line", prefix))
+	}
+	for index, arg := range p.Args {
+		if strings.TrimSpace(arg) == "" {
+			errs = append(errs, fmt.Sprintf("%s: args[%d] must not be empty", prefix, index))
+		}
+		if strings.ContainsAny(arg, "\r\n\x00") {
+			errs = append(errs, fmt.Sprintf("%s: args[%d] must be a single line", prefix, index))
+		}
+	}
+	for profileName, profile := range p.Profiles {
+		profilePrefix := fmt.Sprintf("%s profile %q", prefix, profileName)
+		if len(profile.ConfigOptions) == 0 {
+			errs = append(errs, fmt.Sprintf("%s: at least one config option is required", profilePrefix))
+		}
+		seenOptions := make(map[string]struct{}, len(profile.ConfigOptions))
+		for i, opt := range profile.ConfigOptions {
+			id := strings.TrimSpace(opt.ID)
+			if id == "" {
+				errs = append(errs, fmt.Sprintf("%s: config_options[%d].id must not be empty", profilePrefix, i))
+			} else if len(id) > 256 {
+				errs = append(errs, fmt.Sprintf("%s: config_options[%d].id exceeds 256 bytes", profilePrefix, i))
+			} else if _, duplicate := seenOptions[id]; duplicate {
+				errs = append(errs, fmt.Sprintf("%s: duplicate config option id %q", profilePrefix, id))
+			} else {
+				seenOptions[id] = struct{}{}
+			}
+			switch value := opt.Value.(type) {
+			case string:
+				if strings.TrimSpace(value) == "" {
+					errs = append(errs, fmt.Sprintf("%s: config_options[%d].value must not be empty", profilePrefix, i))
+				} else if len(value) > 4096 {
+					errs = append(errs, fmt.Sprintf("%s: config_options[%d].value exceeds 4096 bytes", profilePrefix, i))
+				}
+			case bool:
+			default:
+				errs = append(errs, fmt.Sprintf("%s: config_options[%d].value must be a string or boolean", profilePrefix, i))
+			}
+		}
+		switch profile.PermissionOptionKind {
+		case "", "reject_once", "allow_once":
+		default:
+			errs = append(errs, fmt.Sprintf("%s: permission_option_kind must be reject_once or allow_once", profilePrefix))
+		}
+	}
+	return errs
+}
+
 func validateProfile(providerPrefix, providerType, name string, profile Profile) []string {
 	var errs []string
 	prefix := fmt.Sprintf("%s profile %q", providerPrefix, name)
 
-	if strings.TrimSpace(profile.Model) == "" {
+	if providerType != ProviderTypeACP && strings.TrimSpace(profile.Model) == "" {
 		errs = append(errs, fmt.Sprintf("%s: model must not be empty", prefix))
 	}
 
 	switch providerType {
+	case ProviderTypeACP:
+		if profile.ReasoningEffort != "" {
+			errs = append(errs, fmt.Sprintf("%s: reasoning_effort is invalid for %s profiles", prefix, ProviderTypeACP))
+		}
+		if len(profile.ExtraBody) > 0 {
+			errs = append(errs, fmt.Sprintf("%s: extra_body is invalid for %s profiles", prefix, ProviderTypeACP))
+		}
+		if profile.GenerateContentConfig != nil {
+			errs = append(errs, fmt.Sprintf("%s: generate_content_config is invalid for %s profiles", prefix, ProviderTypeACP))
+		}
+		if profile.Agent != "" {
+			errs = append(errs, fmt.Sprintf("%s: agent is invalid for %s profiles", prefix, ProviderTypeACP))
+		}
+		if profile.Approval != "" {
+			errs = append(errs, fmt.Sprintf("%s: approval is invalid for %s profiles", prefix, ProviderTypeACP))
+		}
+		if profile.Variant != "" {
+			errs = append(errs, fmt.Sprintf("%s: variant is invalid for %s profiles", prefix, ProviderTypeACP))
+		}
 	case ProviderTypeAgentCLI:
 		if profile.ReasoningEffort != "" {
 			errs = append(errs, fmt.Sprintf("%s: reasoning_effort is invalid for %s profiles", prefix, ProviderTypeAgentCLI))
@@ -412,11 +502,17 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	if strings.TrimSpace(a.Name) == "" {
 		errs = append(errs, "agent name must not be empty")
 	}
-	if a.AgentClass != "LlmAgent" {
-		errs = append(errs, fmt.Sprintf("%s: agent_class must be LlmAgent", prefix))
+	if a.AgentClass != "LlmAgent" && a.AgentClass != "AcpAgent" {
+		errs = append(errs, fmt.Sprintf("%s: agent_class must be LlmAgent or AcpAgent", prefix))
 	}
 	if strings.TrimSpace(a.Instruction) == "" {
 		errs = append(errs, fmt.Sprintf("%s: instruction must not be empty", prefix))
+	}
+
+	if a.AgentClass == "AcpAgent" {
+		errs = append(errs, validateAcpAgent(prefix, a, providers)...)
+		// Skip model validation for AcpAgent since it uses runtime instead.
+		return errs
 	}
 
 	if a.Model == "" {
@@ -430,8 +526,16 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 				errs = append(errs, fmt.Sprintf("%s: unknown provider %q", prefix, providerName))
 			} else if _, exists := p.Profiles[profileName]; !exists {
 				errs = append(errs, fmt.Sprintf("%s: unknown profile %q in provider %q", prefix, profileName, providerName))
+			} else if p.Type == ProviderTypeACP {
+				errs = append(errs, fmt.Sprintf("%s: ACP providers require agent_class: AcpAgent", prefix))
 			}
 		}
+	}
+	if a.Runtime != "" {
+		errs = append(errs, fmt.Sprintf("%s: runtime is only valid for AcpAgent", prefix))
+	}
+	if a.Confirmation != "" {
+		errs = append(errs, fmt.Sprintf("%s: confirmation is only valid for AcpAgent", prefix))
 	}
 
 	switch a.IncludeContents {
@@ -511,8 +615,12 @@ func validateAgentTools(defs *Definitions) []string {
 					if target.ToolScope != "invocation_scoped" {
 						errs = append(errs, fmt.Sprintf("agent tool %q: %s agent tools must declare tool_scope: invocation_scoped", name, ProviderTypeOpenAICompatible))
 					}
+				case ProviderTypeACP:
+					if target.AgentClass != "AcpAgent" {
+						errs = append(errs, fmt.Sprintf("agent tool %q: ACP providers require agent_class: AcpAgent", name))
+					}
 				default:
-					errs = append(errs, fmt.Sprintf("agent tool %q: model must use an %s or %s provider", name, ProviderTypeAgentCLI, ProviderTypeOpenAICompatible))
+					errs = append(errs, fmt.Sprintf("agent tool %q: model must use an %s, %s, or %s provider", name, ProviderTypeAgentCLI, ProviderTypeOpenAICompatible, ProviderTypeACP))
 				}
 			}
 		}
@@ -521,7 +629,11 @@ func validateAgentTools(defs *Definitions) []string {
 }
 
 func providerForAgent(agent AgentDef, providers map[string]Provider) (Provider, bool) {
-	providerName, _, ok := splitModelReference(agent.Model)
+	ref := agent.Model
+	if agent.AgentClass == "AcpAgent" {
+		ref = agent.Runtime
+	}
+	providerName, _, ok := splitModelReference(ref)
 	if !ok {
 		return Provider{}, false
 	}
@@ -572,6 +684,64 @@ func validateWorkflowTools(defs *Definitions) []string {
 			}
 
 		}
+	}
+
+	return errs
+}
+
+func validateAcpAgent(prefix string, a AgentDef, providers map[string]Provider) []string {
+	var errs []string
+
+	if a.Runtime == "" {
+		errs = append(errs, fmt.Sprintf("%s: runtime must not be empty", prefix))
+	} else {
+		providerName, profileName, ok := splitModelReference(a.Runtime)
+		if !ok {
+			errs = append(errs, fmt.Sprintf("%s: runtime must be provider/profile format", prefix))
+		} else {
+			if p, exists := providers[providerName]; !exists {
+				errs = append(errs, fmt.Sprintf("%s: unknown runtime provider %q", prefix, providerName))
+			} else if p.Type != ProviderTypeACP {
+				errs = append(errs, fmt.Sprintf("%s: runtime provider %q must be type acp", prefix, providerName))
+			} else if _, exists := p.Profiles[profileName]; !exists {
+				errs = append(errs, fmt.Sprintf("%s: unknown runtime profile %q in provider %q", prefix, profileName, providerName))
+			}
+		}
+	}
+	if a.Model != "" {
+		errs = append(errs, fmt.Sprintf("%s: model is not valid for AcpAgent (use runtime instead)", prefix))
+	}
+	if a.IncludeContents != "" {
+		errs = append(errs, fmt.Sprintf("%s: include_contents is not valid for AcpAgent", prefix))
+	}
+	if a.Mode != "" {
+		errs = append(errs, fmt.Sprintf("%s: mode is not valid for AcpAgent", prefix))
+	}
+	if a.DurableSession {
+		errs = append(errs, fmt.Sprintf("%s: durable_session is not valid for AcpAgent", prefix))
+	}
+	if a.ToolScope != "" {
+		errs = append(errs, fmt.Sprintf("%s: tool_scope is not valid for AcpAgent", prefix))
+	}
+	if len(a.AgentTools) > 0 {
+		errs = append(errs, fmt.Sprintf("%s: agent_tools is not valid for AcpAgent", prefix))
+	}
+	if len(a.WorkflowTools) > 0 {
+		errs = append(errs, fmt.Sprintf("%s: workflow_tools is not valid for AcpAgent", prefix))
+	}
+	if a.TimeoutSeconds != 0 {
+		errs = append(errs, fmt.Sprintf("%s: timeout_seconds is not valid for AcpAgent", prefix))
+	}
+	if a.Role != "" {
+		errs = append(errs, fmt.Sprintf("%s: role is not valid for AcpAgent", prefix))
+	}
+	if a.GlobalInstruction != "" {
+		errs = append(errs, fmt.Sprintf("%s: global_instruction is not valid for AcpAgent", prefix))
+	}
+	switch a.Confirmation {
+	case "required":
+	default:
+		errs = append(errs, fmt.Sprintf("%s: confirmation must be required", prefix))
 	}
 
 	return errs

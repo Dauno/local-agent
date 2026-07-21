@@ -14,6 +14,7 @@ var (
 	slackUserIDPattern     = regexp.MustCompile(`^[UW][A-Z0-9]{8,}$`)
 	slackTeamIDPattern     = regexp.MustCompile(`^T[A-Z0-9]{8,}$`)
 	slackChannelIDPattern  = regexp.MustCompile(`^[CG][A-Z0-9]{8,}$`)
+	projectNamePattern     = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 )
 
 // FieldError identifies one invalid configuration field.
@@ -123,6 +124,7 @@ func Validate(cfg Config) error {
 	validateIDs(&problems, "slack.allowed_user_ids", cfg.Slack.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
 	validateIDs(&problems, "slack.allowed_team_ids", cfg.Slack.AllowedTeamIDs, slackTeamIDPattern, "a plausible Slack team ID beginning with T")
 	validateIDs(&problems, "slack.allowed_channel_ids", cfg.Slack.AllowedChannelIDs, slackChannelIDPattern, "a plausible Slack public or private channel ID beginning with C or G")
+	validateIDs(&problems, "opencode.management.allowed_user_ids", cfg.OpenCode.Management.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
 
 	const maxFileBytes = 5 * 1024 * 1024
 	const maxFileChars = 20_000
@@ -205,8 +207,8 @@ func Validate(cfg Config) error {
 			add("sandbox.projects", "must contain at least one registered project when enabled")
 		}
 		for name, path := range cfg.Sandbox.Projects {
-			if strings.TrimSpace(name) == "" {
-				add("sandbox.projects", "project names must not be empty")
+			if strings.TrimSpace(name) == "" || len(name) > 64 || !projectNamePattern.MatchString(name) {
+				add("sandbox.projects", "project names must use 1-64 letters, digits, dots, underscores, or hyphens")
 			}
 			requirePath(&problems, fmt.Sprintf("sandbox.projects[%q]", name), path)
 		}
