@@ -53,8 +53,23 @@ func TestRedactingWriter(t *testing.T) {
 		if !errors.Is(err, io.ErrShortWrite) {
 			t.Fatalf("expected ErrShortWrite, got %v", err)
 		}
-		if n != 3 {
-			t.Fatalf("expected 3, got %d", n)
+		if n != 0 {
+			t.Fatalf("expected 0 on short write, got %d", n)
+		}
+	})
+
+	t.Run("short write with expanding redaction", func(t *testing.T) {
+		redactor := secure.NewRedactor("short")
+		w := &redactingWriter{
+			target:   &shortWriter{limit: 10},
+			redactor: redactor,
+		}
+		n, err := w.Write([]byte("this is short but redacted"))
+		if !errors.Is(err, io.ErrShortWrite) {
+			t.Fatalf("expected ErrShortWrite, got %v", err)
+		}
+		if n != 0 {
+			t.Fatalf("expected 0 on short write, got %d", n)
 		}
 	})
 

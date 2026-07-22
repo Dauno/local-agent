@@ -655,10 +655,10 @@ func (w *redactingWriter) Write(data []byte) (int, error) {
 	redacted := w.redactor.String(string(data))
 	n, err := io.WriteString(w.target, redacted)
 	if err != nil {
-		return n, err
+		return 0, err
 	}
 	if n < len(redacted) {
-		return n, io.ErrShortWrite
+		return 0, io.ErrShortWrite
 	}
 	return len(data), nil
 }
