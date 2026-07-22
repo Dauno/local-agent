@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -184,6 +185,8 @@ func (a *Application) Run(ctx context.Context) error {
 			curatorLLM = &memoryCuratorLLM{
 				llm:                   curatorModel,
 				generateContentConfig: curatorResolved.GenerateContentConfig,
+				logger:                logger,
+				sanitize:              redactor.String,
 			}
 		}
 		if attachmentDef != nil {
@@ -224,11 +227,6 @@ func (a *Application) Run(ctx context.Context) error {
 		rootModel = legacyModel
 		agentName = cfg.Agent.Name
 		modelBaseURL = cfg.Model.BaseURL
-	}
-
-	if concrete, ok := curatorLLM.(*memoryCuratorLLM); ok {
-		concrete.logger = logger
-		concrete.sanitize = redactor.String
 	}
 
 	if rootModel == nil {
@@ -540,9 +538,37 @@ func (a *Application) Run(ctx context.Context) error {
 		projector := memoryprojector.New()
 		memoryDir := paths.MemoryDir
 
-		go runMemoryCurator(ctx, store, history, curator, memorySvc, projector, memoryDir,
-			time.Duration(cfg.Memory.WorkerIntervalSeconds)*time.Second,
-			cfg.Memory.CuratorMaxRetries, cfg.Memory.RetentionDays, logger)
+		go func() {
+			const maxBackoff = 30 * time.Second
+			backoff := 1 * time.Second
+			for {
+				done := make(chan struct{})
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							logger.Error("memory curator panicked, will retry",
+								"panic", redactor.String(fmt.Sprintf("%v", r)),
+								"stack", redactor.String(string(debug.Stack())))
+						}
+						close(done)
+					}()
+					runMemoryCurator(ctx, store, history, curator, memorySvc, projector, memoryDir,
+						time.Duration(cfg.Memory.WorkerIntervalSeconds)*time.Second,
+						cfg.Memory.CuratorMaxRetries, cfg.Memory.RetentionDays, logger)
+				}()
+				<-done
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
+				}
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
+		}()
 
 		service.AddMemory(memorySvc, store)
 		logger.Info("memory service enabled", "directory", memoryDir,
@@ -624,10 +650,15 @@ type redactingWriter struct {
 
 func (w *redactingWriter) Write(data []byte) (int, error) {
 	if w == nil || w.target == nil {
-		return len(data), nil
+		return 0, errors.New("redactingWriter: target writer is nil")
 	}
-	if _, err := io.WriteString(w.target, w.redactor.String(string(data))); err != nil {
+	redacted := w.redactor.String(string(data))
+	n, err := io.WriteString(w.target, redacted)
+	if err != nil {
 		return 0, err
+	}
+	if n < len(redacted) {
+		return 0, io.ErrShortWrite
 	}
 	return len(data), nil
 }
