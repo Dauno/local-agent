@@ -59,12 +59,13 @@ func TestRedactingWriter(t *testing.T) {
 	})
 
 	t.Run("short write with expanding redaction", func(t *testing.T) {
-		redactor := secure.NewRedactor("short")
+		// Secreto "x" (1 byte) se redacta a "****" (4 bytes) — expansión real
+		redactor := secure.NewRedactor("x")
 		w := &redactingWriter{
-			target:   &shortWriter{limit: 10},
+			target:   &shortWriter{limit: 1},
 			redactor: redactor,
 		}
-		n, err := w.Write([]byte("this is short but redacted"))
+		n, err := w.Write([]byte("x"))
 		if !errors.Is(err, io.ErrShortWrite) {
 			t.Fatalf("expected ErrShortWrite, got %v", err)
 		}
