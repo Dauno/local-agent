@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -538,14 +539,35 @@ func (a *Application) Run(ctx context.Context) error {
 		memoryDir := paths.MemoryDir
 
 		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					logger.Error("memory curator panicked", "panic", r)
+			const maxBackoff = 30 * time.Second
+			backoff := 1 * time.Second
+			for {
+				done := make(chan struct{})
+				go func() {
+					defer func() {
+						if r := recover(); r != nil {
+							logger.Error("memory curator panicked, will retry",
+								"panic", redactor.String(fmt.Sprintf("%v", r)),
+								"stack", redactor.String(string(debug.Stack())))
+						}
+						close(done)
+					}()
+					runMemoryCurator(ctx, store, history, curator, memorySvc, projector, memoryDir,
+						time.Duration(cfg.Memory.WorkerIntervalSeconds)*time.Second,
+						cfg.Memory.CuratorMaxRetries, cfg.Memory.RetentionDays, logger)
+				}()
+				<-done
+
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(backoff):
 				}
-			}()
-			runMemoryCurator(ctx, store, history, curator, memorySvc, projector, memoryDir,
-				time.Duration(cfg.Memory.WorkerIntervalSeconds)*time.Second,
-				cfg.Memory.CuratorMaxRetries, cfg.Memory.RetentionDays, logger)
+				backoff *= 2
+				if backoff > maxBackoff {
+					backoff = maxBackoff
+				}
+			}
 		}()
 
 		service.AddMemory(memorySvc, store)
@@ -627,11 +649,16 @@ type redactingWriter struct {
 }
 
 func (w *redactingWriter) Write(data []byte) (int, error) {
-	if w.target == nil {
+	if w == nil || w.target == nil {
 		return 0, errors.New("redactingWriter: target writer is nil")
 	}
-	if _, err := io.WriteString(w.target, w.redactor.String(string(data))); err != nil {
-		return 0, err
+	redacted := w.redactor.String(string(data))
+	n, err := io.WriteString(w.target, redacted)
+	if err != nil {
+		return n, err
+	}
+	if n < len(redacted) {
+		return n, io.ErrShortWrite
 	}
 	return len(data), nil
 }
