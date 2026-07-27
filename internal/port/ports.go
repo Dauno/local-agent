@@ -88,6 +88,10 @@ type ContextEnricher interface {
 // exhausted. Callers can use it to apply their own backpressure behavior.
 var ErrModelCallLimitReached = errors.New("maximum concurrent model calls reached")
 
+// ErrCuratorResponseIncomplete marks a curator response that cannot be safely
+// applied because the model stopped before producing a complete payload.
+var ErrCuratorResponseIncomplete = errors.New("curator model response incomplete")
+
 // ModelCallLimiter bounds all model calls made by one running agent process.
 // The composition root supplies one instance to both foreground and background
 // model consumers.
@@ -243,6 +247,19 @@ type MemoryStore interface {
 // directly or change memory policy.
 type MemoryCurator interface {
 	ProposePatch(ctx context.Context, conversationKey domain.ConversationKey, exchangeTS string, messages []domain.Message, topics []domain.TopicReference) (domain.MemoryPatch, error)
+}
+
+// MemoryWorkerStore contains only persistence operations needed by the
+// background curator runner. It intentionally excludes topic policy and CRUD.
+type MemoryWorkerStore interface {
+	ReconcileAssistantExchanges(ctx context.Context, finder AssistantExchangeFinder) error
+	ClaimNextOutboxItem(ctx context.Context) (*domain.OutboxItem, error)
+	LoadOutboxMessages(ctx context.Context, item *domain.OutboxItem) ([]domain.Message, error)
+	CompleteOutboxItem(ctx context.Context, id int, leaseUntil time.Time) error
+	FailOutboxItem(ctx context.Context, id int, leaseUntil time.Time, reason string) error
+	RetryOutboxItem(ctx context.Context, id int, leaseUntil, nextAttempt time.Time) error
+	RescheduleOutboxItem(ctx context.Context, id int, leaseUntil, nextAttempt time.Time) error
+	CleanupOutbox(ctx context.Context, before time.Time) error
 }
 
 // ProjectionSnapshot holds a consistent point-in-time view of all memory state

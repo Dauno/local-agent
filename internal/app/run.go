@@ -7,12 +7,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
-	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
-	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
-	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/secure"
-	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
 )
 
 func (a *Application) Run(ctx context.Context) error {
@@ -85,36 +80,4 @@ func (w *redactingWriter) Write(data []byte) (int, error) {
 		return 0, io.ErrShortWrite
 	}
 	return len(data), nil
-}
-
-func runMemoryCurator(
-	ctx context.Context,
-	store *adaptersqlite.Store,
-	finder port.AssistantExchangeFinder,
-	curator *memorycurator.Curator,
-	memoryService *memoryusecase.Service,
-	projector *memoryprojector.Projector,
-	memoryDir string,
-	interval time.Duration,
-	maxRetries int,
-	retentionDays int,
-	logger port.Logger,
-) {
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
-
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			if err := store.ReconcileAssistantExchanges(ctx, finder); err != nil {
-				logger.Warn("assistant exchange reconciliation failed", "error", err)
-			}
-			if err := store.CleanupOutbox(ctx, time.Now().UTC().AddDate(0, 0, -retentionDays)); err != nil {
-				logger.Warn("memory outbox cleanup failed", "error", err)
-			}
-			processOutbox(ctx, store, curator, memoryService, projector, memoryDir, maxRetries, logger)
-		}
-	}
 }

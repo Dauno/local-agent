@@ -27,7 +27,7 @@ type memoryCuratorLLM struct {
 
 var _ memorycurator.LLM = (*memoryCuratorLLM)(nil)
 
-var errCuratorResponseIncomplete = errors.New("curator model response incomplete")
+var errCuratorResponseIncomplete = port.ErrCuratorResponseIncomplete
 
 func (m *memoryCuratorLLM) GenerateText(ctx context.Context, prompt string) (string, error) {
 	request := &model.LLMRequest{
