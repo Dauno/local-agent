@@ -415,8 +415,11 @@ func runStreamingTurn(ctx context.Context, adkRunner *runner.Runner, input *gena
 		allText             strings.Builder
 		partialText         strings.Builder
 		pendingConfirmation *domain.PendingConfirmation
-		lastFinalText       string
 	)
+	emitText := func(text string) bool {
+		allText.WriteString(text)
+		return yield(port.AgentStreamEvent{Kind: port.AgentStreamTextDelta, TextDelta: text})
+	}
 	for event, runErr := range adkRunner.Run(ctx, ephemeralUserID, sessionID, input, agent.RunConfig{StreamingMode: agent.StreamingModeSSE}) {
 		if runErr != nil {
 			yield(port.AgentStreamEvent{Kind: port.AgentStreamError, Err: fmt.Errorf("run streaming ADK agent: %w", runErr)})
@@ -437,11 +440,12 @@ func runStreamingTurn(ctx context.Context, adkRunner *runner.Runner, input *gena
 		text, _ := eventText(event.Content)
 		if event.Partial && event.Content.Role == genai.RoleModel && text != "" {
 			if partialText.Len() == 0 && allText.Len() > 0 {
-				allText.WriteString("\n\n")
+				if !emitText("\n\n") {
+					return
+				}
 			}
 			partialText.WriteString(text)
-			allText.WriteString(text)
-			if !yield(port.AgentStreamEvent{Kind: port.AgentStreamTextDelta, TextDelta: text}) {
+			if !emitText(text) {
 				return
 			}
 			continue
@@ -455,25 +459,23 @@ func runStreamingTurn(ctx context.Context, adkRunner *runner.Runner, input *gena
 				partialText.Reset()
 			} else if text != "" {
 				if allText.Len() > 0 {
-					allText.WriteString("\n\n")
+					if !emitText("\n\n") {
+						return
+					}
 				}
-				allText.WriteString(text)
+				if !emitText(text) {
+					return
+				}
 			}
 		}
-		if event.IsFinalResponse() && event.Content.Role == genai.RoleModel && text != "" {
-			lastFinalText = text
-		}
 	}
-	text := strings.TrimSpace(allText.String())
-	if text == "" {
-		text = strings.TrimSpace(lastFinalText)
-	}
+	text := allText.String()
 	turn := &port.AgentTurn{Text: text, PendingConfirmation: pendingConfirmation}
 	if pendingConfirmation != nil {
 		yield(port.AgentStreamEvent{Kind: port.AgentStreamPendingConfirmation, Turn: turn})
 		return
 	}
-	if text == "" {
+	if strings.TrimSpace(text) == "" {
 		yield(port.AgentStreamEvent{Kind: port.AgentStreamError, Err: ErrNoResponse})
 		return
 	}
