@@ -7,7 +7,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"runtime/debug"
 	"strings"
 	"time"
 
@@ -488,36 +487,22 @@ func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup
 	if curErr != nil {
 		return models.redactor.Error(fmt.Errorf("initialize memory curator: %w", curErr))
 	}
-	projector := memoryprojector.New()
-	memoryDir := paths.MemoryDir
-	go func() {
-		const maxBackoff = 30 * time.Second
-		backoff := time.Second
-		for {
-			done := make(chan struct{})
-			go func() {
-				defer func() {
-					if r := recover(); r != nil {
-						models.logger.Error("memory curator panicked, will retry", "panic", models.redactor.String(fmt.Sprintf("%v", r)), "stack", models.redactor.String(string(debug.Stack())))
-					}
-					close(done)
-				}()
-				runMemoryCurator(ctx, infra.store, infra.history, curator, memorySvc, projector, memoryDir, time.Duration(cfg.Memory.WorkerIntervalSeconds)*time.Second, cfg.Memory.CuratorMaxRetries, cfg.Memory.RetentionDays, models.logger)
-			}()
-			<-done
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(backoff):
-			}
-			backoff *= 2
-			if backoff > maxBackoff {
-				backoff = maxBackoff
-			}
-		}
-	}()
+	runner, runnerErr := memoryusecase.NewRunner(memoryusecase.RunnerConfig{
+		Interval:      time.Duration(cfg.Memory.WorkerIntervalSeconds) * time.Second,
+		MaxRetries:    cfg.Memory.CuratorMaxRetries,
+		RetentionDays: cfg.Memory.RetentionDays,
+		MemoryDir:     paths.MemoryDir,
+	}, memoryusecase.RunnerDependencies{
+		Store: infra.store, ExchangeFinder: infra.history, Curator: curator, Memory: memorySvc,
+		Projector: memoryprojector.New(), ProjectionReader: infra.store,
+		Logger: models.logger, Sanitize: models.redactor.String,
+	})
+	if runnerErr != nil {
+		return models.redactor.Error(fmt.Errorf("initialize memory runner: %w", runnerErr))
+	}
+	go runner.Run(ctx)
 	service.AddMemory(memorySvc, infra.store)
-	models.logger.Info("memory service enabled", "directory", memoryDir, "max_topics_recall", cfg.Memory.MaxTopicsRecall, "max_chars_recall", cfg.Memory.MaxCharsRecall)
+	models.logger.Info("memory service enabled", "directory", paths.MemoryDir, "max_topics_recall", cfg.Memory.MaxTopicsRecall, "max_chars_recall", cfg.Memory.MaxCharsRecall)
 	return nil
 }
 
