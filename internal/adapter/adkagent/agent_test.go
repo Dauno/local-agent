@@ -156,6 +156,230 @@ func TestRuntimeStreamYieldsTypedDeltasAndAuthoritativeCompletion(t *testing.T) 
 	}
 }
 
+func TestRuntimeStreamEmitsSinglePhaseFinalTextOnce(t *testing.T) {
+	llm := &fakeLLM{response: func(*model.LLMRequest) string { return "single-phase response" }}
+	runtime, err := NewRuntime(RuntimeConfig{AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var events []port.AgentStreamEvent
+	runtime.Stream(t.Context(), port.AgentRequest{
+		ConversationKey: "slack:T12345678:dm:D12345678",
+		Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "hello"}},
+	}, func(event port.AgentStreamEvent) bool {
+		events = append(events, event)
+		return true
+	})
+
+	if len(events) != 2 {
+		t.Fatalf("events = %#v, want one delta and one completion", events)
+	}
+	if events[0].Kind != port.AgentStreamTextDelta || events[0].TextDelta != "single-phase response" {
+		t.Fatalf("first event = %#v, want single-phase text delta", events[0])
+	}
+	if events[1].Kind != port.AgentStreamCompleted || events[1].Turn == nil || events[1].Turn.Text != events[0].TextDelta {
+		t.Fatalf("completion = %#v, want text matching delta", events[1])
+	}
+}
+
+func TestRuntimeStreamPreservesWhitespaceInFinalText(t *testing.T) {
+	const want = "  response \n"
+	llm := &fakeLLM{response: func(*model.LLMRequest) string { return want }}
+	runtime, err := NewRuntime(RuntimeConfig{AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var delta string
+	var completed *port.AgentTurn
+	runtime.Stream(t.Context(), port.AgentRequest{
+		ConversationKey: "slack:T12345678:dm:D12345678",
+		Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "hello"}},
+	}, func(event port.AgentStreamEvent) bool {
+		switch event.Kind {
+		case port.AgentStreamTextDelta:
+			delta += event.TextDelta
+		case port.AgentStreamCompleted:
+			completed = event.Turn
+		}
+		return true
+	})
+
+	if completed == nil || delta != want || completed.Text != want {
+		t.Fatalf("delta = %q, completed = %#v, want %q", delta, completed, want)
+	}
+}
+
+type multiphaseStreamingLLM struct {
+	calls     int
+	finalOnly bool
+}
+
+func (*multiphaseStreamingLLM) Name() string { return "multiphase-streaming-model" }
+
+func (m *multiphaseStreamingLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if !stream {
+			yield(nil, errors.New("expected streaming request"))
+			return
+		}
+		m.calls++
+		if m.calls == 1 {
+			preamble := "Checking the project."
+			if !yield(&model.LLMResponse{Content: genai.NewContentFromText(preamble, genai.RoleModel), Partial: true}, nil) {
+				return
+			}
+			yield(&model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{
+				genai.NewPartFromText(preamble),
+				{FunctionCall: &genai.FunctionCall{ID: "call-1", Name: "inspect_project", Args: map[string]any{}}},
+			}}, TurnComplete: true}, nil)
+			return
+		}
+		if m.finalOnly {
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("Project checked.", genai.RoleModel), TurnComplete: true}, nil)
+			return
+		}
+		for _, delta := range []string{"Project ", "checked."} {
+			if !yield(&model.LLMResponse{Content: genai.NewContentFromText(delta, genai.RoleModel), Partial: true}, nil) {
+				return
+			}
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("Project checked.", genai.RoleModel), TurnComplete: true}, nil)
+	}
+}
+
+func TestRuntimeStreamEmitsNonPartialTextAfterToolPhase(t *testing.T) {
+	inspectProject, err := functiontool.New(functiontool.Config{
+		Name:        "inspect_project",
+		Description: "Inspect the project.",
+	}, func(agent.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"checked": true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &multiphaseStreamingLLM{finalOnly: true}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService(), StaticTools: []tool.Tool{inspectProject},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var deltas strings.Builder
+	var completed *port.AgentTurn
+	runtime.Stream(t.Context(), port.AgentRequest{
+		ConversationKey: "slack:T12345678:dm:D12345678:thread:1700000000.000001",
+		Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "inspect"}},
+	}, func(event port.AgentStreamEvent) bool {
+		switch event.Kind {
+		case port.AgentStreamTextDelta:
+			deltas.WriteString(event.TextDelta)
+		case port.AgentStreamCompleted:
+			completed = event.Turn
+		case port.AgentStreamError:
+			t.Fatalf("unexpected stream error: %v", event.Err)
+		}
+		return true
+	})
+
+	const want = "Checking the project.\n\nProject checked."
+	if completed == nil || completed.Text != want || deltas.String() != want {
+		t.Fatalf("deltas = %q, completed = %#v, want %q", deltas.String(), completed, want)
+	}
+}
+
+func TestRuntimeStreamUsesEmittedDeltasAsAuthoritativeMultiphaseText(t *testing.T) {
+	inspectProject, err := functiontool.New(functiontool.Config{
+		Name:        "inspect_project",
+		Description: "Inspect the project.",
+	}, func(agent.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"checked": true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	llm := &multiphaseStreamingLLM{}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService(), StaticTools: []tool.Tool{inspectProject},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var deltas strings.Builder
+	var completed *port.AgentTurn
+	runtime.Stream(t.Context(), port.AgentRequest{
+		ConversationKey: "slack:T12345678:dm:D12345678:thread:1700000000.000001",
+		Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "inspect"}},
+	}, func(event port.AgentStreamEvent) bool {
+		switch event.Kind {
+		case port.AgentStreamTextDelta:
+			deltas.WriteString(event.TextDelta)
+		case port.AgentStreamCompleted:
+			completed = event.Turn
+		case port.AgentStreamError:
+			t.Fatalf("unexpected stream error: %v", event.Err)
+		}
+		return true
+	})
+
+	const want = "Checking the project.\n\nProject checked."
+	if completed == nil || completed.Text != want {
+		t.Fatalf("completed turn = %#v, want %q", completed, want)
+	}
+	if deltas.String() != completed.Text {
+		t.Fatalf("concatenated deltas = %q, completed text = %q", deltas.String(), completed.Text)
+	}
+	if llm.calls != 2 {
+		t.Fatalf("model calls = %d, want 2", llm.calls)
+	}
+}
+
+func TestRuntimeStreamConfirmationRetainsVisibleText(t *testing.T) {
+	inspectProject, err := functiontool.New(functiontool.Config{
+		Name:                "inspect_project",
+		Description:         "Inspect the project.",
+		RequireConfirmation: true,
+	}, func(agent.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"checked": true}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName: "Dev Agent", Model: &multiphaseStreamingLLM{}, SessionService: session.InMemoryService(), StaticTools: []tool.Tool{inspectProject},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var deltas strings.Builder
+	var pending *port.AgentTurn
+	var completed bool
+	runtime.Stream(t.Context(), port.AgentRequest{
+		ConversationKey: "slack:T12345678:dm:D12345678:thread:1700000000.000001",
+		Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "inspect"}},
+	}, func(event port.AgentStreamEvent) bool {
+		switch event.Kind {
+		case port.AgentStreamTextDelta:
+			deltas.WriteString(event.TextDelta)
+		case port.AgentStreamPendingConfirmation:
+			pending = event.Turn
+		case port.AgentStreamCompleted:
+			completed = true
+		case port.AgentStreamError:
+			t.Fatalf("unexpected stream error: %v", event.Err)
+		}
+		return true
+	})
+
+	if completed || pending == nil || pending.Text != deltas.String() || pending.Text != "Checking the project." {
+		t.Fatalf("deltas = %q, pending = %#v, completed = %v", deltas.String(), pending, completed)
+	}
+}
+
 func (f *fakeLLM) recorded() []requestView {
 	f.mu.Lock()
 	defer f.mu.Unlock()
