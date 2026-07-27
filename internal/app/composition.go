@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"runtime/debug"
+	"strings"
 	"time"
 
 	slackapi "github.com/slack-go/slack"
@@ -45,9 +46,10 @@ import (
 const defaultAttachmentTimeout = 120 * time.Second
 
 type runtimeSetup struct {
-	cfg   config.Config
-	paths config.Paths
-	defs  *agentdef.Definitions
+	cfg    config.Config
+	paths  config.Paths
+	defs   *agentdef.Definitions
+	legacy bool
 }
 
 type runtimeModels struct {
@@ -120,127 +122,116 @@ func (a *Application) loadRuntimeSetup() (runtimeSetup, error) {
 	if err != nil {
 		return runtimeSetup{}, fmt.Errorf("load agent definitions: %w", err)
 	}
-	return runtimeSetup{cfg: cfg, paths: paths, defs: defs}, nil
+	legacy := defs == nil
+	if legacy {
+		defs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody)
+	}
+	return runtimeSetup{cfg: cfg, paths: paths, defs: defs, legacy: legacy}, nil
 }
 
 func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSetup) (runtimeModels, error) {
 	cfg, paths, defs := setup.cfg, setup.paths, setup.defs
 	prepared := runtimeModels{rootFamily: domain.ProviderFamilyOpenAICompatible, openCodeCoordinator: opencodeusecase.NewCoordinator()}
 	describedCLIProviders := make(map[string]bool)
-	if defs != nil {
-		rootDefCandidate, ok := defs.Agents["root_agent"]
-		if !ok {
-			return runtimeModels{}, errors.New("agent definition root_agent is required when declarative agents are configured")
-		}
-		prepared.rootDef = &rootDefCandidate
-		if cur, ok := defs.Agents["memory_curator"]; ok {
-			prepared.curatorDef = &cur
-		}
-		if attachment, ok := defs.Agents["attachment_analyzer"]; ok {
-			prepared.attachmentDef = &attachment
-		}
+	rootDefCandidate, ok := defs.Agents["root_agent"]
+	if !ok {
+		return runtimeModels{}, errors.New("agent definition root_agent is required when declarative agents are configured")
+	}
+	prepared.rootDef = &rootDefCandidate
+	if cur, ok := defs.Agents["memory_curator"]; ok {
+		prepared.curatorDef = &cur
+	}
+	if attachment, ok := defs.Agents["attachment_analyzer"]; ok {
+		prepared.attachmentDef = &attachment
+	}
 
-		providerEnvs := defs.RequiredAPIKeyEnvs()
-		allKeys := append(append(make([]string, 0, len(providerEnvs)+2), providerEnvs...), bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv)
-		values, err := envfile.NewResolver(paths.EnvFile).Resolve(allKeys...)
-		if err != nil {
-			return runtimeModels{}, fmt.Errorf("load runtime secrets: %w", err)
-		}
-		prepared.botToken = values[bootstrap.SlackBotTokenEnv]
-		prepared.appToken = values[bootstrap.SlackAppTokenEnv]
-		if err := requiredSlackTokens(prepared.botToken, prepared.appToken); err != nil {
-			return runtimeModels{}, err
-		}
-		secrets := make([]string, 0, len(providerEnvs)+2)
-		for _, environment := range providerEnvs {
-			secrets = append(secrets, values[environment])
-		}
-		prepared.redactor = secure.NewRedactor(append(secrets, prepared.botToken, prepared.appToken)...)
-		prepared.logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, prepared.redactor)
+	providerEnvs := defs.RequiredAPIKeyEnvs()
+	allKeys := append(append(make([]string, 0, len(providerEnvs)+2), providerEnvs...), bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv)
+	values, err := envfile.NewResolver(paths.EnvFile).Resolve(allKeys...)
+	if err != nil {
+		return runtimeModels{}, fmt.Errorf("load runtime secrets: %w", err)
+	}
+	prepared.botToken = values[bootstrap.SlackBotTokenEnv]
+	prepared.appToken = values[bootstrap.SlackAppTokenEnv]
+	if setup.legacy && strings.TrimSpace(values[cfg.Model.APIKeyEnv]) == "" {
+		return runtimeModels{}, fmt.Errorf("%s is not configured. Run: local-agent init", cfg.Model.APIKeyEnv)
+	}
+	if err := requiredSlackTokens(prepared.botToken, prepared.appToken); err != nil {
+		return runtimeModels{}, err
+	}
+	secrets := make([]string, 0, len(providerEnvs)+2)
+	for _, environment := range providerEnvs {
+		secrets = append(secrets, values[environment])
+	}
+	prepared.redactor = secure.NewRedactor(append(secrets, prepared.botToken, prepared.appToken)...)
+	prepared.logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, prepared.redactor)
 
-		resolved, err := defs.ResolveModel(prepared.rootDef.Model)
-		if err != nil {
-			return runtimeModels{}, fmt.Errorf("resolve root agent model: %w", err)
-		}
-		builtRoot, rootSecret, err := newModelForResolved(ctx, resolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
-		if err != nil {
-			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build root model client: %w", err))
-		}
-		if err := handshakeSelectedAgentCLI(ctx, resolved, builtRoot, describedCLIProviders); err != nil {
-			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("validate root agent model: %w", err))
-		}
-		prepared.rootModel = builtRoot
-		if resolved.IsAgentCLI() {
-			prepared.rootIsAgentCLI = true
-			prepared.rootFamily = domain.ProviderFamilyAgentCLI
-			prepared.modelBaseURL = "agent_cli:" + resolved.Provider.Name
-		} else {
-			prepared.apiKey = rootSecret
-			prepared.modelBaseURL = resolved.BaseURL
-		}
-		acpRuntimeFactory := func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error) {
-			return acpclient.NewWithCoordinator(resolved.Command, resolved.Args, prepared.openCodeCoordinator), nil
-		}
-		prepared.preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, acpRuntimeFactory)
-		if err != nil {
-			return runtimeModels{}, prepared.redactor.Error(err)
-		}
-		prepared.preparedWorkflows, err = prepareRootWorkflowTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, paths.StateDir, acpRuntimeFactory, prepared.openCodeCoordinator)
-		if err != nil {
-			return runtimeModels{}, prepared.redactor.Error(err)
-		}
-
-		if cfg.Memory.Enabled {
-			if prepared.curatorDef == nil {
-				return runtimeModels{}, errors.New("agent definition memory_curator is required when memory is enabled")
-			}
-			curatorResolved, err := defs.ResolveModel(prepared.curatorDef.Model)
-			if err != nil {
-				return runtimeModels{}, fmt.Errorf("resolve curator model: %w", err)
-			}
-			curatorModel, _, err := newModelForResolved(ctx, curatorResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
-			if err != nil {
-				return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build curator model client: %w", err))
-			}
-			if err := handshakeSelectedAgentCLI(ctx, curatorResolved, curatorModel, describedCLIProviders); err != nil {
-				return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("validate curator model: %w", err))
-			}
-			prepared.curatorLLM = &memoryCuratorLLM{llm: curatorModel, generateContentConfig: curatorResolved.GenerateContentConfig, logger: prepared.logger, sanitize: prepared.redactor.String}
-		}
-		if prepared.attachmentDef != nil {
-			attachmentResolved, err := defs.ResolveModel(prepared.attachmentDef.Model)
-			if err != nil {
-				return runtimeModels{}, fmt.Errorf("resolve attachment analyzer model: %w", err)
-			}
-			if err := validateAttachmentModel(attachmentResolved); err != nil {
-				return runtimeModels{}, err
-			}
-			prepared.attachmentModel, _, err = newModelForResolved(ctx, attachmentResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
-			if err != nil {
-				return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build attachment analyzer model client: %w", err))
-			}
-		}
-		prepared.agentName = prepared.rootDef.Name
-	} else {
-		values, err := envfile.NewResolver(paths.EnvFile).Resolve(cfg.Model.APIKeyEnv, bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv)
-		if err != nil {
-			return runtimeModels{}, fmt.Errorf("load runtime secrets: %w", err)
-		}
-		var secretErr error
-		prepared.apiKey, prepared.botToken, prepared.appToken, secretErr = requiredSecrets(cfg, values)
-		if secretErr != nil {
-			return runtimeModels{}, secretErr
-		}
-		prepared.redactor = secure.NewRedactor(prepared.apiKey, prepared.botToken, prepared.appToken)
-		prepared.logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, prepared.redactor)
-		legacyModel, err := newModel(cfg.Model, prepared.apiKey)
-		if err != nil {
+	resolved, err := defs.ResolveModel(prepared.rootDef.Model)
+	if err != nil {
+		return runtimeModels{}, fmt.Errorf("resolve root agent model: %w", err)
+	}
+	builtRoot, rootSecret, err := newModelForResolved(ctx, resolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
+	if err != nil {
+		if setup.legacy {
 			return runtimeModels{}, fmt.Errorf("build model client: %w", err)
 		}
-		prepared.rootModel = legacyModel
-		prepared.agentName = cfg.Agent.Name
-		prepared.modelBaseURL = cfg.Model.BaseURL
+		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build root model client: %w", err))
 	}
+	if err := handshakeSelectedAgentCLI(ctx, resolved, builtRoot, describedCLIProviders); err != nil {
+		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("validate root agent model: %w", err))
+	}
+	prepared.rootModel = builtRoot
+	if resolved.IsAgentCLI() {
+		prepared.rootIsAgentCLI = true
+		prepared.rootFamily = domain.ProviderFamilyAgentCLI
+		prepared.modelBaseURL = "agent_cli:" + resolved.Provider.Name
+	} else {
+		prepared.apiKey = rootSecret
+		prepared.modelBaseURL = resolved.BaseURL
+	}
+	acpRuntimeFactory := func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error) {
+		return acpclient.NewWithCoordinator(resolved.Command, resolved.Args, prepared.openCodeCoordinator), nil
+	}
+	prepared.preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, acpRuntimeFactory)
+	if err != nil {
+		return runtimeModels{}, prepared.redactor.Error(err)
+	}
+	prepared.preparedWorkflows, err = prepareRootWorkflowTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, paths.StateDir, acpRuntimeFactory, prepared.openCodeCoordinator)
+	if err != nil {
+		return runtimeModels{}, prepared.redactor.Error(err)
+	}
+
+	if cfg.Memory.Enabled && prepared.curatorDef == nil && !setup.legacy {
+		return runtimeModels{}, errors.New("agent definition memory_curator is required when memory is enabled")
+	}
+	if cfg.Memory.Enabled && prepared.curatorDef != nil {
+		curatorResolved, err := defs.ResolveModel(prepared.curatorDef.Model)
+		if err != nil {
+			return runtimeModels{}, fmt.Errorf("resolve curator model: %w", err)
+		}
+		curatorModel, _, err := newModelForResolved(ctx, curatorResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
+		if err != nil {
+			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build curator model client: %w", err))
+		}
+		if err := handshakeSelectedAgentCLI(ctx, curatorResolved, curatorModel, describedCLIProviders); err != nil {
+			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("validate curator model: %w", err))
+		}
+		prepared.curatorLLM = &memoryCuratorLLM{llm: curatorModel, generateContentConfig: curatorResolved.GenerateContentConfig, logger: prepared.logger, sanitize: prepared.redactor.String}
+	}
+	if prepared.attachmentDef != nil {
+		attachmentResolved, err := defs.ResolveModel(prepared.attachmentDef.Model)
+		if err != nil {
+			return runtimeModels{}, fmt.Errorf("resolve attachment analyzer model: %w", err)
+		}
+		if err := validateAttachmentModel(attachmentResolved); err != nil {
+			return runtimeModels{}, err
+		}
+		prepared.attachmentModel, _, err = newModelForResolved(ctx, attachmentResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
+		if err != nil {
+			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build attachment analyzer model client: %w", err))
+		}
+	}
+	prepared.agentName = prepared.rootDef.Name
 
 	if prepared.rootModel == nil {
 		return runtimeModels{}, prepared.redactor.Error(errors.New("model client not initialized"))
@@ -542,10 +533,10 @@ func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup,
 		}
 	}
 	models.logger.Info("local-agent starting", "agent", models.agentName, "model", modelName, "model_base_url", models.modelBaseURL, "database", setup.paths.DatabaseFile, "allowed_users", len(cfg.Slack.AllowedUserIDs), "allow_all_users", cfg.Slack.AllowAllUsers, "max_concurrent_model_calls", cfg.Runtime.MaxConcurrentModelCalls)
-	if setup.defs != nil {
-		models.logger.Info("declarative agent definitions loaded", "providers", len(setup.defs.Providers), "agents", len(setup.defs.Agents))
-	} else {
+	if setup.legacy {
 		models.logger.Info("using legacy config.Model; migrate to .local-agent/providers/ and .local-agent/agents/ for declarative model configuration")
+	} else {
+		models.logger.Info("declarative agent definitions loaded", "providers", len(setup.defs.Providers), "agents", len(setup.defs.Agents))
 	}
 	listener.SetInteractiveHandler(func(ictx context.Context, action domain.ConfirmationInteractiveAction) error {
 		return composition.service.HandleConfirmationInteractive(ictx, action)
