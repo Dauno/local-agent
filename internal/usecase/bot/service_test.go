@@ -328,6 +328,7 @@ type fakeStandardExperience struct {
 	interrupted       string
 	incrementalStates []domain.IncrementalStatus
 	createErr         error
+	incrementalLimit  int
 }
 
 func (f *fakeStandardExperience) CreateProgress(_ context.Context, operation domain.ProgressOperation) error {
@@ -396,6 +397,12 @@ func (*fakeStandardExperience) RecoverProgress(context.Context, domain.ProgressO
 func (f *fakeStandardExperience) PublishSuggestedPrompts(context.Context, domain.ReplyTarget, string, []string) (port.PublishedResponse, error) {
 	f.promptCalls++
 	return port.PublishedResponse{LastMessageTS: "1700000001.000002"}, nil
+}
+func (f *fakeStandardExperience) ValidateIncrementalText(text string) error {
+	if f.incrementalLimit > 0 && len([]rune(text)) > f.incrementalLimit {
+		return port.ErrIncrementalTextTooLong
+	}
+	return nil
 }
 func (f *fakeStandardExperience) CreateIncremental(_ context.Context, _ domain.ReplyTarget, operation domain.IncrementalOperation, text string) (port.PublishedResponse, error) {
 	f.createdText = text
@@ -616,6 +623,102 @@ func TestHandleStreamingDMFinalizesOneIncrementalMessage(t *testing.T) {
 		t.Fatalf("standard=%#v regular=%#v", standard, regular.calls)
 	}
 	if len(store.appended) != 2 || store.appended[1].Role != domain.RoleAssistant || store.appended[1].Content != text {
+		t.Fatalf("persisted=%#v", store.appended)
+	}
+}
+
+func TestHandleStreamingFallsBackToRegularPublisherWhenIncrementalLimitIsExceeded(t *testing.T) {
+	first := strings.Repeat("a", 200)
+	text := first + strings.Repeat("b", 100)
+	stream := &fakeStreamingRuntime{events: []port.AgentStreamEvent{
+		{Kind: port.AgentStreamTextDelta, TextDelta: first},
+		{Kind: port.AgentStreamTextDelta, TextDelta: strings.Repeat("b", 100)},
+		{Kind: port.AgentStreamCompleted, Turn: &port.AgentTurn{Text: text}},
+	}}
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	standard := &fakeStandardExperience{incrementalLimit: 100}
+	regular := &fakePublisher{}
+	service := newTestService(t, store, &fakeRuntime{}, &fakeHistory{}, regular, nil)
+	service.cfg.StreamingEnabled = true
+	service.cfg.StreamingCarryRunes = 128
+	service.streamingRuntime = stream
+	service.standardStore = standard
+	service.incrementalPublisher = standard
+	invocation := botInvocation()
+	invocation.ThreadedDM = true
+
+	outcome, err := service.Handle(t.Context(), invocation)
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if standard.createdText != strings.Repeat("a", 72) || standard.finalText != "" || standard.interrupted != incrementalMultipartFallbackMarker {
+		t.Fatalf("incremental fallback=%#v", standard)
+	}
+	if len(regular.calls) != 1 || regular.calls[0].text != text {
+		t.Fatalf("regular publishes=%#v", regular.calls)
+	}
+	if len(store.appended) != 2 || store.appended[1].Role != domain.RoleAssistant || store.appended[1].Content != text {
+		t.Fatalf("persisted=%#v", store.appended)
+	}
+	if standard.incremental == nil || standard.incremental.Status != domain.IncrementalInterrupted {
+		t.Fatalf("incremental operation=%#v", standard.incremental)
+	}
+}
+
+func TestHandleStreamingFallsBackWhenOnlyFinalResponseExceedsIncrementalLimit(t *testing.T) {
+	text := strings.Repeat("a", 300)
+	stream := &fakeStreamingRuntime{events: []port.AgentStreamEvent{
+		{Kind: port.AgentStreamCompleted, Turn: &port.AgentTurn{Text: text}},
+	}}
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	standard := &fakeStandardExperience{incrementalLimit: 100}
+	regular := &fakePublisher{}
+	service := newTestService(t, store, &fakeRuntime{}, &fakeHistory{}, regular, nil)
+	service.cfg.StreamingEnabled = true
+	service.cfg.StreamingCarryRunes = 128
+	service.streamingRuntime = stream
+	service.standardStore = standard
+	service.incrementalPublisher = standard
+	invocation := botInvocation()
+	invocation.ThreadedDM = true
+
+	outcome, err := service.Handle(t.Context(), invocation)
+	if err != nil || outcome != OutcomeResponded {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if standard.createdText != "" || standard.interrupted != "" || len(regular.calls) != 1 || regular.calls[0].text != text {
+		t.Fatalf("standard=%#v regular=%#v", standard, regular.calls)
+	}
+	if standard.incremental == nil || standard.incremental.Status != domain.IncrementalInterrupted {
+		t.Fatalf("incremental operation=%#v", standard.incremental)
+	}
+}
+
+func TestHandleStreamingMultipartFallbackSurfacesRegularPublishFailure(t *testing.T) {
+	text := strings.Repeat("a", 300)
+	stream := &fakeStreamingRuntime{events: []port.AgentStreamEvent{
+		{Kind: port.AgentStreamCompleted, Turn: &port.AgentTurn{Text: text}},
+	}}
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	standard := &fakeStandardExperience{incrementalLimit: 100}
+	regular := &fakePublisher{err: errors.New("multipart publish failed")}
+	service := newTestService(t, store, &fakeRuntime{}, &fakeHistory{}, regular, nil)
+	service.cfg.StreamingEnabled = true
+	service.cfg.StreamingCarryRunes = 128
+	service.streamingRuntime = stream
+	service.standardStore = standard
+	service.incrementalPublisher = standard
+	invocation := botInvocation()
+	invocation.ThreadedDM = true
+
+	outcome, err := service.Handle(t.Context(), invocation)
+	if err != nil || outcome != OutcomePublishFailed {
+		t.Fatalf("outcome=%q err=%v", outcome, err)
+	}
+	if len(regular.calls) != 1 || standard.incremental == nil || standard.incremental.Status != domain.IncrementalInterrupted {
+		t.Fatalf("standard=%#v regular=%#v", standard, regular.calls)
+	}
+	if len(store.appended) != 1 || store.appended[0].Role != domain.RoleUser {
 		t.Fatalf("persisted=%#v", store.appended)
 	}
 }

@@ -214,6 +214,11 @@ var _ port.ProgressPublisher = (*StandardPublisher)(nil)
 var _ port.SuggestedPromptPublisher = (*StandardPublisher)(nil)
 var _ port.IncrementalPublisher = (*StandardPublisher)(nil)
 
+func (*StandardPublisher) ValidateIncrementalText(text string) error {
+	_, err := incrementalMarkdown(text)
+	return err
+}
+
 func (p *StandardPublisher) CreateIncremental(ctx context.Context, target domain.ReplyTarget, operation domain.IncrementalOperation, text string) (port.PublishedResponse, error) {
 	markdown, err := incrementalMarkdown(text)
 	if err != nil {
@@ -333,7 +338,7 @@ func incrementalMarkdown(text string) (string, error) {
 		return "", errors.New("Slack incremental text is required")
 	}
 	if len([]rune(markdown)) > SlackMarkdownChunkRunes {
-		return "", fmt.Errorf("Slack incremental text exceeds %d Unicode code points", SlackMarkdownChunkRunes)
+		return "", fmt.Errorf("%w: Slack incremental text exceeds %d Unicode code points", port.ErrIncrementalTextTooLong, SlackMarkdownChunkRunes)
 	}
 	return markdown, nil
 }

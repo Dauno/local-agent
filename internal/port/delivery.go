@@ -2,10 +2,13 @@ package port
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
+
+var ErrIncrementalTextTooLong = errors.New("incremental text exceeds delivery limit")
 
 type ResponsePublisher interface {
 	Publish(ctx context.Context, target domain.ReplyTarget, text string) (PublishedResponse, error)
@@ -26,6 +29,7 @@ type SuggestedPromptPublisher interface {
 }
 
 type IncrementalPublisher interface {
+	ValidateIncrementalText(text string) error
 	CreateIncremental(ctx context.Context, target domain.ReplyTarget, operation domain.IncrementalOperation, text string) (PublishedResponse, error)
 	UpdateIncremental(ctx context.Context, operation domain.IncrementalOperation, text string) error
 	FinalizeIncremental(ctx context.Context, operation domain.IncrementalOperation, text, assistantCorrelationID string) error
