@@ -27,6 +27,7 @@ type acpInvocationRecoverer interface {
 }
 
 func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+	profileMatched := false
 	for _, child := range d.children {
 		if child.acpRuntime == nil || child.acpResolved == nil {
 			continue
@@ -34,8 +35,9 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		if job.Provider != child.acpResolved.Provider.Name || job.Profile != child.definition.Runtime {
 			continue
 		}
+		profileMatched = true
 		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
-			return domain.AcpInvocationResult{}, errors.New("durable ACP job scope revision does not match current configuration")
+			continue
 		}
 		primary, additional, err := resolveACPProjects(child.projectRoots, job.PrimaryProject, job.AdditionalProjects)
 		if err != nil {
@@ -75,16 +77,21 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		}
 		return result, runErr
 	}
+	if profileMatched {
+		return domain.AcpInvocationResult{}, errors.New("durable ACP job scope revision does not match current configuration")
+	}
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
 }
 
 func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+	profileMatched := false
 	for _, child := range d.children {
 		if child.acpRuntime == nil || child.acpResolved == nil || job.Provider != child.acpResolved.Provider.Name || job.Profile != child.definition.Runtime {
 			continue
 		}
+		profileMatched = true
 		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
-			return domain.AcpInvocationResult{}, errors.New("durable ACP recovery scope revision does not match current configuration")
+			continue
 		}
 		primary, additional, err := resolveACPProjects(child.projectRoots, job.PrimaryProject, job.AdditionalProjects)
 		if err != nil {
@@ -109,6 +116,9 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 			result.Text = d.sanitize(result.Text)
 		}
 		return result, runErr
+	}
+	if profileMatched {
+		return domain.AcpInvocationResult{}, errors.New("durable ACP recovery scope revision does not match current configuration")
 	}
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
 }

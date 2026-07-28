@@ -335,10 +335,23 @@ func terminalOutcome(job *domain.ExternalAgentJob, runErr, contextErr error, max
 	if contextErr != nil {
 		return domain.JobFailed, "acp_job_timeout"
 	}
+	code := acpFailureCode(runErr)
+	if !job.SideEffectsPossible && job.ACPSessionID == "" && job.Attempt < maxAttempts &&
+		(code == string(domain.ACPErrorProcessExit) || code == string(domain.ACPErrorIdleTimeout)) {
+		return domain.JobInterruptedSafe, code
+	}
 	if job.SideEffectsPossible || job.ACPSessionID != "" {
 		return domain.JobCompletionUnknown, "completion_unknown"
 	}
-	return domain.JobFailed, "acp_process_exit"
+	return domain.JobFailed, code
+}
+
+func acpFailureCode(err error) string {
+	var acpErr *domain.ACPError
+	if errors.As(err, &acpErr) && acpErr.Code != "" {
+		return string(acpErr.Code)
+	}
+	return string(domain.ACPErrorProcessExit)
 }
 
 func isTerminalStatus(status domain.ExternalAgentJobStatus) bool {

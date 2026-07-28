@@ -28,6 +28,34 @@ func TestDurableACPDispatcherRejectsScopeRevisionDrift(t *testing.T) {
 	}
 }
 
+func TestDurableACPDispatcherDisambiguatesSharedRuntimeByScopeRevision(t *testing.T) {
+	workspace := t.TempDir()
+	wrongRuntime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "wrong agent"}}
+	rightRuntime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "right agent"}}
+	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}}
+	children := []preparedAgentTool{
+		{
+			definition: agentdef.AgentDef{Name: "improve_agent", Runtime: "opencode/sol-high"},
+			acpRuntime: wrongRuntime, acpResolved: resolved,
+			projectRoots: map[string]string{"workspace": workspace}, registryRevision: "sha256:improve",
+		},
+		{
+			definition: agentdef.AgentDef{Name: "sol-advisor", Runtime: "opencode/sol-high"},
+			acpRuntime: rightRuntime, acpResolved: resolved,
+			projectRoots: map[string]string{"workspace": workspace}, registryRevision: "sha256:advisor",
+		},
+	}
+	result, err := (&acpJobDispatcher{children: children}).Run(context.Background(), domain.ExternalAgentJob{
+		ID: "job-1", Provider: "opencode", Profile: "opencode/sol-high", PrimaryProject: "workspace", RegistryRevision: "sha256:advisor", Task: "review",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "right agent" || wrongRuntime.runs != 0 || rightRuntime.runs != 1 {
+		t.Fatalf("result = %q, wrong runs = %d, right runs = %d", result.Text, wrongRuntime.runs, rightRuntime.runs)
+	}
+}
+
 func TestDetachedACPTimeoutFallbackDoesNotUseRootModelTimeout(t *testing.T) {
 	cfg := config.Default()
 	cfg.Runtime.ModelTimeoutSeconds = 5
