@@ -68,24 +68,39 @@ type GenerateContentConfig struct {
 }
 
 type AgentDef struct {
-	AgentClass        string   `yaml:"agent_class"`
-	Name              string   `yaml:"name"`
-	Model             string   `yaml:"model"`
-	Description       string   `yaml:"description,omitempty"`
-	GlobalInstruction string   `yaml:"global_instruction,omitempty"`
-	Instruction       string   `yaml:"instruction"`
-	IncludeContents   string   `yaml:"include_contents,omitempty"`
-	Mode              string   `yaml:"mode,omitempty"`
-	DurableSession    bool     `yaml:"durable_session,omitempty"`
-	ToolScope         string   `yaml:"tool_scope,omitempty"`
-	AgentTools        []string `yaml:"agent_tools,omitempty"`
-	WorkflowTools     []string `yaml:"workflow_tools,omitempty"`
-	TimeoutSeconds    int      `yaml:"timeout_seconds,omitempty"`
-	Role              string   `yaml:"role,omitempty"`
+	AgentClass                 string   `yaml:"agent_class"`
+	Name                       string   `yaml:"name"`
+	Model                      string   `yaml:"model"`
+	Description                string   `yaml:"description,omitempty"`
+	GlobalInstruction          string   `yaml:"global_instruction,omitempty"`
+	DelegatedGlobalInstruction string   `yaml:"delegated_global_instruction,omitempty"`
+	Instruction                string   `yaml:"instruction"`
+	IncludeContents            string   `yaml:"include_contents,omitempty"`
+	Mode                       string   `yaml:"mode,omitempty"`
+	DurableSession             bool     `yaml:"durable_session,omitempty"`
+	ToolScope                  string   `yaml:"tool_scope,omitempty"`
+	AgentTools                 []string `yaml:"agent_tools,omitempty"`
+	WorkflowTools              []string `yaml:"workflow_tools,omitempty"`
+	TimeoutSeconds             int      `yaml:"timeout_seconds,omitempty"`
+	Role                       string   `yaml:"role,omitempty"`
 
 	// AcpAgent fields.
 	Runtime      string `yaml:"runtime,omitempty"`
 	Confirmation string `yaml:"confirmation,omitempty"`
+}
+
+func (a AgentDef) EffectiveRootGlobalInstruction() string {
+	if a.DelegatedGlobalInstruction == "" {
+		return a.GlobalInstruction
+	}
+	return a.DelegatedGlobalInstruction + "\n\n" + a.GlobalInstruction
+}
+
+func (a AgentDef) EffectiveDelegatedGlobalInstruction() string {
+	if a.DelegatedGlobalInstruction != "" {
+		return a.DelegatedGlobalInstruction
+	}
+	return a.GlobalInstruction
 }
 
 type Definitions struct {

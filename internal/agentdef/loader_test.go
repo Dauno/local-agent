@@ -798,6 +798,9 @@ func TestSeedRootAgentSplitsFields(t *testing.T) {
 	if a.GlobalInstruction == "" {
 		t.Fatal("global_instruction must not be empty")
 	}
+	if a.DelegatedGlobalInstruction == "" {
+		t.Fatal("delegated_global_instruction must not be empty")
+	}
 	if a.Instruction == "" {
 		t.Fatal("instruction must not be empty")
 	}
@@ -813,8 +816,28 @@ func TestSeedRootAgentSplitsFields(t *testing.T) {
 	if !strings.Contains(a.GlobalInstruction, "background") {
 		t.Error("global_instruction should contain background handling")
 	}
-	if !strings.Contains(a.GlobalInstruction, "unsupported actions") {
-		t.Error("global_instruction should contain unsupported action guidance")
+	if strings.Contains(a.GlobalInstruction, "repository contents") {
+		t.Error("global_instruction should not contain delegated-content policy")
+	}
+	if !strings.Contains(a.DelegatedGlobalInstruction, "unsupported actions") {
+		t.Error("delegated_global_instruction should contain unsupported action guidance")
+	}
+	if !strings.Contains(a.DelegatedGlobalInstruction, "repository contents") {
+		t.Error("delegated_global_instruction should contain delegated-content policy")
+	}
+	if strings.Contains(a.EffectiveDelegatedGlobalInstruction(), "Slack reference data") {
+		t.Error("delegated instruction should not contain Slack-specific root context")
+	}
+	effectiveRoot := a.EffectiveRootGlobalInstruction()
+	if !strings.Contains(effectiveRoot, "background") || !strings.Contains(effectiveRoot, "unsupported actions") {
+		t.Error("effective root instruction should contain root context and shared safety policy")
+	}
+	if strings.Index(effectiveRoot, a.DelegatedGlobalInstruction) > strings.Index(effectiveRoot, a.GlobalInstruction) {
+		t.Error("effective root instruction should apply shared safety before root-specific context")
+	}
+	legacy := agentdef.AgentDef{GlobalInstruction: "legacy shared policy"}
+	if legacy.EffectiveRootGlobalInstruction() != legacy.GlobalInstruction || legacy.EffectiveDelegatedGlobalInstruction() != legacy.GlobalInstruction {
+		t.Error("legacy definitions should retain global-instruction propagation")
 	}
 	if strings.Contains(a.GlobalInstruction, "display_name") {
 		t.Error("global_instruction should not contain greeting personalization")
@@ -987,8 +1010,8 @@ func TestTrackedDefinitionsLoad(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load tracked definitions: %v", err)
 	}
-	if defs == nil || defs.Agents["root_agent"].GlobalInstruction == "" {
-		t.Fatal("tracked root_agent must define global_instruction")
+	if defs == nil || defs.Agents["root_agent"].GlobalInstruction == "" || defs.Agents["root_agent"].DelegatedGlobalInstruction == "" {
+		t.Fatal("tracked root_agent must define root and delegated global instructions")
 	}
 	root := defs.Agents["root_agent"]
 	rootTools := root.AgentTools

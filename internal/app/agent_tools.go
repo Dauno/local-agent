@@ -129,7 +129,7 @@ func prepareRootAgentTools(
 			if err := handshakeSelectedAgentCLI(ctx, resolved, childModel, describedCLIProviders); err != nil {
 				return nil, fmt.Errorf("validate agent tool %q model: %w", name, err)
 			}
-			child, err := newAgentToolAgent(definition, root.GlobalInstruction, childModel, nil)
+			child, err := newAgentToolAgent(definition, root.EffectiveDelegatedGlobalInstruction(), childModel, nil)
 			if err != nil {
 				return nil, fmt.Errorf("build agent tool %q: %w", name, err)
 			}
@@ -144,7 +144,7 @@ func prepareRootAgentTools(
 		// Prove the scoped OpenAI-compatible child is representable as an ADK
 		// LlmAgent before Socket Mode; per-invocation construction attaches
 		// the actor-scoped tools.
-		if _, err := newAgentToolAgent(definition, root.GlobalInstruction, childModel, nil); err != nil {
+		if _, err := newAgentToolAgent(definition, root.EffectiveDelegatedGlobalInstruction(), childModel, nil); err != nil {
 			return nil, fmt.Errorf("build agent tool %q: %w", name, err)
 		}
 		prepared = append(prepared, preparedAgentTool{definition: definition, model: childModel})
@@ -157,20 +157,20 @@ func prepareRootAgentTools(
 // workflow tools, and both precede direct root tools in one deterministic list;
 // any construction failure fails the whole turn.
 type compositeAgentToolFactory struct {
-	base              port.AgentToolFactory
-	children          []preparedAgentTool
-	workflowChildren  []preparedWorkflowTool
-	globalInstruction string
+	base                       port.AgentToolFactory
+	children                   []preparedAgentTool
+	workflowChildren           []preparedWorkflowTool
+	delegatedGlobalInstruction string
 }
 
 var _ port.AgentToolFactory = (*compositeAgentToolFactory)(nil)
 
-func newCompositeAgentToolFactory(base port.AgentToolFactory, children []preparedAgentTool, workflowChildren []preparedWorkflowTool, globalInstruction string) *compositeAgentToolFactory {
+func newCompositeAgentToolFactory(base port.AgentToolFactory, children []preparedAgentTool, workflowChildren []preparedWorkflowTool, delegatedGlobalInstruction string) *compositeAgentToolFactory {
 	return &compositeAgentToolFactory{
-		base:              base,
-		children:          children,
-		workflowChildren:  workflowChildren,
-		globalInstruction: globalInstruction,
+		base:                       base,
+		children:                   children,
+		workflowChildren:           workflowChildren,
+		delegatedGlobalInstruction: delegatedGlobalInstruction,
 	}
 }
 
@@ -205,7 +205,7 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 	combined := make([]any, 0, len(f.children)+len(f.workflowChildren)+len(baseRaw))
 	for _, child := range f.children {
 		if child.acpRuntime != nil {
-			acpTool, err := newAcpAgentTool(child.definition, f.globalInstruction, child.acpRuntime, child.acpResolved, child.projectRoots, child.acpTimeout)
+			acpTool, err := newAcpAgentTool(child.definition, f.delegatedGlobalInstruction, child.acpRuntime, child.acpResolved, child.projectRoots, child.acpTimeout)
 			if err != nil {
 				return nil, fmt.Errorf("build ACP agent tool %q: %w", child.definition.Name, err)
 			}
@@ -216,7 +216,7 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 			combined = append(combined, child.cliTool)
 			continue
 		}
-		childAgent, err := newAgentToolAgent(child.definition, f.globalInstruction, child.model, scoped)
+		childAgent, err := newAgentToolAgent(child.definition, f.delegatedGlobalInstruction, child.model, scoped)
 		if err != nil {
 			return nil, fmt.Errorf("build agent tool %q: %w", child.definition.Name, err)
 		}
@@ -225,7 +225,7 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 
 	for idx := range f.workflowChildren {
 		workflowTool, err := f.workflowChildren[idx].buildAgentTool(invocationScope{
-			globalInstruction: f.globalInstruction,
+			globalInstruction: f.delegatedGlobalInstruction,
 			toolIndex:         toolIndex,
 		})
 		if err != nil {

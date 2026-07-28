@@ -177,7 +177,7 @@ func prepareRootWorkflowTools(
 	for _, blueprint := range blueprints {
 		// Dry-run construction at startup to catch errors before Slack opens.
 		if _, err := buildWorkflowAgent(blueprint, models, invocationScope{
-			globalInstruction: root.GlobalInstruction,
+			globalInstruction: root.EffectiveDelegatedGlobalInstruction(),
 			validateOnly:      true,
 			acpRuntimes:       acpRuntimes,
 			acpResolved:       acpResolved,
@@ -196,7 +196,7 @@ func prepareRootWorkflowTools(
 			projectRoots:      paths.SandboxProjectRoots,
 			worktreeRoot:      paths.OpenCodeWorktreeDir,
 			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
-			globalInstruction: root.GlobalInstruction,
+			globalInstruction: root.EffectiveDelegatedGlobalInstruction(),
 			coordinator:       coordinator,
 		})
 	}
