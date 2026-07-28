@@ -63,6 +63,36 @@ func TestACPFakeAgent_RunCollectsOnlyAssistantTextAndHandlesPermission(t *testin
 	}
 }
 
+func TestACPFakeAgentRunsDurableHooksBeforeUse(t *testing.T) {
+	client := acpclient.New("python3", []string{"-c", fakeACPAgentScript(true, true)})
+	var sessionID string
+	sideEffectsPossible := false
+	permissionChecked := false
+	_, err := client.Run(t.Context(), domain.AcpInvocationRequest{
+		PrimaryPath:          t.TempDir(),
+		PermissionOptionKind: domain.ACPPermissionAllowOnce,
+		Task:                 "durable hooks",
+		OnSessionCreated: func(value string) error {
+			sessionID = value
+			return nil
+		},
+		OnSideEffectsPossible: func() error {
+			sideEffectsPossible = true
+			return nil
+		},
+		BeforePermission: func() error {
+			permissionChecked = sessionID != "" && sideEffectsPossible
+			return nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sessionID != "session-real-1" || !sideEffectsPossible || !permissionChecked {
+		t.Fatalf("session hook = %q, side-effects hook = %v, permission hook = %v", sessionID, sideEffectsPossible, permissionChecked)
+	}
+}
+
 func TestACPFakeAgent_RunCollectsUpdateAfterPromptResponse(t *testing.T) {
 	script := strings.Replace(fakeACPAgentScript(true, false), "import sys, json", "import sys, json, time", 1)
 	script = strings.Replace(script,
@@ -90,7 +120,7 @@ func TestACPFakeAgent_RunCollectsUpdateAfterPromptResponse(t *testing.T) {
 
 func TestACPFakeAgent_RunAcceptsLargeJSONRPCMessage(t *testing.T) {
 	script := strings.Replace(fakeACPAgentScript(true, false), `"text":"safe final text"`, `"text":"x" * 150000`, 1)
-	client := acpclient.New("python3", []string{"-c", script})
+	client := acpclient.NewWithBounds("python3", []string{"-c", script}, acpclient.Bounds{MaxFrameBytes: 2 * 1024 * 1024, MaxInlineResultBytes: 200000})
 	result, err := client.Run(t.Context(), domain.AcpInvocationRequest{
 		PrimaryPath:          t.TempDir(),
 		ConfigOptions:        []domain.ACPConfigOption{{ID: "model", Value: "test-model"}},
@@ -107,14 +137,14 @@ func TestACPFakeAgent_RunAcceptsLargeJSONRPCMessage(t *testing.T) {
 
 func TestACPFakeAgent_RunRejectsOversizedJSONRPCMessage(t *testing.T) {
 	script := strings.Replace(fakeACPAgentScript(true, false), `"text":"safe final text"`, `"text":"x" * 1100000`, 1)
-	client := acpclient.New("python3", []string{"-c", script})
+	client := acpclient.NewWithBounds("python3", []string{"-c", script}, acpclient.Bounds{MaxFrameBytes: 1024 * 1024})
 	_, err := client.Run(t.Context(), domain.AcpInvocationRequest{
 		PrimaryPath:          t.TempDir(),
 		ConfigOptions:        []domain.ACPConfigOption{{ID: "model", Value: "test-model"}},
 		PermissionOptionKind: domain.ACPPermissionRejectOnce,
 		Task:                 "task",
 	})
-	if err == nil || !strings.Contains(err.Error(), "ACP stdout exceeds aggregate limit") {
+	if err == nil || !strings.Contains(err.Error(), "acp_frame_too_large") {
 		t.Fatalf("error = %v", err)
 	}
 }
