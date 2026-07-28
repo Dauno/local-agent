@@ -1,6 +1,8 @@
 agent_class: AcpAgent
 name: opencode_worker
 runtime: opencode/luna-xhigh
+execution_mode: durable_job
+timeout_seconds: 7200
 description: Handles delegated coding and repository inspection tasks in the registered projects using OpenCode.
 instruction: |
   Complete only the delegated task.

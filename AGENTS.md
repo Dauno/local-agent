@@ -52,7 +52,7 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 - `agent_cli` providers: `shim.command` (`self` or PATH executable) + `shim.args`; profiles carry `model`, optional `agent`, `approval` (`reject` default | `auto`), `variant`. HTTP fields are rejected.
 - `acp` providers: `command` + `args` (e.g., `opencode acp`); profiles carry `model` + `config_options` (ACP session config IDs) + `permission_option_kind` (`reject_once` or `allow_once`). HTTP fields and `shim` are rejected for `acp`.
 - `internal/adapter/agentcli` implements ADK `model.LLM` by spawning one shim process per model call: one `cli-v1` NDJSON request on stdin, bounded stdout/stderr, process-group kill on cancellation. Text-only: ADK tools, function history, images, and streaming are rejected before launch.
-- `internal/adapter/acpclient` implements `port.ExternalAgentRuntime` by spawning `opencode acp` for ACP v1 JSON-RPC over stdio: initialize, session/new, set_config_option, prompt, and close per invocation.
+- `internal/adapter/acpclient` implements `port.ExternalAgentRuntime` by spawning `opencode acp` for ACP v1 JSON-RPC over stdio: initialize, session/new, set_config_option, prompt, and close per invocation. It negotiates optional `loadSession`/`session/resume` for bounded reconciliation; absent support returns an actionable typed failure.
 - OpenCode is now an external ACP agent, not a version-pinned CLI shim. ACP profiles use direct session config option IDs (`model`, `effort`, `mode`). `openableshim` adapter has been removed.
 - `AcpAgent` agent class: declarative YAML with `runtime: opencode/profile-name` and `confirmation: required`. Becomes a typed ADK FunctionTool with structured `project`/`task` arguments. Uses `port.ExternalAgentRuntime` for invocation.
 - `internal/adapter/codexshim` maps `cli-v1` to `codex exec --json --ephemeral --color never -`. Accepts exactly Codex CLI `0.144.5`; unchanged.
@@ -60,6 +60,27 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 - An `openai_compatible` root may declare `agent_tools` referencing leaf agents of three forms: `agent_cli` leaves (no ADK tools, native CLI tools only, must omit `tool_scope`), `openai_compatible` leaves that must declare `tool_scope: invocation_scoped` (e.g. `explore`), and `AcpAgent` leaves (external ACP agents with structured `project`/`task` arguments and required confirmation). Scoped leaves receive the same invocation-scoped read-only tools as the root (`list_messages`, `list_repos`, `list_directory`, `read_file`, `list_worktrees`) bound to the trusted Slack actor and conversation key — never mutable tools or confirmations. All children are exposed through ADK `AgentTool`, use isolated in-memory child sessions, receive the root-owned `delegated_global_instruction` safety policy rather than Slack-specific root context, and do not change the durable root provider family.
 - `port.AgentToolFactory.ToolsForInvocation` returns `([]any, error)`; a construction failure fails the turn instead of producing a partial tool list. `internal/app/agent_tools.go` prepares child models at startup and composes scoped children per invocation (`compositeAgentToolFactory`).
 - Durable sessions are stamped with `local_agent_provider_family` state; startup and each turn fail closed on family mismatch (`init --reset-state` to switch families).
+- Foreground ACP calls composed with the durable job service use a synchronous compatibility facade. Worker calls carry `JobID` and bypass the facade to prevent recursion; probes and management retain direct ACP clients.
+
+### Durable external-agent notifications
+
+- SQLite schema v19 adds `external_agent_job_notifications`, keyed by
+  `(job_id, status_revision, kind)`. Terminal job CAS and outbox insertion are
+  one transaction; Markdown is host-owned, bounded, sanitized, canonical and
+  SHA-256 addressed.
+- `externalagent.NotificationWorker` is independent from execution leases. It
+  claims `pending`, stale `publishing`, or `unknown` rows and marks publication
+  only with owner/attempt CAS. Restart and ambiguous Slack results reconcile
+  deterministic metadata before retry; raw Markdown and provider errors are not
+  logged.
+- `internal/adapter/slack.JobNotificationPublisher` uses the existing Markdown
+  splitter and Slack history, with metadata for job ID, status revision, kind,
+  renderer version, whole-content digest and part digest. Recovered Slack
+  timestamps are persisted.
+- `completion_unknown` never replays the original task. `Service.Status`,
+  `CancelForConversation`, and `Reconcile` require actor/conversation binding;
+  reconciliation uses capability-negotiated ACP sessions and remains
+  actionable when the provider cannot load/resume.
 
 ### ADK durable runtime
 
@@ -108,10 +129,11 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - **Dedupe**: at-most-once by event + message keys. Ephemeral Slack history recovery is not persisted.
 - **Canonical keys**: `slack:{team}:dm:{channel}` or `slack:{team}:channel:{channel}:thread:{root_ts}`.
 - **ADK session IDs**: `adk:{canonical-conversation-key}` — deterministic, opaque, never derived from untrusted text.
-- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 10.
+- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 19.
 - **Memory**: curated entity memory stored in SQLite; `.local-agent/memory/` holds OKF file projections. Memory retrieval is deterministic (no LLM routing) and runs before each model call. Memory failure is non-fatal.
 - **Ephemeral context**: Slack enrichment and memory snippets are injected per-turn via the user message text; they must never become durable ADK events.
 - **Sandbox**: workspace inspection is opt-in through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env`, `.local-agent`, and `.git` at every depth (including symlinks).
+- **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, and are cleaned by `acp.artifact_retention_days`. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, configured bounds and v19 job/outbox tables without reading secrets.
 
 ## OpenCode config
 

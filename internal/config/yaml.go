@@ -118,6 +118,17 @@ var configSchema = []schemaField{
 			{name: "allowed_user_ids"},
 		}},
 	}},
+	{name: "acp", children: []schemaField{
+		{name: "max_frame_bytes"},
+		{name: "max_inline_result_bytes"},
+		{name: "max_result_artifact_bytes"},
+		{name: "stderr_tail_bytes"},
+		{name: "default_job_timeout_seconds"},
+		{name: "max_job_timeout_seconds"},
+		{name: "idle_timeout_seconds"},
+		{name: "worker_concurrency"},
+		{name: "artifact_retention_days"},
+	}},
 }
 
 // Load reads, applies defaults to, and validates a YAML config file.

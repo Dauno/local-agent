@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
+	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsproject"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/buildinfo"
@@ -46,6 +47,9 @@ func (a *Application) PrepareSetup(ctx context.Context) (bootstrap.Snapshot, boo
 	snapshot, err := service.EnsureBaseArtifacts(ctx, a.root)
 	if err != nil {
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
+	}
+	if err := os.MkdirAll(snapshot.Paths.ArtifactDir, 0o700); err != nil {
+		return bootstrap.Snapshot{}, bootstrap.Secrets{}, fmt.Errorf("create ACP artifact directory: %w", err)
 	}
 	values, err := envfile.NewResolver(snapshot.Paths.EnvFile).Resolve(
 		snapshot.Config.Model.APIKeyEnv,
@@ -86,6 +90,8 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		ConfigPath: configPath,
 		Secrets:    envfile.NewResolver(filepath.Join(a.root, config.DefaultEnvFile)),
 		Database:   databaseChecker{},
+		Artifacts:  artifactChecker{},
+		Jobs:       jobStoreChecker{},
 		CLI:        cliProviderChecker{},
 		ACP:        acpProviderChecker{},
 	}
@@ -198,6 +204,23 @@ func (a *Application) bootstrapService() (*bootstrap.Service, error) {
 }
 
 type databaseChecker struct{}
+
+type artifactChecker struct{}
+
+func (artifactChecker) CheckArtifactStore(ctx context.Context, path string, maxBytes int) error {
+	return fsartifact.CheckDirectory(ctx, path, int64(maxBytes))
+}
+
+type jobStoreChecker struct{}
+
+func (jobStoreChecker) CheckExternalAgentJobs(ctx context.Context, path string) error {
+	store, err := adaptersqlite.OpenExisting(ctx, path)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	return store.CheckExternalAgentJobStore(ctx)
+}
 
 func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
 	store, err := adaptersqlite.OpenExisting(ctx, path)

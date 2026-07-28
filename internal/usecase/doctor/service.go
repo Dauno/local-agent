@@ -27,6 +27,14 @@ type DatabaseChecker interface {
 	CheckDatabase(ctx context.Context, path string) error
 }
 
+type ArtifactChecker interface {
+	CheckArtifactStore(ctx context.Context, path string, maxBytes int) error
+}
+
+type JobStoreChecker interface {
+	CheckExternalAgentJobs(ctx context.Context, path string) error
+}
+
 type RemediableError interface {
 	error
 	Remediation() string
@@ -79,6 +87,8 @@ type Dependencies struct {
 	LoadConfig func(path string) (config.Config, error)
 	Secrets    SecretResolver
 	Database   DatabaseChecker
+	Artifacts  ArtifactChecker
+	Jobs       JobStoreChecker
 	Live       LiveChecker
 	CLI        CLIProviderChecker
 	ACP        ACPProviderChecker
@@ -346,6 +356,20 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			report.fail("SQLite", redactor.String(err.Error()), remediation, false)
 		} else {
 			report.pass("SQLite", "database exists, is migrated, and is readable/writable")
+		}
+		if s.deps.Artifacts != nil {
+			if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ACP.MaxResultArtifactBytes); err != nil {
+				report.fail("ACP artifacts", redactor.String(err.Error()), "Fix the configured artifact directory and permissions; do not place secrets in it.", false)
+			} else {
+				report.pass("ACP artifacts", fmt.Sprintf("private artifact directory and %d-byte bound are valid", cfg.ACP.MaxResultArtifactBytes))
+			}
+		}
+		if s.deps.Jobs != nil {
+			if err := s.deps.Jobs.CheckExternalAgentJobs(ctx, paths.DatabaseFile); err != nil {
+				report.fail("external-agent jobs", redactor.String(err.Error()), "Run local-agent init to migrate the local job store, or repair the configured database.", false)
+			} else {
+				report.pass("external-agent jobs", "durable job and notification outbox are available")
+			}
 		}
 	}
 	if pathErr == nil {

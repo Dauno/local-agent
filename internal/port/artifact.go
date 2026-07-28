@@ -87,4 +87,10 @@ type GeneratedFileOperationStore interface {
 	GetGeneratedFileOperation(ctx context.Context, operationID string) (*domain.GeneratedFileOperation, error)
 }
 
+// ResultArtifactStore retains bounded external-agent results outside model and
+// Slack payloads. References are opaque and derived by the adapter.
+type ResultArtifactStore interface {
+	Put(ctx context.Context, ownerID, content string) (domain.ResultArtifact, error)
+}
+
 var ErrGeneratedFileOperationExists = errors.New("generated file operation already exists")

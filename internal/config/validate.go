@@ -150,6 +150,7 @@ func Validate(cfg Config) error {
 		}
 	}
 	validateIDs(&problems, "opencode.management.allowed_user_ids", cfg.OpenCode.Management.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
+	validateACP(&problems, cfg.ACP)
 
 	const maxFileBytes = 5 * 1024 * 1024
 	const maxFileChars = 20_000
@@ -278,6 +279,48 @@ func Validate(cfg Config) error {
 		return &ValidationError{Fields: problems}
 	}
 	return nil
+}
+
+func validateACP(problems *[]FieldError, cfg ACPConfig) {
+	const (
+		maxFrameCeiling    = 64 * 1024 * 1024
+		maxInlineCeiling   = 16 * 1024 * 1024
+		maxArtifactCeiling = 256 * 1024 * 1024
+		maxStderrCeiling   = 4 * 1024 * 1024
+		maxTimeoutCeiling  = 7 * 24 * 60 * 60
+	)
+	positive := []struct {
+		field string
+		value int
+		max   int
+	}{
+		{"acp.max_frame_bytes", cfg.MaxFrameBytes, maxFrameCeiling},
+		{"acp.max_inline_result_bytes", cfg.MaxInlineResultBytes, maxInlineCeiling},
+		{"acp.max_result_artifact_bytes", cfg.MaxResultArtifactBytes, maxArtifactCeiling},
+		{"acp.stderr_tail_bytes", cfg.StderrTailBytes, maxStderrCeiling},
+		{"acp.max_job_timeout_seconds", cfg.MaxJobTimeoutSeconds, maxTimeoutCeiling},
+		{"acp.worker_concurrency", cfg.WorkerConcurrency, 64},
+		{"acp.artifact_retention_days", cfg.ArtifactRetentionDays, 3650},
+	}
+	for _, item := range positive {
+		if item.value <= 0 {
+			addConfigProblem(problems, item.field, "must be greater than zero")
+		} else if item.value > item.max {
+			addConfigProblem(problems, item.field, fmt.Sprintf("must not exceed %d", item.max))
+		}
+	}
+	if cfg.DefaultJobTimeoutSeconds <= 0 {
+		addConfigProblem(problems, "acp.default_job_timeout_seconds", "must be greater than zero")
+	} else if cfg.DefaultJobTimeoutSeconds > cfg.MaxJobTimeoutSeconds {
+		addConfigProblem(problems, "acp.default_job_timeout_seconds", "must not exceed acp.max_job_timeout_seconds")
+	}
+	if cfg.IdleTimeoutSeconds < 0 {
+		addConfigProblem(problems, "acp.idle_timeout_seconds", "must be zero or greater")
+	}
+}
+
+func addConfigProblem(problems *[]FieldError, field, problem string) {
+	*problems = append(*problems, FieldError{Field: field, Problem: problem})
 }
 
 // Validate checks the receiver without mutating it.
