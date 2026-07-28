@@ -1,6 +1,6 @@
 agent_class: AcpAgent
 name: opencode_worker
-runtime: opencode/flash-reasoning
+runtime: opencode/luna-xhigh
 description: Handles delegated coding and repository inspection tasks in the registered projects using OpenCode.
 instruction: |
   Complete only the delegated task.

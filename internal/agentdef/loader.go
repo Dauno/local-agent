@@ -554,8 +554,14 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 		if strings.TrimSpace(a.GlobalInstruction) == "" {
 			errs = append(errs, fmt.Sprintf("%s: global_instruction must not be empty", prefix))
 		}
+		if a.DelegatedGlobalInstruction != "" && strings.TrimSpace(a.DelegatedGlobalInstruction) == "" {
+			errs = append(errs, fmt.Sprintf("%s: delegated_global_instruction must not be empty", prefix))
+		}
 	} else if a.GlobalInstruction != "" {
 		errs = append(errs, fmt.Sprintf("%s: global_instruction is only allowed on root_agent", prefix))
+	}
+	if a.Name != "root_agent" && a.DelegatedGlobalInstruction != "" {
+		errs = append(errs, fmt.Sprintf("%s: delegated_global_instruction is only allowed on root_agent", prefix))
 	}
 
 	return errs
@@ -737,6 +743,9 @@ func validateAcpAgent(prefix string, a AgentDef, providers map[string]Provider) 
 	}
 	if a.GlobalInstruction != "" {
 		errs = append(errs, fmt.Sprintf("%s: global_instruction is not valid for AcpAgent", prefix))
+	}
+	if a.DelegatedGlobalInstruction != "" {
+		errs = append(errs, fmt.Sprintf("%s: delegated_global_instruction is not valid for AcpAgent", prefix))
 	}
 	switch a.Confirmation {
 	case "required":

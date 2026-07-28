@@ -405,11 +405,11 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		}
 		toolFactory = toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService)
 		if len(models.preparedAgentTools) > 0 || len(models.preparedWorkflows) > 0 {
-			globalInstruction := ""
+			delegatedGlobalInstruction := ""
 			if models.rootDef != nil {
-				globalInstruction = models.rootDef.GlobalInstruction
+				delegatedGlobalInstruction = models.rootDef.EffectiveDelegatedGlobalInstruction()
 			}
-			toolFactory = newCompositeAgentToolFactory(toolFactory, models.preparedAgentTools, models.preparedWorkflows, globalInstruction)
+			toolFactory = newCompositeAgentToolFactory(toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
 		}
 		if setup.defs != nil {
 			if provider, exists := setup.defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
@@ -428,7 +428,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 
 	rtInstruction, rtGlobalInstruction := "", ""
 	if models.rootDef != nil {
-		rtInstruction, rtGlobalInstruction = models.rootDef.Instruction, models.rootDef.GlobalInstruction
+		rtInstruction, rtGlobalInstruction = models.rootDef.Instruction, models.rootDef.EffectiveRootGlobalInstruction()
 	}
 	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ProviderFamily: models.rootFamily})
 	if err != nil {

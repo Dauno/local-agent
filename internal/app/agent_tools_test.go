@@ -560,6 +560,9 @@ func TestACPAgentToolResolvesRegisteredProjectsAndInvokesRuntime(t *testing.T) {
 	if runtime.request.PermissionOptionKind != domain.ACPPermissionAllowOnce || runtime.request.Task != "change code" {
 		t.Fatalf("request = %+v", runtime.request)
 	}
+	if runtime.request.GlobalInstruction != "Global." {
+		t.Fatalf("delegated global instruction = %q", runtime.request.GlobalInstruction)
+	}
 }
 
 func TestResolveACPProjectsRejectsDuplicateAndUnknownNames(t *testing.T) {
