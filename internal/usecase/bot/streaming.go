@@ -3,6 +3,7 @@ package bot
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -12,6 +13,8 @@ import (
 )
 
 const incrementalRendererVersion = "standard_incremental_v1"
+
+const incrementalMultipartFallbackMarker = "_Streaming preview ended at Slack's message limit. The complete response follows._"
 
 func (s *Service) handleStreamingTurn(
 	ctx, modelCtx context.Context,
@@ -44,6 +47,7 @@ func (s *Service) handleStreamingTurn(
 	lastSnapshot := ""
 	lastWrite := time.Time{}
 	createAttempted := false
+	multipartFallback := false
 
 	func() {
 		defer modelRelease()
@@ -56,6 +60,17 @@ func (s *Service) handleStreamingTurn(
 				snapshot := sanitizer.Snapshot(false)
 				if snapshot == "" || snapshot == lastSnapshot {
 					return true
+				}
+				if multipartFallback {
+					return true
+				}
+				if err := s.incrementalPublisher.ValidateIncrementalText(snapshot); err != nil {
+					if errors.Is(err, port.ErrIncrementalTextTooLong) {
+						multipartFallback = true
+						return true
+					}
+					deliveryErr = err
+					return false
 				}
 				if operation.MessageTS != "" && s.clock.Now().Sub(lastWrite) < s.cfg.UpdateInterval {
 					return true
@@ -127,7 +142,28 @@ func (s *Service) handleStreamingTurn(
 		s.interruptIncremental(ctx, &operation, "", s.cfg.ModelErrorMessage)
 		return OutcomeModelFailed, nil
 	}
+	if !multipartFallback {
+		if err := s.incrementalPublisher.ValidateIncrementalText(finalText); err != nil {
+			if errors.Is(err, port.ErrIncrementalTextTooLong) {
+				multipartFallback = true
+			} else {
+				s.updateProgress(ctx, progress, domain.ProgressFailed)
+				s.interruptIncremental(ctx, &operation, "", s.cfg.ModelErrorMessage)
+				return OutcomePublishFailed, nil
+			}
+		}
+	}
 	s.updateProgress(ctx, progress, domain.ProgressFinalizing)
+	if multipartFallback {
+		s.interruptIncremental(ctx, &operation, "", incrementalMultipartFallbackMarker)
+		outcome, err := s.finalizeTurn(ctx, invocation, key, terminal.Turn.Text, metadata)
+		if err == nil && outcome == OutcomeResponded {
+			s.updateProgress(ctx, progress, domain.ProgressCleared)
+		} else {
+			s.updateProgress(ctx, progress, domain.ProgressFailed)
+		}
+		return outcome, err
+	}
 	if operation.MessageTS == "" {
 		outcome, err := s.finalizeTurn(ctx, invocation, key, terminal.Turn.Text, metadata)
 		status := domain.IncrementalInterrupted

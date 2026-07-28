@@ -2,12 +2,14 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 type fakeStandardMessageClient struct {
@@ -97,8 +99,12 @@ func TestIncrementalPublisherEnforcesObservedLimitAndCanonicalFinalMetadata(t *t
 		ID: "incremental-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001",
 		MessageTS: "1700000001.000001", RendererVersion: standardIncrementalRenderer, Sequence: 2, PrefixDigest: "digest",
 	}
-	if err := publisher.UpdateIncremental(t.Context(), operation, strings.Repeat("界", SlackMarkdownChunkRunes+1)); err == nil {
-		t.Fatal("oversized incremental update was accepted")
+	oversized := strings.Repeat("界", SlackMarkdownChunkRunes+1)
+	if err := publisher.ValidateIncrementalText(oversized); !errors.Is(err, port.ErrIncrementalTextTooLong) {
+		t.Fatalf("oversized incremental validation error=%v", err)
+	}
+	if err := publisher.UpdateIncremental(t.Context(), operation, oversized); !errors.Is(err, port.ErrIncrementalTextTooLong) {
+		t.Fatalf("oversized incremental update error=%v", err)
 	}
 	if err := publisher.FinalizeIncremental(t.Context(), operation, "final answer", "assistant-correlation"); err != nil {
 		t.Fatal(err)
