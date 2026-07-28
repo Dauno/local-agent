@@ -30,6 +30,47 @@ const (
 	ACPFallbackExternalDirectoryMode = "external_directory"
 )
 
+// ACPErrorCode is a bounded host-owned classification for ACP failures. The
+// code is safe to expose in diagnostics; frame content is never included.
+type ACPErrorCode string
+
+const (
+	ACPErrorFrameTooLarge              ACPErrorCode = "acp_frame_too_large"
+	ACPErrorMalformedFrame             ACPErrorCode = "acp_malformed_frame"
+	ACPErrorProtocolViolation          ACPErrorCode = "acp_protocol_violation"
+	ACPErrorConfigDrift                ACPErrorCode = "acp_config_drift"
+	ACPErrorIdleTimeout                ACPErrorCode = "acp_idle_timeout"
+	ACPErrorJobTimeout                 ACPErrorCode = "acp_job_timeout"
+	ACPErrorProcessExit                ACPErrorCode = "acp_process_exit"
+	ACPErrorResultTooLarge             ACPErrorCode = "acp_result_too_large"
+	ACPErrorCompletedWithoutFinalText  ACPErrorCode = "acp_completed_without_final_message"
+	ACPErrorPermissionUnavailable      ACPErrorCode = "acp_permission_unavailable"
+	ACPErrorInvalidInput               ACPErrorCode = "acp_invalid_input"
+	ACPErrorSessionRecoveryUnsupported ACPErrorCode = "acp_session_recovery_unsupported"
+)
+
+type ACPError struct {
+	Code ACPErrorCode
+	Err  error
+}
+
+func (e *ACPError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Err == nil {
+		return string(e.Code)
+	}
+	return fmt.Sprintf("%s: %v", e.Code, e.Err)
+}
+
+func (e *ACPError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
 type ACPConfigOption struct {
 	ID    string
 	Value any
@@ -55,6 +96,8 @@ type ACPAgentInfo struct {
 type ACPSessionCapabilities struct {
 	AdditionalDirectories bool
 	Close                 bool
+	LoadSession           bool
+	Resume                bool
 }
 
 type ACPInitResult struct {
@@ -87,23 +130,46 @@ type ACPToolActivity struct {
 }
 
 type AcpInvocationRequest struct {
+	JobID                string
 	PrimaryProject       string
 	PrimaryPath          string
 	AdditionalProjects   []string
 	AdditionalPaths      []string
 	ProfileName          string
+	ProviderName         string
+	RegistryRevision     string
 	ConfigOptions        []ACPConfigOption
 	PermissionOptionKind string
 	GlobalInstruction    string
 	AgentInstruction     string
 	Task                 string
 	Timeout              time.Duration
+	// These fields are trusted host identity and are never included in the ACP prompt.
+	Actor           string
+	TeamID          string
+	ConversationKey ConversationKey
+	OriginalCallID  string
+	// These host-owned hooks are used by durable jobs and are never serialized
+	// into ACP or model-visible content.
+	OnSessionCreated      func(string) error
+	OnSideEffectsPossible func() error
+	BeforePermission      func() error
 }
 
 type AcpInvocationResult struct {
-	Text  string
-	Usage ACPUsage
-	Error string
+	Text         string
+	Inline       bool
+	ArtifactRef  string
+	ResultSHA256 string
+	ResultBytes  int64
+	Usage        ACPUsage
+	Error        string
+}
+
+type ResultArtifact struct {
+	Reference string
+	SHA256    string
+	Bytes     int64
 }
 
 type GitDeliveryResult struct {

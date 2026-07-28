@@ -641,3 +641,24 @@ func (s *Store) ProbeReadWrite(ctx context.Context) error {
 	}
 	return nil
 }
+
+func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
+	if s == nil || s.db == nil {
+		return errors.New("SQLite store is not configured")
+	}
+	var version int
+	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		return fmt.Errorf("inspect SQLite schema version: %w", err)
+	}
+	if version < 19 {
+		return fmt.Errorf("external-agent job outbox requires SQLite schema v19, found v%d", version)
+	}
+	var name string
+	if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_agent_job_notifications'`).Scan(&name); err != nil {
+		return fmt.Errorf("inspect external-agent notification outbox: %w", err)
+	}
+	if name != "external_agent_job_notifications" {
+		return errors.New("external-agent notification outbox is missing")
+	}
+	return nil
+}

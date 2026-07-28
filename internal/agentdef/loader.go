@@ -537,6 +537,9 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	if a.Confirmation != "" {
 		errs = append(errs, fmt.Sprintf("%s: confirmation is only valid for AcpAgent", prefix))
 	}
+	if a.ExecutionMode != "" {
+		errs = append(errs, fmt.Sprintf("%s: execution_mode is only valid for AcpAgent", prefix))
+	}
 
 	switch a.IncludeContents {
 	case "", "default", "none":
@@ -735,8 +738,13 @@ func validateAcpAgent(prefix string, a AgentDef, providers map[string]Provider) 
 	if len(a.WorkflowTools) > 0 {
 		errs = append(errs, fmt.Sprintf("%s: workflow_tools is not valid for AcpAgent", prefix))
 	}
-	if a.TimeoutSeconds != 0 {
-		errs = append(errs, fmt.Sprintf("%s: timeout_seconds is not valid for AcpAgent", prefix))
+	if a.TimeoutSeconds < 0 || a.TimeoutSeconds > MaxACPTimeoutSeconds {
+		errs = append(errs, fmt.Sprintf("%s: timeout_seconds must be between 0 and %d", prefix, MaxACPTimeoutSeconds))
+	}
+	switch a.ExecutionMode {
+	case "", ExecutionModeForeground, ExecutionModeDurableJob:
+	default:
+		errs = append(errs, fmt.Sprintf("%s: execution_mode must be foreground or durable_job", prefix))
 	}
 	if a.Role != "" {
 		errs = append(errs, fmt.Sprintf("%s: role is not valid for AcpAgent", prefix))

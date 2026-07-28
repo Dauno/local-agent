@@ -1,6 +1,8 @@
 package acpclient
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -12,24 +14,35 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 const (
-	stdoutBoundBytes    = 1 * 1024 * 1024
-	stderrBoundBytes    = 128 * 1024
-	processKillGrace    = 5 * time.Second
-	promptDrainQuiet    = 250 * time.Millisecond
-	jsonRPCVersion      = "2.0"
-	defaultProbeTimeout = 2 * time.Minute
-	defaultRunTimeout   = 30 * time.Minute
+	defaultMaxFrameBytes          = 8 * 1024 * 1024
+	defaultMaxInlineResultBytes   = 64 * 1024
+	defaultMaxResultArtifactBytes = 16 * 1024 * 1024
+	defaultStderrTailBytes        = 128 * 1024
+	processKillGrace              = 5 * time.Second
+	promptDrainQuiet              = 250 * time.Millisecond
+	jsonRPCVersion                = "2.0"
+	defaultProbeTimeout           = 2 * time.Minute
+	defaultRunTimeout             = 30 * time.Minute
+	recoveryPrompt                = "Inspect the existing repository and remote state for this interrupted task. Do not repeat completed mutations. Complete only missing steps. Return a concise factual result with files, commit, branch, remote, pull request, verification, and unresolved ambiguity."
 )
 
 type Bounds struct {
-	MaxStdout int
-	MaxStderr int
+	// MaxStdout and MaxStderr are retained for source compatibility with older
+	// callers. They no longer impose cumulative stream limits.
+	MaxStdout              int
+	MaxStderr              int
+	MaxFrameBytes          int
+	MaxInlineResultBytes   int
+	MaxResultArtifactBytes int
+	StderrTailBytes        int
 }
 
 type Client struct {
@@ -37,23 +50,43 @@ type Client struct {
 	args        []string
 	bounds      Bounds
 	coordinator port.OpenCodeCoordinator
+	artifacts   port.ResultArtifactStore
 }
 
 var _ port.ExternalAgentRuntime = (*Client)(nil)
 
 func New(executable string, args []string) *Client {
-	return &Client{
-		executable: executable,
-		args:       append([]string(nil), args...),
-		bounds: Bounds{
-			MaxStdout: stdoutBoundBytes,
-			MaxStderr: stderrBoundBytes,
-		},
+	return NewWithBounds(executable, args, Bounds{})
+}
+
+func NewWithBounds(executable string, args []string, bounds Bounds, artifactStores ...port.ResultArtifactStore) *Client {
+	if bounds.MaxFrameBytes <= 0 {
+		bounds.MaxFrameBytes = defaultMaxFrameBytes
 	}
+	if bounds.MaxInlineResultBytes <= 0 {
+		bounds.MaxInlineResultBytes = defaultMaxInlineResultBytes
+	}
+	if bounds.MaxResultArtifactBytes <= 0 {
+		bounds.MaxResultArtifactBytes = defaultMaxResultArtifactBytes
+	}
+	if bounds.StderrTailBytes <= 0 {
+		bounds.StderrTailBytes = defaultStderrTailBytes
+	}
+	client := &Client{executable: executable, args: append([]string(nil), args...), bounds: bounds}
+	if len(artifactStores) > 0 {
+		client.artifacts = artifactStores[0]
+	}
+	return client
 }
 
 func NewWithCoordinator(executable string, args []string, coordinator port.OpenCodeCoordinator) *Client {
 	client := New(executable, args)
+	client.coordinator = coordinator
+	return client
+}
+
+func NewWithCoordinatorAndBounds(executable string, args []string, coordinator port.OpenCodeCoordinator, bounds Bounds, artifactStore port.ResultArtifactStore) *Client {
+	client := NewWithBounds(executable, args, bounds, artifactStore)
 	client.coordinator = coordinator
 	return client
 }
@@ -111,6 +144,9 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 		}
 		defer release()
 	}
+	if !utf8.ValidString(req.Task) || containsUnsafeControl(req.Task) || utf8.RuneCountInString(req.Task) > domain.MaxExternalAgentTaskRunes {
+		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorInvalidInput, Err: errors.New("ACP task is invalid or exceeds the configured character budget")}
+	}
 	timeout := req.Timeout
 	if timeout <= 0 {
 		timeout = defaultRunTimeout
@@ -138,6 +174,11 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 	if err != nil {
 		return domain.AcpInvocationResult{}, fmt.Errorf("acp session/new: %w", err)
 	}
+	if req.OnSessionCreated != nil {
+		if err := req.OnSessionCreated(sessionID); err != nil {
+			return domain.AcpInvocationResult{}, err
+		}
+	}
 	if len(req.ConfigOptions) > 0 && len(initialConfig.Options) == 0 {
 		return domain.AcpInvocationResult{}, errors.New("ACP session did not advertise configuration options")
 	}
@@ -146,13 +187,92 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 	}
 
 	prompt := buildPrompt(req.GlobalInstruction, req.AgentInstruction, req.Task, req.AdditionalProjects, req.AdditionalPaths)
-	result, err := c.prompt(proc, sessionID, prompt, req.PermissionOptionKind, req.ConfigOptions)
+	result, err := c.prompt(proc, sessionID, prompt, req.PermissionOptionKind, req.ConfigOptions, req.JobID, req.OnSideEffectsPossible, req.BeforePermission)
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
 	if init.SessionCapabilities.Close {
 		if err := c.closeSession(proc, sessionID); err != nil {
 			return domain.AcpInvocationResult{}, fmt.Errorf("acp session/close: %w", err)
+		}
+	}
+	return result, nil
+}
+
+// Reconcile negotiates recovery before attempting any session operation. It
+// intentionally never sends job.Task: an ambiguous task must not be replayed.
+func (c *Client) Reconcile(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+	if strings.TrimSpace(job.ACPSessionID) == "" {
+		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorSessionRecoveryUnsupported, Err: errors.New("session recovery is unsupported because no ACP session ID was persisted")}
+	}
+	return c.reconcile(ctx, domain.AcpInvocationRequest{JobID: job.ID, Task: ""}, job.ACPSessionID)
+}
+
+// ReconcileInvocation is used by the composed job dispatcher after resolving
+// trusted project paths. It is separate from Reconcile so durable state never
+// stores host paths.
+func (c *Client) ReconcileInvocation(ctx context.Context, req domain.AcpInvocationRequest, sessionID string) (domain.AcpInvocationResult, error) {
+	return c.reconcile(ctx, req, sessionID)
+}
+
+func (c *Client) reconcile(ctx context.Context, req domain.AcpInvocationRequest, sessionID string) (domain.AcpInvocationResult, error) {
+	timeout := req.Timeout
+	if timeout <= 0 {
+		timeout = defaultRunTimeout
+	}
+	ctx, cancel := withDefaultTimeout(ctx, timeout)
+	defer cancel()
+	proc, err := c.start(ctx, req.PrimaryPath)
+	if err != nil {
+		return domain.AcpInvocationResult{}, fmt.Errorf("acp recovery start: %w", err)
+	}
+	defer c.terminate(proc)
+	init, err := c.initialize(proc)
+	if err != nil {
+		return domain.AcpInvocationResult{}, fmt.Errorf("acp recovery initialize: %w", err)
+	}
+	if !init.SessionCapabilities.LoadSession && !init.SessionCapabilities.Resume {
+		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorSessionRecoveryUnsupported, Err: errors.New("session recovery is unsupported by the ACP agent")}
+	}
+	if err := validateWorkspacePaths(req.PrimaryPath, req.AdditionalPaths); err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
+	method := "session/resume"
+	if init.SessionCapabilities.LoadSession {
+		method = "session/load"
+	}
+	params := map[string]any{"sessionId": sessionID, "cwd": req.PrimaryPath, "mcpServers": []any{}}
+	if len(req.AdditionalPaths) > 0 {
+		if !init.SessionCapabilities.AdditionalDirectories {
+			return domain.AcpInvocationResult{}, errors.New("ACP recovery cannot restore additional workspace roots")
+		}
+		params["additionalDirectories"] = req.AdditionalPaths
+	}
+	loaded, err := c.request(proc, method, params, nil)
+	if err != nil {
+		return domain.AcpInvocationResult{}, fmt.Errorf("ACP %s: %w", method, err)
+	}
+	var response sessionResult
+	if len(loaded) > 0 && string(loaded) != "null" {
+		if err := json.Unmarshal(loaded, &response); err != nil {
+			return domain.AcpInvocationResult{}, errors.New("ACP session recovery result is malformed")
+		}
+	}
+	if response.SessionID != "" && response.SessionID != sessionID {
+		return domain.AcpInvocationResult{}, errors.New("ACP session recovery returned a different session ID")
+	}
+	if len(req.ConfigOptions) > 0 && len(response.ConfigOptions) > 0 {
+		if err := c.applyConfig(proc, sessionID, req.ConfigOptions); err != nil {
+			return domain.AcpInvocationResult{}, err
+		}
+	}
+	result, err := c.prompt(proc, sessionID, recoveryPrompt, domain.ACPPermissionRejectOnce, req.ConfigOptions, req.JobID, nil, nil)
+	if err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
+	if init.SessionCapabilities.Close {
+		if err := c.closeSession(proc, sessionID); err != nil {
+			return domain.AcpInvocationResult{}, fmt.Errorf("acp recovery session/close: %w", err)
 		}
 	}
 	return result, nil
@@ -225,15 +345,18 @@ type wireError struct {
 }
 
 type process struct {
-	ctx      context.Context
-	cmd      *exec.Cmd
-	stdin    io.WriteCloser
-	messages chan wireMessage
-	fatal    chan error
-	done     chan error
-	writeMu  sync.Mutex
-	idMu     sync.Mutex
-	nextID   int64
+	ctx         context.Context
+	cmd         *exec.Cmd
+	stdin       io.WriteCloser
+	messages    chan wireMessage
+	fatal       chan error
+	done        chan error
+	writeMu     sync.Mutex
+	idMu        sync.Mutex
+	nextID      int64
+	stderrMu    sync.Mutex
+	stderr      *tailBuffer
+	stderrBytes int64
 }
 
 func (c *Client) start(ctx context.Context, dir string) (*process, error) {
@@ -272,6 +395,7 @@ func (c *Client) start(ctx context.Context, dir string) (*process, error) {
 		fatal:    make(chan error, 2),
 		done:     make(chan error, 1),
 		nextID:   1,
+		stderr:   newTailBuffer(c.bounds.StderrTailBytes),
 	}
 	go c.readStdout(proc, stdout)
 	go c.drainStderr(proc, stderr)
@@ -280,23 +404,20 @@ func (c *Client) start(ctx context.Context, dir string) (*process, error) {
 }
 
 func (c *Client) readStdout(proc *process, stdout io.Reader) {
-	limited := &io.LimitedReader{R: stdout, N: int64(c.bounds.MaxStdout) + 1}
-	decoder := json.NewDecoder(limited)
+	reader := bufio.NewReaderSize(stdout, minInt(c.bounds.MaxFrameBytes+1, 64*1024))
 	for {
-		var message wireMessage
-		if err := decoder.Decode(&message); err != nil {
-			if limited.N == 0 {
-				proc.reportFatal(errors.New("ACP stdout exceeds aggregate limit"))
-				return
-			}
+		frame, err := readFrame(reader, c.bounds.MaxFrameBytes)
+		if err != nil {
 			if errors.Is(err, io.EOF) {
-				break
+				proc.reportFatal(&domain.ACPError{Code: domain.ACPErrorProcessExit, Err: errors.New("ACP stdout closed unexpectedly")})
+			} else {
+				proc.reportFatal(err)
 			}
-			proc.reportFatal(fmt.Errorf("ACP stdout read failed: %w", err))
 			return
 		}
-		if limited.N == 0 || decoder.InputOffset() > int64(c.bounds.MaxStdout) {
-			proc.reportFatal(errors.New("ACP stdout exceeds aggregate limit"))
+		message, err := decodeFrame(frame)
+		if err != nil {
+			proc.reportFatal(err)
 			return
 		}
 		select {
@@ -305,24 +426,106 @@ func (c *Client) readStdout(proc *process, stdout io.Reader) {
 			return
 		}
 	}
-	proc.reportFatal(errors.New("ACP stdout closed unexpectedly"))
 }
 
 func (c *Client) drainStderr(proc *process, stderr io.Reader) {
 	buffer := make([]byte, 4096)
-	total := 0
-	reported := false
 	for {
 		n, err := stderr.Read(buffer)
-		total += n
-		if total > c.bounds.MaxStderr && !reported {
-			reported = true
-			proc.reportFatal(errors.New("ACP stderr exceeds aggregate limit"))
+		if n > 0 {
+			proc.stderrMu.Lock()
+			proc.stderrBytes += int64(n)
+			proc.stderr.Append(buffer[:n])
+			proc.stderrMu.Unlock()
 		}
 		if err != nil {
 			return
 		}
 	}
+}
+
+func readFrame(reader *bufio.Reader, maxBytes int) ([]byte, error) {
+	if maxBytes <= 0 {
+		return nil, &domain.ACPError{Code: domain.ACPErrorFrameTooLarge, Err: errors.New("invalid frame bound")}
+	}
+	frame := make([]byte, 0, minInt(maxBytes+1, 64*1024))
+	for {
+		part, err := reader.ReadSlice('\n')
+		if len(part) > maxBytes+1 || len(frame)+len(part) > maxBytes+1 {
+			return nil, &domain.ACPError{Code: domain.ACPErrorFrameTooLarge, Err: errors.New("ACP frame exceeds configured limit")}
+		}
+		frame = append(frame, part...)
+		if len(frame) > maxBytes+1 {
+			return nil, &domain.ACPError{Code: domain.ACPErrorFrameTooLarge, Err: errors.New("ACP frame exceeds configured limit")}
+		}
+		if err == nil {
+			if len(frame) == 0 || frame[len(frame)-1] != '\n' {
+				return nil, &domain.ACPError{Code: domain.ACPErrorFrameTooLarge, Err: errors.New("ACP frame is unterminated")}
+			}
+			frame = bytes.TrimSuffix(frame, []byte{'\n'})
+			if len(frame) > 0 && frame[len(frame)-1] == '\r' {
+				frame = frame[:len(frame)-1]
+			}
+			if len(frame) > maxBytes {
+				return nil, &domain.ACPError{Code: domain.ACPErrorFrameTooLarge, Err: errors.New("ACP frame exceeds configured limit")}
+			}
+			return frame, nil
+		}
+		if errors.Is(err, bufio.ErrBufferFull) {
+			continue
+		}
+		if errors.Is(err, io.EOF) {
+			if len(frame) > 0 {
+				return nil, &domain.ACPError{Code: domain.ACPErrorFrameTooLarge, Err: errors.New("ACP frame is unterminated")}
+			}
+			return nil, io.EOF
+		}
+		return nil, &domain.ACPError{Code: domain.ACPErrorMalformedFrame, Err: errors.New("ACP frame read failed")}
+	}
+}
+
+func decodeFrame(frame []byte) (wireMessage, error) {
+	decoder := json.NewDecoder(bytes.NewReader(frame))
+	var message wireMessage
+	if err := decoder.Decode(&message); err != nil {
+		return wireMessage{}, &domain.ACPError{Code: domain.ACPErrorMalformedFrame, Err: errors.New("ACP frame is not valid JSON")}
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return wireMessage{}, &domain.ACPError{Code: domain.ACPErrorMalformedFrame, Err: errors.New("ACP frame contains trailing data")}
+	}
+	if message.JSONRPC == "" {
+		return wireMessage{}, &domain.ACPError{Code: domain.ACPErrorProtocolViolation, Err: errors.New("ACP frame has no JSON-RPC version")}
+	}
+	return message, nil
+}
+
+func minInt(left, right int) int {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+type tailBuffer struct {
+	data []byte
+	max  int
+}
+
+func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+
+func (b *tailBuffer) Append(data []byte) {
+	if b == nil || b.max <= 0 {
+		return
+	}
+	if len(data) >= b.max {
+		b.data = append(b.data[:0], data[len(data)-b.max:]...)
+		return
+	}
+	if len(b.data)+len(data) > b.max {
+		b.data = append([]byte(nil), b.data[len(b.data)+len(data)-b.max:]...)
+	}
+	b.data = append(b.data, data...)
 }
 
 func (p *process) reportFatal(err error) {
@@ -480,6 +683,7 @@ func (c *Client) initialize(proc *process) (domain.ACPInitResult, error) {
 		serverCapabilities[name] = json.RawMessage(append([]byte(nil), value...))
 	}
 	sessionCaps := capabilityObject(response.Capabilities["sessionCapabilities"])
+	loadSession := capabilityEnabled(response.Capabilities["loadSession"]) || capabilityEnabled(sessionCaps["loadSession"])
 	return domain.ACPInitResult{
 		ProtocolVersion:    version,
 		AgentInfo:          *response.AgentInfo,
@@ -487,6 +691,8 @@ func (c *Client) initialize(proc *process) (domain.ACPInitResult, error) {
 		SessionCapabilities: domain.ACPSessionCapabilities{
 			AdditionalDirectories: capabilityEnabled(sessionCaps["additionalDirectories"]),
 			Close:                 capabilityEnabled(sessionCaps["close"]),
+			LoadSession:           loadSession,
+			Resume:                capabilityEnabled(sessionCaps["resume"]),
 		},
 	}, nil
 }
@@ -619,15 +825,24 @@ func jsonValuesEqual(left, right any) bool {
 }
 
 type promptCollector struct {
-	client         *Client
-	sessionID      string
-	permissionKind string
-	expectedConfig []domain.ACPConfigOption
-	text           strings.Builder
+	client           *Client
+	sessionID        string
+	permissionKind   string
+	expectedConfig   []domain.ACPConfigOption
+	ownerID          string
+	onSideEffects    func() error
+	beforePermission func() error
+	sideEffectsSeen  bool
+	messageID        string
+	hasMessageID     bool
+	text             strings.Builder
 }
 
-func (c *Client) prompt(proc *process, sessionID, text, permissionKind string, expectedConfig []domain.ACPConfigOption) (domain.AcpInvocationResult, error) {
-	collector := &promptCollector{client: c, sessionID: sessionID, permissionKind: permissionKind, expectedConfig: expectedConfig}
+func (c *Client) prompt(proc *process, sessionID, text, permissionKind string, expectedConfig []domain.ACPConfigOption, ownerID string, onSideEffects func() error, beforePermission func() error) (domain.AcpInvocationResult, error) {
+	if ownerID == "" {
+		ownerID = "invocation-" + sessionID
+	}
+	collector := &promptCollector{client: c, sessionID: sessionID, permissionKind: permissionKind, expectedConfig: expectedConfig, ownerID: ownerID, onSideEffects: onSideEffects, beforePermission: beforePermission}
 	result, err := c.request(proc, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt":    []any{map[string]string{"type": "text", "text": text}},
@@ -654,11 +869,7 @@ func (c *Client) prompt(proc *process, sessionID, text, permissionKind string, e
 	if err := c.drainPromptUpdates(proc, collector); err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
-	finalText := collector.text.String()
-	if strings.TrimSpace(finalText) == "" {
-		return domain.AcpInvocationResult{}, errors.New("ACP run completed without assistant text")
-	}
-	return domain.AcpInvocationResult{Text: finalText}, nil
+	return collector.result(proc.ctx)
 }
 
 func (c *Client) drainPromptUpdates(proc *process, collector *promptCollector) error {
@@ -713,6 +924,7 @@ func (c *promptCollector) handleUpdate(raw json.RawMessage) error {
 		SessionID string `json:"sessionId"`
 		Update    struct {
 			Kind          string                `json:"sessionUpdate"`
+			MessageID     string                `json:"messageId"`
 			Content       json.RawMessage       `json:"content"`
 			ConfigOptions []sessionConfigOption `json:"configOptions"`
 		} `json:"update"`
@@ -721,16 +933,34 @@ func (c *promptCollector) handleUpdate(raw json.RawMessage) error {
 		return errors.New("ACP session/update is malformed or belongs to another session")
 	}
 	switch notification.Update.Kind {
+	case "tool_call", "tool_call_update":
+		if !c.sideEffectsSeen && c.onSideEffects != nil {
+			// Tool activity can already have mutated external state before permission; classify it first.
+			if err := c.onSideEffects(); err != nil {
+				return err
+			}
+			c.sideEffectsSeen = true
+		}
 	case "agent_message_chunk":
 		var content struct {
 			Type string `json:"type"`
 			Text string `json:"text"`
 		}
 		if err := json.Unmarshal(notification.Update.Content, &content); err != nil || content.Type != "text" {
-			return errors.New("ACP agent message chunk is malformed")
+			return &domain.ACPError{Code: domain.ACPErrorMalformedFrame, Err: errors.New("ACP agent message chunk is malformed")}
 		}
-		if c.text.Len()+len(content.Text) > stdoutBoundBytes {
-			return errors.New("ACP assistant text exceeds limit")
+		if !utf8.ValidString(content.Text) || containsUnsafeControl(content.Text) {
+			return &domain.ACPError{Code: domain.ACPErrorMalformedFrame, Err: errors.New("ACP agent message chunk contains invalid text")}
+		}
+		if notification.Update.MessageID != "" && c.hasMessageID && notification.Update.MessageID != c.messageID {
+			c.text.Reset()
+		}
+		if notification.Update.MessageID != "" {
+			c.messageID = notification.Update.MessageID
+			c.hasMessageID = true
+		}
+		if c.text.Len()+len(content.Text) > c.client.bounds.MaxResultArtifactBytes {
+			return &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("ACP final result exceeds configured artifact limit")}
 		}
 		c.text.WriteString(content.Text)
 	case "config_option_update":
@@ -739,10 +969,59 @@ func (c *promptCollector) handleUpdate(raw json.RawMessage) error {
 			return err
 		}
 		if err := verifyConfigState(c.expectedConfig, state); err != nil {
-			return fmt.Errorf("ACP config drift detected: %w", err)
+			return &domain.ACPError{Code: domain.ACPErrorConfigDrift, Err: err}
 		}
 	}
 	return nil
+}
+
+func (c *promptCollector) result(ctx context.Context) (domain.AcpInvocationResult, error) {
+	finalText := c.text.String()
+	if strings.TrimSpace(finalText) == "" {
+		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorCompletedWithoutFinalText, Err: errors.New("ACP run completed without assistant text")}
+	}
+	result := domain.AcpInvocationResult{Text: finalText, Inline: true, ResultBytes: int64(len(finalText))}
+	if len(finalText) <= c.client.bounds.MaxInlineResultBytes {
+		return result, nil
+	}
+	if c.client.artifacts == nil {
+		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("ACP result exceeds inline limit and artifact storage is unavailable")}
+	}
+	artifact, err := c.client.artifacts.Put(ctx, c.ownerID, finalText)
+	if err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
+	preview := truncateUTF8Bytes(finalText, c.client.bounds.MaxInlineResultBytes)
+	result.Text = preview + "\n[full result stored as private artifact]"
+	result.Inline = false
+	result.ArtifactRef = artifact.Reference
+	result.ResultSHA256 = artifact.SHA256
+	result.ResultBytes = artifact.Bytes
+	return result, nil
+}
+
+func containsUnsafeControl(value string) bool {
+	for _, r := range value {
+		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
+			return true
+		}
+	}
+	return false
+}
+
+func truncateUTF8Bytes(value string, max int) string {
+	if max <= 0 {
+		return ""
+	}
+	if len(value) <= max {
+		return value
+	}
+	// Cut by bytes, then back up only across a partial UTF-8 sequence.
+	end := max
+	for end > 0 && !utf8.ValidString(value[:end]) {
+		end--
+	}
+	return value[:end]
 }
 
 func (c *promptCollector) handlePermission(proc *process, id json.RawMessage, raw json.RawMessage) error {
@@ -770,7 +1049,12 @@ func (c *promptCollector) handlePermission(proc *process, id json.RawMessage, ra
 		selected = option.ID
 	}
 	if selected == "" {
-		return fmt.Errorf("ACP permission request does not offer %s", c.permissionKind)
+		return &domain.ACPError{Code: domain.ACPErrorPermissionUnavailable, Err: fmt.Errorf("ACP permission request does not offer %s", c.permissionKind)}
+	}
+	if c.permissionKind == domain.ACPPermissionAllowOnce && c.beforePermission != nil {
+		if err := c.beforePermission(); err != nil {
+			return err
+		}
 	}
 	return c.client.respondResult(proc, id, map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}})
 }

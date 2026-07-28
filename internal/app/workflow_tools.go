@@ -436,11 +436,11 @@ func buildACPNode(doc agentdef.AgentDocument, scope invocationScope) (agent.Agen
 				}
 				instruction := renderWorkflowState(doc.ACP.Instruction, ctx.Session().State())
 				result, err := runtime.Run(ctx, domain.AcpInvocationRequest{
-					PrimaryProject:       project,
-					PrimaryPath:          primaryPath,
-					AdditionalProjects:   []string{"managed_worktree_root"},
-					AdditionalPaths:      additionalPaths,
-					ProfileName:          resolved.Provider.Name,
+					PrimaryProject:     project,
+					PrimaryPath:        primaryPath,
+					AdditionalProjects: []string{"managed_worktree_root"},
+					AdditionalPaths:    additionalPaths,
+					ProfileName:        doc.ACP.Runtime, ProviderName: resolved.Provider.Name,
 					ConfigOptions:        domainConfigOptions(resolved),
 					PermissionOptionKind: resolved.PermissionOptionKind,
 					GlobalInstruction:    scope.globalInstruction,

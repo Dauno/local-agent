@@ -1177,6 +1177,25 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		return OutcomeModelFailed
 	}
 
+	// Resume can produce another confirmation before it produces text. Treat it
+	// exactly like an initial turn: persist and publish the new delivery first.
+	if turn.PendingConfirmation != nil {
+		s.updateProgress(ctx, progress, domain.ProgressWaitingConfirmation)
+		resumeInvocation := invocation
+		if interactive != nil {
+			resumeInvocation = domain.Invocation{
+				TeamID: interactive.TeamID, ChannelID: interactive.ChannelID,
+				ChannelKind: channelKindForChannel(interactive.ChannelID), UserID: actor,
+				EventTS: interactive.ThreadTS, ThreadTS: interactive.ThreadTS, ThreadedDM: true,
+			}
+		}
+		outcome, pendingErr := s.handlePendingConfirmation(ctx, resumeInvocation, delivery.ConversationKey, turn)
+		if pendingErr != nil || outcome != OutcomeResponded {
+			s.updateProgress(ctx, progress, domain.ProgressFailed)
+		}
+		return outcome
+	}
+
 	safeText := s.sanitize(turn.Text)
 	if strings.TrimSpace(safeText) == "" {
 		safeText = s.sanitize(fmt.Sprintf("Confirmation %s.", map[bool]string{true: "approved", false: "rejected"}[approved]))
@@ -1223,6 +1242,13 @@ func (s *Service) waitingProgress(ctx context.Context, key domain.ConversationKe
 		return nil
 	}
 	return operation
+}
+
+func channelKindForChannel(channelID string) domain.ChannelKind {
+	if strings.HasPrefix(channelID, "D") {
+		return domain.ChannelDM
+	}
+	return domain.ChannelPublic
 }
 
 type systemClock struct{}
