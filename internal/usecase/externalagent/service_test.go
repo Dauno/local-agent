@@ -165,11 +165,65 @@ func TestSafeRetryDoesNotPublishQueuedAsTerminal(t *testing.T) {
 	}
 }
 
+func TestTransientACPProcessExitRetriesBeforeSession(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	runtime := &fakeJobRuntime{
+		result: domain.AcpInvocationResult{Text: "done", Inline: true, ResultBytes: 4},
+		errs:   []error{&domain.ACPError{Code: domain.ACPErrorProcessExit, Err: context.Canceled}},
+	}
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.Start(t.Context(), testRequest(domain.JobDetached))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go service.Run(ctx)
+	finished := waitForJob(t, jobStore, job.ID, domain.JobCompleted)
+	if runtime.calls != 2 || finished.Attempt != 2 {
+		t.Fatalf("calls = %d, finished attempt = %d", runtime.calls, finished.Attempt)
+	}
+}
+
+func TestNonRetryableACPErrorPreservesCode(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	runtime := &fakeJobRuntime{errs: []error{&domain.ACPError{Code: domain.ACPErrorConfigDrift, Err: context.Canceled}}}
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.Start(t.Context(), testRequest(domain.JobDetached))
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go service.Run(ctx)
+	finished := waitForJob(t, jobStore, job.ID, domain.JobFailed)
+	if runtime.calls != 1 || finished.ErrorCode != string(domain.ACPErrorConfigDrift) {
+		t.Fatalf("calls = %d, error code = %q", runtime.calls, finished.ErrorCode)
+	}
+}
+
 type fakeJobRuntime struct {
 	mu     sync.Mutex
 	calls  int
 	result domain.AcpInvocationResult
 	block  chan struct{}
+	errs   []error
 }
 
 type fakeJobPublisher struct {
@@ -184,6 +238,7 @@ func (p *fakeJobPublisher) PublishJobTerminal(context.Context, domain.ExternalAg
 func (r *fakeJobRuntime) Run(ctx context.Context, _ domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
 	r.mu.Lock()
 	r.calls++
+	call := r.calls
 	r.mu.Unlock()
 	if r.block != nil {
 		select {
@@ -194,6 +249,9 @@ func (r *fakeJobRuntime) Run(ctx context.Context, _ domain.ExternalAgentJob) (do
 		if err := ctx.Err(); err != nil {
 			return domain.AcpInvocationResult{}, err
 		}
+	}
+	if call <= len(r.errs) {
+		return domain.AcpInvocationResult{}, r.errs[call-1]
 	}
 	return r.result, nil
 }
