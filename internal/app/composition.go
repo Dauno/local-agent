@@ -19,6 +19,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
+	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fssandbox"
 	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
@@ -36,6 +37,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
+	externalagentusecase "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
 	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
 	opencodeusecase "github.com/Dauno/slack-local-agent/internal/usecase/opencode"
@@ -70,6 +72,22 @@ type runtimeModels struct {
 	redactor            secure.Redactor
 	logger              *logging.Logger
 	openCodeCoordinator *opencodeusecase.Coordinator
+	artifactStore       port.ResultArtifactStore
+}
+
+func bindForegroundRuntimes(models runtimeModels, jobs synchronousExternalAgentJobs) {
+	for _, child := range models.preparedAgentTools {
+		if runtime, ok := child.acpRuntime.(*foregroundExternalAgentRuntime); ok {
+			runtime.setJobRunner(jobs)
+		}
+	}
+	for _, workflow := range models.preparedWorkflows {
+		for _, runtime := range workflow.acpRuntimes {
+			if facade, ok := runtime.(*foregroundExternalAgentRuntime); ok {
+				facade.setJobRunner(jobs)
+			}
+		}
+	}
 }
 
 type runtimeInfrastructure struct {
@@ -164,6 +182,11 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	}
 	prepared.redactor = secure.NewRedactor(append(secrets, prepared.botToken, prepared.appToken)...)
 	prepared.logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, prepared.redactor)
+	artifactStore, artifactErr := fsartifact.New(paths.ArtifactDir, int64(cfg.ACP.MaxResultArtifactBytes))
+	if artifactErr != nil {
+		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize ACP result artifact store: %w", artifactErr))
+	}
+	prepared.artifactStore = artifactStore
 
 	resolved, err := defs.ResolveModel(prepared.rootDef.Model)
 	if err != nil {
@@ -189,7 +212,11 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		prepared.modelBaseURL = resolved.BaseURL
 	}
 	acpRuntimeFactory := func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error) {
-		return acpclient.NewWithCoordinator(resolved.Command, resolved.Args, prepared.openCodeCoordinator), nil
+		direct := acpclient.NewWithCoordinatorAndBounds(resolved.Command, resolved.Args, prepared.openCodeCoordinator, acpclient.Bounds{
+			MaxFrameBytes: cfg.ACP.MaxFrameBytes, MaxInlineResultBytes: cfg.ACP.MaxInlineResultBytes,
+			MaxResultArtifactBytes: cfg.ACP.MaxResultArtifactBytes, StderrTailBytes: cfg.ACP.StderrTailBytes,
+		}, prepared.artifactStore)
+		return newForegroundExternalAgentRuntime(direct, nil), nil
 	}
 	prepared.preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, acpRuntimeFactory)
 	if err != nil {
@@ -279,6 +306,13 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 			return nil, models.redactor.Error(err)
 		}
 	}
+	if retention, ok := models.artifactStore.(interface {
+		Cleanup(context.Context, time.Time) (int, error)
+	}); ok {
+		if _, err := retention.Cleanup(ctx, time.Now().UTC().AddDate(0, 0, -cfg.ACP.ArtifactRetentionDays)); err != nil {
+			return nil, models.redactor.Error(fmt.Errorf("cleanup ACP result artifacts: %w", err))
+		}
+	}
 
 	modelCalls := modelcalllimiter.New(cfg.Runtime.MaxConcurrentModelCalls)
 	sdkLog := log.New(&redactingWriter{target: a.logOutput, redactor: models.redactor}, "slack: ", log.LstdFlags)
@@ -366,6 +400,9 @@ type runtimeComposition struct {
 func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (*runtimeComposition, error) {
 	cfg, paths := setup.cfg, setup.paths
 	var toolFactory port.AgentToolFactory
+	var compositeFactory *compositeAgentToolFactory
+	var externalJobService *externalagentusecase.Service
+	var notificationWorker *externalagentusecase.NotificationWorker
 	var err error
 	if !models.rootIsAgentCLI {
 		var sandboxService *sandboxusecase.Service
@@ -409,7 +446,22 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			if models.rootDef != nil {
 				delegatedGlobalInstruction = models.rootDef.EffectiveDelegatedGlobalInstruction()
 			}
-			toolFactory = newCompositeAgentToolFactory(toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
+			compositeFactory = newCompositeAgentToolFactory(toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
+			toolFactory = compositeFactory
+		}
+		externalJobService, notificationWorker, err = newExternalAgentJobService(cfg, models, infra)
+		if err != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent jobs: %w", err))
+		}
+		if compositeFactory != nil {
+			compositeFactory.setJobStarter(externalJobService)
+		}
+		bindForegroundRuntimes(models, externalJobService)
+		if externalJobService != nil {
+			go externalJobService.Run(ctx)
+		}
+		if notificationWorker != nil {
+			go notificationWorker.Run(ctx)
 		}
 		if setup.defs != nil {
 			if provider, exists := setup.defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {

@@ -29,6 +29,8 @@ type postRequest struct {
 	partIndex     int
 	partCount     int
 	contentSHA256 string
+	eventType     string
+	extraMetadata map[string]any
 }
 
 type postClient interface {
@@ -56,8 +58,15 @@ func (c sdkPostClient) PostMessage(ctx context.Context, req postRequest) (string
 			"part_count":     req.partCount,
 			"content_sha256": req.contentSHA256,
 		}
+		for key, value := range req.extraMetadata {
+			payload[key] = value
+		}
+		eventType := assistantMetadataEventType
+		if req.eventType != "" {
+			eventType = req.eventType
+		}
 		options = append(options, slackapi.MsgOptionMetadata(slackapi.SlackMetadata{
-			EventType:    assistantMetadataEventType,
+			EventType:    eventType,
 			EventPayload: payload,
 		}))
 	}

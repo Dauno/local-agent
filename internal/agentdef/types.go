@@ -12,6 +12,12 @@ const (
 	ProviderTypeACP              = "acp"
 )
 
+const (
+	ExecutionModeForeground = "foreground"
+	ExecutionModeDurableJob = "durable_job"
+	MaxACPTimeoutSeconds    = 24 * 60 * 60
+)
+
 // Approval modes for agent_cli profiles.
 const (
 	ApprovalReject = "reject"
@@ -82,6 +88,7 @@ type AgentDef struct {
 	AgentTools                 []string `yaml:"agent_tools,omitempty"`
 	WorkflowTools              []string `yaml:"workflow_tools,omitempty"`
 	TimeoutSeconds             int      `yaml:"timeout_seconds,omitempty"`
+	ExecutionMode              string   `yaml:"execution_mode,omitempty"`
 	Role                       string   `yaml:"role,omitempty"`
 
 	// AcpAgent fields.

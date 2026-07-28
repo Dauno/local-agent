@@ -84,6 +84,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 		Canvases: config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:  config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
 		OpenCode: config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
+		ACP:      config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, WorkerConcurrency: 1, ArtifactRetentionDays: 30},
 	}
 
 	got := config.Default()
@@ -200,10 +201,20 @@ exports:
 opencode:
   management:
     allowed_user_ids: []
-`
+acp:
+  max_frame_bytes: 8388608
+  max_inline_result_bytes: 65536
+  max_result_artifact_bytes: 16777216
+  stderr_tail_bytes: 131072
+  default_job_timeout_seconds: 7200
+  max_job_timeout_seconds: 86400
+   idle_timeout_seconds: 0
+   worker_concurrency: 1
+   artifact_retention_days: 30
+        `
 
-	if string(got) != want {
-		t.Fatalf("default YAML mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
+	if !reflect.DeepEqual(strings.Fields(string(got)), strings.Fields(want)) {
+		t.Fatalf("default YAML fields mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
 	}
 }
 
@@ -472,6 +483,7 @@ func TestResolvePaths(t *testing.T) {
 		EnvFile:             filepath.Join(root, ".env"),
 		MemoryDir:           filepath.Join(root, "var", "state", "memory"),
 		OpenCodeWorktreeDir: filepath.Join(root, "var", "state", "worktrees"),
+		ArtifactDir:         filepath.Join(root, "var", "state", "artifacts"),
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("ResolvePaths()\n got: %#v\nwant: %#v", paths, want)

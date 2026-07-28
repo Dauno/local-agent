@@ -31,6 +31,7 @@ type Config struct {
 	Canvases CanvasesConfig `yaml:"canvases"`
 	Exports  ExportsConfig  `yaml:"exports"`
 	OpenCode OpenCodeConfig `yaml:"opencode"`
+	ACP      ACPConfig      `yaml:"acp"`
 
 	document *sourceDocument
 }
@@ -41,6 +42,18 @@ type OpenCodeConfig struct {
 
 type OpenCodeManagementConfig struct {
 	AllowedUserIDs []string `yaml:"allowed_user_ids"`
+}
+
+type ACPConfig struct {
+	MaxFrameBytes            int `yaml:"max_frame_bytes"`
+	MaxInlineResultBytes     int `yaml:"max_inline_result_bytes"`
+	MaxResultArtifactBytes   int `yaml:"max_result_artifact_bytes"`
+	StderrTailBytes          int `yaml:"stderr_tail_bytes"`
+	DefaultJobTimeoutSeconds int `yaml:"default_job_timeout_seconds"`
+	MaxJobTimeoutSeconds     int `yaml:"max_job_timeout_seconds"`
+	IdleTimeoutSeconds       int `yaml:"idle_timeout_seconds"`
+	WorkerConcurrency        int `yaml:"worker_concurrency"`
+	ArtifactRetentionDays    int `yaml:"artifact_retention_days"`
 }
 
 type AgentConfig struct {
@@ -230,5 +243,12 @@ func Default() Config {
 		Canvases: CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:  ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
 		OpenCode: OpenCodeConfig{Management: OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
+		ACP: ACPConfig{
+			MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024,
+			MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024,
+			DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400,
+			WorkerConcurrency:     1,
+			ArtifactRetentionDays: 30,
+		},
 	}
 }
