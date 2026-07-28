@@ -21,6 +21,7 @@ const (
 	stdoutBoundBytes    = 1 * 1024 * 1024
 	stderrBoundBytes    = 128 * 1024
 	processKillGrace    = 5 * time.Second
+	promptDrainQuiet    = 250 * time.Millisecond
 	jsonRPCVersion      = "2.0"
 	defaultProbeTimeout = 2 * time.Minute
 	defaultRunTimeout   = 30 * time.Minute
@@ -650,11 +651,43 @@ func (c *Client) prompt(proc *process, sessionID, text, permissionKind string, e
 	if response.StopReason != domain.ACPStopReasonEndTurn {
 		return domain.AcpInvocationResult{}, fmt.Errorf("ACP run stopped with reason %q", response.StopReason)
 	}
+	if err := c.drainPromptUpdates(proc, collector); err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
 	finalText := collector.text.String()
 	if strings.TrimSpace(finalText) == "" {
 		return domain.AcpInvocationResult{}, errors.New("ACP run completed without assistant text")
 	}
 	return domain.AcpInvocationResult{Text: finalText}, nil
+}
+
+func (c *Client) drainPromptUpdates(proc *process, collector *promptCollector) error {
+	timer := time.NewTimer(promptDrainQuiet)
+	defer timer.Stop()
+	for {
+		select {
+		case <-proc.ctx.Done():
+			return proc.ctx.Err()
+		case err := <-proc.fatal:
+			return err
+		case message := <-proc.messages:
+			if message.JSONRPC != jsonRPCVersion || message.Method == "" {
+				return errors.New("ACP emitted an invalid message after prompt completion")
+			}
+			if err := collector.handle(proc, message); err != nil {
+				return err
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(promptDrainQuiet)
+		case <-timer.C:
+			return nil
+		}
+	}
 }
 
 func (c *promptCollector) handle(proc *process, message wireMessage) error {

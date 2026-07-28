@@ -38,5 +38,5 @@ profiles:
       - id: effort
         value: high
       - id: mode
-        value: build
+        value: plan
     permission_option_kind: allow_once
