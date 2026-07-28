@@ -242,6 +242,73 @@ func TestRunnerCancellationDuringPanicBackoffStopsWithoutRestart(t *testing.T) {
 	}
 }
 
+func TestRunnerCancellationDuringNormalOperationStopsPromptly(t *testing.T) {
+	store := &panicWorkerStore{panicked: make(chan struct{})}
+	runner, err := NewRunner(RunnerConfig{Interval: time.Hour, MaxRetries: 1, MemoryDir: t.TempDir()}, RunnerDependencies{
+		Store: store, ExchangeFinder: runnerFinder{}, Curator: runnerNoopCurator{}, Memory: &Service{},
+		Projector: runnerProjector{}, ProjectionReader: runnerSnapshotReader{}, Logger: &runnerTestLogger{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		runner.Run(ctx)
+		close(done)
+	}()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not stop during normal operation")
+	}
+}
+
+func TestRunnerRestartsWorkerAfterPanic(t *testing.T) {
+	store := &restartWorkerStore{restarted: make(chan struct{})}
+	runner, err := NewRunner(RunnerConfig{Interval: time.Millisecond, MaxRetries: 1, MemoryDir: t.TempDir()}, RunnerDependencies{
+		Store: store, ExchangeFinder: runnerFinder{}, Curator: runnerNoopCurator{}, Memory: &Service{},
+		Projector: runnerProjector{}, ProjectionReader: runnerSnapshotReader{}, Logger: &runnerTestLogger{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		runner.Run(ctx)
+		close(done)
+	}()
+	select {
+	case <-store.restarted:
+		cancel()
+	case <-time.After(2 * time.Second):
+		cancel()
+		t.Fatal("runner did not restart worker after panic")
+	}
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("restarted runner did not stop after cancellation")
+	}
+}
+
+func TestNextPanicBackoffIsBounded(t *testing.T) {
+	for _, test := range []struct {
+		current time.Duration
+		want    time.Duration
+	}{
+		{current: time.Second, want: 2 * time.Second},
+		{current: 16 * time.Second, want: maxPanicBackoff},
+		{current: maxPanicBackoff, want: maxPanicBackoff},
+	} {
+		if got := nextPanicBackoff(test.current); got != test.want {
+			t.Errorf("nextPanicBackoff(%s) = %s, want %s", test.current, got, test.want)
+		}
+	}
+}
+
 type panicWorkerStore struct {
 	panicValue string
 	panicked   chan struct{}
@@ -267,6 +334,42 @@ func (*panicWorkerStore) RescheduleOutboxItem(context.Context, int, time.Time, t
 	return nil
 }
 func (*panicWorkerStore) CleanupOutbox(context.Context, time.Time) error { return nil }
+
+type restartWorkerStore struct {
+	mu        sync.Mutex
+	calls     int
+	restarted chan struct{}
+}
+
+func (s *restartWorkerStore) ReconcileAssistantExchanges(ctx context.Context, _ port.AssistantExchangeFinder) error {
+	s.mu.Lock()
+	s.calls++
+	call := s.calls
+	s.mu.Unlock()
+	if call == 1 {
+		panic("restart worker")
+	}
+	close(s.restarted)
+	<-ctx.Done()
+	return ctx.Err()
+}
+func (*restartWorkerStore) ClaimNextOutboxItem(context.Context) (*domain.OutboxItem, error) {
+	return nil, nil
+}
+func (*restartWorkerStore) LoadOutboxMessages(context.Context, *domain.OutboxItem) ([]domain.Message, error) {
+	return nil, nil
+}
+func (*restartWorkerStore) CompleteOutboxItem(context.Context, int, time.Time) error { return nil }
+func (*restartWorkerStore) FailOutboxItem(context.Context, int, time.Time, string) error {
+	return nil
+}
+func (*restartWorkerStore) RetryOutboxItem(context.Context, int, time.Time, time.Time) error {
+	return nil
+}
+func (*restartWorkerStore) RescheduleOutboxItem(context.Context, int, time.Time, time.Time) error {
+	return nil
+}
+func (*restartWorkerStore) CleanupOutbox(context.Context, time.Time) error { return nil }
 
 type runnerNoopCurator struct{}
 

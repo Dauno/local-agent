@@ -43,6 +43,11 @@ type Runner struct {
 	sanitize  func(string) string
 }
 
+const (
+	initialPanicBackoff = time.Second
+	maxPanicBackoff     = 30 * time.Second
+)
+
 func NewRunner(cfg RunnerConfig, deps RunnerDependencies) (*Runner, error) {
 	if cfg.Interval <= 0 || cfg.MaxRetries <= 0 || cfg.RetentionDays < 0 {
 		return nil, errors.New("memory runner settings are invalid")
@@ -65,8 +70,7 @@ func NewRunner(cfg RunnerConfig, deps RunnerDependencies) (*Runner, error) {
 // Run supervises the periodic worker and restarts it after a panic with bounded
 // exponential backoff. Context cancellation stops both the worker and retry wait.
 func (r *Runner) Run(ctx context.Context) {
-	const maxBackoff = 30 * time.Second
-	backoff := time.Second
+	backoff := initialPanicBackoff
 	for {
 		done := make(chan struct{})
 		go func() {
@@ -94,11 +98,12 @@ func (r *Runner) Run(ctx context.Context) {
 			return
 		case <-timer.C:
 		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+		backoff = nextPanicBackoff(backoff)
 	}
+}
+
+func nextPanicBackoff(current time.Duration) time.Duration {
+	return min(current*2, maxPanicBackoff)
 }
 
 func (r *Runner) runWorker(ctx context.Context) {
