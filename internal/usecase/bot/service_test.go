@@ -950,6 +950,9 @@ func richConfirmationAction(delivery port.ConfirmationDelivery) domain.Confirmat
 
 func TestHandleInteractiveConfirmationBindsPublishedMessageAndPublishesResult(t *testing.T) {
 	delivery := richConfirmationDelivery(t)
+	delivery.ThreadTS = "1700000000.000001"
+	delivery.ConversationKey = domain.ConversationKey("slack:T12345678:dm:D12345678:thread:" + delivery.ThreadTS)
+	delivery.SessionID = "adk:" + string(delivery.ConversationKey)
 	confirmations := &fakeConfirmationStore{delivery: &delivery}
 	runtime := &fakeRuntime{resumeTurn: port.AgentTurn{Text: "completed"}}
 	publisher := &fakePublisher{}
@@ -970,7 +973,7 @@ func TestHandleInteractiveConfirmationBindsPublishedMessageAndPublishesResult(t 
 	if len(richPublisher.updated) != 1 || richPublisher.updated[0].Status != port.ConfirmationConsumed {
 		t.Fatalf("terminal updates = %#v", richPublisher.updated)
 	}
-	if len(publisher.calls) != 1 || publisher.calls[0].text != "completed" || publisher.calls[0].target.ChannelID != delivery.ChannelID {
+	if len(publisher.calls) != 1 || publisher.calls[0].text != "completed" || publisher.calls[0].target.ChannelID != delivery.ChannelID || publisher.calls[0].target.ThreadTS != delivery.ThreadTS {
 		t.Fatalf("result publishes = %#v", publisher.calls)
 	}
 }

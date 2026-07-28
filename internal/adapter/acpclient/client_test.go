@@ -63,6 +63,31 @@ func TestACPFakeAgent_RunCollectsOnlyAssistantTextAndHandlesPermission(t *testin
 	}
 }
 
+func TestACPFakeAgent_RunCollectsUpdateAfterPromptResponse(t *testing.T) {
+	script := strings.Replace(fakeACPAgentScript(true, false), "import sys, json", "import sys, json, time", 1)
+	script = strings.Replace(script,
+		`notify({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"safe final text"}})
+        respond(req_id, {"stopReason":"end_turn"})`,
+		`notify({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"safe"}})
+        respond(req_id, {"stopReason":"end_turn"})
+        time.sleep(0.02)
+        notify({"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":" final text"}})`, 1)
+	client := acpclient.New("python3", []string{"-c", script})
+
+	result, err := client.Run(t.Context(), domain.AcpInvocationRequest{
+		PrimaryPath:          t.TempDir(),
+		ConfigOptions:        []domain.ACPConfigOption{{ID: "model", Value: "test-model"}},
+		PermissionOptionKind: domain.ACPPermissionRejectOnce,
+		Task:                 "task",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != "safe final text" {
+		t.Fatalf("text = %q", result.Text)
+	}
+}
+
 func TestACPFakeAgent_RunAcceptsLargeJSONRPCMessage(t *testing.T) {
 	script := strings.Replace(fakeACPAgentScript(true, false), `"text":"safe final text"`, `"text":"x" * 150000`, 1)
 	client := acpclient.New("python3", []string{"-c", script})
