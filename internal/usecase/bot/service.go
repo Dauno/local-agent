@@ -64,6 +64,7 @@ type Dependencies struct {
 	PromptPublisher       port.SuggestedPromptPublisher
 	StreamingRuntime      port.StreamingAgentRuntime
 	IncrementalPublisher  port.IncrementalPublisher
+	SummaryScheduler      port.SummaryScheduler
 }
 
 type Outcome string
@@ -105,6 +106,15 @@ type Service struct {
 	promptPublisher       port.SuggestedPromptPublisher
 	streamingRuntime      port.StreamingAgentRuntime
 	incrementalPublisher  port.IncrementalPublisher
+	summaryScheduler      port.SummaryScheduler
+}
+
+type confirmationExpirer interface {
+	ExpireDelivery(context.Context, string, time.Time) (bool, error)
+}
+
+type expiredConfirmationLister interface {
+	ListExpired(context.Context, time.Time) ([]port.ConfirmationDelivery, error)
 }
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
@@ -188,6 +198,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		promptPublisher:      deps.PromptPublisher,
 		streamingRuntime:     deps.StreamingRuntime,
 		incrementalPublisher: deps.IncrementalPublisher,
+		summaryScheduler:     deps.SummaryScheduler,
 	}, nil
 }
 
@@ -394,7 +405,19 @@ func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Contex
 		terminal = domain.ProgressCleared
 	}
 	s.updateProgress(ctx, progress, terminal)
+	if finalizeErr == nil && outcome == OutcomeResponded && s.summaryScheduler != nil {
+		s.scheduleSummary(ctx, key)
+	}
 	return outcome, finalizeErr
+}
+
+func (s *Service) scheduleSummary(ctx context.Context, key domain.ConversationKey) {
+	if s.summaryScheduler == nil {
+		return
+	}
+	if err := s.summaryScheduler.ScheduleConversation(ctx, "adk:"+string(key)); err != nil {
+		s.logger.Warn("conversation summary scheduling failed", "conversation_key", key, "error", err)
+	}
 }
 
 func (s *Service) presentSuggestedPrompts(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey) {
@@ -845,6 +868,39 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 	if s.confirmationStore == nil {
 		return nil
 	}
+	if lister, ok := s.confirmationStore.(expiredConfirmationLister); ok {
+		expired, err := lister.ListExpired(ctx, s.clock.Now().UTC())
+		if err != nil {
+			return fmt.Errorf("list expired confirmations: %w", err)
+		}
+		for _, delivery := range expired {
+			expirer, ok := s.confirmationStore.(confirmationExpirer)
+			if !ok {
+				continue
+			}
+			first, err := expirer.ExpireDelivery(ctx, delivery.WrapperCallID, s.clock.Now().UTC())
+			if err != nil {
+				return fmt.Errorf("expire confirmation %s: %w", delivery.WrapperCallID, err)
+			}
+			if !first || s.runtime == nil {
+				continue
+			}
+			if _, err := s.runtime.Resume(ctx, domain.ConfirmationDecision{
+				WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
+				ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
+				Approved: false, Payload: map[string]any{"expired": true},
+			}); err != nil {
+				return fmt.Errorf("close expired confirmation %s in ADK: %w", delivery.WrapperCallID, err)
+			}
+			if s.confirmationPublisher != nil && delivery.RendererMode == confirmationRendererMode {
+				expiredDelivery := delivery
+				expiredDelivery.Status = port.ConfirmationExpired
+				if err := s.confirmationPublisher.UpdateConfirmation(ctx, expiredDelivery, "This confirmation has expired."); err != nil {
+					return fmt.Errorf("update expired confirmation %s: %w", delivery.WrapperCallID, err)
+				}
+			}
+		}
+	}
 	deliveries, err := s.confirmationStore.ListPending(ctx)
 	if err != nil {
 		return fmt.Errorf("list pending confirmations: %w", err)
@@ -1077,9 +1133,27 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	}
 
 	if !delivery.Expiry.After(now) {
-		if err := s.confirmationStore.ExpireDeliveries(ctx, now); err != nil {
-			s.logger.Error("confirmation expiry persistence failed", "wrapper_call_id", wrapperCallID, "error", err)
+		firstExpiry := delivery.Status == port.ConfirmationPending || delivery.Status == port.ConfirmationPublished
+		var expiryErr error
+		if expirer, ok := s.confirmationStore.(confirmationExpirer); ok {
+			firstExpiry, expiryErr = expirer.ExpireDelivery(ctx, wrapperCallID, now)
+		} else {
+			expiryErr = s.confirmationStore.ExpireDeliveries(ctx, now)
+		}
+		if expiryErr != nil {
+			s.logger.Error("confirmation expiry persistence failed", "wrapper_call_id", wrapperCallID, "error", expiryErr)
 			return OutcomeModelFailed
+		}
+		if firstExpiry && s.runtime != nil {
+			_, resumeErr := s.runtime.Resume(ctx, domain.ConfirmationDecision{
+				WrapperCallID: wrapperCallID, OriginalCallID: delivery.OriginalCallID,
+				ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
+				Approved: false, Payload: map[string]any{"expired": true},
+			})
+			if resumeErr != nil {
+				s.logger.Error("expired confirmation ADK terminal response failed", "wrapper_call_id", wrapperCallID, "error", resumeErr)
+				return OutcomeModelFailed
+			}
 		}
 		if interactive != nil && s.confirmationPublisher != nil {
 			expiredDelivery := *delivery
@@ -1229,6 +1303,9 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		"wrapper_call_id", wrapperCallID,
 		"approved", approved,
 		"actor", delivery.Actor)
+	if s.summaryScheduler != nil {
+		s.scheduleSummary(ctx, delivery.ConversationKey)
+	}
 	return OutcomeResponded
 }
 

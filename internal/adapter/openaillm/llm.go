@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"iter"
 	"strings"
+	"sync/atomic"
 
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
@@ -26,12 +27,64 @@ var (
 	ErrNoAssistantText = errors.New("model response contained no non-empty assistant text")
 )
 
+const (
+	SSEErrorProviderRequest  = "provider_request"
+	SSEErrorDecode           = "sse_decode"
+	SSEErrorTransportRead    = "transport_read"
+	SSEErrorChunkConsistency = "chunk_consistency"
+	SSEErrorFinalAggregation = "final_aggregation"
+)
+
+// SSEError is a typed, content-free classification for streaming failures.
+// It deliberately carries no frame or payload so diagnostics cannot leak raw
+// provider data.
+type SSEError struct {
+	Category       string
+	Err            error
+	FramePresent   bool
+	PayloadPresent bool
+}
+
+type StreamMetrics struct {
+	SSEDecodeFailures atomic.Uint64
+}
+
+func (e *SSEError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("OpenAI-compatible stream error (%s)", e.Category)
+}
+
+func (e *SSEError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func classifyStreamReadError(err error) string {
+	message := strings.ToLower(err.Error())
+	for _, fragment := range []string{"status code", "api error", "provider error", "invalid request"} {
+		if strings.Contains(message, fragment) {
+			return SSEErrorProviderRequest
+		}
+	}
+	for _, fragment := range []string{"decode", "json", "unexpected end", "unexpected eof", "invalid character"} {
+		if strings.Contains(message, fragment) {
+			return SSEErrorDecode
+		}
+	}
+	return SSEErrorTransportRead
+}
+
 // OpenAICompatibleLLM implements ADK's model.LLM using OpenAI Chat Completions.
 type OpenAICompatibleLLM struct {
 	client          openai.Client
 	model           string
 	reasoningEffort string
 	extraBody       map[string]any
+	metrics         *StreamMetrics
 }
 
 var _ model.LLM = (*OpenAICompatibleLLM)(nil)
@@ -56,7 +109,22 @@ func New(options ...Option) (*OpenAICompatibleLLM, error) {
 		model:           cfg.model,
 		reasoningEffort: cfg.reasoningEffort,
 		extraBody:       cfg.extraBody,
+		metrics:         &StreamMetrics{},
 	}, nil
+}
+
+func (m *OpenAICompatibleLLM) Metrics() *StreamMetrics {
+	if m == nil {
+		return nil
+	}
+	return m.metrics
+}
+
+func (m *OpenAICompatibleLLM) Counters() map[string]uint64 {
+	if m == nil || m.metrics == nil {
+		return map[string]uint64{}
+	}
+	return map[string]uint64{"sse_decode_failures": m.metrics.SSEDecodeFailures.Load()}
 }
 
 // Name returns the configured provider model identifier.
@@ -108,7 +176,7 @@ func (m *OpenAICompatibleLLM) generateStream(ctx context.Context, params openai.
 	for stream.Next() {
 		chunk := stream.Current()
 		if !accumulator.AddChunk(chunk) {
-			yield(nil, errors.New("OpenAI-compatible stream contained inconsistent chunks"))
+			yield(nil, &SSEError{Category: SSEErrorChunkConsistency, Err: errors.New("OpenAI-compatible stream contained inconsistent chunks"), FramePresent: true, PayloadPresent: true})
 			return
 		}
 		for _, choice := range chunk.Choices {
@@ -126,12 +194,16 @@ func (m *OpenAICompatibleLLM) generateStream(ctx context.Context, params openai.
 		}
 	}
 	if err := stream.Err(); err != nil {
-		yield(nil, fmt.Errorf("OpenAI-compatible streaming Chat Completions request failed: %w", err))
+		category := classifyStreamReadError(err)
+		if category == SSEErrorDecode && m.metrics != nil {
+			m.metrics.SSEDecodeFailures.Add(1)
+		}
+		yield(nil, &SSEError{Category: category, Err: err})
 		return
 	}
 	response, err := responseFromCompletion(&accumulator.ChatCompletion)
 	if err != nil {
-		yield(nil, err)
+		yield(nil, &SSEError{Category: SSEErrorFinalAggregation, Err: err, FramePresent: true, PayloadPresent: true})
 		return
 	}
 	response.Partial = false

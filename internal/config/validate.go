@@ -84,6 +84,9 @@ func Validate(cfg Config) error {
 	if cfg.Context.RetainMessagesPerConversation <= 0 {
 		add("context.retain_messages_per_conversation", "must be greater than zero")
 	}
+	if cfg.Context.ADKCompaction != nil {
+		validateADKCompaction(&problems, *cfg.Context.ADKCompaction)
+	}
 
 	switch cfg.Runtime.LogLevel {
 	case "debug", "info", "warn", "error":
@@ -275,6 +278,57 @@ func Validate(cfg Config) error {
 		}
 	}
 
+	if len(problems) > 0 {
+		return &ValidationError{Fields: problems}
+	}
+	return nil
+}
+
+func validateADKCompaction(problems *[]FieldError, cfg ADKCompactionConfig) {
+	positive := []struct {
+		field string
+		value int
+	}{
+		{"context.adk_compaction.max_history_chars", cfg.MaxHistoryChars},
+		{"context.adk_compaction.recent_turns", cfg.RecentTurns},
+		{"context.adk_compaction.summary_max_chars", cfg.SummaryMaxChars},
+	}
+	for _, item := range positive {
+		if item.value <= 0 {
+			addConfigProblem(problems, item.field, "must be greater than zero")
+		}
+	}
+	if cfg.SummaryEnabled && cfg.SummaryMaxChars >= cfg.MaxHistoryChars && cfg.MaxHistoryChars > 0 && cfg.SummaryMaxChars > 0 {
+		addConfigProblem(problems, "context.adk_compaction.summary_max_chars", "must be smaller than max_history_chars")
+	}
+	if cfg.SummaryMaxChars > MaxSQLiteSummaryChars {
+		addConfigProblem(problems, "context.adk_compaction.summary_max_chars", "must not exceed SQLite summary limit of 8000 code points")
+	}
+	if cfg.SummaryEnabled && cfg.MaxHistoryChars > 0 && cfg.SummaryMaxChars > 0 && cfg.MaxHistoryChars <= cfg.SummaryMaxChars+1000 {
+		addConfigProblem(problems, "context.adk_compaction.max_history_chars", "must reserve more than 1000 code points for one non-empty user content after the summary")
+	}
+	if !cfg.SummaryEnabled && cfg.MaxHistoryChars > 0 && cfg.MaxHistoryChars < 100 {
+		addConfigProblem(problems, "context.adk_compaction.max_history_chars", "must reserve at least 100 code points for one non-empty user content when summaries are disabled")
+	}
+}
+
+// ValidateADKCompaction applies production-only constraints that require the
+// selected root provider. Generic YAML validation remains provider agnostic.
+func ValidateADKCompaction(cfg Config, durableOpenAICompatible, summarizerCompatible bool) error {
+	if cfg.Context.ADKCompaction == nil {
+		if durableOpenAICompatible {
+			return &ValidationError{Fields: []FieldError{{Field: "context.adk_compaction", Problem: "must be configured and enabled for a durable openai_compatible root"}}}
+		}
+		return nil
+	}
+	var problems []FieldError
+	validateADKCompaction(&problems, *cfg.Context.ADKCompaction)
+	if durableOpenAICompatible && !cfg.Context.ADKCompaction.Enabled {
+		problems = append(problems, FieldError{Field: "context.adk_compaction.enabled", Problem: "must be true for a durable openai_compatible root"})
+	}
+	if durableOpenAICompatible && cfg.Context.ADKCompaction.SummaryEnabled && !summarizerCompatible {
+		problems = append(problems, FieldError{Field: "context.adk_compaction.summary_enabled", Problem: "requires a compatible non-streaming no-tool summarizer composition"})
+	}
 	if len(problems) > 0 {
 		return &ValidationError{Fields: problems}
 	}

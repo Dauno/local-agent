@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"iter"
@@ -9,6 +10,9 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
+
+	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
+	"github.com/Dauno/slack-local-agent/internal/secure"
 )
 
 func TestMemoryCuratorLLMUsesADKFinishReason(t *testing.T) {
@@ -36,6 +40,21 @@ func TestMemoryCuratorLLMUsesADKFinishReason(t *testing.T) {
 				t.Fatalf("GenerateText() = %q, %v", text, err)
 			}
 		})
+	}
+}
+
+func TestMemoryCuratorLLMDoesNotLogModelResponse(t *testing.T) {
+	const responseText = "unlogged model response"
+	var output bytes.Buffer
+	curator := &memoryCuratorLLM{
+		llm:    staticADKModel{response: &model.LLMResponse{Content: genai.NewContentFromText(responseText, genai.RoleModel), FinishReason: genai.FinishReasonStop}},
+		logger: logging.New(&output, "debug", secure.NewRedactor()),
+	}
+	if _, err := curator.GenerateText(t.Context(), "prompt"); err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(output.String(), responseText) {
+		t.Fatalf("model response leaked into curator log: %s", output.String())
 	}
 }
 

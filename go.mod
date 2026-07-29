@@ -4,7 +4,7 @@ go 1.25.0
 
 require (
 	github.com/joho/godotenv v1.5.1
-	github.com/openai/openai-go/v3 v3.41.1
+	github.com/openai/openai-go/v3 v3.43.0
 	github.com/slack-go/slack v0.27.0
 	github.com/spf13/cobra v1.10.2
 	golang.org/x/term v0.45.0
