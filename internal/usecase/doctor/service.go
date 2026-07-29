@@ -354,6 +354,13 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			}
 		}
 	}
+	durableOpenAI := defs == nil || (resolvedModel != nil && resolvedModel.Type() == agentdef.ProviderTypeOpenAICompatible)
+	summarizerCompatible := durableOpenAI
+	if err := config.ValidateADKCompaction(cfg, durableOpenAI, summarizerCompatible); err != nil {
+		report.fail("ADK compaction", err.Error(), "Set context.adk_compaction.enabled=true with valid positive limits and keep summary composition compatible, then restart.", false)
+	} else if durableOpenAI {
+		report.pass("ADK compaction", "durable OpenAI-compatible model history projection is enabled")
+	}
 
 	modelAPIKeyEnv := cfg.Model.APIKeyEnv
 	rootCLIProvider := resolvedModel != nil && resolvedModel.IsAgentCLI()

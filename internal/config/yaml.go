@@ -33,6 +33,13 @@ var configSchema = []schemaField{
 		{name: "max_messages"},
 		{name: "max_chars"},
 		{name: "retain_messages_per_conversation"},
+		{name: "adk_compaction", children: []schemaField{
+			{name: "enabled"},
+			{name: "max_history_chars"},
+			{name: "recent_turns"},
+			{name: "summary_enabled"},
+			{name: "summary_max_chars"},
+		}},
 	}},
 	{name: "runtime", children: []schemaField{
 		{name: "log_level"},

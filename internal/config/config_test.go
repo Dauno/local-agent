@@ -25,6 +25,10 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			MaxMessages:                   30,
 			MaxChars:                      20_000,
 			RetainMessagesPerConversation: 100,
+			ADKCompaction: &config.ADKCompactionConfig{
+				Enabled: true, MaxHistoryChars: 120_000, RecentTurns: 8,
+				SummaryEnabled: true, SummaryMaxChars: 8_000,
+			},
 		},
 		Runtime: config.RuntimeConfig{
 			LogLevel:                "info",
@@ -109,6 +113,28 @@ func TestDefaultDoesNotShareExtraBody(t *testing.T) {
 	}
 }
 
+func TestADKCompactionDefaultsAndProductionValidation(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.RecentTurns != 8 || !cfg.Context.ADKCompaction.SummaryEnabled || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 {
+		t.Fatalf("unexpected ADK compaction defaults: %#v", cfg.Context.ADKCompaction)
+	}
+	cfg.Context.ADKCompaction.Enabled = false
+	if err := config.ValidateADKCompaction(cfg, true, true); err == nil || !strings.Contains(err.Error(), "must be true") {
+		t.Fatalf("disabled durable compaction error = %v", err)
+	}
+	cfg.Context.ADKCompaction.Enabled = true
+	cfg.Context.ADKCompaction.MaxHistoryChars = cfg.Context.ADKCompaction.SummaryMaxChars + 1000
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "reserve more than 1000") {
+		t.Fatalf("insufficient compaction reserve error = %v", err)
+	}
+	cfg = config.Default()
+	cfg.Context.ADKCompaction.SummaryMaxChars = 9000
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "SQLite summary limit") {
+		t.Fatalf("SQLite summary limit error = %v", err)
+	}
+}
+
 func TestMarshalDefaultYAML(t *testing.T) {
 	t.Parallel()
 
@@ -125,6 +151,12 @@ context:
   max_messages: 30
   max_chars: 20000
   retain_messages_per_conversation: 100
+  adk_compaction:
+    enabled: true
+    max_history_chars: 120000
+    recent_turns: 8
+    summary_enabled: true
+    summary_max_chars: 8000
 runtime:
   log_level: info
   model_timeout_seconds: 0
@@ -275,6 +307,16 @@ func TestParseEmptyOrCommentOnlyUsesDefaults(t *testing.T) {
 			!reflect.DeepEqual(cfg.Slack, want.Slack) {
 			t.Fatalf("Parse(%q) did not produce defaults: %#v", input, cfg)
 		}
+	}
+}
+
+func TestParseLegacyYAMLReceivesADKCompactionDefaults(t *testing.T) {
+	cfg, err := config.Parse([]byte("agent:\n  name: Legacy\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 {
+		t.Fatalf("legacy compaction defaults = %#v", cfg.Context.ADKCompaction)
 	}
 }
 

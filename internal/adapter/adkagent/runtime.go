@@ -30,6 +30,7 @@ type RuntimeConfig struct {
 	SessionService    session.Service
 	Model             model.LLM
 	ToolFactory       port.AgentToolFactory
+	ContextProjector  port.ContextProjector
 	// StaticTools are reusable ADK tools composed at startup, such as AgentTool
 	// wrappers. Invocation-scoped tools continue to come from ToolFactory.
 	StaticTools []tool.Tool
@@ -47,6 +48,7 @@ type Runtime struct {
 	sessionService    session.Service
 	model             model.LLM
 	toolFactory       port.AgentToolFactory
+	contextProjector  port.ContextProjector
 	staticTools       []tool.Tool
 	providerFamily    string
 }
@@ -79,6 +81,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		sessionService:    cfg.SessionService,
 		model:             cfg.Model,
 		toolFactory:       cfg.ToolFactory,
+		contextProjector:  cfg.ContextProjector,
 		staticTools:       append([]tool.Tool(nil), cfg.StaticTools...),
 		providerFamily:    providerFamily,
 	}, nil
@@ -114,9 +117,12 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 	if len(tools) > 0 {
 		agentCfg.Tools = tools
 	}
-	if reference := ephemeral.reference(); reference != "" {
-		agentCfg.BeforeModelCallbacks = []llmagent.BeforeModelCallback{
-			injectEphemeralReference(reference),
+	if r.contextProjector != nil || ephemeral.reference() != "" {
+		if r.contextProjector != nil {
+			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, BeforeModelCallback(r.contextProjector))
+		}
+		if reference := ephemeral.reference(); reference != "" {
+			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, injectEphemeralReference(reference))
 		}
 	}
 
@@ -297,8 +303,9 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 		Parts: []*genai.Part{
 			{
 				FunctionResponse: &genai.FunctionResponse{
-					ID:   decision.WrapperCallID,
-					Name: toolconfirmation.FunctionCallName,
+					ID:           decision.WrapperCallID,
+					Name:         toolconfirmation.FunctionCallName,
+					WillContinue: boolPointer(false),
 					Response: map[string]any{
 						"confirmed": decision.Approved,
 						"payload":   payload,
@@ -314,6 +321,8 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 	}
 	return turn, nil
 }
+
+func boolPointer(value bool) *bool { return &value }
 
 func (r *Runtime) ensureSession(ctx context.Context, sessionID string) (session.Session, error) {
 	created, err := r.sessionService.Create(ctx, &session.CreateRequest{

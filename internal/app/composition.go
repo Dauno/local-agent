@@ -28,6 +28,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
+	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/adapter/opencodemanager"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
@@ -41,6 +42,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
+	contextsummary "github.com/Dauno/slack-local-agent/internal/usecase/contextsummary"
 	externalagentusecase "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
 	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
@@ -195,6 +197,9 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	resolved, err := defs.ResolveModel(prepared.rootDef.Model)
 	if err != nil {
 		return runtimeModels{}, fmt.Errorf("resolve root agent model: %w", err)
+	}
+	if err := config.ValidateADKCompaction(cfg, resolved.Type() == agentdef.ProviderTypeOpenAICompatible, resolved.Type() == agentdef.ProviderTypeOpenAICompatible); err != nil {
+		return runtimeModels{}, err
 	}
 	builtRoot, rootSecret, err := newModelForResolved(ctx, resolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
 	if err != nil {
@@ -413,6 +418,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var compositeFactory *compositeAgentToolFactory
 	var externalJobService *externalagentusecase.Service
 	var notificationWorker *externalagentusecase.NotificationWorker
+	var summaryScheduler port.SummaryScheduler
 	var err error
 	if !models.rootIsAgentCLI {
 		var sandboxService *sandboxusecase.Service
@@ -507,12 +513,49 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			}
 		}
 	}
+	if !models.rootIsAgentCLI && cfg.Context.ADKCompaction != nil && cfg.Context.ADKCompaction.SummaryEnabled {
+		summarizer, summaryErr := openaillm.NewSummarizer(models.rootModel, openaillm.SummarizerConfig{
+			MaxChars: cfg.Context.ADKCompaction.SummaryMaxChars, Timeout: 30 * time.Second,
+			ModelCalls: infra.modelCalls, Redact: models.redactor.String,
+		})
+		if summaryErr != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize ADK summarizer: %w", summaryErr))
+		}
+		worker, workerErr := contextsummary.New(contextsummary.Config{MaxChars: cfg.Context.ADKCompaction.SummaryMaxChars, RecentTurns: cfg.Context.ADKCompaction.RecentTurns, WorkerInterval: time.Second}, contextsummary.Dependencies{
+			Store: infra.store, Summarizer: summarizer,
+			TurnSource: adkagent.DurableTurnSource{Service: infra.sessionSvc, AppName: "local-agent", UserID: "local_user", Redact: models.redactor.String},
+		})
+		if workerErr != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize ADK summary worker: %w", workerErr))
+		}
+		summaryScheduler = worker
+		go worker.Run(ctx)
+	}
 
 	rtInstruction, rtGlobalInstruction := "", ""
 	if models.rootDef != nil {
 		rtInstruction, rtGlobalInstruction = models.rootDef.Instruction, models.rootDef.EffectiveRootGlobalInstruction()
 	}
-	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ProviderFamily: models.rootFamily})
+	var projector port.ContextProjector
+	if !models.rootIsAgentCLI {
+		compaction := cfg.Context.ADKCompaction
+		if compaction == nil {
+			return nil, errors.New("context.adk_compaction is required for durable model runtime")
+		}
+		projector, err = adkagent.NewProjector(adkagent.CompactionConfig{
+			Enabled: compaction.Enabled, MaxHistoryChars: compaction.MaxHistoryChars,
+			RecentTurns: compaction.RecentTurns, SummaryEnabled: compaction.SummaryEnabled,
+			SummaryMaxChars: compaction.SummaryMaxChars,
+		})
+		if err != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize ADK context projector: %w", err))
+		}
+		if concrete, ok := projector.(*adkagent.Projector); ok {
+			concrete.SetSummaryStore(infra.store)
+			concrete.SetLogger(models.logger)
+		}
+	}
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ProviderFamily: models.rootFamily})
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}
@@ -523,12 +566,9 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		RetainMessages: cfg.Context.RetainMessagesPerConversation, MaxConcurrentCalls: cfg.Runtime.MaxConcurrentModelCalls,
 		ModelTimeout: time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second, BusyMessage: cfg.Runtime.BusyMessage, ModelErrorMessage: cfg.Runtime.ModelErrorMessage, UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 		ProgressEnabled: cfg.Slack.StandardAgent.ProgressEnabled, PromptsEnabled: cfg.Slack.StandardAgent.PromptsEnabled, SuggestedPrompts: cfg.Slack.StandardAgent.SuggestedPrompts, StreamingEnabled: cfg.Slack.StandardAgent.StreamingEnabled, UpdateInterval: time.Duration(cfg.Slack.StandardAgent.UpdateIntervalSeconds) * time.Second, StreamingCarryRunes: models.redactor.StreamingCarryRunes(),
-	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher})
+	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler})
 	if err != nil {
 		return nil, err
-	}
-	if err := confirmationStore.ExpireDeliveries(ctx, time.Now().UTC()); err != nil {
-		models.logger.Warn("confirmation delivery expiry failed", "error", err)
 	}
 	if err := service.ReconcileConfirmations(ctx, infra.history); err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("reconcile confirmation deliveries: %w", err))
