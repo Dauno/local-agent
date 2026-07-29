@@ -4,7 +4,9 @@
 package toolfactory
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"net/url"
 	"strings"
@@ -14,6 +16,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
 
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
@@ -26,10 +29,15 @@ var _ port.AgentToolFactory = (*Factory)(nil)
 // Factory implements port.AgentToolFactory by producing typed ADK function
 // tools for the invoking actor and conversation.
 type Factory struct {
-	store   port.ConversationStore
-	sandbox *sandboxusecase.Service
-	canvas  *canvasusecase.Service
-	exports *generatedfileusecase.Service
+	store          port.ConversationStore
+	sandbox        *sandboxusecase.Service
+	canvas         *canvasusecase.Service
+	exports        *generatedfileusecase.Service
+	agentBuilder   port.AgentBuilderService
+	currentDefs    *agentdef.Definitions
+	agentWriter    port.AgentDefinitionWriter
+	draftStore     port.AgentDraftStore
+	allowedUserIDs []string
 }
 
 // New creates a tool factory. Sandbox, canvas, and export services may be nil — when
@@ -41,6 +49,34 @@ func New(store port.ConversationStore, sb *sandboxusecase.Service, cv *canvasuse
 	return &Factory{store: store, sandbox: sb, canvas: cv, exports: exports}
 }
 
+// WithAgentBuilder configures the service used to preview agent definitions.
+func (f *Factory) WithAgentBuilder(svc port.AgentBuilderService) *Factory {
+	f.agentBuilder = svc
+	return f
+}
+
+func (f *Factory) WithAgentWriter(w port.AgentDefinitionWriter) *Factory {
+	f.agentWriter = w
+	return f
+}
+
+func (f *Factory) WithDraftStore(svc port.AgentDraftStore) *Factory {
+	f.draftStore = svc
+	return f
+}
+
+// WithAllowedUserIDs configures the users allowed to install agent definitions.
+func (f *Factory) WithAllowedUserIDs(ids []string) *Factory {
+	f.allowedUserIDs = append([]string(nil), ids...)
+	return f
+}
+
+// WithCurrentDefinitions configures the active agent and provider definitions.
+func (f *Factory) WithCurrentDefinitions(defs *agentdef.Definitions) *Factory {
+	f.currentDefs = defs
+	return f
+}
+
 // ToolsForInvocation implements port.AgentToolFactory. A tool construction
 // failure returns an error instead of a partial tool list.
 func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) ([]any, error) {
@@ -48,7 +84,7 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, nil
 	}
 
-	tools := make([]any, 0, 12)
+	tools := make([]any, 0, 13)
 
 	// Conversation tool.
 	ro, err := f.listMessagesTool(key)
@@ -56,6 +92,21 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, fmt.Errorf("build list_messages tool: %w", err)
 	}
 	tools = append(tools, ro)
+
+	if f.agentBuilder != nil {
+		preview, err := f.previewAgentDefTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build preview_agent_def tool: %w", err)
+		}
+		tools = append(tools, preview)
+	}
+	if f.draftStore != nil && f.agentWriter != nil {
+		install, err := f.installAgentDefTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build install_agent_def tool: %w", err)
+		}
+		tools = append(tools, install)
+	}
 
 	if f.sandbox != nil {
 		// Read-only sandbox tools.
@@ -100,6 +151,221 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 	}
 
 	return tools, nil
+}
+
+func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	type previewAgentDefArgs struct {
+		Name        string `json:"name" jsonschema:"nombre del agente en snake_case (3-64 caracteres)"`
+		Description string `json:"description" jsonschema:"descripcion breve para routing del LLM (max 500 caracteres)"`
+		Instruction string `json:"instruction" jsonschema:"instruccion completa del agente (max 3000 caracteres)"`
+		Model       string `json:"model,omitempty" jsonschema:"modelo en formato provider/profile (opcional)"`
+	}
+	type previewAgentDefResult struct {
+		YAML     string   `json:"yaml"`
+		SHA256   string   `json:"sha_256"`
+		DraftID  string   `json:"draft_id"`
+		Name     string   `json:"name"`
+		Model    string   `json:"model"`
+		Class    string   `json:"class"`
+		Warnings []string `json:"warnings,omitempty"`
+	}
+
+	return functiontool.New(
+		functiontool.Config{
+			Name:        "preview_agent_def",
+			Description: "Compila una descripcion en lenguaje natural a una definicion AgentDef YAML validada. No escribe archivos.",
+		},
+		func(ctx agent.Context, args previewAgentDefArgs) (previewAgentDefResult, error) {
+			if f.agentBuilder == nil || f.draftStore == nil {
+				return previewAgentDefResult{}, fmt.Errorf("agent builder service or draft store not available")
+			}
+
+			draft := domain.AgentDraft{
+				Name:        args.Name,
+				Description: args.Description,
+				Instruction: args.Instruction,
+				Model:       args.Model,
+			}
+
+			result, err := f.agentBuilder.Preview(draft, f.currentDefs)
+			if err != nil {
+				return previewAgentDefResult{}, err
+			}
+			if result == nil {
+				return previewAgentDefResult{}, fmt.Errorf("agent builder service returned no preview")
+			}
+
+			draftID, err := newAgentDraftID()
+			if err != nil {
+				return previewAgentDefResult{}, err
+			}
+			teamID, actorID, conversationKey := agentDraftScope(actor, key)
+			now := time.Now().UTC()
+			if err := f.draftStore.Create(ctx, &port.AgentDraft{
+				DraftID:         draftID,
+				TeamID:          teamID,
+				ActorID:         actorID,
+				ConversationKey: conversationKey,
+				Name:            result.AgentDef.Name,
+				Description:     draft.Description,
+				Instruction:     draft.Instruction,
+				Model:           result.AgentDef.Model,
+				DefinitionHash:  result.SHA256,
+				Status:          port.DraftStatusPreviewed,
+				CreatedAt:       now,
+				ExpiresAt:       now.Add(agentDraftTTL),
+			}); err != nil {
+				return previewAgentDefResult{}, fmt.Errorf("persist agent draft: %w", err)
+			}
+
+			return previewAgentDefResult{
+				YAML:    result.YAML,
+				SHA256:  result.SHA256,
+				DraftID: draftID,
+				Name:    result.AgentDef.Name,
+				Model:   result.AgentDef.Model,
+				Class:   result.AgentDef.AgentClass,
+			}, nil
+		},
+	)
+}
+
+func (f *Factory) installAgentDefTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	type installAgentDefArgs struct {
+		DraftID        string `json:"draft_id" jsonschema:"ID del draft devuelto por preview_agent_def"`
+		Name           string `json:"name,omitempty" jsonschema:"nombre exacto opcional del agente del preview aprobado"`
+		DefinitionHash string `json:"definition_hash,omitempty" jsonschema:"SHA-256 opcional del YAML canónico mostrado en preview"`
+	}
+	type installAgentDefResult struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+
+	return functiontool.New(
+		functiontool.Config{
+			Name:                "install_agent_def",
+			Description:         "Instala una definicion de agente previamente validada con preview_agent_def. Requiere confirmacion explicita.",
+			RequireConfirmation: true,
+		},
+		func(ctx agent.Context, args installAgentDefArgs) (installAgentDefResult, error) {
+			if f.draftStore == nil || f.agentWriter == nil {
+				return installAgentDefResult{}, fmt.Errorf("agent draft store or writer not available")
+			}
+			if !f.isAllowedUser(actor) {
+				return installAgentDefResult{}, fmt.Errorf("actor is not authorized to install agent definitions")
+			}
+			if strings.TrimSpace(args.DraftID) == "" {
+				return installAgentDefResult{}, fmt.Errorf("agent draft ID is required")
+			}
+
+			draft, err := f.draftStore.Get(ctx, args.DraftID)
+			if err != nil {
+				return installAgentDefResult{}, fmt.Errorf("load agent draft: %w", err)
+			}
+			if draft == nil {
+				return installAgentDefResult{}, fmt.Errorf("agent draft %q was not found", args.DraftID)
+			}
+			if draft.ActorID != actor || draft.ConversationKey != string(key) {
+				return installAgentDefResult{}, fmt.Errorf("agent draft does not belong to the current actor and conversation")
+			}
+			if strings.TrimSpace(args.Name) != "" && draft.Name != args.Name {
+				return installAgentDefResult{}, fmt.Errorf("agent draft does not match requested name")
+			}
+			if strings.TrimSpace(args.DefinitionHash) != "" && draft.DefinitionHash != args.DefinitionHash {
+				return installAgentDefResult{}, fmt.Errorf("agent draft does not match requested definition hash")
+			}
+			if !draft.ExpiresAt.After(time.Now().UTC()) {
+				return installAgentDefResult{}, fmt.Errorf("agent draft %q has expired", draft.DraftID)
+			}
+			if draft.Status != port.DraftStatusPreviewed && draft.Status != port.DraftStatusInstallRequested {
+				return installAgentDefResult{}, fmt.Errorf("agent draft %q is not installable from status %q", draft.DraftID, draft.Status)
+			}
+
+			if err := agentdef.ValidateAgentName(draft.Name); err != nil {
+				return installAgentDefResult{}, fmt.Errorf("invalid agent name: %w", err)
+			}
+
+			candidate := agentdef.AgentDef{
+				AgentClass:      "LlmAgent",
+				Name:            draft.Name,
+				Model:           draft.Model,
+				Description:     draft.Description,
+				Instruction:     draft.Instruction,
+				IncludeContents: "none",
+				ToolScope:       "invocation_scoped",
+			}
+			yamlBytes, err := agentdef.MarshalAgentDef(candidate)
+			if err != nil {
+				return installAgentDefResult{}, fmt.Errorf("marshal agent definition: %w", err)
+			}
+			hash := sha256.Sum256(yamlBytes)
+			definitionHash := fmt.Sprintf("%x", hash)
+			if definitionHash != draft.DefinitionHash || (strings.TrimSpace(args.DefinitionHash) != "" && definitionHash != args.DefinitionHash) {
+				return installAgentDefResult{}, fmt.Errorf("agent definition hash does not match draft")
+			}
+
+			if draft.Status == port.DraftStatusPreviewed {
+				if err := f.draftStore.UpdateStatus(ctx, draft.DraftID, port.DraftStatusPreviewed, port.DraftStatusInstallRequested); err != nil {
+					return installAgentDefResult{}, fmt.Errorf("request agent draft installation: %w", err)
+				}
+			}
+
+			if err := f.agentWriter.Write(draft.Name, yamlBytes); err != nil {
+				if failErr := f.draftStore.UpdateStatus(ctx, draft.DraftID, port.DraftStatusInstallRequested, port.DraftStatusFailed); failErr != nil {
+					return installAgentDefResult{}, fmt.Errorf("write agent file: %v; mark draft failed: %w", err, failErr)
+				}
+				return installAgentDefResult{}, fmt.Errorf("write agent file: %w", err)
+			}
+
+			if err := f.draftStore.UpdateStatus(ctx, draft.DraftID, port.DraftStatusInstallRequested, port.DraftStatusInstalled); err != nil {
+				if failErr := f.draftStore.UpdateStatus(ctx, draft.DraftID, port.DraftStatusInstallRequested, port.DraftStatusFailed); failErr != nil {
+					return installAgentDefResult{}, fmt.Errorf("mark agent draft installed: %v; mark draft failed: %w", err, failErr)
+				}
+				return installAgentDefResult{}, fmt.Errorf("mark agent draft installed: %w", err)
+			}
+
+			return installAgentDefResult{
+				Status:  "installed",
+				Message: fmt.Sprintf("Agente %q instalado. Estara activo tras el proximo reinicio.", draft.Name),
+			}, nil
+		},
+	)
+}
+
+const agentDraftTTL = 24 * time.Hour
+
+func newAgentDraftID() (string, error) {
+	data := make([]byte, 12)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate agent draft ID: %w", err)
+	}
+	return "draft_" + hex.EncodeToString(data), nil
+}
+
+func agentDraftScope(actor string, key domain.ConversationKey) (teamID, actorID, conversationKey string) {
+	actorID = strings.TrimSpace(actor)
+	if actorID == "" {
+		actorID = "unknown_actor"
+	}
+	conversationKey = strings.TrimSpace(string(key))
+	if conversationKey == "" {
+		conversationKey = "unknown_conversation"
+	}
+	teamID = "unknown_team"
+	parts := strings.Split(conversationKey, ":")
+	if len(parts) > 1 && strings.TrimSpace(parts[0]) == "slack" && strings.TrimSpace(parts[1]) != "" {
+		teamID = strings.TrimSpace(parts[1])
+	}
+	return teamID, actorID, conversationKey
+}
+
+func (f *Factory) isAllowedUser(actor string) bool {
+	for _, allowed := range f.allowedUserIDs {
+		if strings.TrimSpace(allowed) == actor {
+			return true
+		}
+	}
+	return false
 }
 
 // --- read-only: conversation ---
