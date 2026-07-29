@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -45,7 +46,7 @@ func Load(dir string) (*Definitions, error) {
 	}
 
 	defs := &Definitions{Providers: providers, Agents: agents}
-	if err := validateDefinitions(defs); err != nil {
+	if err := ValidateDefinitions(defs); err != nil {
 		return nil, err
 	}
 	return defs, nil
@@ -61,7 +62,7 @@ func LoadFromDirs(agentsDir, providersDir string) (*Definitions, error) {
 		return nil, err
 	}
 	defs := &Definitions{Providers: providers, Agents: agents}
-	if err := validateDefinitions(defs); err != nil {
+	if err := ValidateDefinitions(defs); err != nil {
 		return nil, err
 	}
 	return defs, nil
@@ -245,7 +246,7 @@ func mappingValue(mapping *yaml.Node, key string) *yaml.Node {
 	return nil
 }
 
-func validateDefinitions(defs *Definitions) error {
+func ValidateDefinitions(defs *Definitions) error {
 	var errs []string
 
 	if len(defs.Providers) == 0 {
@@ -258,7 +259,18 @@ func validateDefinitions(defs *Definitions) error {
 		errs = append(errs, "at least one agent definition is required")
 	}
 	for _, a := range defs.Agents {
+		if !IsReservedAgentName(a.Name) {
+			if err := a.ValidateName(); err != nil {
+				errs = append(errs, fmt.Sprintf("agent %q: %v", a.Name, err))
+			}
+		}
 		errs = append(errs, validateAgent(a, defs.Providers)...)
+	}
+	for _, name := range eligibleAgentNames(defs) {
+		if IsReservedAgentName(name) {
+			continue
+		}
+		errs = append(errs, ValidateAgentEligibility(defs.Agents[name], defs.Providers)...)
 	}
 	errs = append(errs, validateAgentTools(defs)...)
 	errs = append(errs, validateWorkflowTools(defs)...)
@@ -267,6 +279,111 @@ func validateDefinitions(defs *Definitions) error {
 		return fmt.Errorf("invalid agent definitions: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+func ValidateCandidateAgent(current *Definitions, candidate AgentDef) error {
+	if err := candidate.ValidateName(); err != nil {
+		return err
+	}
+	if err := candidate.ValidateSize(); err != nil {
+		return err
+	}
+	if current == nil {
+		return errors.New("current agent definitions must not be nil")
+	}
+	if candidate.AgentClass != "LlmAgent" && candidate.AgentClass != "AcpAgent" {
+		return fmt.Errorf("agent %q: agent_class must be LlmAgent or AcpAgent", candidate.Name)
+	}
+	if candidate.Role != "" {
+		return fmt.Errorf("agent %q: role must be empty", candidate.Name)
+	}
+	if eligibilityErrs := ValidateAgentEligibility(candidate, current.Providers); len(eligibilityErrs) > 0 {
+		return fmt.Errorf("%s", eligibilityErrs[0])
+	}
+	if _, exists := current.Agents[candidate.Name]; exists {
+		return fmt.Errorf("agent name %q already exists", candidate.Name)
+	}
+	if candidate.AgentClass != "AcpAgent" {
+		providerName, profileName, ok := splitModelReference(candidate.Model)
+		if !ok {
+			return fmt.Errorf("agent %q: model must be provider/profile format", candidate.Name)
+		}
+		provider, exists := current.Providers[providerName]
+		if !exists {
+			return fmt.Errorf("agent %q: unknown provider %q", candidate.Name, providerName)
+		}
+		if _, exists := provider.Profiles[profileName]; !exists {
+			return fmt.Errorf("agent %q: unknown profile %q in provider %q", candidate.Name, profileName, providerName)
+		}
+	}
+
+	snapshot := &Definitions{
+		Providers: make(map[string]Provider, len(current.Providers)),
+		Agents:    make(map[string]AgentDef, len(current.Agents)+1),
+	}
+	for name, provider := range current.Providers {
+		snapshot.Providers[name] = provider
+	}
+	for name, agent := range current.Agents {
+		snapshot.Agents[name] = agent
+	}
+	snapshot.Agents[candidate.Name] = candidate
+	return ValidateDefinitions(snapshot)
+}
+
+func ValidateAgentEligibility(agent AgentDef, providers map[string]Provider) []string {
+	prefix := fmt.Sprintf("agent tool %q", agent.Name)
+	var errs []string
+	if strings.TrimSpace(agent.Description) == "" {
+		errs = append(errs, fmt.Sprintf("%s: description must not be empty", prefix))
+	}
+	if agent.DurableSession {
+		errs = append(errs, fmt.Sprintf("%s: durable_session and role are not supported", prefix))
+	}
+	if len(agent.AgentTools) > 0 {
+		errs = append(errs, fmt.Sprintf("%s: nested agent_tools are not supported", prefix))
+	}
+	if agent.AgentClass == "AcpAgent" && agent.Confirmation != "required" {
+		errs = append(errs, fmt.Sprintf("%s: confirmation must be required", prefix))
+	}
+
+	if provider, ok := providerForAgent(agent, providers); ok {
+		switch provider.Type {
+		case ProviderTypeAgentCLI:
+			if agent.ToolScope != "" {
+				errs = append(errs, fmt.Sprintf("%s: tool_scope is not supported for %s agent tools", prefix, ProviderTypeAgentCLI))
+			}
+		case ProviderTypeOpenAICompatible:
+			if agent.ToolScope != "invocation_scoped" {
+				errs = append(errs, fmt.Sprintf("%s: %s agent tools must declare tool_scope: invocation_scoped", prefix, ProviderTypeOpenAICompatible))
+			}
+		}
+	}
+	return errs
+}
+
+func eligibleAgentNames(defs *Definitions) []string {
+	if defs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(defs.Agents))
+	for name, agent := range defs.Agents {
+		if name == "root_agent" || agent.Role != "" {
+			continue
+		}
+		if agent.AgentClass != "LlmAgent" && agent.AgentClass != "AcpAgent" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// EligibleAgentNames returns the deterministically ordered agent definitions
+// that can be auto-discovered as root agent tools.
+func EligibleAgentNames(defs *Definitions) []string {
+	return eligibleAgentNames(defs)
 }
 
 func validateProvider(p Provider) []string {
@@ -605,32 +722,11 @@ func validateAgentTools(defs *Definitions) []string {
 				errs = append(errs, fmt.Sprintf("%s: cannot reference itself as an agent tool", prefix))
 				continue
 			}
-			if strings.TrimSpace(target.Description) == "" {
-				errs = append(errs, fmt.Sprintf("agent tool %q: description must not be empty", name))
-			}
-			if len(target.AgentTools) > 0 {
-				errs = append(errs, fmt.Sprintf("agent tool %q: nested agent_tools are not supported", name))
-			}
-			if target.DurableSession || target.Role != "" {
+			if target.Role != "" {
 				errs = append(errs, fmt.Sprintf("agent tool %q: durable_session and role are not supported", name))
 			}
-			if provider, ok := providerForAgent(target, defs.Providers); ok {
-				switch provider.Type {
-				case ProviderTypeAgentCLI:
-					if target.ToolScope != "" {
-						errs = append(errs, fmt.Sprintf("agent tool %q: tool_scope is not supported for %s agent tools", name, ProviderTypeAgentCLI))
-					}
-				case ProviderTypeOpenAICompatible:
-					if target.ToolScope != "invocation_scoped" {
-						errs = append(errs, fmt.Sprintf("agent tool %q: %s agent tools must declare tool_scope: invocation_scoped", name, ProviderTypeOpenAICompatible))
-					}
-				case ProviderTypeACP:
-					if target.AgentClass != "AcpAgent" {
-						errs = append(errs, fmt.Sprintf("agent tool %q: ACP providers require agent_class: AcpAgent", name))
-					}
-				default:
-					errs = append(errs, fmt.Sprintf("agent tool %q: model must use an %s, %s, or %s provider", name, ProviderTypeAgentCLI, ProviderTypeOpenAICompatible, ProviderTypeACP))
-				}
+			if IsReservedAgentName(target.Name) {
+				errs = append(errs, ValidateAgentEligibility(target, defs.Providers)...)
 			}
 		}
 	}

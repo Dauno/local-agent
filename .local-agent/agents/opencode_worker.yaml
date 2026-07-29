@@ -8,4 +8,5 @@ instruction: |
   Complete only the delegated task.
   Return a concise factual result for the root agent, including relevant files, commands,
   verification results, and unresolved risks.
+  Don't delegate
 confirmation: required
