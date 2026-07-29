@@ -58,6 +58,7 @@ type Listener struct {
 	client             socketClient
 	router             Router
 	logger             port.Logger
+	allowedUserIDs     []string
 	interactiveHandler func(context.Context, domain.ConfirmationInteractiveAction) error
 	builderPresenter   *BuilderModalPresenter
 	builderHandler     *BuilderSubmissionHandler
@@ -80,6 +81,14 @@ func (l *Listener) SetInteractiveHandler(handler func(context.Context, domain.Co
 		return
 	}
 	l.interactiveHandler = handler
+}
+
+// WithAllowedUserIDs configures the users allowed to open the builder modal.
+func (l *Listener) WithAllowedUserIDs(ids []string) *Listener {
+	if l != nil {
+		l.allowedUserIDs = append([]string(nil), ids...)
+	}
+	return l
 }
 
 // WithBuilderPresenter configures the modal opened by the builder action.
@@ -242,6 +251,20 @@ func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event
 				}
 				return
 			}
+			if callback.User.ID != action.Value {
+				l.logger.Warn("builder modal action rejected because the clicking user does not match the launcher actor", "actor", action.Value, "user", callback.User.ID)
+				if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
+					l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
+				}
+				return
+			}
+			if !l.isAllowedBuilderUser(callback.User.ID) {
+				l.logger.Warn("builder modal action rejected because the user is not an allowed administrator", "user", callback.User.ID)
+				if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
+					l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
+				}
+				return
+			}
 			if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
 				l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
 				if ctx.Err() != nil {
@@ -291,6 +314,18 @@ func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event
 			l.logger.Warn("interactive handler returned error", "error", err)
 		}
 	}()
+}
+
+func (l *Listener) isAllowedBuilderUser(userID string) bool {
+	if len(l.allowedUserIDs) == 0 {
+		return true
+	}
+	for _, allowed := range l.allowedUserIDs {
+		if allowed == userID {
+			return true
+		}
+	}
+	return false
 }
 
 func (l *Listener) ackInteractive(ctx context.Context, request socketmode.Request, payload any) error {

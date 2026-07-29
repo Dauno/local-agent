@@ -29,15 +29,16 @@ var _ port.AgentToolFactory = (*Factory)(nil)
 // Factory implements port.AgentToolFactory by producing typed ADK function
 // tools for the invoking actor and conversation.
 type Factory struct {
-	store          port.ConversationStore
-	sandbox        *sandboxusecase.Service
-	canvas         *canvasusecase.Service
-	exports        *generatedfileusecase.Service
-	agentBuilder   port.AgentBuilderService
-	currentDefs    *agentdef.Definitions
-	agentWriter    port.AgentDefinitionWriter
-	draftStore     port.AgentDraftStore
-	allowedUserIDs []string
+	store           port.ConversationStore
+	sandbox         *sandboxusecase.Service
+	canvas          *canvasusecase.Service
+	exports         *generatedfileusecase.Service
+	agentBuilder    port.AgentBuilderService
+	builderLauncher port.BuilderLauncherPublisher
+	currentDefs     *agentdef.Definitions
+	agentWriter     port.AgentDefinitionWriter
+	draftStore      port.AgentDraftStore
+	allowedUserIDs  []string
 }
 
 // New creates a tool factory. Sandbox, canvas, and export services may be nil — when
@@ -52,6 +53,12 @@ func New(store port.ConversationStore, sb *sandboxusecase.Service, cv *canvasuse
 // WithAgentBuilder configures the service used to preview agent definitions.
 func (f *Factory) WithAgentBuilder(svc port.AgentBuilderService) *Factory {
 	f.agentBuilder = svc
+	return f
+}
+
+// WithBuilderLauncher configures the publisher used to open the agent builder modal.
+func (f *Factory) WithBuilderLauncher(p port.BuilderLauncherPublisher) *Factory {
+	f.builderLauncher = p
 	return f
 }
 
@@ -99,6 +106,13 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 			return nil, fmt.Errorf("build preview_agent_def tool: %w", err)
 		}
 		tools = append(tools, preview)
+	}
+	if f.builderLauncher != nil {
+		launcher, err := f.publishBuilderLauncherTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build publish_builder_launcher tool: %w", err)
+		}
+		tools = append(tools, launcher)
 	}
 	if f.draftStore != nil && f.agentWriter != nil {
 		install, err := f.installAgentDefTool(actor, key)
@@ -226,6 +240,30 @@ func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) 
 				Model:   result.AgentDef.Model,
 				Class:   result.AgentDef.AgentClass,
 			}, nil
+		},
+	)
+}
+
+func (f *Factory) publishBuilderLauncherTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	return functiontool.New(
+		functiontool.Config{
+			Name:        "publish_builder_launcher",
+			Description: "Publica un mensaje con un botón para abrir el formulario de creación de agentes.",
+		},
+		func(ctx agent.Context, _ struct{}) (map[string]string, error) {
+			if f.builderLauncher == nil {
+				return nil, fmt.Errorf("builder launcher not available")
+			}
+			idempotencyInput := fmt.Sprintf("%s:%s:%d", actor, key, time.Now().UTC().UnixNano())
+			idempotencyKey := fmt.Sprintf("%x", sha256.Sum256([]byte(idempotencyInput)))
+			if err := f.builderLauncher.PublishBuilderLauncher(ctx, port.BuilderLauncherRequest{
+				Actor:           actor,
+				ConversationKey: key,
+				IdempotencyKey:  idempotencyKey,
+			}); err != nil {
+				return nil, fmt.Errorf("publish builder launcher: %w", err)
+			}
+			return map[string]string{"status": "ok", "message": "El formulario para crear un agente se ha abierto correctamente."}, nil
 		},
 	)
 }
