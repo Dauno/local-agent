@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -138,6 +139,33 @@ type selectedModel struct {
 	resolved *agentdef.ResolvedModel
 }
 
+func selectedModelAlreadyIncluded(selected []selectedModel, agent string) bool {
+	for _, model := range selected {
+		if model.agent == agent {
+			return true
+		}
+	}
+	return false
+}
+
+func eligibleAgentNames(defs *agentdef.Definitions) []string {
+	if defs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(defs.Agents))
+	for name, agent := range defs.Agents {
+		if name == "root_agent" || agent.Role != "" {
+			continue
+		}
+		if agent.AgentClass != "LlmAgent" && agent.AgentClass != "AcpAgent" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 func New(deps Dependencies) (*Service, error) {
 	if strings.TrimSpace(deps.ConfigPath) == "" {
 		return nil, errors.New("doctor config path is required")
@@ -223,6 +251,39 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 					selectedModels = append(selectedModels, selectedModel{agent: agentToolName, resolved: agentToolResolved})
 				}
 				if defsErr == nil {
+					// Tambien revisar agentes auto-descubiertos.
+					for _, name := range eligibleAgentNames(defs) {
+						if agentdef.IsReservedAgentName(name) {
+							continue
+						}
+						// Skip if already checked via rootDef.AgentTools.
+						alreadyChecked := false
+						for _, toolName := range rootDef.AgentTools {
+							if toolName == name {
+								alreadyChecked = true
+								break
+							}
+						}
+						if alreadyChecked {
+							continue
+						}
+						agentTool, exists := defs.Agents[name]
+						if !exists {
+							continue
+						}
+						modelRef := agentTool.Model
+						if agentTool.AgentClass == "AcpAgent" {
+							modelRef = agentTool.Runtime
+						}
+						agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
+						if resolveErr != nil {
+							defsErr = fmt.Errorf("resolve auto-discovered agent %q model: %w", name, resolveErr)
+							break
+						}
+						selectedModels = append(selectedModels, selectedModel{agent: name, resolved: agentToolResolved})
+					}
+				}
+				if defsErr == nil {
 					blueprints := make([]*agentdef.WorkflowBlueprint, 0, len(rootDef.WorkflowTools))
 					for _, workflowID := range rootDef.WorkflowTools {
 						bp, loadErr := defs.LoadWorkflow(paths.StateDir, workflowID)
@@ -265,7 +326,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 						defsErr = errors.New("agent definition memory_curator is required when memory is enabled")
 					} else if curatorResolved, resolveErr := defs.ResolveModel(curator.Model); resolveErr != nil {
 						defsErr = fmt.Errorf("resolve memory_curator model: %w", resolveErr)
-					} else {
+					} else if !selectedModelAlreadyIncluded(selectedModels, "memory_curator") {
 						selectedModels = append(selectedModels, selectedModel{agent: "memory_curator", resolved: curatorResolved})
 					}
 				}
@@ -278,7 +339,9 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 						case attachmentResolved.IsAgentCLI():
 							defsErr = errors.New("attachment_analyzer cannot use an agent_cli provider because it requires the ADK load_artifacts tool")
 						default:
-							selectedModels = append(selectedModels, selectedModel{agent: "attachment_analyzer", resolved: attachmentResolved})
+							if !selectedModelAlreadyIncluded(selectedModels, "attachment_analyzer") {
+								selectedModels = append(selectedModels, selectedModel{agent: "attachment_analyzer", resolved: attachmentResolved})
+							}
 						}
 					}
 				}

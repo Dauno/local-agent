@@ -5,7 +5,7 @@ Feature para crear definiciones de agentes (AgentDef YAML) desde Slack mediante
 lenguaje natural o formulario modal, aprovechando el loader existente en agentdef.
 
 ## 2. Contexto y Justificación
-- local-agent ya carga agentes desde .local-agent/agents/*.yaml en caliente
+- local-agent ya carga agentes desde .local-agent/agents/*.yaml durante startup
 - El paquete agentdef tiene tipos, validación y resolución completos
 - Permitir crear agentes desde Slack empodera a los usuarios sin editar YAML manual
 
@@ -20,20 +20,22 @@ lenguaje natural o formulario modal, aprovechando el loader existente en agentde
 
 ### RF2: install_agent_def (tool con confirmación)
 - Recibe name + definition_hash del preview
-- Revalida TOCTOU
+- Revalida TOCTOU, nombre y hash
 - Usa flujo existente de PendingConfirmation → Approve/Reject
-- Escribe atómicamente a .local-agent/agents/<name>.yaml
+- Escribe únicamente el YAML a .local-agent/agents/<name>.yaml
 - Create-no-replace, fsync, anti-symlink
-- Informa que se activa tras próximo reinicio
+- No modifica root_agent ni ningún manifest
+- La activación ocurre en el próximo reinicio, cuando agentdef.Load() descubre el YAML nuevo
 
 ### RF3: Draft Store
 - Tabla agent_drafts en SQLite
-- Campos: draft_id, team_id, actor_id, conversation_key, name, description, instruction, model, tools, definition_hash, catalog_revision, status, created_at, expires_at
+- Campos: draft_id, team_id, actor_id, conversation_key, name, description, instruction, model, definition_hash, catalog_revision, status, created_at, expires_at
 - Estados: draft → previewed → install_requested → installed|cancelled|expired|failed
+- v1 usa una allowlist fija de tools read-only: list_messages, list_repos, list_directory, read_file, list_worktrees
 
 ### RF4: Modal Slack (1 vista)
 - Botón "Crear agente" como entry point
-- Campos: Nombre, Descripción, Instrucción, Modelo (dropdown), Tools (multi-select)
+- Campos: Nombre, Descripción, Instrucción, Modelo (dropdown)
 - view_submission → persiste draft → cierra modal → publica preview en conversación
 - Botón "Solicitar instalación" en el preview
 - Sin preview inline, sin instalación directa desde modal
@@ -51,6 +53,8 @@ lenguaje natural o formulario modal, aprovechando el loader existente en agentde
 - Sin hot activation (se activa tras reinicio)
 - Sin preview inline en modal
 - Sin selectores externos dinámicos
+- Colisiones de nombres con tools existentes (list_messages, create_canvas, etc.) se rechazan en preview/startup
+- Orden determinista: ordenar los agentes por nombre
 
 ## 5. Arquitectura
 
@@ -79,10 +83,11 @@ Usuario describe agente
   → preview_agent_def compila, valida, retorna YAML + SHA-256
   → usuario ve preview y decide
   → usuario pide instalar
-  → root_agent llama install_agent_def (name + hash)
+  → root_agent llama install_agent_def (name + definition_hash)
   → PendingConfirmation → botones Approve/Reject
-  → Approve → AgentWriter escribe YAML
-  → Se informa que estará activo tras reinicio
+  → Approve → install_agent_def revalida y escribe únicamente YAML con create-no-replace + fsync
+  → No modifica root_agent ni ningún manifest
+  → agentdef.Load() descubre YAML durante el próximo reinicio y activa agente
 ```
 
 ### 5.4 Flujo modal
@@ -93,18 +98,27 @@ Usuario hace clic "Crear agente"
   → view_submission → valida → persiste draft → ACK (cierra modal)
   → Asíncrono: compila, valida, publica preview en conversación
   → Preview incluye botón "Solicitar instalación"
-  → Usuario hace clic → install_agent_def (mismo flujo que texto)
+  → Usuario hace clic → install_agent_def recibe name + definition_hash (mismo flujo que texto)
+  → Approve → escribe únicamente YAML; activación implícita durante el próximo reinicio mediante agentdef.Load()
 ```
+
+### 5.5 Auto-discovery durante startup
+Durante startup, `prepareRootAgentTools()` itera todo `defs.Agents`, excluye `root_agent`, conserva solo definiciones con `Role != ""` y solo tipos `LlmAgent` o `AcpAgent`. Los YAML nuevos quedan disponibles sin modificar `root_agent` ni un manifest.
 
 ## 6. Seguridad
 - Allowlist administrativa específica para crear agentes
 - Rechazar nombres reservados (root_agent, semillas) y colisiones
-- Límites: description 500 chars, instruction 10000 chars
+- Límites: description 500 chars, instruction 3.000 chars
 - Path derivado del nombre validado (nunca del usuario como texto)
 - create-no-replace, fsync, anti-symlink
 - private_metadata solo para draft_id opaco
 - Revalidar autorización en cada paso
 - Rate limit y cuota máxima
+
+### 6.1 Allowlist read-only para children
+- Los agents children solo reciben la allowlist positiva fija de tools read-only: list_messages, list_repos, list_directory, read_file, list_worktrees
+- Tools mutables como install_agent_def, create_canvas y export_* no deben pasar a agents children
+- La selección usa allowlist positiva, no exclusión puntual
 
 ## 7. Plan de Implementación
 
@@ -124,6 +138,8 @@ Usuario hace clic "Crear agente"
 - AgentWriter (adapter/filesystem/agentwriter.go)
 - installAgentDefTool con RequireConfirmationProvider
 - Integración con flujo de confirmación existente
+- install_agent_def solo escribe el YAML con create-no-replace + fsync; no modifica root_agent ni manifest
+- La activación queda implícita para el próximo reinicio, cuando agentdef.Load() descubre el nuevo YAML
 
 ### Fase 3: Draft Store
 - Migración SQLite (agent_drafts)
@@ -139,6 +155,7 @@ Usuario hace clic "Crear agente"
 ### Fase 5: Integración
 - Cablear en composition.go
 - Redactor de secretos en drafts
+- Actualizar doctor para inspeccionar agentes auto-descubiertos
 - Tests integrales
 - QA manual en Slack desktop y mobile
 
@@ -153,6 +170,15 @@ Usuario hace clic "Crear agente"
 - [ ] install_agent_def rechaza hash incorrecto
 - [ ] Modal se abre con trigger_id y campos correctos
 - [ ] view_submission persiste draft y publica preview
+- [ ] Submission inválido conserva el modal abierto con errores por campo
+- [ ] ACK de interacciones ocurre dentro del límite de 3 segundos
+- [ ] Actor, equipo y conversación incorrectos rechazan toda operación
 - [ ] Flujo de confirmación Approve/Reject funciona con install
 - [ ] Fallback por texto funciona idéntico al modal
 - [ ] Drafts expiran y no permiten instalación vencida
+- [ ] Draft vencido, cancelado o ya instalado falla determinísticamente
+- [ ] Dos instalaciones concurrentes del mismo nombre producen exactamente un ganador
+- [ ] Symlink, hardlink o archivo preexistente no puede reemplazarse
+- [ ] Instrucciones de 3.001 caracteres son rechazadas coherentemente
+- [ ] Migración desde schema v19 está probada (SchemaVersion 19)
+- [ ] Ningún contenido bruto de instrucciones aparece en logs o errores

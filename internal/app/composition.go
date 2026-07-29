@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
+	"github.com/Dauno/slack-local-agent/internal/adapter/filesystem"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fssandbox"
 	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
@@ -34,6 +37,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/secure"
+	"github.com/Dauno/slack-local-agent/internal/usecase/agentbuilder"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
@@ -394,11 +398,17 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 }
 
 type runtimeComposition struct {
-	service *botusecase.Service
+	service         *botusecase.Service
+	agentBuilderSvc port.AgentBuilderService
 }
 
 func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (*runtimeComposition, error) {
 	cfg, paths := setup.cfg, setup.paths
+	defs := setup.defs
+	var agentBuilderSvc port.AgentBuilderService
+	if defs != nil {
+		agentBuilderSvc = agentbuilder.New()
+	}
 	var toolFactory port.AgentToolFactory
 	var compositeFactory *compositeAgentToolFactory
 	var externalJobService *externalagentusecase.Service
@@ -440,7 +450,22 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 				return nil, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
 			}
 		}
-		toolFactory = toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService)
+		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService)
+		// Configurar Agent Builder (preview + install tools).
+		if agentBuilderSvc != nil && defs != nil {
+			agentsDir := filepath.Join(paths.StateDir, "agents")
+			if info, statErr := os.Stat(agentsDir); statErr == nil && info.IsDir() {
+				writer, writerErr := filesystem.NewAgentWriter(agentsDir)
+				if writerErr == nil {
+					factory = factory.
+						WithAgentBuilder(agentBuilderSvc).
+						WithAgentWriter(writer).
+						WithCurrentDefinitions(defs).
+						WithDraftStore(adaptersqlite.NewAgentDraftStore(infra.store))
+				}
+			}
+		}
+		toolFactory = factory
 		if len(models.preparedAgentTools) > 0 || len(models.preparedWorkflows) > 0 {
 			delegatedGlobalInstruction := ""
 			if models.rootDef != nil {
@@ -515,7 +540,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			return nil, err
 		}
 	}
-	return &runtimeComposition{service: service}, nil
+	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc}, nil
 }
 
 func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service) error {
@@ -562,6 +587,24 @@ func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup,
 	cfg := setup.cfg
 	socket := socketmode.New(infra.api, socketmode.OptionLog(infra.sdkLog))
 	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(infra.auth.UserID, cfg.Slack.StandardAgent.ThreadedDM), models.logger)
+	if composition != nil && composition.agentBuilderSvc != nil && setup.defs != nil && infra.publisher != nil && infra.store != nil {
+		var allowedProfiles []string
+		for name, provider := range setup.defs.Providers {
+			if provider.Type != agentdef.ProviderTypeOpenAICompatible {
+				continue
+			}
+			for profileName := range provider.Profiles {
+				allowedProfiles = append(allowedProfiles, name+"/"+profileName)
+			}
+		}
+		if len(allowedProfiles) > 0 {
+			sort.Strings(allowedProfiles)
+			draftStore := adaptersqlite.NewAgentDraftStore(infra.store)
+			presenter := slackadapter.NewBuilderModalPresenter(allowedProfiles)
+			handler := slackadapter.NewBuilderSubmissionHandler(draftStore, composition.agentBuilderSvc, setup.defs, infra.publisher)
+			listener = listener.WithBuilderPresenter(presenter).WithBuilderHandler(handler)
+		}
+	}
 	modelName := cfg.Model.Name
 	if models.rootDef != nil {
 		resolved, _ := setup.defs.ResolveModel(models.rootDef.Model)

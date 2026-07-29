@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -73,6 +74,33 @@ type acpAgentResult struct {
 	Result string `json:"result"`
 }
 
+func eligibleAgentNames(defs *agentdef.Definitions) []string {
+	if defs == nil {
+		return nil
+	}
+	names := make([]string, 0, len(defs.Agents))
+	for name, agent := range defs.Agents {
+		if name == "root_agent" || agent.Role != "" {
+			continue
+		}
+		if agent.AgentClass != "LlmAgent" && agent.AgentClass != "AcpAgent" {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func isReadOnlyChildTool(name string) bool {
+	switch name {
+	case "list_messages", "list_repos", "list_directory", "read_file", "list_worktrees":
+		return true
+	default:
+		return false
+	}
+}
+
 // prepareRootAgentTools resolves, constructs, and validates every configured
 // agent-tool child model at process start, before Slack Socket Mode opens.
 func prepareRootAgentTools(
@@ -87,12 +115,16 @@ func prepareRootAgentTools(
 	describedCLIProviders map[string]bool,
 	acpRuntimeFactory func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error),
 ) ([]preparedAgentTool, error) {
-	if defs == nil || len(root.AgentTools) == 0 {
+	if defs == nil {
 		return nil, nil
 	}
 
-	prepared := make([]preparedAgentTool, 0, len(root.AgentTools))
-	for _, name := range root.AgentTools {
+	names := root.AgentTools
+	if len(names) == 0 {
+		names = eligibleAgentNames(defs)
+	}
+	prepared := make([]preparedAgentTool, 0, len(names))
+	for _, name := range names {
 		definition, exists := defs.Agents[name]
 		if !exists {
 			return nil, fmt.Errorf("agent tool %q is not defined", name)
@@ -211,9 +243,8 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 		if !ok {
 			return nil, fmt.Errorf("invocation tool %d is not an ADK tool: %T", index, raw)
 		}
-		// Child agents and workflow steps receive read-only invocation tools only.
-		// create_canvas remains available to the root in baseRaw below.
-		if adkTool.Name() != "create_canvas" {
+		// Child agents and workflow steps receive only the fixed read-only allowlist.
+		if isReadOnlyChildTool(adkTool.Name()) {
 			scoped = append(scoped, adkTool)
 			toolIndex[adkTool.Name()] = adkTool
 		}

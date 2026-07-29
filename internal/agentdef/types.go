@@ -5,6 +5,12 @@
 // standard library and gopkg.in/yaml.v3.
 package agentdef
 
+import (
+	"fmt"
+	"regexp"
+	"unicode/utf8"
+)
+
 // Provider types.
 const (
 	ProviderTypeOpenAICompatible = "openai_compatible"
@@ -17,6 +23,53 @@ const (
 	ExecutionModeDurableJob = "durable_job"
 	MaxACPTimeoutSeconds    = 24 * 60 * 60
 )
+
+const (
+	MaxAgentNameLength   = 64
+	MinAgentNameLength   = 3
+	MaxDescriptionLength = 500
+	MaxInstructionLength = 3000
+	AgentNamePattern     = `^[a-z][a-z0-9_-]{2,63}$`
+)
+
+var validAgentNamePattern = regexp.MustCompile(AgentNamePattern)
+
+func IsReservedAgentName(name string) bool {
+	switch name {
+	case "root_agent", "user", "explore", "opencode_worker", "attachment_analyzer", "memory_curator":
+		return true
+	default:
+		return false
+	}
+}
+
+func IsDirectToolName(name string) bool {
+	switch name {
+	case "list_repos", "list_directory", "read_file", "list_worktrees", "create_worktree", "remove_worktree", "list_messages", "create_canvas", "export_text", "export_markdown", "export_csv", "export_json", "preview_agent_def", "install_agent_def", "manage_opencode":
+		return true
+	default:
+		return false
+	}
+}
+
+func ValidateAgentName(name string) error {
+	if name == "" {
+		return fmt.Errorf("agent name must not be empty")
+	}
+	if len(name) < MinAgentNameLength || len(name) > MaxAgentNameLength {
+		return fmt.Errorf("agent name length must be between %d and %d characters", MinAgentNameLength, MaxAgentNameLength)
+	}
+	if !validAgentNamePattern.MatchString(name) {
+		return fmt.Errorf("agent name must match %s", AgentNamePattern)
+	}
+	if IsReservedAgentName(name) {
+		return fmt.Errorf("agent name %q is reserved", name)
+	}
+	if IsDirectToolName(name) {
+		return fmt.Errorf("agent name %q conflicts with a direct tool", name)
+	}
+	return nil
+}
 
 // Approval modes for agent_cli profiles.
 const (
@@ -94,6 +147,20 @@ type AgentDef struct {
 	// AcpAgent fields.
 	Runtime      string `yaml:"runtime,omitempty"`
 	Confirmation string `yaml:"confirmation,omitempty"`
+}
+
+func (a AgentDef) ValidateName() error {
+	return ValidateAgentName(a.Name)
+}
+
+func (a AgentDef) ValidateSize() error {
+	if utf8.RuneCountInString(a.Description) > MaxDescriptionLength {
+		return fmt.Errorf("agent description exceeds %d characters", MaxDescriptionLength)
+	}
+	if utf8.RuneCountInString(a.Instruction) > MaxInstructionLength {
+		return fmt.Errorf("agent instruction exceeds %d characters", MaxInstructionLength)
+	}
+	return nil
 }
 
 func (a AgentDef) EffectiveRootGlobalInstruction() string {
