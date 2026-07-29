@@ -54,11 +54,7 @@ func (m *memoryCuratorLLM) GenerateText(ctx context.Context, prompt string) (str
 		}
 	}
 	if m.logger != nil {
-		loggedResponse := response
-		if m.sanitize != nil {
-			loggedResponse = m.sanitize(loggedResponse)
-		}
-		m.logger.Debug("memory curator model response", "finish_reason", finishReason, "response_chars", len([]rune(response)), "response", loggedResponse)
+		m.logger.Debug("memory curator model response", "finish_reason", finishReason, "response_chars", len([]rune(response)))
 	}
 	if finishReason != "" && finishReason != genai.FinishReasonStop {
 		return "", fmt.Errorf("%w: finish_reason=%s response_chars=%d", errCuratorResponseIncomplete, finishReason, len([]rune(response)))

@@ -1,6 +1,8 @@
 // Package config owns the non-sensitive, typed project configuration.
 package config
 
+import "github.com/Dauno/slack-local-agent/internal/domain"
+
 const (
 	DefaultProjectStateDir = ".local-agent"
 	DefaultDatabaseFile    = ".local-agent/local-agent.db"
@@ -15,6 +17,8 @@ const (
 	DefaultModelErrorMessage   = "No pude completar la respuesta por un error del modelo. Intenta de nuevo."
 	DefaultUnauthorizedMessage = "No tienes permiso para usar este bot. Pide acceso a quien administra local-agent."
 )
+
+const MaxSQLiteSummaryChars = domain.MaxPersistedSummaryChars
 
 // Config is the complete non-sensitive configuration stored in config.yaml.
 // Secrets are resolved separately through Model.APIKeyEnv and Slack's fixed
@@ -66,9 +70,18 @@ type StateConfig struct {
 }
 
 type ContextConfig struct {
-	MaxMessages                   int `yaml:"max_messages"`
-	MaxChars                      int `yaml:"max_chars"`
-	RetainMessagesPerConversation int `yaml:"retain_messages_per_conversation"`
+	MaxMessages                   int                  `yaml:"max_messages"`
+	MaxChars                      int                  `yaml:"max_chars"`
+	RetainMessagesPerConversation int                  `yaml:"retain_messages_per_conversation"`
+	ADKCompaction                 *ADKCompactionConfig `yaml:"adk_compaction"`
+}
+
+type ADKCompactionConfig struct {
+	Enabled         bool `yaml:"enabled"`
+	MaxHistoryChars int  `yaml:"max_history_chars"`
+	RecentTurns     int  `yaml:"recent_turns"`
+	SummaryEnabled  bool `yaml:"summary_enabled"`
+	SummaryMaxChars int  `yaml:"summary_max_chars"`
 }
 
 type RuntimeConfig struct {
@@ -178,6 +191,10 @@ func Default() Config {
 			MaxMessages:                   30,
 			MaxChars:                      20_000,
 			RetainMessagesPerConversation: 100,
+			ADKCompaction: &ADKCompactionConfig{
+				Enabled: true, MaxHistoryChars: 120_000, RecentTurns: 8,
+				SummaryEnabled: true, SummaryMaxChars: 8_000,
+			},
 		},
 		Runtime: RuntimeConfig{
 			LogLevel:                "info",

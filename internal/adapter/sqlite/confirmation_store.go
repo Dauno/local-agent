@@ -238,6 +238,53 @@ func (s *ConfirmationStore) ExpireDeliveries(ctx context.Context, now time.Time)
 	return err
 }
 
+// ExpireDelivery performs the one-time state transition used to close the
+// corresponding ADK confirmation protocol after its Slack prompt expires.
+func (s *ConfirmationStore) ExpireDelivery(ctx context.Context, wrapperCallID string, now time.Time) (bool, error) {
+	result, err := s.db.ExecContext(ctx,
+		`UPDATE tool_confirmation_deliveries SET status = ?, updated_at = ?
+		 WHERE wrapper_call_id = ? AND status IN (?, ?) AND expiry <= ?`,
+		string(port.ConfirmationExpired), now.Unix(), wrapperCallID,
+		string(port.ConfirmationPending), string(port.ConfirmationPublished), now.Unix())
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	return rows == 1, err
+}
+
+func (s *ConfirmationStore) ListExpired(ctx context.Context, now time.Time) ([]port.ConfirmationDelivery, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT wrapper_call_id FROM tool_confirmation_deliveries
+		WHERE status IN (?, ?) AND expiry <= ? ORDER BY expiry ASC`,
+		string(port.ConfirmationPending), string(port.ConfirmationPublished), now.Unix())
+	if err != nil {
+		return nil, err
+	}
+	var wrapperIDs []string
+	for rows.Next() {
+		var wrapperCallID string
+		if err := rows.Scan(&wrapperCallID); err != nil {
+			_ = rows.Close()
+			return nil, err
+		}
+		wrapperIDs = append(wrapperIDs, wrapperCallID)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	var deliveries []port.ConfirmationDelivery
+	for _, wrapperCallID := range wrapperIDs {
+		delivery, err := s.GetByWrapperCallID(ctx, wrapperCallID)
+		if err != nil {
+			return nil, err
+		}
+		if delivery != nil {
+			deliveries = append(deliveries, *delivery)
+		}
+	}
+	return deliveries, nil
+}
+
 func deliveryConversationKey(teamID, channelID, threadTS string) domain.ConversationKey {
 	if len(channelID) > 0 && channelID[0] == 'D' {
 		if threadTS == "" {

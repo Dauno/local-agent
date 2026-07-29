@@ -1030,8 +1030,11 @@ func TestHandleInteractiveConfirmationUpdatesExpiredPrompt(t *testing.T) {
 	if err := service.HandleConfirmationInteractive(t.Context(), action); err == nil {
 		t.Fatal("expired interaction returned nil")
 	}
-	if runtime.resumeCalls != 0 || len(richPublisher.updated) != 1 || richPublisher.updated[0].Status != port.ConfirmationExpired {
+	if runtime.resumeCalls != 1 || len(richPublisher.updated) != 1 || richPublisher.updated[0].Status != port.ConfirmationExpired {
 		t.Fatalf("resume calls = %d, updates = %#v", runtime.resumeCalls, richPublisher.updated)
+	}
+	if runtime.resumeDecision.Approved || runtime.resumeDecision.Payload["expired"] != true {
+		t.Fatalf("expired terminal decision = %#v", runtime.resumeDecision)
 	}
 }
 

@@ -159,6 +159,7 @@ func (s *Service) handleStreamingTurn(
 		outcome, err := s.finalizeTurn(ctx, invocation, key, terminal.Turn.Text, metadata)
 		if err == nil && outcome == OutcomeResponded {
 			s.updateProgress(ctx, progress, domain.ProgressCleared)
+			s.scheduleSummary(ctx, key)
 		} else {
 			s.updateProgress(ctx, progress, domain.ProgressFailed)
 		}
@@ -170,6 +171,7 @@ func (s *Service) handleStreamingTurn(
 		if err == nil && outcome == OutcomeResponded {
 			status = domain.IncrementalFinalized
 			s.updateProgress(ctx, progress, domain.ProgressCleared)
+			s.scheduleSummary(ctx, key)
 		} else {
 			s.updateProgress(ctx, progress, domain.ProgressFailed)
 		}
@@ -180,6 +182,7 @@ func (s *Service) handleStreamingTurn(
 	outcome, err := s.finalizeIncrementalTurn(ctx, invocation, key, metadata, &operation, finalText)
 	if err == nil && outcome == OutcomeResponded {
 		s.updateProgress(ctx, progress, domain.ProgressCleared)
+		s.scheduleSummary(ctx, key)
 	} else {
 		s.updateProgress(ctx, progress, domain.ProgressFailed)
 	}
