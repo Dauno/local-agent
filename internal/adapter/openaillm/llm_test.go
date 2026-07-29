@@ -225,6 +225,128 @@ func TestGenerateContentStreamsTrueTextDeltasAndAuthoritativeFinal(t *testing.T)
 	}
 }
 
+func TestGenerateContentIgnoresSSEKeepAliveAndRetryBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		flusher, ok := writer.(http.Flusher)
+		if !ok {
+			t.Fatal("test server does not support flushing")
+		}
+		fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
+		flusher.Flush()
+		fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"\"}]}\n\n")
+		fmt.Fprint(writer, ": one\n\n: two\n\nretry: 3000\n\n")
+		flusher.Flush()
+		fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" after keep-alive\"},\"finish_reason\":\"\"}]}\n\n")
+		fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	llm := mustTestLLM(t, server.URL)
+
+	var responses []*model.LLMResponse
+	for response, err := range llm.GenerateContent(context.Background(), textRequest(), true) {
+		if err != nil {
+			t.Fatalf("keep-alive stream error = %v", err)
+		}
+		responses = append(responses, response)
+	}
+	if len(responses) != 3 || responses[0].Content.Parts[0].Text != "Hello" || responses[1].Content.Parts[0].Text != " after keep-alive" || responses[2].Content.Parts[0].Text != "Hello after keep-alive" {
+		t.Fatalf("keep-alive responses = %#v", responses)
+	}
+}
+
+func TestGenerateContentAccumulatesToolCallChunksAfterEmptySSEBlocks(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
+		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": 0, "id": "call-1", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{"query":"sta`}}}}, "finish_reason": ""}}})
+		fmt.Fprint(writer, ": gap\n\n: gap2\n\n")
+		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"index": 0, "function": map[string]any{"arguments": `tus"}`}}}}, "finish_reason": ""}}})
+		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}})
+		fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	llm := mustTestLLM(t, server.URL)
+	request := textRequest()
+	request.Config = &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "lookup"}}}}}
+	response, err, yields := collect(llm.GenerateContent(context.Background(), request, true))
+	if err != nil || yields != 1 || response == nil || response.Content == nil || len(response.Content.Parts) != 1 {
+		t.Fatalf("tool stream = %#v, %v, yields=%d", response, err, yields)
+	}
+	call := response.Content.Parts[0].FunctionCall
+	if call == nil || call.ID != "call-1" || call.Name != "lookup" || call.Args["query"] != "status" {
+		t.Fatalf("accumulated tool call = %#v", call)
+	}
+}
+
+func TestGenerateContentMalformedNonEmptySSEFailsClosed(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, "data: {\"id\":\"truncated\"\n\n")
+	}))
+	t.Cleanup(server.Close)
+	llm := mustTestLLM(t, server.URL)
+	_, err, yields := collect(llm.GenerateContent(context.Background(), textRequest(), true))
+	if err == nil || yields != 1 {
+		t.Fatalf("malformed SSE = err %v, yields %d", err, yields)
+	}
+	var streamErr *SSEError
+	if !errors.As(err, &streamErr) || streamErr.Category != SSEErrorDecode || streamErr.FramePresent || streamErr.PayloadPresent {
+		t.Fatalf("malformed SSE classification = %#v, %v", streamErr, err)
+	}
+}
+
+func TestGenerateContentEmptySSEDataIsTerminalWithoutReplay(t *testing.T) {
+	var requests atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		requests.Add(1)
+		writer.Header().Set("Content-Type", "text/event-stream")
+		fmt.Fprint(writer, "data: \n\n")
+		fmt.Fprint(writer, "data: [DONE]\n\n")
+	}))
+	t.Cleanup(server.Close)
+	_, err, yields := collect(mustTestLLM(t, server.URL).GenerateContent(context.Background(), textRequest(), true))
+	if err == nil || yields != 1 || requests.Load() != 1 {
+		t.Fatalf("empty SSE data = err %v, yields %d, requests %d", err, yields, requests.Load())
+	}
+}
+
+func TestGenerateContentCancellationAndTransportErrorsAreTerminal(t *testing.T) {
+	t.Run("cancellation", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			<-request.Context().Done()
+		}))
+		t.Cleanup(server.Close)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err, yields := collect(mustTestLLM(t, server.URL).GenerateContent(ctx, textRequest(), true))
+		if err == nil || yields != 1 {
+			t.Fatalf("cancellation = err %v, yields %d", err, yields)
+		}
+	})
+
+	t.Run("transport EOF", func(t *testing.T) {
+		server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+			hijacker, ok := writer.(http.Hijacker)
+			if !ok {
+				t.Fatal("test server does not support hijacking")
+			}
+			connection, _, err := hijacker.Hijack()
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = fmt.Fprintf(connection, "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\ndata: {\"id\":\"partial\"\n\n")
+			_ = connection.Close()
+		}))
+		t.Cleanup(server.Close)
+		_, err, yields := collect(mustTestLLM(t, server.URL).GenerateContent(context.Background(), textRequest(), true))
+		if err == nil || yields != 1 {
+			t.Fatalf("transport EOF = err %v, yields %d", err, yields)
+		}
+	})
+}
+
 func TestRequestParamsPreservesTextAndImagePartOrder(t *testing.T) {
 	server := httptest.NewServer(http.NotFoundHandler())
 	t.Cleanup(server.Close)
@@ -509,6 +631,11 @@ func writeJSON(t *testing.T, writer http.ResponseWriter, status int, value any) 
 	if err := json.NewEncoder(writer).Encode(value); err != nil {
 		t.Errorf("write test response: %v", err)
 	}
+}
+
+func writeSSEChunk(writer http.ResponseWriter, value any) {
+	data, _ := json.Marshal(value)
+	_, _ = fmt.Fprintf(writer, "data: %s\n\n", data)
 }
 
 func assertJSONValue(t *testing.T, body map[string]any, key string, want any) {

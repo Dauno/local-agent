@@ -118,6 +118,41 @@ func TestOfflineDoctorCannotCallLiveChecks(t *testing.T) {
 	}
 }
 
+func TestDoctorValidatesADKCompactionModesAndLimits(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*config.Config)
+		pass   bool
+	}{
+		{name: "enabled defaults", mutate: func(*config.Config) {}, pass: true},
+		{name: "disabled durable root", mutate: func(cfg *config.Config) { cfg.Context.ADKCompaction.Enabled = false }, pass: false},
+		{name: "SQLite limit", mutate: func(cfg *config.Config) { cfg.Context.ADKCompaction.SummaryMaxChars = 9000 }, pass: false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			deps, _, _ := validDependencies()
+			deps.LoadConfig = func(string) (config.Config, error) {
+				cfg := config.Default()
+				test.mutate(&cfg)
+				return cfg, nil
+			}
+			service, err := New(deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			report := service.Run(t.Context(), false)
+			foundFailure := false
+			for _, result := range report.Results {
+				if result.Name == "ADK compaction" && result.Status == StatusFail {
+					foundFailure = true
+				}
+			}
+			if test.pass && foundFailure || !test.pass && !foundFailure {
+				t.Fatalf("ADK compaction result mismatch: %#v", report.Results)
+			}
+		})
+	}
+}
+
 func TestLiveDoctorCallsEveryLiveCheck(t *testing.T) {
 	deps, _, live := validDependencies()
 	service, _ := New(deps)

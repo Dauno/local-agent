@@ -145,6 +145,29 @@ Long responses are split into labeled parts without knowingly cutting tables,
 code fences, inline links, or inline code. Model-generated Slack mention and
 broadcast control sequences are neutralized outside code.
 
+### ADK context compaction
+
+Durable OpenAI-compatible roots require bounded model-facing history. The full
+ADK event ledger remains durable; only the request sent to the model is
+projected. The deterministic recent-turn window is always the hard bound, while
+the optional rolling summary is untrusted reference data and cannot authorize
+tools or confirmations.
+
+```yaml
+context:
+  adk_compaction:
+    enabled: true
+    max_history_chars: 120000
+    recent_turns: 8
+    summary_enabled: true
+    summary_max_chars: 8000
+```
+
+Values count Unicode code points. Structured function arguments and responses
+are charged by canonical JSON. `doctor` rejects invalid or disabled compaction
+before Socket Mode starts. If the active user/tool/confirmation suffix alone
+exceeds the budget, the model call fails closed with `active_context_too_large`.
+
 When upgrading from a binary that published Slack `mrkdwn`, stop the process,
 back up `.local-agent/` if its local history matters, then run:
 

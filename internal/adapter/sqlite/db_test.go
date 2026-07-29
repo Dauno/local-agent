@@ -83,6 +83,20 @@ func TestInitializeMigratesVersionZeroAndIsIdempotent(t *testing.T) {
 	}
 }
 
+func TestMigrationV21CreatesContextSummaryTables(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "summary.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	for _, table := range []string{"adk_context_summaries", "adk_context_summary_jobs"} {
+		var name string
+		if err := store.db.QueryRowContext(context.Background(), "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = ?", table).Scan(&name); err != nil || name != table {
+			t.Fatalf("migration table %q: %v", table, err)
+		}
+	}
+}
+
 func TestCreateUsesRestrictivePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "local-agent.db")
 	store, err := Create(context.Background(), path)
