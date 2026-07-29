@@ -45,7 +45,7 @@ func IsReservedAgentName(name string) bool {
 
 func IsDirectToolName(name string) bool {
 	switch name {
-	case "list_repos", "list_directory", "read_file", "list_worktrees", "create_worktree", "remove_worktree", "list_messages", "create_canvas", "export_text", "export_markdown", "export_csv", "export_json", "preview_agent_def", "install_agent_def", "manage_opencode":
+	case "list_repos", "list_directory", "read_file", "list_worktrees", "create_worktree", "remove_worktree", "list_messages", "create_canvas", "export_text", "export_markdown", "export_csv", "export_json", "preview_agent_def", "install_agent_def", "publish_builder_launcher", "manage_opencode":
 		return true
 	default:
 		return false

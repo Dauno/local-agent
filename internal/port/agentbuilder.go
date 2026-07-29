@@ -1,6 +1,8 @@
 package port
 
 import (
+	"context"
+
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
@@ -23,4 +25,16 @@ type AgentDefPreview struct {
 // not depend on the declarative definition package.
 type AgentBuilderService interface {
 	Preview(draft domain.AgentDraft, current any) (*PreviewResult, error)
+}
+
+// BuilderLauncherRequest contains the context for publishing a builder launcher.
+type BuilderLauncherRequest struct {
+	Actor           string
+	ConversationKey domain.ConversationKey
+	IdempotencyKey  string
+}
+
+// BuilderLauncherPublisher publishes a message with a button to open the builder modal.
+type BuilderLauncherPublisher interface {
+	PublishBuilderLauncher(ctx context.Context, req BuilderLauncherRequest) error
 }

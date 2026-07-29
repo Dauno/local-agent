@@ -450,7 +450,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 				return nil, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
 			}
 		}
-		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService)
+		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs)
 		// Configurar Agent Builder (preview + install tools).
 		if agentBuilderSvc != nil && defs != nil {
 			agentsDir := filepath.Join(paths.StateDir, "agents")
@@ -464,6 +464,11 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 						WithDraftStore(adaptersqlite.NewAgentDraftStore(infra.store))
 				}
 			}
+		}
+		if infra.publisher != nil && infra.api != nil {
+			factory = factory.WithBuilderLauncher(
+				slackadapter.NewBuilderLauncherPublisher(infra.api, infra.publisher, models.logger),
+			)
 		}
 		toolFactory = factory
 		if len(models.preparedAgentTools) > 0 || len(models.preparedWorkflows) > 0 {
@@ -586,7 +591,7 @@ func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup
 func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, composition *runtimeComposition) error {
 	cfg := setup.cfg
 	socket := socketmode.New(infra.api, socketmode.OptionLog(infra.sdkLog))
-	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(infra.auth.UserID, cfg.Slack.StandardAgent.ThreadedDM), models.logger)
+	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(infra.auth.UserID, cfg.Slack.StandardAgent.ThreadedDM), models.logger).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs)
 	if composition != nil && composition.agentBuilderSvc != nil && setup.defs != nil && infra.publisher != nil && infra.store != nil {
 		var allowedProfiles []string
 		for name, provider := range setup.defs.Providers {

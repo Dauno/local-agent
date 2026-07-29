@@ -74,7 +74,10 @@ func SeedRootAgent(modelRef string) AgentDef {
 			"You are Dev Agent.\n\n" +
 			"Answer concisely by default.\n" +
 			"When the current user message is a greeting, include " +
-			"slack.user.display_name in your greeting when it is available.\n",
+			"slack.user.display_name in your greeting when it is available.\n" +
+			"When the user asks to open the modal or form for creating agents, use the " +
+			"publish_builder_launcher tool. To create an agent through the conversation, use " +
+			"preview_agent_def and install_agent_def.\n",
 		Mode:            "chat",
 		IncludeContents: "default",
 		DurableSession:  true,
