@@ -17,6 +17,8 @@ import (
 
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
+const maxContextWindowTokens = 10_000_000
+
 func Load(dir string) (*Definitions, error) {
 	agentsDir := filepath.Join(dir, "agents")
 	providersDir := filepath.Join(dir, "providers")
@@ -607,6 +609,34 @@ func validateProfile(providerPrefix, providerType, name string, profile Profile)
 		if profile.GenerateContentConfig != nil && profile.GenerateContentConfig.MaxOutputTokens < 0 {
 			errs = append(errs, fmt.Sprintf("%s: generate_content_config.max_output_tokens must not be negative", prefix))
 		}
+		if profile.ContextWindowTokens != nil || profile.MaxOutputTokens != nil || profile.TokenCounter != nil {
+			if profile.ContextWindowTokens == nil || *profile.ContextWindowTokens <= 0 {
+				errs = append(errs, fmt.Sprintf("%s: context_window_tokens must be positive", prefix))
+			} else if *profile.ContextWindowTokens > maxContextWindowTokens {
+				errs = append(errs, fmt.Sprintf("%s: context_window_tokens exceeds safe maximum of %d", prefix, maxContextWindowTokens))
+			}
+			if profile.MaxOutputTokens != nil && *profile.MaxOutputTokens < 0 {
+				errs = append(errs, fmt.Sprintf("%s: max_output_tokens must not be negative", prefix))
+			}
+			if profile.MaxOutputTokens != nil && profile.ContextWindowTokens != nil && *profile.MaxOutputTokens > 0 && *profile.ContextWindowTokens > 0 && *profile.MaxOutputTokens >= *profile.ContextWindowTokens {
+				errs = append(errs, fmt.Sprintf("%s: max_output_tokens must be less than context_window_tokens", prefix))
+			}
+			if profile.TokenCounter != nil {
+				if profile.TokenCounter.Strategy == "" {
+					errs = append(errs, fmt.Sprintf("%s: token_counter.strategy must not be empty", prefix))
+				} else {
+					switch profile.TokenCounter.Strategy {
+					case "official", "endpoint", "estimator":
+						if strings.TrimSpace(profile.TokenCounter.ID) == "" {
+							errs = append(errs, fmt.Sprintf("%s: token_counter.id is required for strategy %q", prefix, profile.TokenCounter.Strategy))
+						}
+					case "byte_bound":
+					default:
+						errs = append(errs, fmt.Sprintf("%s: token_counter.strategy must be one of official, endpoint, estimator, or byte_bound", prefix))
+					}
+				}
+			}
+		}
 	}
 
 	return errs
@@ -900,4 +930,39 @@ func sensitiveHeader(name string) bool {
 	default:
 		return false
 	}
+}
+
+// ValidateProfileCapability validates the complete capability required to
+// compose an OpenAI-compatible model context guard.
+func ValidateProfileCapability(resolved *ResolvedModel) []string {
+	var errs []string
+	if resolved == nil {
+		return []string{"cannot validate profile capability for nil model"}
+	}
+	if resolved.Type() != ProviderTypeOpenAICompatible {
+		return nil
+	}
+	if resolved.ContextWindowTokens <= 0 {
+		errs = append(errs, fmt.Sprintf("openai_compatible model %q: context_window_tokens must be positive", resolved.Model))
+	} else if resolved.ContextWindowTokens > maxContextWindowTokens {
+		errs = append(errs, fmt.Sprintf("openai_compatible model %q: context_window_tokens exceeds safe maximum of %d", resolved.Model, maxContextWindowTokens))
+	}
+	if resolved.MaxOutputTokens < 0 {
+		errs = append(errs, fmt.Sprintf("openai_compatible model %q: max_output_tokens must not be negative", resolved.Model))
+	}
+	if resolved.MaxOutputTokens > 0 && resolved.ContextWindowTokens > 0 && resolved.MaxOutputTokens >= resolved.ContextWindowTokens {
+		errs = append(errs, fmt.Sprintf("openai_compatible model %q: max_output_tokens must be less than context_window_tokens", resolved.Model))
+	}
+	switch resolved.CounterStrategy {
+	case "":
+		errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.strategy is required for composition", resolved.Model))
+	case "official", "endpoint", "estimator":
+		if strings.TrimSpace(resolved.CounterID) == "" {
+			errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.id is required for strategy %q", resolved.Model, resolved.CounterStrategy))
+		}
+	case "byte_bound":
+	default:
+		errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.strategy must be one of official, endpoint, estimator, or byte_bound", resolved.Model))
+	}
+	return errs
 }

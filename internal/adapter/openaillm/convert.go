@@ -52,6 +52,9 @@ func (m *OpenAICompatibleLLM) requestParams(request *model.LLMRequest) (openai.C
 			return openai.ChatCompletionNewParams{}, err
 		}
 	}
+	if m.defaultMaxOutputTokens > 0 && (request.Config == nil || request.Config.MaxOutputTokens <= 0) {
+		params.MaxTokens = openai.Int(int64(m.defaultMaxOutputTokens))
+	}
 	if len(m.extraBody) > 0 {
 		params.SetExtraFields(m.extraBody)
 	}

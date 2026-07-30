@@ -147,6 +147,7 @@ func newSpikeLLM(t *testing.T, server *httptest.Server) *openaillm.OpenAICompati
 	if err != nil {
 		t.Fatal(err)
 	}
+	configureIntegrationGuard(t, llm)
 	return llm
 }
 

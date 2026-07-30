@@ -220,6 +220,10 @@ api_key_env: DECLARATIVE_MODEL_KEY
 profiles:
   default:
     model: test-model
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -250,6 +254,50 @@ instruction: test
 	if live.model != 1 || live.modelAPIKey != "declarative-secret" {
 		t.Fatalf("live model checks=%d api key=%q", live.model, live.modelAPIKey)
 	}
+}
+
+func TestDoctorRejectsMissingRootContextCapability(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	for _, directory := range []string{"agents", "providers"} {
+		if err := os.MkdirAll(filepath.Join(stateDir, directory), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "provider.yaml"), []byte(`
+name: test
+type: openai_compatible
+base_url: https://example.test
+api_key_env: DECLARATIVE_MODEL_KEY
+profiles:
+  default:
+    model: test-model
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(`
+agent_class: LlmAgent
+name: root_agent
+model: test/default
+global_instruction: policy
+instruction: test
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.Secrets = fakeSecrets{values: map[string]string{"DECLARATIVE_MODEL_KEY": "secret", SlackBotTokenKey: "xoxb-secret", SlackAppTokenKey: "xapp-secret"}}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), false)
+	for _, result := range report.Results {
+		if result.Name == "model context capability" && result.Status == StatusFail && strings.Contains(result.Detail, "context_window_tokens") {
+			return
+		}
+	}
+	t.Fatalf("missing context capability failure: %#v", report.Results)
 }
 
 func TestSecretPrefixFailuresAreActionableAndRedacted(t *testing.T) {
@@ -452,6 +500,10 @@ api_key_env: DEEPSEEK_API_KEY
 profiles:
   root:
     model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
 `,
 		filepath.Join(stateDir, "providers", "opencode.yaml"): `
 name: opencode
@@ -528,6 +580,10 @@ api_key_env: DEEPSEEK_API_KEY
 profiles:
   root:
     model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
 `,
 		filepath.Join(stateDir, "providers", "explorer.yaml"): `
 name: explorer
@@ -537,6 +593,10 @@ api_key_env: EXPLORER_API_KEY
 profiles:
   scout:
     model: explorer-scout
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
 `,
 		filepath.Join(stateDir, "agents", "root_agent.yaml"): `
 agent_class: LlmAgent

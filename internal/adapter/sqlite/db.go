@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 23
+const SchemaVersion = 25
 
 var (
 	ErrDatabaseNotFound       = errors.New("SQLite database not found")
@@ -46,6 +46,15 @@ func (e *StateResetNeededError) Unwrap() error { return ErrStateResetNeeded }
 
 type Store struct {
 	db *sql.DB
+}
+
+// DB exposes the shared connection only to application composition for
+// independently layered SQLite-backed adapters.
+func (s *Store) DB() *sql.DB {
+	if s == nil {
+		return nil
+	}
+	return s.db
 }
 
 // OpenExisting opens and migrates an existing database. SQLite's mode=rw is

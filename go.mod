@@ -7,6 +7,7 @@ require (
 	github.com/openai/openai-go/v3 v3.43.0
 	github.com/slack-go/slack v0.27.0
 	github.com/spf13/cobra v1.10.2
+	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
 	google.golang.org/adk/v2 v2.0.0
 	google.golang.org/genai v1.57.0
@@ -49,7 +50,6 @@ require (
 	golang.org/x/crypto v0.51.0 // indirect
 	golang.org/x/net v0.55.0 // indirect
 	golang.org/x/sync v0.20.0 // indirect
-	golang.org/x/sys v0.47.0 // indirect
 	golang.org/x/text v0.37.0 // indirect
 	google.golang.org/api v0.279.0 // indirect
 	google.golang.org/genproto/googleapis/rpc v0.0.0-20260511170946-3700d4141b60 // indirect

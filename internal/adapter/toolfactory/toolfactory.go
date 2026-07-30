@@ -7,6 +7,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/url"
 	"strings"
@@ -29,16 +30,40 @@ var _ port.AgentToolFactory = (*Factory)(nil)
 // Factory implements port.AgentToolFactory by producing typed ADK function
 // tools for the invoking actor and conversation.
 type Factory struct {
-	store           port.ConversationStore
-	sandbox         *sandboxusecase.Service
-	canvas          *canvasusecase.Service
-	exports         *generatedfileusecase.Service
-	agentBuilder    port.AgentBuilderService
-	builderLauncher port.BuilderLauncherPublisher
-	currentDefs     *agentdef.Definitions
-	agentWriter     port.AgentDefinitionWriter
-	draftStore      port.AgentDraftStore
-	allowedUserIDs  []string
+	store              port.ConversationStore
+	sandbox            *sandboxusecase.Service
+	canvas             *canvasusecase.Service
+	exports            *generatedfileusecase.Service
+	agentBuilder       port.AgentBuilderService
+	builderLauncher    port.BuilderLauncherPublisher
+	currentDefs        *agentdef.Definitions
+	agentWriter        port.AgentDefinitionWriter
+	draftStore         port.AgentDraftStore
+	allowedUserIDs     []string
+	recoverableResults port.RecoverableResultStore
+	codeReaders        map[string]port.CodeReader
+	syntaxEngine       port.SyntaxEngine
+	codeIntelligence   port.CodeIntelligence
+}
+
+func (f *Factory) WithCodeReaders(readers map[string]port.CodeReader) *Factory {
+	f.codeReaders = readers
+	return f
+}
+
+func (f *Factory) WithRecoverableResults(store port.RecoverableResultStore) *Factory {
+	f.recoverableResults = store
+	return f
+}
+
+func (f *Factory) WithSyntaxEngine(engine port.SyntaxEngine) *Factory {
+	f.syntaxEngine = engine
+	return f
+}
+
+func (f *Factory) WithCodeIntelligence(intelligence port.CodeIntelligence) *Factory {
+	f.codeIntelligence = intelligence
+	return f
 }
 
 // New creates a tool factory. Sandbox, canvas, and export services may be nil — when
@@ -99,6 +124,42 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, fmt.Errorf("build list_messages tool: %w", err)
 	}
 	tools = append(tools, ro)
+	if f.recoverableResults != nil {
+		readResult, err := f.readResultChunkTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_result_chunk tool: %w", err)
+		}
+		tools = append(tools, readResult)
+	}
+	if len(f.codeReaders) > 0 {
+		readRange, err := f.readFileRangeTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_file_range tool: %w", err)
+		}
+		tools = append(tools, readRange)
+	}
+	if f.syntaxEngine != nil {
+		codeSymbols, err := f.codeSymbolsTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build code_symbols tool: %w", err)
+		}
+		readSymbol, err := f.readSymbolTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_symbol tool: %w", err)
+		}
+		tools = append(tools, codeSymbols, readSymbol)
+	}
+	if f.codeIntelligence != nil {
+		definition, err := f.codeLocationTool(actor, key, "code_definition", false)
+		if err != nil {
+			return nil, fmt.Errorf("build code_definition tool: %w", err)
+		}
+		references, err := f.codeLocationTool(actor, key, "code_references", true)
+		if err != nil {
+			return nil, fmt.Errorf("build code_references tool: %w", err)
+		}
+		tools = append(tools, definition, references)
+	}
 
 	if f.agentBuilder != nil {
 		preview, err := f.previewAgentDefTool(actor, key)
@@ -165,6 +226,134 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 	}
 
 	return tools, nil
+}
+
+func (f *Factory) readFileRangeTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	type args struct {
+		Project        string `json:"project"`
+		Path           string `json:"path"`
+		StartLine      int    `json:"start_line"`
+		MaxLines       int    `json:"max_lines"`
+		ExpectedSHA256 string `json:"expected_sha256,omitempty"`
+	}
+	return functiontool.New(functiontool.Config{Name: "read_file_range", Description: "Reads a bounded line range from an immutable project-relative source snapshot. If next_offset_bytes is nonzero, continue the result_ref with read_result_chunk."},
+		func(ctx agent.Context, input args) (domain.SourceRange, error) {
+			reader := f.codeReaders[input.Project]
+			if reader == nil {
+				return domain.SourceRange{}, fmt.Errorf("project is unavailable")
+			}
+			return reader.ReadRange(ctx, domain.SourceRangeRequest{Project: input.Project, Path: input.Path, StartLine: input.StartLine, MaxLines: input.MaxLines, ExpectedSHA256: input.ExpectedSHA256, Actor: actor, ConversationKey: string(key)})
+		})
+}
+
+func (f *Factory) readResultChunkTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	type args struct {
+		ResultRef   string `json:"result_ref" jsonschema:"opaque recoverable result reference"`
+		OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"server-provided continuation offset"`
+		MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes requested"`
+	}
+	type result struct {
+		Content         string `json:"content"`
+		OffsetBytes     int64  `json:"offset_bytes"`
+		NextOffsetBytes int64  `json:"next_offset_bytes"`
+		EOF             bool   `json:"eof"`
+		SHA256          string `json:"sha256"`
+	}
+	return functiontool.New(functiontool.Config{Name: "read_result_chunk", Description: "Reads a bounded UTF-8 chunk from an owner-bound recoverable result."},
+		func(ctx agent.Context, input args) (result, error) {
+			chunk, err := f.recoverableResults.ReadChunk(ctx, domain.ResultChunkRequest{Ref: input.ResultRef, Actor: actor, ConversationKey: string(key), OffsetBytes: input.OffsetBytes, MaxBytes: input.MaxBytes})
+			if err != nil {
+				return result{}, err
+			}
+			return result{Content: chunk.Content, OffsetBytes: chunk.OffsetBytes, NextOffsetBytes: chunk.NextOffsetBytes, EOF: chunk.EOF, SHA256: chunk.SHA256}, nil
+		})
+}
+
+func (f *Factory) codeSymbolsTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	type args struct {
+		Project    string `json:"project"`
+		Path       string `json:"path"`
+		MaxResults int    `json:"max_results,omitempty"`
+	}
+	type result struct {
+		Symbols    []domain.CodeSymbol `json:"symbols"`
+		TotalCount int                 `json:"total_count"`
+		Truncated  bool                `json:"truncated"`
+		ResultRef  string              `json:"result_ref,omitempty"`
+	}
+	return functiontool.New(functiontool.Config{Name: "code_symbols", Description: "Returns bounded project-scoped symbols with syntax fallback."},
+		func(ctx agent.Context, input args) (result, error) {
+			maxResults := input.MaxResults
+			if maxResults <= 0 || maxResults > 200 {
+				maxResults = 200
+			}
+			if f.codeIntelligence != nil {
+				semantic, semanticErr := f.codeIntelligence.Symbols(ctx, domain.SymbolRequest{Project: input.Project, Path: input.Path,
+					MaxResults: maxResults, Actor: actor, ConversationKey: string(key)})
+				if semanticErr == nil {
+					return result{Symbols: semantic.Symbols, TotalCount: semantic.TotalCount, Truncated: semantic.Truncated, ResultRef: semantic.ResultRef}, nil
+				}
+			}
+			syntaxResult, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{Project: input.Project, Path: input.Path, Query: "outline",
+				MaxResults: maxResults, Actor: actor, ConversationKey: string(key)})
+			if err != nil {
+				return result{}, err
+			}
+			symbols := make([]domain.CodeSymbol, 0, len(syntaxResult.Captures))
+			for _, capture := range syntaxResult.Captures {
+				symbols = append(symbols, domain.CodeSymbol{Name: capture.Name, Kind: capture.Kind, Location: capture.Location})
+			}
+			return result{Symbols: symbols, TotalCount: syntaxResult.Total, Truncated: syntaxResult.Truncated, ResultRef: syntaxResult.ResultRef}, nil
+		})
+}
+
+func (f *Factory) readSymbolTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	type args struct {
+		Project string `json:"project"`
+		Path    string `json:"path"`
+		Name    string `json:"name"`
+	}
+	return functiontool.New(functiontool.Config{Name: "read_symbol", Description: "Reads one named Go declaration through the project-scoped ranged reader."},
+		func(ctx agent.Context, input args) (domain.SourceRange, error) {
+			reader := f.codeReaders[input.Project]
+			if reader == nil {
+				return domain.SourceRange{}, errors.New("project is unavailable")
+			}
+			result, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{Project: input.Project, Path: input.Path, Query: "outline",
+				MaxResults: 200, Actor: actor, ConversationKey: string(key)})
+			if err != nil {
+				return domain.SourceRange{}, err
+			}
+			for _, capture := range result.Captures {
+				if capture.Name != input.Name {
+					continue
+				}
+				lines := capture.Location.EndLine - capture.Location.StartLine + 1
+				return reader.ReadRange(ctx, domain.SourceRangeRequest{Project: input.Project, Path: input.Path,
+					StartLine: capture.Location.StartLine, MaxLines: lines, ExpectedSHA256: capture.Location.FileSHA256,
+					Actor: actor, ConversationKey: string(key)})
+			}
+			return domain.SourceRange{}, errors.New("symbol is unavailable")
+		})
+}
+
+func (f *Factory) codeLocationTool(actor string, key domain.ConversationKey, name string, references bool) (tool.Tool, error) {
+	type args struct {
+		Project    string `json:"project"`
+		Path       string `json:"path"`
+		Line       int    `json:"line"`
+		Column     int    `json:"column"`
+		MaxResults int    `json:"max_results,omitempty"`
+	}
+	return functiontool.New(functiontool.Config{Name: name, Description: "Returns bounded, project-scoped LSP code locations."},
+		func(ctx agent.Context, input args) (domain.LocationResult, error) {
+			request := domain.LocationRequest{Project: input.Project, Path: input.Path, Line: input.Line, Column: input.Column,
+				MaxResults: input.MaxResults, Actor: actor, ConversationKey: string(key)}
+			if references {
+				return f.codeIntelligence.References(ctx, request)
+			}
+			return f.codeIntelligence.Definition(ctx, request)
+		})
 }
 
 func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) (tool.Tool, error) {

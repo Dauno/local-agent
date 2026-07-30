@@ -25,6 +25,16 @@ func (d *Definitions) ResolveModel(modelRef string) (*ResolvedModel, error) {
 		Profile:  profile,
 		Model:    profile.Model,
 	}
+	if profile.ContextWindowTokens != nil {
+		resolved.ContextWindowTokens = *profile.ContextWindowTokens
+	}
+	if profile.MaxOutputTokens != nil {
+		resolved.MaxOutputTokens = *profile.MaxOutputTokens
+	}
+	if profile.TokenCounter != nil {
+		resolved.CounterStrategy = profile.TokenCounter.Strategy
+		resolved.CounterID = profile.TokenCounter.ID
+	}
 
 	switch provider.Type {
 	case ProviderTypeACP:

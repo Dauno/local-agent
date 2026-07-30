@@ -25,12 +25,18 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 		Headers:   copyStringMap(cfg.Headers),
 		Profiles: map[string]Profile{
 			"flash-reasoning": {
-				Model:           cfg.Name,
-				ReasoningEffort: cfg.ReasoningEffort,
-				ExtraBody:       extraBody,
+				Model:               cfg.Name,
+				ReasoningEffort:     cfg.ReasoningEffort,
+				ContextWindowTokens: intPtr(1_000_000),
+				MaxOutputTokens:     intPtr(32_000),
+				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
+				ExtraBody:           extraBody,
 			},
 			"flash-json": {
-				Model: cfg.Name,
+				Model:               cfg.Name,
+				ContextWindowTokens: intPtr(1_000_000),
+				MaxOutputTokens:     intPtr(1_200),
+				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
 				ExtraBody: map[string]any{
 					// DeepSeek V4 enables thinking by default; reserve this profile's output budget for curator JSON.
 					"thinking": map[string]any{
@@ -43,6 +49,18 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 				GenerateContentConfig: &GenerateContentConfig{
 					Temperature:     float64Ptr(0),
 					MaxOutputTokens: 1200,
+				},
+			},
+			"pro-reasoning": {
+				Model:               "deepseek-v4-pro",
+				ReasoningEffort:     "xhigh",
+				ContextWindowTokens: intPtr(1_000_000),
+				MaxOutputTokens:     intPtr(32_000),
+				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
+				ExtraBody: map[string]any{
+					"thinking": map[string]any{
+						"type": "enabled",
+					},
 				},
 			},
 		},
@@ -150,6 +168,10 @@ func copyStringMap(m map[string]string) map[string]string {
 }
 
 func float64Ptr(v float64) *float64 {
+	return &v
+}
+
+func intPtr(v int) *int {
 	return &v
 }
 

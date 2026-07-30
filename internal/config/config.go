@@ -24,18 +24,19 @@ const MaxSQLiteSummaryChars = domain.MaxPersistedSummaryChars
 // Secrets are resolved separately through Model.APIKeyEnv and Slack's fixed
 // environment variable names.
 type Config struct {
-	Agent    AgentConfig    `yaml:"agent"`
-	State    StateConfig    `yaml:"state"`
-	Context  ContextConfig  `yaml:"context"`
-	Runtime  RuntimeConfig  `yaml:"runtime"`
-	Model    ModelConfig    `yaml:"model"`
-	Slack    SlackConfig    `yaml:"slack"`
-	Memory   MemoryConfig   `yaml:"memory"`
-	Sandbox  SandboxConfig  `yaml:"sandbox"`
-	Canvases CanvasesConfig `yaml:"canvases"`
-	Exports  ExportsConfig  `yaml:"exports"`
-	OpenCode OpenCodeConfig `yaml:"opencode"`
-	ACP      ACPConfig      `yaml:"acp"`
+	Agent            AgentConfig             `yaml:"agent"`
+	State            StateConfig             `yaml:"state"`
+	Context          ContextConfig           `yaml:"context"`
+	Runtime          RuntimeConfig           `yaml:"runtime"`
+	Model            ModelConfig             `yaml:"model"`
+	Slack            SlackConfig             `yaml:"slack"`
+	Memory           MemoryConfig            `yaml:"memory"`
+	Sandbox          SandboxConfig           `yaml:"sandbox"`
+	Canvases         CanvasesConfig          `yaml:"canvases"`
+	Exports          ExportsConfig           `yaml:"exports"`
+	OpenCode         OpenCodeConfig          `yaml:"opencode"`
+	ACP              ACPConfig               `yaml:"acp"`
+	CodeIntelligence *CodeIntelligenceConfig `yaml:"code_intelligence"`
 
 	document *sourceDocument
 }
@@ -46,6 +47,27 @@ type OpenCodeConfig struct {
 
 type OpenCodeManagementConfig struct {
 	AllowedUserIDs []string `yaml:"allowed_user_ids"`
+}
+
+type CodeIntelligenceConfig struct {
+	Enabled               bool                      `yaml:"enabled"`
+	MaxProcesses          int                       `yaml:"max_processes"`
+	InitTimeoutSeconds    int                       `yaml:"initialization_timeout_seconds"`
+	RequestTimeoutSeconds int                       `yaml:"request_timeout_seconds"`
+	LSPServers            []LSPServerConfig         `yaml:"lsp_servers"`
+	LSPRoutes             map[string]LSPRouteConfig `yaml:"lsp_routes"`
+}
+
+type LSPServerConfig struct {
+	ID        string   `yaml:"id"`
+	Command   string   `yaml:"command"`
+	Args      []string `yaml:"args,omitempty"`
+	Languages []string `yaml:"languages"`
+}
+
+type LSPRouteConfig struct {
+	Priority []string `yaml:"priority"`
+	Fallback string   `yaml:"fallback,omitempty"`
 }
 
 type ACPConfig struct {
@@ -75,11 +97,31 @@ type StateConfig struct {
 	DB  string `yaml:"db"`
 }
 
+type ContextFeaturesConfig struct {
+	ModelBudgetEnabled        bool `yaml:"model_budget_enabled"`
+	RecoverableResultsEnabled bool `yaml:"recoverable_results_enabled"`
+	ContinuityCapsuleEnabled  bool `yaml:"continuity_capsule_enabled"`
+}
+
 type ContextConfig struct {
-	MaxMessages                   int                  `yaml:"max_messages"`
-	MaxChars                      int                  `yaml:"max_chars"`
-	RetainMessagesPerConversation int                  `yaml:"retain_messages_per_conversation"`
-	ADKCompaction                 *ADKCompactionConfig `yaml:"adk_compaction"`
+	MaxMessages                   int                       `yaml:"max_messages"`
+	MaxChars                      int                       `yaml:"max_chars"`
+	RetainMessagesPerConversation int                       `yaml:"retain_messages_per_conversation"`
+	ADKCompaction                 *ADKCompactionConfig      `yaml:"adk_compaction"`
+	ModelBudget                   *ModelBudgetConfig        `yaml:"model_budget"`
+	RecoverableResults            *RecoverableResultsConfig `yaml:"recoverable_results"`
+	ContextFeatures               *ContextFeaturesConfig    `yaml:"context_features"`
+}
+
+type ModelBudgetConfig struct {
+	MaxRequestPercent int `yaml:"max_request_percent"`
+}
+
+type RecoverableResultsConfig struct {
+	MaxResultBytes   int64 `yaml:"max_result_bytes"`
+	ChunkMaxBytes    int   `yaml:"chunk_max_bytes"`
+	RetentionDays    int   `yaml:"retention_days"`
+	CleanupBatchSize int   `yaml:"cleanup_batch_size"`
 }
 
 type ADKCompactionConfig struct {
@@ -197,10 +239,18 @@ func Default() Config {
 			MaxMessages:                   30,
 			MaxChars:                      20_000,
 			RetainMessagesPerConversation: 100,
+			ModelBudget:                   &ModelBudgetConfig{MaxRequestPercent: 60},
+			RecoverableResults: &RecoverableResultsConfig{
+				MaxResultBytes:   4 * 1024 * 1024,
+				ChunkMaxBytes:    16384,
+				RetentionDays:    7,
+				CleanupBatchSize: 100,
+			},
 			ADKCompaction: &ADKCompactionConfig{
 				Enabled: true, MaxHistoryChars: 120_000, RecentTurns: 8,
 				SummaryEnabled: true, SummaryMaxChars: 8_000,
 			},
+			ContextFeatures: &ContextFeaturesConfig{},
 		},
 		Runtime: RuntimeConfig{
 			LogLevel:                "info",
@@ -273,6 +323,9 @@ func Default() Config {
 			WorkerConcurrency:     1,
 			ArtifactRetentionDays: 30,
 			Delivery:              ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
+		},
+		CodeIntelligence: &CodeIntelligenceConfig{
+			Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10,
 		},
 	}
 }

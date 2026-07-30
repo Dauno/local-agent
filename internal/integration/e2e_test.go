@@ -372,6 +372,7 @@ func TestE2E_ContextSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	configureIntegrationGuard(t, llm)
 
 	adkSession := adaptersqlite.NewAdkSessionService(store)
 	toolFact := toolfactory.New(store, nil, nil, nil)
@@ -432,6 +433,7 @@ func TestE2E_ContextSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	configureIntegrationGuard(t, llm2)
 
 	adkSession2 := adaptersqlite.NewAdkSessionService(reopened)
 	toolFact2 := toolfactory.New(reopened, nil, nil, nil)

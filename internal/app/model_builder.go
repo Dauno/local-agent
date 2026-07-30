@@ -13,6 +13,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 )
@@ -121,6 +122,20 @@ func newModelForResolved(
 	}
 	httpModel, err := newModelFromResolved(resolved, apiKey)
 	if err != nil {
+		return nil, "", err
+	}
+	counter, err := composeRootTokenCounter(resolved)
+	if err != nil {
+		return nil, "", err
+	}
+	budget, err := domain.NewRequestBudget(resolved.ContextWindowTokens, domain.RequestBudgetPolicy{MaxRequestPercent: cfg.Context.ModelBudget.MaxRequestPercent})
+	if err != nil {
+		return nil, "", fmt.Errorf("compose model request budget: %w", err)
+	}
+	if err := httpModel.ConfigureRequestGuard(counter, budget, resolved.Provider.Name+"/"+resolved.Model); err != nil {
+		return nil, "", err
+	}
+	if err := httpModel.ConfigureDefaultMaxOutputTokens(resolved.MaxOutputTokens); err != nil {
 		return nil, "", err
 	}
 	return httpModel, apiKey, nil

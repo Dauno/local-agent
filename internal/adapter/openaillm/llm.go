@@ -14,6 +14,9 @@ import (
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 var (
@@ -80,11 +83,15 @@ func classifyStreamReadError(err error) string {
 
 // OpenAICompatibleLLM implements ADK's model.LLM using OpenAI Chat Completions.
 type OpenAICompatibleLLM struct {
-	client          openai.Client
-	model           string
-	reasoningEffort string
-	extraBody       map[string]any
-	metrics         *StreamMetrics
+	client                 openai.Client
+	model                  string
+	reasoningEffort        string
+	extraBody              map[string]any
+	metrics                *StreamMetrics
+	requestCounter         port.RequestTokenCounter
+	requestBudget          domain.RequestBudget
+	profileID              string
+	defaultMaxOutputTokens int32
 }
 
 var _ model.LLM = (*OpenAICompatibleLLM)(nil)
@@ -137,6 +144,59 @@ func (m *OpenAICompatibleLLM) Name() string {
 
 func (m *OpenAICompatibleLLM) SupportsStreaming() bool { return m != nil }
 
+// ConfigureRequestGuard installs the mandatory final request guard. It must be
+// called during composition, before the model is shared with any runtime.
+func (m *OpenAICompatibleLLM) ConfigureRequestGuard(counter port.RequestTokenCounter, budget domain.RequestBudget, profileID string) error {
+	if m == nil || counter == nil {
+		return errors.New("OpenAI-compatible request guard requires a token counter")
+	}
+	if budget.HardTokens <= 0 {
+		return errors.New("OpenAI-compatible request guard requires a positive hard limit")
+	}
+	m.requestCounter = counter
+	m.requestBudget = budget
+	m.profileID = profileID
+	return nil
+}
+
+// ConfigureDefaultMaxOutputTokens applies the profile output limit when an ADK
+// request does not provide a more specific generation limit.
+func (m *OpenAICompatibleLLM) ConfigureDefaultMaxOutputTokens(tokens int) error {
+	if m == nil {
+		return errors.New("OpenAI-compatible model is nil")
+	}
+	if tokens < 0 {
+		return errors.New("OpenAI-compatible max output tokens must not be negative")
+	}
+	m.defaultMaxOutputTokens = int32(tokens)
+	return nil
+}
+
+func (m *OpenAICompatibleLLM) guardRequest(ctx context.Context, params openai.ChatCompletionNewParams, stream bool) error {
+	if m.requestCounter == nil {
+		return errors.New("OpenAI-compatible final request guard is not configured")
+	}
+	serialized, err := json.Marshal(struct {
+		Params openai.ChatCompletionNewParams `json:"params"`
+		Stream bool                           `json:"stream"`
+	}{Params: params, Stream: stream})
+	if err != nil {
+		return fmt.Errorf("serialize OpenAI-compatible request for guard: %w", err)
+	}
+	count, err := m.requestCounter.CountRequest(ctx, port.ModelRequestEnvelope{
+		SerializerID: "openai-chat-completions-v1",
+		ProfileID:    m.profileID,
+		Serialized:   string(serialized),
+	})
+	if err != nil {
+		return fmt.Errorf("request_token_count_unavailable: %w", err)
+	}
+	if count.Tokens > m.requestBudget.HardTokens {
+		return &domain.IrreducibleContextError{MinimumTokens: count.Tokens, HardTokens: m.requestBudget.HardTokens}
+	}
+	return nil
+}
+
 // GenerateContent converts one ADK request into one non-streaming Chat
 // Completions request and yields at most one ADK response.
 func (m *OpenAICompatibleLLM) GenerateContent(ctx context.Context, request *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
@@ -148,6 +208,10 @@ func (m *OpenAICompatibleLLM) GenerateContent(ctx context.Context, request *mode
 
 		params, err := m.requestParams(request)
 		if err != nil {
+			yield(nil, err)
+			return
+		}
+		if err := m.guardRequest(ctx, params, stream); err != nil {
 			yield(nil, err)
 			return
 		}

@@ -348,6 +348,7 @@ func newE2EService(t *testing.T, opts ...e2eServiceOption) *e2eDeps {
 	if err != nil {
 		t.Fatal(err)
 	}
+	configureIntegrationGuard(t, llm)
 
 	// ADK session service.
 	adkSessionService := adaptersqlite.NewAdkSessionService(store)
@@ -425,6 +426,19 @@ func newE2EService(t *testing.T, opts ...e2eServiceOption) *e2eDeps {
 		Publisher:  publisher,
 		Store:      store,
 		SandboxDir: sandboxDir,
+	}
+}
+
+type integrationRequestCounter struct{}
+
+func (integrationRequestCounter) CountRequest(_ context.Context, envelope port.ModelRequestEnvelope) (port.TokenCount, error) {
+	return port.TokenCount{Tokens: len(envelope.Serialized), Strategy: "integration"}, nil
+}
+
+func configureIntegrationGuard(t *testing.T, llm *openaillm.OpenAICompatibleLLM) {
+	t.Helper()
+	if err := llm.ConfigureRequestGuard(integrationRequestCounter{}, domain.RequestBudget{HardTokens: 1_000_000}, "integration/model"); err != nil {
+		t.Fatal(err)
 	}
 }
 

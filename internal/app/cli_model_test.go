@@ -114,10 +114,12 @@ func TestEnforceProviderFamily(t *testing.T) {
 func TestNewModelForResolvedOpenAIRequiresKey(t *testing.T) {
 	t.Parallel()
 	resolved := &agentdef.ResolvedModel{
-		Provider:  agentdef.Provider{Name: "deepseek", Type: agentdef.ProviderTypeOpenAICompatible},
-		Model:     "deepseek-v4-flash",
-		BaseURL:   "https://api.deepseek.com",
-		APIKeyEnv: "DEEPSEEK_API_KEY",
+		Provider:            agentdef.Provider{Name: "deepseek", Type: agentdef.ProviderTypeOpenAICompatible},
+		Model:               "deepseek-v4-flash",
+		BaseURL:             "https://api.deepseek.com",
+		APIKeyEnv:           "DEEPSEEK_API_KEY",
+		ContextWindowTokens: 128_000,
+		CounterStrategy:     "byte_bound",
 	}
 	cfg := config.Default()
 	paths := testPathsFor(t, cfg, t.TempDir())

@@ -31,6 +31,10 @@ type RuntimeConfig struct {
 	Model             model.LLM
 	ToolFactory       port.AgentToolFactory
 	ContextProjector  port.ContextProjector
+	ContextCompiler   port.ContextCompiler
+	ContextBudget     domain.RequestBudget
+	ContinuityStore   port.ContinuityStore
+	SummaryStore      port.SummaryStore
 	// StaticTools are reusable ADK tools composed at startup, such as AgentTool
 	// wrappers. Invocation-scoped tools continue to come from ToolFactory.
 	StaticTools []tool.Tool
@@ -49,6 +53,10 @@ type Runtime struct {
 	model             model.LLM
 	toolFactory       port.AgentToolFactory
 	contextProjector  port.ContextProjector
+	contextCompiler   port.ContextCompiler
+	contextBudget     domain.RequestBudget
+	continuityStore   port.ContinuityStore
+	summaryStore      port.SummaryStore
 	staticTools       []tool.Tool
 	providerFamily    string
 }
@@ -82,6 +90,10 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		model:             cfg.Model,
 		toolFactory:       cfg.ToolFactory,
 		contextProjector:  cfg.ContextProjector,
+		contextCompiler:   cfg.ContextCompiler,
+		contextBudget:     cfg.ContextBudget,
+		continuityStore:   cfg.ContinuityStore,
+		summaryStore:      cfg.SummaryStore,
 		staticTools:       append([]tool.Tool(nil), cfg.StaticTools...),
 		providerFamily:    providerFamily,
 	}, nil
@@ -117,12 +129,15 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 	if len(tools) > 0 {
 		agentCfg.Tools = tools
 	}
-	if r.contextProjector != nil || ephemeral.reference() != "" {
-		if r.contextProjector != nil {
+	if r.contextProjector != nil || r.contextCompiler != nil || ephemeral.reference() != "" {
+		if r.contextProjector != nil && r.contextCompiler == nil {
 			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, BeforeModelCallback(r.contextProjector))
 		}
 		if reference := ephemeral.reference(); reference != "" {
 			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, injectEphemeralReference(reference))
+		}
+		if r.contextCompiler != nil {
+			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, CompilerBeforeModelCallback(r.contextCompiler, r.contextBudget, r.continuityStore, r.summaryStore, ephemeral.actor))
 		}
 	}
 
@@ -191,6 +206,9 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	if err != nil {
 		return port.AgentTurn{}, err
 	}
+	if turn.PendingConfirmation == nil {
+		r.updateContinuity(ctx, sessionID, current.Content, turn.Text, true)
+	}
 	return turn, nil
 }
 
@@ -248,7 +266,113 @@ func (r *Runtime) Stream(ctx context.Context, req port.AgentRequest, yield func(
 		terminalError(fmt.Errorf("create runner: %w", err))
 		return
 	}
-	runStreamingTurn(ctx, adkRunner, genai.NewContentFromText(current.Content, genai.RoleUser), sessionID, current.UserID, req.ConversationKey, yield)
+	wrappedYield := func(event port.AgentStreamEvent) bool {
+		if event.Kind == port.AgentStreamCompleted && event.Turn != nil && event.Turn.PendingConfirmation == nil {
+			r.updateContinuity(ctx, sessionID, current.Content, event.Turn.Text, true)
+		}
+		return yield(event)
+	}
+	runStreamingTurn(ctx, adkRunner, genai.NewContentFromText(current.Content, genai.RoleUser), sessionID, current.UserID, req.ConversationKey, wrappedYield)
+}
+
+func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, finalText string, updateObjective bool) {
+	if r.continuityStore == nil {
+		return
+	}
+	loaded, err := r.sessionService.Get(ctx, &session.GetRequest{AppName: applicationName, UserID: ephemeralUserID, SessionID: sessionID})
+	if err != nil || loaded == nil || loaded.Session == nil || loaded.Session.Events() == nil || loaded.Session.Events().Len() == 0 {
+		return
+	}
+	ordinal := int64(loaded.Session.Events().Len() - 1)
+	sourceRevision := int64(loaded.Session.Events().Len())
+	if revisioned, ok := loaded.Session.(interface{ Revision() int64 }); ok {
+		sourceRevision = revisioned.Revision()
+	}
+	prior, err := r.continuityStore.Latest(ctx, sessionID)
+	if err != nil {
+		return
+	}
+	revision := prior.Revision + 1
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", sourceRevision, currentText, finalText)))
+	sourceDigest := fmt.Sprintf("%x", digest[:])
+	candidate := prior
+	candidate.Revision = revision
+	candidate.CoveredThrough = ordinal
+	candidate.SourceDigest = sourceDigest
+	if updateObjective {
+		objective, ok := continuityItem(domain.ContinuityKindObjective, "objective-", currentText, ordinal, sourceRevision, sourceDigest)
+		if ok {
+			if prior.Objective != nil && prior.Objective.Text != objective.Text {
+				objective.SupersedesID = prior.Objective.ID
+				superseded := *prior.Objective
+				superseded.Status = domain.ContinuityStatusSuperseded
+				candidate.Superseded = appendBoundedContinuity(candidate.Superseded, superseded)
+			}
+			candidate.Objective = &objective
+		}
+	}
+	applyContinuityOutcome(&candidate, finalText, ordinal, sourceRevision, sourceDigest)
+	_ = r.continuityStore.Commit(ctx, sessionID, candidate, prior.Revision)
+}
+
+func continuityItem(kind domain.ContinuityItemKind, prefix, text string, ordinal, sourceRevision int64, digest string) (domain.ContinuityItem, bool) {
+	return domain.SanitizeContinuityItem(domain.ContinuityItem{ID: prefix + digest[:16], Kind: kind,
+		Text: boundedContinuityText(text), SourceEventOrdinal: ordinal, SourceSessionRevision: sourceRevision,
+		SourceDigest: digest, Status: domain.ContinuityStatusCurrent})
+}
+
+func applyContinuityOutcome(capsule *domain.ContinuityCapsule, finalText string, ordinal, sourceRevision int64, digest string) {
+	type section struct {
+		prefix string
+		kind   domain.ContinuityItemKind
+		target *[]domain.ContinuityItem
+	}
+	sections := []section{
+		{"constraint:", domain.ContinuityKindConstraint, &capsule.Constraints},
+		{"decision:", domain.ContinuityKindDecision, &capsule.Decisions},
+		{"pending:", domain.ContinuityKindPending, &capsule.Pending},
+		{"open question:", domain.ContinuityKindOpenQuestion, &capsule.OpenQuestions},
+		{"completed:", domain.ContinuityKindCompleted, &capsule.Completed},
+	}
+	classified := false
+	for index, line := range strings.Split(finalText, "\n") {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		for _, current := range sections {
+			if !strings.HasPrefix(lower, current.prefix) {
+				continue
+			}
+			text := strings.TrimSpace(trimmed[len(current.prefix):])
+			item, ok := continuityItem(current.kind, string(current.kind)+fmt.Sprintf("-%d-", index), text, ordinal, sourceRevision, digest)
+			if ok {
+				*current.target = appendBoundedContinuity(*current.target, item)
+				classified = true
+			}
+			break
+		}
+	}
+	if !classified {
+		if item, ok := continuityItem(domain.ContinuityKindCompleted, "completed-", finalText, ordinal, sourceRevision, digest); ok {
+			capsule.Completed = appendBoundedContinuity(capsule.Completed, item)
+		}
+	}
+}
+
+func appendBoundedContinuity(items []domain.ContinuityItem, item domain.ContinuityItem) []domain.ContinuityItem {
+	items = append(items, item)
+	if len(items) > 8 {
+		items = items[len(items)-8:]
+	}
+	return items
+}
+
+func boundedContinuityText(value string) string {
+	const maxCodePoints = 1000
+	runes := []rune(value)
+	if len(runes) > maxCodePoints {
+		runes = runes[:maxCodePoints]
+	}
+	return string(runes)
 }
 
 // Resume continues a pending confirmation by sending the user's decision.
@@ -279,7 +403,7 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 			}
 		}
 	}
-	agent, err := r.buildAgent(tools, beforeModelData{})
+	agent, err := r.buildAgent(tools, beforeModelData{actor: decision.Actor})
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("build agent for resume: %w", err)
 	}
@@ -318,6 +442,9 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 	turn, err := runTurn(ctx, adkRunner, resumeContent, sessionID, decision.Actor, decision.ConversationKey)
 	if err != nil {
 		return port.AgentTurn{}, err
+	}
+	if turn.PendingConfirmation == nil {
+		r.updateContinuity(ctx, sessionID, "", turn.Text, false)
 	}
 	return turn, nil
 }
@@ -523,13 +650,24 @@ func extractConfirmation(fc *genai.FunctionCall) *domain.PendingConfirmation {
 type beforeModelData struct {
 	memory  []domain.MemorySnippet
 	context domain.AgentContext
+	actor   string
 }
 
 func buildBeforeModelContext(req port.AgentRequest) beforeModelData {
 	return beforeModelData{
 		memory:  req.Memory,
 		context: req.Context,
+		actor:   latestActor(req),
 	}
+}
+
+func latestActor(req port.AgentRequest) string {
+	for i := len(req.Messages) - 1; i >= 0; i-- {
+		if req.Messages[i].UserID != "" {
+			return req.Messages[i].UserID
+		}
+	}
+	return ""
 }
 
 func (d beforeModelData) reference() string {

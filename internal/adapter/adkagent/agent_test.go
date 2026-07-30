@@ -348,8 +348,9 @@ func TestRuntimeStreamConfirmationRetainsVisibleText(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	continuity := &recordingContinuityStore{}
 	runtime, err := NewRuntime(RuntimeConfig{
-		AgentName: "Dev Agent", Model: &multiphaseStreamingLLM{}, SessionService: session.InMemoryService(), StaticTools: []tool.Tool{inspectProject},
+		AgentName: "Dev Agent", Model: &multiphaseStreamingLLM{}, SessionService: session.InMemoryService(), StaticTools: []tool.Tool{inspectProject}, ContinuityStore: continuity,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -377,6 +378,9 @@ func TestRuntimeStreamConfirmationRetainsVisibleText(t *testing.T) {
 
 	if completed || pending == nil || pending.Text != deltas.String() || pending.Text != "Checking the project." {
 		t.Fatalf("deltas = %q, pending = %#v, completed = %v", deltas.String(), pending, completed)
+	}
+	if continuity.commits != 0 {
+		t.Fatalf("continuity commits = %d, want 0 while confirmation is pending", continuity.commits)
 	}
 }
 

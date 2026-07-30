@@ -511,6 +511,42 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		}
 	}
 
+	// Context engineering offline checks.
+	if cfg.Context.ModelBudget != nil {
+		budgetPct := cfg.Context.ModelBudget.MaxRequestPercent
+		if budgetPct >= 20 && budgetPct <= 80 {
+			report.pass("model budget", fmt.Sprintf("max request utilization %d%% (hard ceiling)", budgetPct))
+			if budgetPct > 70 {
+				report.fail("model budget", fmt.Sprintf("max request percent %d exceeds 70 — quality may degrade", budgetPct), "Lower context.model_budget.max_request_percent.", false)
+			}
+		}
+	}
+	if cfg.Context.RecoverableResults != nil {
+		report.pass("recoverable results", fmt.Sprintf("store configured: %d bytes max, %d retention days", cfg.Context.RecoverableResults.MaxResultBytes, cfg.Context.RecoverableResults.RetentionDays))
+	}
+	if cfg.Context.ModelBudget != nil && resolvedModel != nil && resolvedModel.Type() == agentdef.ProviderTypeOpenAICompatible {
+		if capabilityProblems := agentdef.ValidateProfileCapability(resolvedModel); len(capabilityProblems) > 0 {
+			report.fail("model context capability", strings.Join(capabilityProblems, "; "), "Fix the selected root profile context capability.", false)
+		} else {
+			if resolvedModel.MaxOutputTokens < 0 {
+				report.fail("model context window", "root model profile max_output_tokens must not be negative", "Set max_output_tokens >= 0 in the root profile.", false)
+			} else if resolvedModel.MaxOutputTokens >= resolvedModel.ContextWindowTokens {
+				report.fail("model context window", "max_output_tokens must be less than context_window_tokens", "Reduce max_output_tokens in the root profile.", false)
+			} else {
+				report.pass("model context window", fmt.Sprintf("context window: %d tokens, output: %d tokens", resolvedModel.ContextWindowTokens, resolvedModel.MaxOutputTokens))
+			}
+			counterCheck := resolvedModel.CounterStrategy
+			if counterCheck == "" {
+				report.fail("token counter", "no token_counter configured for root openai_compatible model", "Add token_counter.strategy (e.g. byte_bound) to the root profile YAML.", false)
+			} else {
+				report.pass("token counter", fmt.Sprintf("strategy: %s", counterCheck))
+			}
+		}
+	}
+	if cfg.CodeIntelligence != nil && cfg.CodeIntelligence.Enabled {
+		report.pass("code intelligence", fmt.Sprintf("enabled: %d LSP servers, %d routes", len(cfg.CodeIntelligence.LSPServers), len(cfg.CodeIntelligence.LSPRoutes)))
+	}
+
 	if !includeLive {
 		return report
 	}
