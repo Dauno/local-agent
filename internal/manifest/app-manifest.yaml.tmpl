@@ -19,7 +19,7 @@ oauth_config:
 {{- if .CanvasesEnabled }}
       - canvases:write
 {{- end }}
-{{- if .ExportsEnabled }}
+{{- if or .ExportsEnabled .DurableACPEnabled }}
       - files:write
 {{- end }}
       - files:read

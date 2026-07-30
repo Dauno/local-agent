@@ -49,15 +49,21 @@ type OpenCodeManagementConfig struct {
 }
 
 type ACPConfig struct {
-	MaxFrameBytes            int `yaml:"max_frame_bytes"`
-	MaxInlineResultBytes     int `yaml:"max_inline_result_bytes"`
-	MaxResultArtifactBytes   int `yaml:"max_result_artifact_bytes"`
-	StderrTailBytes          int `yaml:"stderr_tail_bytes"`
-	DefaultJobTimeoutSeconds int `yaml:"default_job_timeout_seconds"`
-	MaxJobTimeoutSeconds     int `yaml:"max_job_timeout_seconds"`
-	IdleTimeoutSeconds       int `yaml:"idle_timeout_seconds"`
-	WorkerConcurrency        int `yaml:"worker_concurrency"`
-	ArtifactRetentionDays    int `yaml:"artifact_retention_days"`
+	MaxFrameBytes            int               `yaml:"max_frame_bytes"`
+	MaxInlineResultBytes     int               `yaml:"max_inline_result_bytes"`
+	MaxResultArtifactBytes   int               `yaml:"max_result_artifact_bytes"`
+	StderrTailBytes          int               `yaml:"stderr_tail_bytes"`
+	DefaultJobTimeoutSeconds int               `yaml:"default_job_timeout_seconds"`
+	MaxJobTimeoutSeconds     int               `yaml:"max_job_timeout_seconds"`
+	IdleTimeoutSeconds       int               `yaml:"idle_timeout_seconds"`
+	WorkerConcurrency        int               `yaml:"worker_concurrency"`
+	ArtifactRetentionDays    int               `yaml:"artifact_retention_days"`
+	Delivery                 ACPDeliveryConfig `yaml:"delivery"`
+}
+
+type ACPDeliveryConfig struct {
+	MaxMarkdownParts int `yaml:"max_markdown_parts"`
+	MaxFileBytes     int `yaml:"max_file_bytes"`
 }
 
 type AgentConfig struct {
@@ -266,6 +272,7 @@ func Default() Config {
 			DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400,
 			WorkerConcurrency:     1,
 			ArtifactRetentionDays: 30,
+			Delivery:              ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
 		},
 	}
 }

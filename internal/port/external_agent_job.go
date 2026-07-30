@@ -27,6 +27,11 @@ type ExternalAgentJobNotificationStore interface {
 	MarkNotificationUnknown(ctx context.Context, notification *domain.ExternalAgentJobNotification, errorCode string) error
 }
 
+type ExternalAgentJobDeliveryStore interface {
+	MarkNotificationFileID(ctx context.Context, notification *domain.ExternalAgentJobNotification, fileID string, now time.Time) error
+	MarkNotificationUploadState(ctx context.Context, notification *domain.ExternalAgentJobNotification, state domain.JobResultUploadState, now time.Time) error
+}
+
 type ExternalAgentJobReconciler interface {
 	BeginReconciliation(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error)
 }

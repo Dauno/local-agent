@@ -38,3 +38,62 @@ func TestExternalAgentJobRequestDigestExcludesHostPaths(t *testing.T) {
 		t.Fatalf("digest = %q / %q", left, right)
 	}
 }
+
+func TestConversationReplyTargetAcceptsThreadedDM(t *testing.T) {
+	target, err := domain.ConversationReplyTarget("slack:T12345678:dm:D12345678:thread:1700000000.000001")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if target.ChannelID != "D12345678" || target.ThreadTS != "1700000000.000001" {
+		t.Fatalf("target = %#v", target)
+	}
+}
+
+func TestExternalAgentJobNotificationUsesCanonicalBoundForSummary(t *testing.T) {
+	job := domain.ExternalAgentJob{
+		ID: "job_1", Status: domain.JobCompleted, StatusRevision: 1,
+		ResultSummary:   strings.Repeat("x", 3000),
+		ConversationKey: "slack:T12345678:dm:D12345678",
+	}
+	notification, err := domain.NewExternalAgentJobNotification(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(notification.CanonicalMarkdown, job.ResultSummary) {
+		t.Fatal("notification truncated a summary below the canonical Markdown bound")
+	}
+
+	job.ResultSummary = strings.Repeat("x", 9000)
+	notification, err = domain.NewExternalAgentJobNotification(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len([]rune(notification.CanonicalMarkdown)); got != 8000 || !strings.HasSuffix(notification.CanonicalMarkdown, "…") {
+		t.Fatalf("bounded notification length = %d, suffix = %q", got, notification.CanonicalMarkdown[len(notification.CanonicalMarkdown)-3:])
+	}
+}
+
+func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing.T) {
+	job := domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678"}
+	resultText := strings.Repeat("result-", 4000)
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+		Text: resultText, DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryCanonicalMarkdown: "OpenCode job `job_1` completed.\n\n" + resultText,
+		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6, DeliveryContentBytes: int64(len([]byte(resultText))),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notification.DeliveryMode != domain.JobResultDeliveryMarkdown || !strings.HasSuffix(notification.CanonicalMarkdown, resultText) || strings.Contains(notification.CanonicalMarkdown, "…") {
+		t.Fatalf("notification = %+v", notification)
+	}
+
+	file, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+		Text: "", DeliveryMode: domain.JobResultDeliveryFile, DeliveryArtifactRef: "job_1-delivery.result", DeliveryContentSHA256: strings.Repeat("a", 64), DeliveryContentBytes: 20000,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if file.DeliveryMode != domain.JobResultDeliveryFile || file.ArtifactRef == "" || file.ContentBytes != 20000 || strings.Contains(file.CanonicalMarkdown, resultText) {
+		t.Fatalf("file notification = %+v", file)
+	}
+}

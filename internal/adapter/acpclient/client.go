@@ -50,7 +50,6 @@ type Client struct {
 	args        []string
 	bounds      Bounds
 	coordinator port.OpenCodeCoordinator
-	artifacts   port.ResultArtifactStore
 }
 
 var _ port.ExternalAgentRuntime = (*Client)(nil)
@@ -73,9 +72,8 @@ func NewWithBounds(executable string, args []string, bounds Bounds, artifactStor
 		bounds.StderrTailBytes = defaultStderrTailBytes
 	}
 	client := &Client{executable: executable, args: append([]string(nil), args...), bounds: bounds}
-	if len(artifactStores) > 0 {
-		client.artifacts = artifactStores[0]
-	}
+	// The optional artifact argument is retained for constructor compatibility;
+	// result materialization belongs to the host delivery boundary.
 	return client
 }
 
@@ -981,22 +979,6 @@ func (c *promptCollector) result(ctx context.Context) (domain.AcpInvocationResul
 		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorCompletedWithoutFinalText, Err: errors.New("ACP run completed without assistant text")}
 	}
 	result := domain.AcpInvocationResult{Text: finalText, Inline: true, ResultBytes: int64(len(finalText))}
-	if len(finalText) <= c.client.bounds.MaxInlineResultBytes {
-		return result, nil
-	}
-	if c.client.artifacts == nil {
-		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("ACP result exceeds inline limit and artifact storage is unavailable")}
-	}
-	artifact, err := c.client.artifacts.Put(ctx, c.ownerID, finalText)
-	if err != nil {
-		return domain.AcpInvocationResult{}, err
-	}
-	preview := truncateUTF8Bytes(finalText, c.client.bounds.MaxInlineResultBytes)
-	result.Text = preview + "\n[full result stored as private artifact]"
-	result.Inline = false
-	result.ArtifactRef = artifact.Reference
-	result.ResultSHA256 = artifact.SHA256
-	result.ResultBytes = artifact.Bytes
 	return result, nil
 }
 
@@ -1007,21 +989,6 @@ func containsUnsafeControl(value string) bool {
 		}
 	}
 	return false
-}
-
-func truncateUTF8Bytes(value string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if len(value) <= max {
-		return value
-	}
-	// Cut by bytes, then back up only across a partial UTF-8 sequence.
-	end := max
-	for end > 0 && !utf8.ValidString(value[:end]) {
-		end--
-	}
-	return value[:end]
 }
 
 func (c *promptCollector) handlePermission(proc *process, id json.RawMessage, raw json.RawMessage) error {

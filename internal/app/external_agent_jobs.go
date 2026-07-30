@@ -2,13 +2,14 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -16,10 +17,13 @@ import (
 )
 
 type acpJobDispatcher struct {
-	children []preparedAgentTool
-	global   string
-	store    port.ExternalAgentJobStore
-	sanitize func(string) string
+	children   []preparedAgentTool
+	global     string
+	store      port.ExternalAgentJobStore
+	sanitize   func(string) string
+	artifacts  port.ResultArtifactStore
+	policy     domain.ResultDeliveryPolicy
+	partLabels bool
 }
 
 type acpInvocationRecoverer interface {
@@ -72,7 +76,9 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 				return d.store.MarkSideEffectsPossible(ctx, job.ID, job.LeaseOwner, job.Attempt)
 			},
 		})
-		if runErr == nil && d.sanitize != nil {
+		if runErr == nil && d.artifacts != nil && job.Mode == domain.JobDetached {
+			result, runErr = d.materialize(ctx, job, result)
+		} else if runErr == nil && d.sanitize != nil {
 			result.Text = d.sanitize(result.Text)
 		}
 		return result, runErr
@@ -81,6 +87,77 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		return domain.AcpInvocationResult{}, errors.New("durable ACP job scope revision does not match current configuration")
 	}
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
+}
+
+func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalAgentJob, result domain.AcpInvocationResult) (domain.AcpInvocationResult, error) {
+	if err := d.policy.Validate(); err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
+	var content []byte
+	var err error
+	if result.ArtifactRef != "" {
+		verified, ok := d.artifacts.(port.VerifiedResultArtifactStore)
+		if !ok {
+			return domain.AcpInvocationResult{}, errors.New("ACP result artifact cannot be verified")
+		}
+		content, err = verified.Get(ctx, job.ID, result.ArtifactRef, result.ResultSHA256, d.policy.MaxResultArtifactBytes)
+		if err != nil {
+			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("verified ACP result artifact is unavailable")}
+		}
+	} else {
+		content = []byte(result.Text)
+	}
+	text := string(content)
+	if d.sanitize != nil {
+		text = d.sanitize(text)
+	}
+	text, err = domain.SanitizeResultText(text)
+	if err != nil {
+		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultDeliveryFailed, Err: errors.New("ACP result sanitization failed")}
+	}
+	safeBytes := []byte(text)
+	if int64(len(safeBytes)) > d.policy.MaxFileBytes {
+		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("sanitized ACP result exceeds configured delivery bound")}
+	}
+	digest := sha256.Sum256(safeBytes)
+	contentSHA := fmt.Sprintf("%x", digest)
+	canonical := fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text)
+	parts := slackadapter.RenderMarkdownParts(canonical, d.partLabels)
+	mode := domain.JobResultDeliveryMarkdown
+	artifactRef := ""
+	if result.ArtifactRef != "" || len(parts) > d.policy.MaxMarkdownParts {
+		mode = domain.JobResultDeliveryFile
+		ownerID := job.ID + "-delivery"
+		artifact, putErr := d.artifacts.Put(ctx, ownerID, text)
+		if putErr != nil {
+			verified, verifiedOK := d.artifacts.(port.VerifiedResultArtifactStore)
+			if !verifiedOK {
+				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
+			}
+			if _, readErr := verified.Get(ctx, ownerID, ownerID+".result", contentSHA, d.policy.MaxFileBytes); readErr != nil {
+				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
+			}
+			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: int64(len(safeBytes))}
+		}
+		artifactRef = artifact.Reference
+	}
+	result.Text = text
+	result.Inline = mode == domain.JobResultDeliveryMarkdown
+	result.ArtifactRef = artifactRef
+	result.ResultSHA256 = contentSHA
+	result.ResultBytes = int64(len(safeBytes))
+	result.DeliveryMode = mode
+	result.DeliveryCanonicalMarkdown = canonical
+	result.DeliveryPolicyVersion = domain.JobDeliveryPolicyV1
+	result.DeliveryMaxMarkdownParts = d.policy.MaxMarkdownParts
+	result.DeliveryContentSHA256 = contentSHA
+	result.DeliveryContentBytes = int64(len(safeBytes))
+	result.DeliveryArtifactRef = artifactRef
+	if mode == domain.JobResultDeliveryFile {
+		// File-mode content lives only in the verified private artifact.
+		result.Text = ""
+	}
+	return result, nil
 }
 
 func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
@@ -112,7 +189,9 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 			GlobalInstruction: d.global, AgentInstruction: child.definition.Instruction,
 			PermissionOptionKind: child.acpResolved.PermissionOptionKind, Timeout: time.Until(job.TimeoutAt),
 		}, job.ACPSessionID)
-		if runErr == nil && d.sanitize != nil {
+		if runErr == nil && d.artifacts != nil {
+			result, runErr = d.materialize(ctx, job, result)
+		} else if runErr == nil && d.sanitize != nil {
 			result.Text = d.sanitize(result.Text)
 		}
 		return result, runErr
@@ -121,39 +200,6 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 		return domain.AcpInvocationResult{}, errors.New("durable ACP recovery scope revision does not match current configuration")
 	}
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
-}
-
-type slackJobPublisher struct {
-	publisher port.ResponsePublisher
-	sanitize  func(string) string
-}
-
-func (p *slackJobPublisher) PublishJobTerminal(ctx context.Context, job domain.ExternalAgentJob) error {
-	if p == nil || p.publisher == nil {
-		return errors.New("job terminal publisher is not configured")
-	}
-	switch job.Status {
-	case domain.JobCompletionUnknown, domain.JobCompleted, domain.JobFailed, domain.JobCancelled, domain.JobAbandoned:
-	default:
-		return errors.New("cannot publish a non-terminal external-agent job status")
-	}
-	target, err := replyTargetForConversation(job.ConversationKey)
-	if err != nil {
-		return err
-	}
-	status := fmt.Sprintf("OpenCode job `%s` %s.", job.ID, job.Status)
-	switch job.Status {
-	case domain.JobCompleted:
-		if summary := boundedSanitized(p.sanitize, job.ResultSummary, 2000); summary != "" {
-			status += "\n\nSummary: " + summary
-		}
-	case domain.JobCompletionUnknown:
-		status = fmt.Sprintf("OpenCode job `%s` was interrupted after external actions may have occurred. It was not retried; reconciliation is required.", job.ID)
-	case domain.JobFailed:
-		status += " The operation failed with a host-owned error code."
-	}
-	_, err = p.publisher.Publish(ctx, target, status)
-	return err
 }
 
 func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *runtimeInfrastructure) (*externalagent.Service, *externalagent.NotificationWorker, error) {
@@ -179,13 +225,22 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		MaxTimeout:     time.Duration(cfg.ACP.MaxJobTimeoutSeconds) * time.Second,
 		LeaseTTL:       30 * time.Second, PollInterval: time.Second, Concurrency: cfg.ACP.WorkerConcurrency, MaxAttempts: 2,
 	}, externalagent.Dependencies{
-		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String},
+		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String,
+			artifacts: models.artifactStore, policy: domain.ResultDeliveryPolicy{
+				MaxMarkdownParts: cfg.ACP.Delivery.MaxMarkdownParts, MaxFileBytes: int64(cfg.ACP.Delivery.MaxFileBytes),
+				MaxInlineResultBytes: int64(cfg.ACP.MaxInlineResultBytes), MaxResultArtifactBytes: int64(cfg.ACP.MaxResultArtifactBytes),
+			}, partLabels: cfg.Slack.PartLabels},
 		Publisher: nil,
 	})
 	if err != nil {
 		return nil, nil, err
 	}
-	notificationPublisher := slackadapter.NewJobNotificationPublisher(infra.publisher, infra.history)
+	verifiedArtifacts, ok := models.artifactStore.(port.VerifiedResultArtifactStore)
+	if !ok {
+		return nil, nil, errors.New("initialize durable ACP result delivery: verified artifact store is unavailable")
+	}
+	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
+	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, verifiedArtifacts, store, infra.api)
 	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher})
 	if err != nil {
 		return nil, nil, err
@@ -193,28 +248,11 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	return service, notificationWorker, nil
 }
 
-func replyTargetForConversation(key domain.ConversationKey) (domain.ReplyTarget, error) {
-	parts := strings.Split(string(key), ":")
-	if len(parts) < 4 || parts[0] != "slack" {
-		return domain.ReplyTarget{}, errors.New("job conversation key is malformed")
-	}
-	target := domain.ReplyTarget{ChannelID: parts[3]}
-	for index := 4; index+1 < len(parts); index++ {
-		if parts[index] == "thread" {
-			target.ThreadTS = parts[index+1]
-			break
+func durableACPConfigured(models runtimeModels) bool {
+	for _, child := range models.preparedAgentTools {
+		if child.acpRuntime != nil && child.definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
+			return true
 		}
 	}
-	return target, nil
-}
-
-func boundedSanitized(sanitize func(string) string, value string, max int) string {
-	if sanitize != nil {
-		value = sanitize(value)
-	}
-	if len([]rune(value)) <= max {
-		return value
-	}
-	runes := []rune(value)
-	return string(runes[:max]) + "…"
+	return false
 }

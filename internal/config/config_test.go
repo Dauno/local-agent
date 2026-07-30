@@ -88,7 +88,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 		Canvases: config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:  config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
 		OpenCode: config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
-		ACP:      config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, WorkerConcurrency: 1, ArtifactRetentionDays: 30},
+		ACP:      config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
 	}
 
 	got := config.Default()
@@ -132,6 +132,36 @@ func TestADKCompactionDefaultsAndProductionValidation(t *testing.T) {
 	cfg.Context.ADKCompaction.SummaryMaxChars = 9000
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "SQLite summary limit") {
 		t.Fatalf("SQLite summary limit error = %v", err)
+	}
+}
+
+func TestACPDeliveryPolicyValidation(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.ACP.Delivery.MaxMarkdownParts = 9
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_markdown_parts") {
+		t.Fatalf("part policy error = %v", err)
+	}
+	cfg = config.Default()
+	cfg.ACP.Delivery.MaxFileBytes = cfg.ACP.MaxResultArtifactBytes + 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_file_bytes") {
+		t.Fatalf("file policy error = %v", err)
+	}
+	cfg = config.Default()
+	cfg.ACP.Delivery.MaxMarkdownParts = 1
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "delivery capacity") {
+		t.Fatalf("inline capacity error = %v", err)
+	}
+}
+
+func TestACPDeliveryFileBoundDefaultsToConfiguredArtifactBound(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte("acp:\n  max_result_artifact_bytes: 1048576\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ACP.Delivery.MaxFileBytes != cfg.ACP.MaxResultArtifactBytes {
+		t.Fatalf("max_file_bytes = %d, artifact bound = %d", cfg.ACP.Delivery.MaxFileBytes, cfg.ACP.MaxResultArtifactBytes)
 	}
 }
 
@@ -238,11 +268,14 @@ acp:
   max_inline_result_bytes: 65536
   max_result_artifact_bytes: 16777216
   stderr_tail_bytes: 131072
-  default_job_timeout_seconds: 7200
-  max_job_timeout_seconds: 86400
+   default_job_timeout_seconds: 7200
+   max_job_timeout_seconds: 86400
    idle_timeout_seconds: 0
    worker_concurrency: 1
    artifact_retention_days: 30
+   delivery:
+     max_markdown_parts: 6
+     max_file_bytes: 16777216
         `
 
 	if !reflect.DeepEqual(strings.Fields(string(got)), strings.Fields(want)) {

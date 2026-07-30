@@ -14,13 +14,15 @@ import (
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
 
 type Store struct {
-	dir      string
-	maxBytes int64
+	dir        string
+	maxBytes   int64
+	references port.ArtifactReferenceChecker
 }
 
 func CheckDirectory(ctx context.Context, dir string, maxBytes int64) error {
@@ -109,6 +111,61 @@ func (s *Store) Put(ctx context.Context, ownerID, content string) (domain.Result
 	return domain.ResultArtifact{Reference: filename, SHA256: fmt.Sprintf("%x", digest), Bytes: int64(len(data))}, nil
 }
 
+// Get returns verified bytes for the canonical artifact owned by ownerID. It
+// deliberately accepts an opaque reference only when it is the exact filename
+// generated for that owner.
+func (s *Store) Get(ctx context.Context, ownerID, reference, expectedSHA256 string, maxBytes int64) ([]byte, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if err := s.Check(ctx); err != nil {
+		return nil, err
+	}
+	if s == nil || s.dir == "" || s.maxBytes <= 0 {
+		return nil, errors.New("artifact store is not configured")
+	}
+	if !ownerPattern.MatchString(ownerID) || reference != ownerID+".result" || filepath.Base(reference) != reference {
+		return nil, errors.New("result artifact reference is invalid")
+	}
+	if strings.TrimSpace(expectedSHA256) == "" {
+		return nil, errors.New("result artifact digest is required")
+	}
+	if maxBytes <= 0 || maxBytes > s.maxBytes {
+		return nil, errors.New("result artifact read bound is invalid")
+	}
+	path := filepath.Join(s.dir, reference)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, fmt.Errorf("inspect result artifact: %w", err)
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return nil, errors.New("result artifact is not a regular application-owned file")
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, fmt.Errorf("open result artifact: %w", err)
+	}
+	defer file.Close()
+	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
+	if err != nil {
+		return nil, fmt.Errorf("read result artifact: %w", err)
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, errors.New("result artifact exceeds configured read bound")
+	}
+	digest := sha256.Sum256(data)
+	if fmt.Sprintf("%x", digest) != strings.ToLower(expectedSHA256) {
+		return nil, errors.New("result artifact digest mismatch")
+	}
+	return data, nil
+}
+
+func (s *Store) SetReferenceChecker(checker port.ArtifactReferenceChecker) {
+	if s != nil {
+		s.references = checker
+	}
+}
+
 func (s *Store) Check(ctx context.Context) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -160,6 +217,15 @@ func (s *Store) Cleanup(ctx context.Context, before time.Time) (int, error) {
 		}
 		if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || !info.ModTime().Before(before) {
 			continue
+		}
+		if ownedResult && s.references != nil {
+			referenced, err := s.references.IsArtifactReferenced(ctx, entry.Name())
+			if err != nil {
+				return removed, fmt.Errorf("check artifact reference %q: %w", entry.Name(), err)
+			}
+			if referenced {
+				continue
+			}
 		}
 		if err := os.Remove(path); err != nil {
 			return removed, fmt.Errorf("remove artifact %q: %w", entry.Name(), err)

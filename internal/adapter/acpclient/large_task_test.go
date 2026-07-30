@@ -1,7 +1,6 @@
 package acpclient_test
 
 import (
-	"context"
 	"strconv"
 	"strings"
 	"testing"
@@ -66,15 +65,13 @@ func TestACPCollectorUsesFinalAssistantMessageID(t *testing.T) {
 	}
 }
 
-func TestACPLargeFinalResultUsesPrivateArtifact(t *testing.T) {
-	artifactDir := t.TempDir()
-	artifacts := newTestArtifactStore(t, artifactDir, 4096)
+func TestACPLargeFinalResultReturnsCompleteBoundedText(t *testing.T) {
 	client := acpclient.NewWithBounds("python3", []string{"-c", fakeACPAgentScript(true, false)}, acpclient.Bounds{
 		MaxFrameBytes:          128 * 1024,
 		MaxInlineResultBytes:   4,
 		MaxResultArtifactBytes: 4096,
 		StderrTailBytes:        1024,
-	}, artifacts)
+	})
 
 	result, err := client.Run(t.Context(), domain.AcpInvocationRequest{
 		PrimaryPath:          t.TempDir(),
@@ -84,22 +81,22 @@ func TestACPLargeFinalResultUsesPrivateArtifact(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Inline || result.ArtifactRef == "" || result.ResultBytes == 0 || result.ResultSHA256 == "" {
+	if !result.Inline || result.ArtifactRef != "" || result.Text != "safe final text" || result.ResultBytes != int64(len(result.Text)) {
 		t.Fatalf("result metadata = %+v", result)
 	}
 }
 
-func TestACPResultPreviewTruncatesByBytesWithoutBreakingUTF8(t *testing.T) {
+func TestACPResultKeepsUTF8TextForHostMaterialization(t *testing.T) {
 	script := strings.Replace(fakeACPAgentScript(true, false), `"text":"safe final text"`, `"text":"🚀🚀"`, 1)
 	client := acpclient.NewWithBounds("python3", []string{"-c", script}, acpclient.Bounds{
 		MaxFrameBytes: 64 * 1024, MaxInlineResultBytes: 5, MaxResultArtifactBytes: 4096, StderrTailBytes: 1024,
-	}, newTestArtifactStore(t, t.TempDir(), 4096))
+	})
 	result, err := client.Run(t.Context(), domain.AcpInvocationRequest{PrimaryPath: t.TempDir(), Task: "byte preview"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !utf8.ValidString(result.Text) || !strings.HasPrefix(result.Text, "🚀\n") {
-		t.Fatalf("preview = %q, valid UTF-8 = %v", result.Text, utf8.ValidString(result.Text))
+	if !utf8.ValidString(result.Text) || result.Text != "🚀🚀" {
+		t.Fatalf("result = %q, valid UTF-8 = %v", result.Text, utf8.ValidString(result.Text))
 	}
 }
 
@@ -151,20 +148,4 @@ for line in sys.stdin:
         send({"jsonrpc":"2.0","id":req_id,"result":{}})
         break
 `
-}
-
-func newTestArtifactStore(t *testing.T, dir string, maxBytes int64) interface {
-	Put(context.Context, string, string) (domain.ResultArtifact, error)
-} {
-	t.Helper()
-	return testArtifactStore{dir: dir, max: maxBytes}
-}
-
-type testArtifactStore struct {
-	dir string
-	max int64
-}
-
-func (s testArtifactStore) Put(context.Context, string, string) (domain.ResultArtifact, error) {
-	return domain.ResultArtifact{Reference: "artifact:test", SHA256: "digest", Bytes: s.max + 1}, nil
 }

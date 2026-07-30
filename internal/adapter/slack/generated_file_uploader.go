@@ -23,12 +23,20 @@ func NewGeneratedFileUploader(client *slackapi.Client, timeout time.Duration) *G
 }
 
 func (u *GeneratedFileUploader) RequestUploadURL(ctx context.Context, filename string, sizeBytes int) (port.GeneratedFileUploadTarget, error) {
+	return u.requestUploadURL(ctx, filename, sizeBytes, "")
+}
+
+func (u *GeneratedFileUploader) RequestMarkdownUploadURL(ctx context.Context, filename string, sizeBytes int) (port.GeneratedFileUploadTarget, error) {
+	return u.requestUploadURL(ctx, filename, sizeBytes, "markdown")
+}
+
+func (u *GeneratedFileUploader) requestUploadURL(ctx context.Context, filename string, sizeBytes int, snippetType string) (port.GeneratedFileUploadTarget, error) {
 	if u == nil || u.client == nil {
 		return port.GeneratedFileUploadTarget{}, errors.New("generated file client is not configured")
 	}
 	ctx, cancel := u.withTimeout(ctx)
 	defer cancel()
-	response, err := u.client.GetUploadURLExternalContext(ctx, slackapi.GetUploadURLExternalParameters{FileName: filename, FileSize: sizeBytes})
+	response, err := u.client.GetUploadURLExternalContext(ctx, slackapi.GetUploadURLExternalParameters{FileName: filename, FileSize: sizeBytes, SnippetType: snippetType})
 	if err != nil {
 		return port.GeneratedFileUploadTarget{}, uploadError("request Slack upload URL", err)
 	}
@@ -96,3 +104,4 @@ func ambiguousUploadError(err error) bool {
 }
 
 var _ port.GeneratedFileUploader = (*GeneratedFileUploader)(nil)
+var _ port.MarkdownResultUploader = (*GeneratedFileUploader)(nil)

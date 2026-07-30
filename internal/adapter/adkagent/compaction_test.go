@@ -74,9 +74,14 @@ func TestProjectorCountsStructuredPartsAndRetainsRecentTurnsInOrder(t *testing.T
 }
 
 func TestProjectorNeverSeparatesProtocolPairs(t *testing.T) {
-	confirmationCall := domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "wrapper-1", Name: domain.ConfirmationFunctionName, Args: map[string]any{"hint": "write"}}}}}
+	originalCall := domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "write"}}}}
+	placeholderResponse := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"error": "requires confirmation"}}}}}
+	confirmationCall := domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "wrapper-1", Name: domain.ConfirmationFunctionName, Args: map[string]any{
+		"originalFunctionCall": map[string]any{"id": "call-1", "name": "write"},
+	}}}}}
 	confirmationResponse := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "wrapper-1", Name: domain.ConfirmationFunctionName, Response: map[string]any{"confirmed": true}}}}}
-	contents := []domain.Content{userText("request"), confirmationCall, confirmationResponse, modelText("completed"), userText("next")}
+	terminalResponse := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"result": "done"}}}}}
+	contents := []domain.Content{userText("request"), originalCall, placeholderResponse, confirmationCall, confirmationResponse, terminalResponse, modelText("completed"), userText("next")}
 	result, err := testProjector(t, 1000, 8).Project(context.Background(), domain.CompactionRequest{Contents: contents})
 	if err != nil || len(result.Contents) != len(contents) {
 		t.Fatalf("confirmation pair projection = %#v, %v", result.Contents, err)

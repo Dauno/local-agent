@@ -135,6 +135,10 @@ var configSchema = []schemaField{
 		{name: "idle_timeout_seconds"},
 		{name: "worker_concurrency"},
 		{name: "artifact_retention_days"},
+		{name: "delivery", children: []schemaField{
+			{name: "max_markdown_parts"},
+			{name: "max_file_bytes"},
+		}},
 	}},
 }
 
@@ -180,6 +184,15 @@ func Parse(data []byte) (Config, error) {
 	var cfg Config
 	if err := effective.Decode(&cfg); err != nil {
 		return Config{}, fmt.Errorf("decode typed configuration: %w", err)
+	}
+	maxFileBytesExplicit := false
+	if _, acpNode, acpPresent := mappingEntry(root, "acp"); acpPresent {
+		if _, deliveryNode, deliveryPresent := mappingEntry(acpNode, "delivery"); deliveryPresent {
+			_, _, maxFileBytesExplicit = mappingEntry(deliveryNode, "max_file_bytes")
+		}
+	}
+	if !maxFileBytesExplicit {
+		cfg.ACP.Delivery.MaxFileBytes = cfg.ACP.MaxResultArtifactBytes
 	}
 	normalizeCollections(&cfg)
 	if err := Validate(cfg); err != nil {

@@ -81,6 +81,14 @@ type GeneratedFileUploader interface {
 	CompleteUpload(ctx context.Context, fileID string, channelID string, threadTS string, title string) error
 }
 
+// MarkdownResultUploader is the optional typed transport used for durable
+// ACP results. The fallback method remains available for existing export
+// adapters and fakes.
+type MarkdownResultUploader interface {
+	GeneratedFileUploader
+	RequestMarkdownUploadURL(ctx context.Context, filename string, sizeBytes int) (GeneratedFileUploadTarget, error)
+}
+
 type GeneratedFileOperationStore interface {
 	CreateGeneratedFileOperation(ctx context.Context, op domain.GeneratedFileOperation) error
 	UpdateGeneratedFileOperation(ctx context.Context, operationID string, status domain.GeneratedFileOperationStatus, slackFileID string) error
@@ -91,6 +99,17 @@ type GeneratedFileOperationStore interface {
 // Slack payloads. References are opaque and derived by the adapter.
 type ResultArtifactStore interface {
 	Put(ctx context.Context, ownerID, content string) (domain.ResultArtifact, error)
+	Get(ctx context.Context, ownerID, reference, expectedSHA256 string, maxBytes int64) ([]byte, error)
+}
+
+// VerifiedResultArtifactStore is retained as a descriptive alias at call
+// sites where a verified read, rather than only a write, is required.
+type VerifiedResultArtifactStore = ResultArtifactStore
+
+// ArtifactReferenceChecker lets retention skip files still needed by an
+// unpublished durable delivery.
+type ArtifactReferenceChecker interface {
+	IsArtifactReferenced(ctx context.Context, reference string) (bool, error)
 }
 
 var ErrGeneratedFileOperationExists = errors.New("generated file operation already exists")

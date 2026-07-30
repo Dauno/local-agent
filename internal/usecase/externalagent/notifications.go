@@ -3,6 +3,7 @@ package externalagent
 import (
 	"context"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -55,7 +56,7 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 	if notification.NeedsReconciliation {
 		ts, found, reconcileErr := w.publisher.Reconcile(ctx, *notification)
 		if reconcileErr != nil {
-			_ = w.store.MarkNotificationUnknown(context.WithoutCancel(ctx), notification, "notification_reconcile_failed")
+			_ = w.store.MarkNotificationUnknown(context.WithoutCancel(ctx), notification, notificationErrorCode(reconcileErr))
 			return nil
 		}
 		if found {
@@ -64,8 +65,28 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 	}
 	response, publishErr := w.publisher.Publish(ctx, *notification)
 	if publishErr != nil || response.LastMessageTS == "" {
-		_ = w.store.MarkNotificationUnknown(context.WithoutCancel(ctx), notification, "notification_publish_ambiguous")
+		code := "notification_publish_ambiguous"
+		if publishErr != nil {
+			code = notificationErrorCode(publishErr)
+		}
+		_ = w.store.MarkNotificationUnknown(context.WithoutCancel(ctx), notification, code)
 		return nil
 	}
 	return w.store.MarkNotificationPublished(context.WithoutCancel(ctx), notification, response.LastMessageTS, time.Now().UTC())
+}
+
+func notificationErrorCode(err error) string {
+	if err == nil {
+		return "notification_publish_ambiguous"
+	}
+	message := strings.ToLower(err.Error())
+	for _, code := range []string{"result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid"} {
+		if strings.Contains(message, code) {
+			return code
+		}
+	}
+	if strings.Contains(message, "job notification") || strings.Contains(message, "delivery identity") {
+		return "notification_delivery_invalid"
+	}
+	return "notification_publish_ambiguous"
 }

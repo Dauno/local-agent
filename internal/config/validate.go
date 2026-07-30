@@ -371,6 +371,18 @@ func validateACP(problems *[]FieldError, cfg ACPConfig) {
 	if cfg.IdleTimeoutSeconds < 0 {
 		addConfigProblem(problems, "acp.idle_timeout_seconds", "must be zero or greater")
 	}
+	if cfg.Delivery.MaxMarkdownParts < 1 || cfg.Delivery.MaxMarkdownParts > 8 {
+		addConfigProblem(problems, "acp.delivery.max_markdown_parts", "must be between 1 and 8")
+	}
+	if cfg.Delivery.MaxFileBytes <= 0 {
+		addConfigProblem(problems, "acp.delivery.max_file_bytes", "must be greater than zero")
+	} else if cfg.MaxResultArtifactBytes > 0 && cfg.Delivery.MaxFileBytes > cfg.MaxResultArtifactBytes {
+		addConfigProblem(problems, "acp.delivery.max_file_bytes", "must not exceed acp.max_result_artifact_bytes")
+	}
+	if cfg.Delivery.MaxMarkdownParts > 0 && cfg.MaxInlineResultBytes > 0 &&
+		int64(cfg.MaxInlineResultBytes) > int64(cfg.Delivery.MaxMarkdownParts*domain.SlackMarkdownChunkRunes) {
+		addConfigProblem(problems, "acp.max_inline_result_bytes", "must fit within configured Markdown delivery capacity")
+	}
 }
 
 func addConfigProblem(problems *[]FieldError, field, problem string) {
