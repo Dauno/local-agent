@@ -650,8 +650,8 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("inspect SQLite schema version: %w", err)
 	}
-	if version < 19 {
-		return fmt.Errorf("external-agent job outbox requires SQLite schema v19, found v%d", version)
+	if version < 22 {
+		return fmt.Errorf("external-agent result delivery requires SQLite schema v22, found v%d", version)
 	}
 	var name string
 	if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_agent_job_notifications'`).Scan(&name); err != nil {
@@ -659,6 +659,14 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	}
 	if name != "external_agent_job_notifications" {
 		return errors.New("external-agent notification outbox is missing")
+	}
+	var columns int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('external_agent_job_notifications')
+		WHERE name IN ('delivery_mode', 'policy_version', 'artifact_ref', 'result_bytes', 'max_markdown_parts', 'upload_state', 'slack_file_id')`).Scan(&columns); err != nil {
+		return fmt.Errorf("inspect external-agent result delivery fields: %w", err)
+	}
+	if columns != 7 {
+		return errors.New("external-agent result delivery fields are incomplete")
 	}
 	return nil
 }

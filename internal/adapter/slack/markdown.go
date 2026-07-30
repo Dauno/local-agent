@@ -38,6 +38,12 @@ func renderMarkdownV1(text string, showLabels bool) []string {
 	return SplitMarkdown(neutralizeUnsafeControls(text), SlackMarkdownChunkRunes, showLabels)
 }
 
+// RenderMarkdownParts exposes the canonical renderer to composition code that
+// must choose a durable delivery mode before publication.
+func RenderMarkdownParts(text string, showLabels bool) []string {
+	return renderMarkdownV1(text, showLabels)
+}
+
 func neutralizeUnsafeControls(text string) string {
 	var result strings.Builder
 	result.Grow(len(text))

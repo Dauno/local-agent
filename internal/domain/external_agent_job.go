@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,7 +15,10 @@ const MaxExternalAgentTaskRunes = 200_000
 
 const (
 	JobNotificationTerminal = "terminal"
+	JobNotificationFailure  = "delivery_failure"
 	JobNotificationRenderer = "markdown_v1"
+	JobDeliveryPolicyV1     = "delivery_v1"
+	SlackMarkdownChunkRunes = 11900
 )
 
 type NotificationPublishState string
@@ -25,6 +29,44 @@ const (
 	NotificationPublished  NotificationPublishState = "published"
 	NotificationUnknown    NotificationPublishState = "unknown"
 )
+
+type JobResultDeliveryMode string
+
+const (
+	JobResultDeliveryMarkdown JobResultDeliveryMode = "markdown"
+	JobResultDeliveryFile     JobResultDeliveryMode = "file"
+)
+
+type JobResultUploadState string
+
+const (
+	JobResultUploadNotApplicable JobResultUploadState = "not_applicable"
+	JobResultUploadPending       JobResultUploadState = "pending"
+	JobResultUploadURLRequested  JobResultUploadState = "url_requested"
+	JobResultUploadBytesUploaded JobResultUploadState = "bytes_uploaded"
+	JobResultUploadCompleted     JobResultUploadState = "completed"
+	JobResultUploadUnknown       JobResultUploadState = "unknown"
+)
+
+type ResultDeliveryPolicy struct {
+	MaxMarkdownParts       int
+	MaxFileBytes           int64
+	MaxInlineResultBytes   int64
+	MaxResultArtifactBytes int64
+}
+
+func (p ResultDeliveryPolicy) Validate() error {
+	if p.MaxMarkdownParts < 1 || p.MaxMarkdownParts > 8 {
+		return errors.New("result delivery max Markdown parts must be between 1 and 8")
+	}
+	if p.MaxFileBytes <= 0 || p.MaxFileBytes > p.MaxResultArtifactBytes {
+		return errors.New("result delivery max file bytes must be positive and within the artifact bound")
+	}
+	if p.MaxInlineResultBytes <= 0 || p.MaxInlineResultBytes > int64(p.MaxMarkdownParts*SlackMarkdownChunkRunes) {
+		return errors.New("ACP inline result bound exceeds the configured Markdown delivery capacity")
+	}
+	return nil
+}
 
 type ExternalAgentJobNotification struct {
 	JobID               string
@@ -42,7 +84,19 @@ type ExternalAgentJobNotification struct {
 	NextAttemptAt       time.Time
 	LastErrorCode       string
 	NeedsReconciliation bool
+	DeliveryMode        JobResultDeliveryMode
+	PolicyVersion       string
+	ArtifactRef         string
+	ResultBytes         int64
+	ContentBytes        int64
+	MaxMarkdownParts    int
+	UploadState         JobResultUploadState
+	SlackFileID         string
 }
+
+// ExternalAgentJobDelivery is the durable, immutable delivery identity. The
+// notification name remains as the compatibility-facing store type.
+type ExternalAgentJobDelivery = ExternalAgentJobNotification
 
 func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNotification, error) {
 	target, err := ConversationReplyTarget(job.ConversationKey)
@@ -54,13 +108,16 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 	}
 	markdown := fmt.Sprintf("OpenCode job `%s` %s.", job.ID, job.Status)
 	if job.Status == JobCompleted && strings.TrimSpace(job.ResultSummary) != "" {
-		markdown += "\n\nSummary: " + sanitizeNotificationText(job.ResultSummary, 2000)
+		markdown += "\n\nSummary: " + job.ResultSummary
 	}
 	if job.Status == JobCompletionUnknown {
 		markdown = fmt.Sprintf("OpenCode job `%s` was interrupted after external actions may have occurred. It was not retried; reconciliation is required.", job.ID)
 	}
 	if job.Status == JobFailed {
 		markdown += " The operation failed with a host-owned error code."
+		if job.ErrorCode != "" {
+			markdown += " Delivery code: `" + sanitizeNotificationText(job.ErrorCode, 128) + "`."
+		}
 	}
 	if job.Status == JobCancelled {
 		markdown += " The operation was cancelled before completion."
@@ -76,7 +133,127 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 		CanonicalMarkdown: markdown, ContentSHA256: fmt.Sprintf("%x", digest),
 		RendererVersion: JobNotificationRenderer, Target: target,
 		PublishState: NotificationPending,
+		DeliveryMode: JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
+		UploadState: JobResultUploadNotApplicable, MaxMarkdownParts: 1,
 	}, nil
+}
+
+// NewExternalAgentJobDelivery creates a notification from a complete,
+// already-sanitized result. It never truncates provider output.
+func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResult) (ExternalAgentJobNotification, error) {
+	target, err := ConversationReplyTarget(job.ConversationKey)
+	if err != nil {
+		return ExternalAgentJobNotification{}, err
+	}
+	if job.ID == "" || job.StatusRevision < 0 {
+		return ExternalAgentJobNotification{}, errors.New("external-agent delivery identity is invalid")
+	}
+	if strings.ContainsAny(job.ID, "/\\\x00\r\n") {
+		return ExternalAgentJobNotification{}, errors.New("external-agent delivery job ID is not a safe filename component")
+	}
+	if job.Status != JobCompleted {
+		return NewExternalAgentJobNotification(job)
+	}
+	mode := result.DeliveryMode
+	if mode == "" {
+		mode = JobResultDeliveryMarkdown
+	}
+	policyVersion := result.DeliveryPolicyVersion
+	if policyVersion == "" {
+		policyVersion = JobDeliveryPolicyV1
+	}
+	maxParts := result.DeliveryMaxMarkdownParts
+	if maxParts <= 0 {
+		maxParts = 1
+	}
+	if maxParts > 8 {
+		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown part policy is invalid")
+	}
+	contentDigest := result.DeliveryContentSHA256
+	if contentDigest == "" {
+		contentDigest = result.ResultSHA256
+	}
+	if contentDigest == "" {
+		digest := sha256.Sum256([]byte(result.Text))
+		contentDigest = fmt.Sprintf("%x", digest)
+	}
+	contentBytes := result.DeliveryContentBytes
+	if contentBytes <= 0 {
+		contentBytes = result.ResultBytes
+	}
+	if contentBytes <= 0 {
+		contentBytes = int64(len([]byte(result.Text)))
+	}
+	if contentBytes <= 0 {
+		return ExternalAgentJobNotification{}, errors.New("result delivery content size is invalid")
+	}
+	if _, err := hex.DecodeString(contentDigest); err != nil || len(contentDigest) != sha256.Size*2 {
+		return ExternalAgentJobNotification{}, errors.New("result delivery digest is invalid")
+	}
+	markdown := fmt.Sprintf("OpenCode job `%s` completed.", job.ID)
+	artifactRef := ""
+	uploadState := JobResultUploadNotApplicable
+	if mode == JobResultDeliveryFile {
+		artifactRef = result.DeliveryArtifactRef
+		if artifactRef == "" {
+			artifactRef = result.ArtifactRef
+		}
+		if artifactRef == "" {
+			return ExternalAgentJobNotification{}, errors.New("file delivery requires a result artifact")
+		}
+		if strings.ContainsAny(artifactRef, "/\\\x00\r\n") {
+			return ExternalAgentJobNotification{}, errors.New("result delivery artifact reference is invalid")
+		}
+		uploadState = JobResultUploadPending
+		markdown += fmt.Sprintf(" The complete result was attached as `opencode-%s.md` (%d bytes, SHA-256 `%s`).", job.ID, contentBytes, contentDigest)
+	} else if mode == JobResultDeliveryMarkdown {
+		if result.ArtifactRef != "" || result.DeliveryArtifactRef != "" {
+			return ExternalAgentJobNotification{}, errors.New("Markdown delivery cannot reference an artifact")
+		}
+		if result.DeliveryCanonicalMarkdown != "" {
+			markdown = result.DeliveryCanonicalMarkdown
+		} else if result.Text != "" {
+			markdown += "\n\n" + result.Text
+		}
+	} else {
+		return ExternalAgentJobNotification{}, fmt.Errorf("unsupported result delivery mode %q", mode)
+	}
+	if !utf8.ValidString(markdown) || strings.TrimSpace(markdown) == "" {
+		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown is invalid")
+	}
+	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
+	return ExternalAgentJobNotification{
+		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
+		CanonicalMarkdown: markdown, ContentSHA256: contentDigest, RendererVersion: JobNotificationRenderer,
+		Target: target, PublishState: NotificationPending, DeliveryMode: mode, PolicyVersion: policyVersion,
+		ArtifactRef: artifactRef, ResultBytes: contentBytes, MaxMarkdownParts: maxParts,
+		ContentBytes: contentBytes,
+		UploadState:  uploadState,
+	}, nil
+}
+
+// SanitizeResultText applies host-owned control neutralization before digesting
+// or storing result bytes. Redaction is applied by the application redactor.
+func SanitizeResultText(value string) (string, error) {
+	if !utf8.ValidString(value) {
+		return "", errors.New("result text is not valid UTF-8")
+	}
+	var builder strings.Builder
+	for _, r := range value {
+		if r == '\x00' || (r < ' ' && r != '\n' && r != '\r' && r != '\t') {
+			continue
+		}
+		if r == '<' {
+			builder.WriteString("&lt;")
+			continue
+		}
+		builder.WriteRune(r)
+	}
+	result := builder.String()
+	if strings.TrimSpace(result) == "" {
+		return "", errors.New("result text is empty after sanitization")
+	}
+	return result, nil
 }
 
 func sanitizeNotificationText(value string, maxRunes int) string {
@@ -105,6 +282,12 @@ func sanitizeNotificationText(value string, maxRunes int) string {
 func ConversationReplyTarget(key ConversationKey) (ReplyTarget, error) {
 	parts := strings.Split(string(key), ":")
 	if len(parts) < 4 || parts[0] != "slack" || parts[1] == "" || parts[3] == "" {
+		return ReplyTarget{}, errors.New("job conversation key is malformed")
+	}
+	if len(parts) == 4 && parts[2] != "dm" {
+		return ReplyTarget{}, errors.New("job conversation key is malformed")
+	}
+	if len(parts) != 4 && !(len(parts) == 6 && (parts[2] == "dm" || parts[2] == "channel" || parts[2] == "group") && parts[4] == "thread" && parts[5] != "") {
 		return ReplyTarget{}, errors.New("job conversation key is malformed")
 	}
 	target := ReplyTarget{ChannelID: parts[3]}

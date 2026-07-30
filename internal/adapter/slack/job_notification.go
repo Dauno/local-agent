@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 
 	slackapi "github.com/slack-go/slack"
 
@@ -16,12 +17,20 @@ import (
 const jobNotificationMetadataEventType = "local_agent_external_agent_job"
 
 type JobNotificationPublisher struct {
-	publisher *Publisher
-	history   *HistoryReader
+	publisher     *Publisher
+	history       *HistoryReader
+	uploader      port.GeneratedFileUploader
+	artifacts     port.VerifiedResultArtifactStore
+	deliveryStore port.ExternalAgentJobDeliveryStore
+	fileClient    *slackapi.Client
 }
 
 func NewJobNotificationPublisher(publisher *Publisher, history *HistoryReader) *JobNotificationPublisher {
 	return &JobNotificationPublisher{publisher: publisher, history: history}
+}
+
+func NewDurableJobNotificationPublisher(publisher *Publisher, history *HistoryReader, uploader port.GeneratedFileUploader, artifacts port.VerifiedResultArtifactStore, deliveryStore port.ExternalAgentJobDeliveryStore, fileClient *slackapi.Client) *JobNotificationPublisher {
+	return &JobNotificationPublisher{publisher: publisher, history: history, uploader: uploader, artifacts: artifacts, deliveryStore: deliveryStore, fileClient: fileClient}
 }
 
 func (p *JobNotificationPublisher) Publish(ctx context.Context, notification domain.ExternalAgentJobNotification) (port.PublishedResponse, error) {
@@ -31,6 +40,9 @@ func (p *JobNotificationPublisher) Publish(ctx context.Context, notification dom
 	}
 	if p == nil || p.publisher == nil || p.publisher.client == nil {
 		return port.PublishedResponse{}, errors.New("Slack job notification publisher is required")
+	}
+	if notification.DeliveryMode == domain.JobResultDeliveryFile {
+		return p.publishFile(ctx, notification)
 	}
 	if notification.Target.CorrelationID == "" {
 		notification.Target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", notification.JobID, notification.StatusRevision, notification.Kind)
@@ -53,7 +65,10 @@ func (p *JobNotificationPublisher) Publish(ctx context.Context, notification dom
 				"job_id": notification.JobID, "status_revision": notification.StatusRevision,
 				"kind": notification.Kind, "renderer_version": notification.RendererVersion,
 				"notification_sha256": notification.ContentSHA256, "content_sha256": notification.ContentSHA256,
-				"part_sha256": contentSHA256(part),
+				"delivery_mode": string(notification.DeliveryMode), "policy_version": notification.PolicyVersion,
+				"result_bytes": notification.ContentBytes, "max_markdown_parts": notification.MaxMarkdownParts,
+				"upload_state": string(notification.UploadState),
+				"part_sha256":  contentSHA256(part),
 			},
 		}
 		ts, err := p.publisher.postWithRetry(ctx, req)
@@ -74,12 +89,20 @@ func (p *JobNotificationPublisher) Reconcile(ctx context.Context, notification d
 	if p == nil || p.history == nil || p.history.client == nil {
 		return "", false, errors.New("Slack job notification history is required")
 	}
+	if notification.DeliveryMode == domain.JobResultDeliveryFile && notification.SlackFileID == "" {
+		// No durable Slack identity exists yet, so there is nothing to
+		// reconcile. Let the worker retry the upload URL request.
+		return "", false, nil
+	}
 	callCtx := ctx
 	cancel := func() {}
 	if p.history.timeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, p.history.timeout)
 	}
 	defer cancel()
+	if notification.DeliveryMode == domain.JobResultDeliveryFile {
+		return p.reconcileFile(ctx, notification, callCtx)
+	}
 	var messages []slackapi.Message
 	if notification.Target.ThreadTS != "" {
 		messages, err = p.history.client.ConversationReplies(callCtx, notification.Target.ChannelID, notification.Target.ThreadTS, "", 100)
@@ -99,6 +122,8 @@ func (p *JobNotificationPublisher) Reconcile(ctx context.Context, notification d
 		jobID, _ := payload["job_id"].(string)
 		kind, _ := payload["kind"].(string)
 		renderer, _ := payload["renderer_version"].(string)
+		mode, _ := payload["delivery_mode"].(string)
+		policy, _ := payload["policy_version"].(string)
 		digest, _ := payload["notification_sha256"].(string)
 		if digest == "" {
 			digest, _ = payload["content_sha256"].(string)
@@ -107,7 +132,7 @@ func (p *JobNotificationPublisher) Reconcile(ctx context.Context, notification d
 		revision, _ := metadataInt(payload["status_revision"])
 		index, _ := metadataInt(payload["part_index"])
 		count, _ := metadataInt(payload["part_count"])
-		if jobID != notification.JobID || kind != notification.Kind || renderer != notification.RendererVersion || digest != notification.ContentSHA256 {
+		if jobID != notification.JobID || kind != notification.Kind || renderer != notification.RendererVersion || digest != notification.ContentSHA256 || (mode != "" && mode != string(notification.DeliveryMode)) || (policy != "" && policy != notification.PolicyVersion) {
 			if jobID == notification.JobID {
 				return "", false, errors.New("Slack job notification metadata is inconsistent")
 			}
@@ -137,15 +162,272 @@ func validateJobNotification(notification domain.ExternalAgentJobNotification) (
 	if notification.JobID == "" || notification.StatusRevision < 0 || notification.Kind == "" || notification.RendererVersion != domain.JobNotificationRenderer || notification.Target.ChannelID == "" || notification.CanonicalMarkdown == "" {
 		return nil, errors.New("job notification identity is invalid")
 	}
-	digest := sha256.Sum256([]byte(notification.CanonicalMarkdown))
-	if fmt.Sprintf("%x", digest) != notification.ContentSHA256 {
-		return nil, errors.New("job notification digest does not match canonical Markdown")
+	if notification.DeliveryMode == domain.JobResultDeliveryFile {
+		contentBytes := notification.ContentBytes
+		if contentBytes <= 0 {
+			contentBytes = notification.ResultBytes
+		}
+		if notification.ArtifactRef == "" || contentBytes <= 0 || notification.ContentSHA256 == "" {
+			return nil, errors.New("file job notification delivery identity is invalid")
+		}
+		parts := renderMarkdownV1(notification.CanonicalMarkdown, false)
+		if len(parts) != 1 {
+			return nil, errors.New("file job notification status exceeds one Markdown part")
+		}
+		return parts, nil
+	}
+	if notification.PolicyVersion == "legacy_v1" {
+		digest := sha256.Sum256([]byte(notification.CanonicalMarkdown))
+		if fmt.Sprintf("%x", digest) != notification.ContentSHA256 {
+			return nil, errors.New("job notification digest does not match canonical Markdown")
+		}
+	} else if len(notification.ContentSHA256) != sha256.Size*2 || notification.ContentBytes <= 0 {
+		return nil, errors.New("job notification result digest is invalid")
 	}
 	parts := renderMarkdownV1(notification.CanonicalMarkdown, false)
 	if len(parts) == 0 || strings.TrimSpace(strings.Join(parts, "")) == "" {
 		return nil, errors.New("job notification Markdown is empty")
 	}
+	if notification.MaxMarkdownParts > 0 && len(parts) > notification.MaxMarkdownParts {
+		return nil, errors.New("job notification exceeds its persisted Markdown part policy")
+	}
 	return parts, nil
+}
+
+func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification domain.ExternalAgentJobNotification) (port.PublishedResponse, error) {
+	if p.uploader == nil || p.artifacts == nil {
+		return port.PublishedResponse{}, errors.New("durable file delivery dependencies are required")
+	}
+	contentBytes := notification.ContentBytes
+	if contentBytes <= 0 {
+		contentBytes = notification.ResultBytes
+	}
+	content, err := p.artifacts.Get(ctx, notification.JobID+"-delivery", notification.ArtifactRef, notification.ContentSHA256, contentBytes)
+	if err != nil {
+		return port.PublishedResponse{}, errors.New("result_artifact_invalid")
+	}
+	if notification.SlackFileID == "" {
+		filename := "opencode-" + notification.JobID + ".md"
+		var target port.GeneratedFileUploadTarget
+		var requestErr error
+		if markdownUploader, ok := p.uploader.(port.MarkdownResultUploader); ok {
+			target, requestErr = markdownUploader.RequestMarkdownUploadURL(ctx, filename, len(content))
+		} else {
+			target, requestErr = p.uploader.RequestUploadURL(ctx, filename, len(content))
+		}
+		if requestErr != nil || target.FileID == "" || target.UploadURL == "" {
+			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+		}
+		if p.deliveryStore != nil {
+			if err := p.deliveryStore.MarkNotificationFileID(ctx, &notification, target.FileID, time.Now().UTC()); err != nil {
+				return port.PublishedResponse{}, err
+			}
+		}
+		notification.SlackFileID = target.FileID
+		if err := p.uploader.UploadBytes(ctx, target, content); err != nil {
+			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+		}
+		if p.deliveryStore != nil {
+			if err := p.deliveryStore.MarkNotificationUploadState(ctx, &notification, domain.JobResultUploadBytesUploaded, time.Now().UTC()); err != nil {
+				return port.PublishedResponse{}, err
+			}
+		}
+		notification.UploadState = domain.JobResultUploadBytesUploaded
+	} else if notification.UploadState == domain.JobResultUploadUnknown || notification.UploadState == domain.JobResultUploadURLRequested {
+		// A persisted file ID means the process may have stopped after upload.
+		// Prove that exact file before allowing completion; never create a second.
+		if p.fileClient == nil {
+			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+		}
+		if _, inspectErr := p.inspectFile(ctx, notification); inspectErr != nil {
+			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+		}
+		if notification.Target.ThreadTS != "" {
+			shared, inspectErr := p.fileSharedInThread(ctx, notification)
+			if inspectErr != nil || !shared {
+				return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+			}
+		}
+		notification.UploadState = domain.JobResultUploadCompleted
+		if p.deliveryStore != nil {
+			if err := p.deliveryStore.MarkNotificationUploadState(ctx, &notification, domain.JobResultUploadCompleted, time.Now().UTC()); err != nil {
+				return port.PublishedResponse{}, err
+			}
+		}
+	}
+	if notification.UploadState != domain.JobResultUploadCompleted {
+		if err := p.uploader.CompleteUpload(ctx, notification.SlackFileID, notification.Target.ChannelID, notification.Target.ThreadTS, "OpenCode result "+notification.JobID); err != nil {
+			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+		}
+		if p.deliveryStore != nil {
+			if err := p.deliveryStore.MarkNotificationUploadState(ctx, &notification, domain.JobResultUploadCompleted, time.Now().UTC()); err != nil {
+				return port.PublishedResponse{}, err
+			}
+		}
+		notification.UploadState = domain.JobResultUploadCompleted
+	}
+	return p.publishParts(ctx, notification, renderMarkdownV1(notification.CanonicalMarkdown, false), notification.SlackFileID)
+}
+
+func (p *JobNotificationPublisher) publishParts(ctx context.Context, notification domain.ExternalAgentJobNotification, parts []string, fileID string) (port.PublishedResponse, error) {
+	channel := p.publisher.channelPace(notification.Target.ChannelID)
+	channel.mu.Lock()
+	defer channel.mu.Unlock()
+	result := port.PublishedResponse{}
+	for index, part := range parts {
+		if err := p.publisher.waitForChannel(ctx, channel); err != nil {
+			return result, err
+		}
+		extra := map[string]any{
+			"job_id": notification.JobID, "status_revision": notification.StatusRevision,
+			"kind": notification.Kind, "renderer_version": notification.RendererVersion,
+			"delivery_mode": string(notification.DeliveryMode), "policy_version": notification.PolicyVersion,
+			"notification_sha256": notification.ContentSHA256, "content_sha256": notification.ContentSHA256,
+			"result_bytes": notification.ContentBytes, "max_markdown_parts": notification.MaxMarkdownParts,
+			"upload_state": string(notification.UploadState),
+			"part_sha256":  contentSHA256(part),
+		}
+		if fileID != "" {
+			extra["file_id"] = fileID
+		}
+		ts, err := p.publisher.postWithRetry(ctx, postRequest{channelID: notification.Target.ChannelID, threadTS: notification.Target.ThreadTS,
+			markdown: part, correlationID: notification.Target.CorrelationID, renderMode: notification.RendererVersion,
+			partIndex: index + 1, partCount: len(parts), contentSHA256: contentSHA256(part), eventType: jobNotificationMetadataEventType, extraMetadata: extra})
+		channel.lastAttempt = p.publisher.now()
+		if err != nil {
+			return result, err
+		}
+		result.LastMessageTS = ts
+	}
+	return result, nil
+}
+
+func (p *JobNotificationPublisher) reconcileFile(ctx context.Context, notification domain.ExternalAgentJobNotification, callCtx context.Context) (string, bool, error) {
+	if p.fileClient == nil {
+		return "", false, errors.New("file delivery evidence is unavailable")
+	}
+	if _, err := p.inspectFile(callCtx, notification); err != nil {
+		return "", false, err
+	}
+	var err error
+	var messages []slackapi.Message
+	if notification.Target.ThreadTS != "" {
+		messages, err = p.history.client.ConversationReplies(callCtx, notification.Target.ChannelID, notification.Target.ThreadTS, "", 100)
+	} else {
+		messages, err = p.history.client.ConversationHistory(callCtx, notification.Target.ChannelID, "", 100)
+	}
+	if err != nil {
+		return "", false, err
+	}
+	fileShared := notification.Target.ThreadTS == ""
+	statusTS := ""
+	for _, message := range messages {
+		if containsSlackFile(message.Files, notification.SlackFileID) {
+			if fileShared || message.Edited != nil || message.Hidden || message.User != p.history.botUserID || message.Timestamp == "" {
+				return "", false, errors.New("file delivery share evidence is inconsistent")
+			}
+			fileShared = true
+		}
+		if message.Metadata.EventType != jobNotificationMetadataEventType || message.Edited != nil || message.Hidden || len(message.Files) != 0 || message.User != p.history.botUserID {
+			continue
+		}
+		payload := message.Metadata.EventPayload
+		jobID, _ := payload["job_id"].(string)
+		mode, _ := payload["delivery_mode"].(string)
+		policy, _ := payload["policy_version"].(string)
+		fileID, _ := payload["file_id"].(string)
+		kind, _ := payload["kind"].(string)
+		renderer, _ := payload["renderer_version"].(string)
+		digest, _ := payload["notification_sha256"].(string)
+		partDigest, _ := payload["part_sha256"].(string)
+		revision, _ := metadataInt(payload["status_revision"])
+		index, _ := metadataInt(payload["part_index"])
+		count, _ := metadataInt(payload["part_count"])
+		parts := renderMarkdownV1(notification.CanonicalMarkdown, false)
+		if jobID == notification.JobID && (mode != string(domain.JobResultDeliveryFile) || policy != notification.PolicyVersion || fileID != notification.SlackFileID || kind != notification.Kind || renderer != notification.RendererVersion || digest != notification.ContentSHA256 || index != 1 || count != 1 || len(parts) != 1 || partDigest != contentSHA256(parts[0]) || revision != notification.StatusRevision || message.Timestamp == "") {
+			if jobID == notification.JobID {
+				return "", false, errors.New("file delivery status evidence is inconsistent")
+			}
+			continue
+		}
+		if jobID == notification.JobID {
+			if statusTS != "" {
+				return "", false, errors.New("file delivery status evidence is duplicated")
+			}
+			statusTS = message.Timestamp
+		}
+	}
+	if !fileShared {
+		return "", false, errors.New("file delivery thread evidence is unavailable")
+	}
+	if statusTS != "" {
+		return statusTS, true, nil
+	}
+	return "", false, nil
+}
+
+func (p *JobNotificationPublisher) fileSharedInThread(ctx context.Context, notification domain.ExternalAgentJobNotification) (bool, error) {
+	if p == nil || p.history == nil || p.history.client == nil || notification.Target.ThreadTS == "" {
+		return false, errors.New("file delivery thread evidence is unavailable")
+	}
+	messages, err := p.history.client.ConversationReplies(ctx, notification.Target.ChannelID, notification.Target.ThreadTS, "", 100)
+	if err != nil {
+		return false, err
+	}
+	found := false
+	for _, message := range messages {
+		if !containsSlackFile(message.Files, notification.SlackFileID) {
+			continue
+		}
+		if found || message.Edited != nil || message.Hidden || message.User != p.history.botUserID || message.Timestamp == "" {
+			return false, errors.New("file delivery share evidence is inconsistent")
+		}
+		found = true
+	}
+	return found, nil
+}
+
+func containsSlackFile(files []slackapi.File, fileID string) bool {
+	for _, file := range files {
+		if file.ID == fileID && fileID != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func (p *JobNotificationPublisher) inspectFile(ctx context.Context, notification domain.ExternalAgentJobNotification) (*slackapi.File, error) {
+	if p == nil || p.fileClient == nil || notification.SlackFileID == "" {
+		return nil, errors.New("file delivery evidence is unavailable")
+	}
+	file, _, _, err := p.fileClient.GetFileInfoContext(ctx, notification.SlackFileID, 1, 1)
+	if err != nil || file == nil {
+		return nil, errors.New("file delivery evidence is ambiguous")
+	}
+	contentBytes := notification.ContentBytes
+	if contentBytes <= 0 {
+		contentBytes = notification.ResultBytes
+	}
+	botUserID := ""
+	if p.history != nil {
+		botUserID = p.history.botUserID
+	}
+	if file.ID != notification.SlackFileID || file.Name != "opencode-"+notification.JobID+".md" || file.Size != int(contentBytes) || !fileVisibleInChannel(file, notification.Target.ChannelID) || (file.User != "" && botUserID != "" && file.User != botUserID) {
+		return nil, errors.New("file delivery evidence is inconsistent")
+	}
+	return file, nil
+}
+
+func fileVisibleInChannel(file *slackapi.File, channelID string) bool {
+	if file == nil || channelID == "" {
+		return false
+	}
+	for _, candidate := range append(append(append([]string{}, file.Channels...), file.Groups...), file.IMs...) {
+		if candidate == channelID {
+			return true
+		}
+	}
+	return false
 }
 
 var _ port.JobNotificationPublisher = (*JobNotificationPublisher)(nil)

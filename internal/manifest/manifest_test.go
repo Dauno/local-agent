@@ -155,6 +155,16 @@ func TestRenderOmitsGeneratedFileScopeWhenDisabled(t *testing.T) {
 	}
 }
 
+func TestRenderIncludesFileScopeForDurableACPDelivery(t *testing.T) {
+	rendered, err := Render(Identity{AppName: "Local Agent", BotDisplayName: "Dev Agent", DurableACPEnabled: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "files:write") {
+		t.Fatal("durable ACP delivery did not request files:write")
+	}
+}
+
 func TestRenderRejectsInvalidIdentity(t *testing.T) {
 	t.Parallel()
 

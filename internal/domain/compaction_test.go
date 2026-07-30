@@ -1,6 +1,9 @@
 package domain
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestClassifyConversationTurnsKeepsOlderOpenInvocationInActiveSuffix(t *testing.T) {
 	contents := []Content{
@@ -18,6 +21,38 @@ func TestClassifyConversationTurnsKeepsOlderOpenInvocationInActiveSuffix(t *test
 	}
 	if !turns[0].HasOpenInvocation || turns[0].Closed {
 		t.Fatalf("older invocation was not marked active: %#v", turns[0])
+	}
+}
+
+func TestClassifyConversationTurnsAcceptsADKConfirmationLifecycle(t *testing.T) {
+	contents := []Content{
+		{Role: ContentRoleUser, Parts: []ContentPart{{Text: "run the tool"}}},
+		{Role: ContentRoleModel, Parts: []ContentPart{{FunctionCall: &FunctionCall{ID: "call-1", Name: "write"}}}},
+		{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"error": "requires confirmation"}}}}},
+		{Role: ContentRoleModel, Parts: []ContentPart{{FunctionCall: &FunctionCall{ID: "confirmation-1", Name: ConfirmationFunctionName, Args: map[string]any{
+			"originalFunctionCall": map[string]any{"id": "call-1", "name": "write"},
+		}}}}},
+		{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "confirmation-1", Name: ConfirmationFunctionName, Response: map[string]any{"confirmed": true}}}}},
+		{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"result": "done"}}}}},
+		{Role: ContentRoleModel, Parts: []ContentPart{{Text: "completed"}}},
+	}
+
+	if _, _, err := ClassifyConversationTurns(contents); err != nil {
+		t.Fatalf("valid ADK confirmation lifecycle rejected: %v", err)
+	}
+}
+
+func TestClassifyConversationTurnsRejectsDuplicateResponseWithoutConfirmation(t *testing.T) {
+	contents := []Content{
+		{Role: ContentRoleUser, Parts: []ContentPart{{Text: "run the tool"}}},
+		{Role: ContentRoleModel, Parts: []ContentPart{{FunctionCall: &FunctionCall{ID: "call-1", Name: "write"}}}},
+		{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "write"}}}},
+		{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "write"}}}},
+	}
+
+	_, _, err := ClassifyConversationTurns(contents)
+	if err == nil || !strings.Contains(err.Error(), "has no matching call") {
+		t.Fatalf("duplicate response error = %v", err)
 	}
 }
 

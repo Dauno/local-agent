@@ -62,21 +62,31 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 - Durable sessions are stamped with `local_agent_provider_family` state; startup and each turn fail closed on family mismatch (`init --reset-state` to switch families).
 - Foreground ACP calls composed with the durable job service use a synchronous compatibility facade. Worker calls carry `JobID` and bypass the facade to prevent recursion; probes and management retain direct ACP clients.
 
-### Durable external-agent notifications
+### Durable external-agent result delivery
 
-- SQLite schema v19 adds `external_agent_job_notifications`, keyed by
+- SQLite schema v22 adds immutable result-delivery fields to
+  `external_agent_job_notifications`, keyed by
   `(job_id, status_revision, kind)`. Terminal job CAS and outbox insertion are
-  one transaction; Markdown is host-owned, bounded, sanitized, canonical and
-  SHA-256 addressed.
+  one transaction. Existing v19-v21 rows remain `legacy_v1` and are never
+  replayed or regenerated.
+- Durable ACP results are redacted and control-sanitized before mode selection.
+  Results use complete `markdown_v1` multipart delivery up to
+  `acp.delivery.max_markdown_parts` (1-8), otherwise use a private verified
+  `.md` artifact uploaded to the originating thread. No second confirmation is
+  created.
+- Result artifacts use bounded 0600 files, opaque references, verified owner
+  and SHA-256 reads, and retention skips unpublished delivery references. Raw
+  ACP artifacts are never uploaded.
 - `externalagent.NotificationWorker` is independent from execution leases. It
   claims `pending`, stale `publishing`, or `unknown` rows and marks publication
   only with owner/attempt CAS. Restart and ambiguous Slack results reconcile
-  deterministic metadata before retry; raw Markdown and provider errors are not
-  logged.
+  deterministic metadata before retry; raw result content, artifact paths,
+  upload URLs, and provider errors are not logged.
 - `internal/adapter/slack.JobNotificationPublisher` uses the existing Markdown
-  splitter and Slack history, with metadata for job ID, status revision, kind,
-  renderer version, whole-content digest and part digest. Recovered Slack
-  timestamps are persisted.
+  splitter and external upload transport, with metadata for job ID, status
+  revision, kind, mode, policy, whole-result digest, part digest, and file ID.
+  Recovered Slack timestamps are persisted; file upload state is persisted
+  through URL request, byte upload, completion, and reconciliation.
 - `completion_unknown` never replays the original task. `Service.Status`,
   `CancelForConversation`, and `Reconcile` require actor/conversation binding;
   reconciliation uses capability-negotiated ACP sessions and remains
@@ -129,11 +139,11 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - **Dedupe**: at-most-once by event + message keys. Ephemeral Slack history recovery is not persisted.
 - **Canonical keys**: `slack:{team}:dm:{channel}` or `slack:{team}:channel:{channel}:thread:{root_ts}`.
 - **ADK session IDs**: `adk:{canonical-conversation-key}` — deterministic, opaque, never derived from untrusted text.
-- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 19.
+- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 22.
 - **Memory**: curated entity memory stored in SQLite; `.local-agent/memory/` holds OKF file projections. Memory retrieval is deterministic (no LLM routing) and runs before each model call. Memory failure is non-fatal.
 - **Ephemeral context**: Slack enrichment and memory snippets are injected per-turn via the user message text; they must never become durable ADK events.
 - **Sandbox**: workspace inspection is opt-in through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env`, `.local-agent`, and `.git` at every depth (including symlinks).
-- **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, and are cleaned by `acp.artifact_retention_days`. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, configured bounds and v19 job/outbox tables without reading secrets.
+- **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, verified owner/digest reads, and are cleaned by `acp.artifact_retention_days` only when no unpublished delivery references them. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, delivery policy, and v22 job/outbox fields without reading result content or secrets. Durable ACP file fallback requires Slack `files:write`.
 
 ## OpenCode config
 

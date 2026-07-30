@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -16,6 +17,8 @@ import (
 var _ port.ExternalAgentJobStore = (*ExternalAgentJobStore)(nil)
 var _ port.ExpiredExternalAgentJobRecovery = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobNotificationStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobDeliveryStore = (*ExternalAgentJobStore)(nil)
+var _ port.ArtifactReferenceChecker = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobReconciler = (*ExternalAgentJobStore)(nil)
 
 var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
@@ -250,7 +253,7 @@ func (s *ExternalAgentJobStore) RequestCancellation(ctx context.Context, jobID, 
 		return nil, err
 	}
 	if isNotificationTerminal(job.Status) {
-		if err := insertJobNotification(ctx, tx, job); err != nil {
+		if err := insertJobNotification(ctx, tx, job, nil); err != nil {
 			return nil, err
 		}
 	}
@@ -325,6 +328,9 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 	}
 	if result != nil {
 		job.ResultSummary, job.ResultArtifact, job.ResultSHA256, job.ResultBytes = result.Text, result.ArtifactRef, result.ResultSHA256, result.ResultBytes
+		if result.DeliveryMode == domain.JobResultDeliveryFile {
+			job.ResultSummary = ""
+		}
 	}
 	job.ErrorCode = errorCode
 	leaseOwner, leaseExpiry, heartbeat := job.LeaseOwner, unix(job.LeaseExpiry), unix(job.HeartbeatAt)
@@ -351,7 +357,7 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 		return err
 	}
 	if isNotificationTerminal(job.Status) {
-		if err := insertJobNotification(ctx, tx, job); err != nil {
+		if err := insertJobNotification(ctx, tx, job, result); err != nil {
 			return err
 		}
 	}
@@ -410,7 +416,7 @@ func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string
 		return err
 	}
 	if isNotificationTerminal(job.Status) {
-		if err := insertJobNotification(ctx, tx, job); err != nil {
+		if err := insertJobNotification(ctx, tx, job, nil); err != nil {
 			return err
 		}
 	}
@@ -428,8 +434,14 @@ func isNotificationTerminal(status domain.ExternalAgentJobStatus) bool {
 
 func insertJobNotification(ctx context.Context, exec interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, job domain.ExternalAgentJob) error {
-	notification, err := domain.NewExternalAgentJobNotification(job)
+}, job domain.ExternalAgentJob, result *domain.AcpInvocationResult) error {
+	var notification domain.ExternalAgentJobNotification
+	var err error
+	if result != nil && job.Status == domain.JobCompleted && job.Mode == domain.JobDetached {
+		notification, err = domain.NewExternalAgentJobDelivery(job, *result)
+	} else {
+		notification, err = domain.NewExternalAgentJobNotification(job)
+	}
 	if err != nil {
 		return err
 	}
@@ -437,13 +449,15 @@ func insertJobNotification(ctx context.Context, exec interface {
 		job_id, status_revision, kind, canonical_markdown, content_sha256,
 		renderer_version, channel_id, thread_ts, publish_state, lease_owner,
 		lease_expiry, attempts, next_attempt_at, recovered_slack_ts, last_error_code,
-		created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, '', '', ?, ?)
+		created_at, updated_at, delivery_mode, policy_version, artifact_ref, result_bytes,
+		max_markdown_parts, upload_state, slack_file_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, '')
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 		notification.JobID, notification.StatusRevision, notification.Kind,
 		notification.CanonicalMarkdown, notification.ContentSHA256, notification.RendererVersion,
 		notification.Target.ChannelID, notification.Target.ThreadTS, notification.PublishState,
-		unix(job.UpdatedAt), unix(job.UpdatedAt), unix(job.UpdatedAt),
+		unix(job.UpdatedAt), unix(job.UpdatedAt), unix(job.UpdatedAt), notification.DeliveryMode, notification.PolicyVersion,
+		notification.ArtifactRef, notification.ResultBytes, notification.MaxMarkdownParts, notification.UploadState,
 	)
 	return err
 }
@@ -463,6 +477,7 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		FROM external_agent_job_notifications
 		WHERE ((publish_state IN (?, ?) AND next_attempt_at <= ?) OR
 			(publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?))
+		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
 		ORDER BY next_attempt_at ASC, created_at ASC LIMIT 1`,
 		domain.NotificationPending, domain.NotificationUnknown, now.UnixNano(), domain.NotificationPublishing, now.UnixNano()).Scan(&jobID, &revision, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -476,7 +491,8 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		publish_state = ?, lease_owner = ?, lease_expiry = ?, attempts = attempts + 1, updated_at = ?
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND
 		((publish_state IN (?, ?) AND next_attempt_at <= ?) OR
-		 (publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?))`,
+		 (publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?))
+		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')`,
 		domain.NotificationPublishing, owner, leaseExpiry.UnixNano(), now.UnixNano(), jobID, revision, kind,
 		domain.NotificationPending, domain.NotificationUnknown, now.UnixNano(), domain.NotificationPublishing, now.UnixNano())
 	if err != nil {
@@ -502,10 +518,10 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
 		publish_state = ?, recovered_slack_ts = ?, lease_owner = '', lease_expiry = 0,
-		last_error_code = '', updated_at = ?
+		last_error_code = '', updated_at = ?, upload_state = CASE WHEN delivery_mode = 'file' THEN ? ELSE upload_state END
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND publish_state = ?
-		AND lease_owner = ? AND attempts = ?`, domain.NotificationPublished, slackTS, now.UnixNano(), notification.JobID,
-		notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
+		AND lease_owner = ? AND attempts = ?`, domain.NotificationPublished, slackTS, now.UnixNano(),
+		domain.JobResultUploadCompleted, notification.JobID, notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
 	if err != nil {
 		return fmt.Errorf("mark notification published: %w", err)
 	}
@@ -515,22 +531,106 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 	return nil
 }
 
+func (s *ExternalAgentJobStore) MarkNotificationFileID(ctx context.Context, notification *domain.ExternalAgentJobNotification, fileID string, now time.Time) error {
+	if notification == nil || notification.JobID == "" || notification.LeaseOwner == "" || fileID == "" {
+		return errors.New("notification file identity is required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
+		slack_file_id = ?, upload_state = ?, updated_at = ?
+		WHERE job_id = ? AND status_revision = ? AND kind = ? AND publish_state = ?
+		AND lease_owner = ? AND attempts = ?`, fileID, domain.JobResultUploadURLRequested, now.UnixNano(), notification.JobID,
+		notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
+	if err != nil {
+		return fmt.Errorf("persist notification Slack file ID: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrNotificationStateConflict
+	}
+	return nil
+}
+
+func (s *ExternalAgentJobStore) MarkNotificationUploadState(ctx context.Context, notification *domain.ExternalAgentJobNotification, state domain.JobResultUploadState, now time.Time) error {
+	if notification == nil || notification.JobID == "" || notification.LeaseOwner == "" {
+		return errors.New("notification upload identity is required")
+	}
+	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_job_notifications SET upload_state = ?, updated_at = ?
+		WHERE job_id = ? AND status_revision = ? AND kind = ? AND publish_state = ?
+		AND lease_owner = ? AND attempts = ?`, state, now.UnixNano(), notification.JobID,
+		notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
+	if err != nil {
+		return fmt.Errorf("persist notification upload state: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return ErrNotificationStateConflict
+	}
+	return nil
+}
+
+func (s *ExternalAgentJobStore) IsArtifactReferenced(ctx context.Context, reference string) (bool, error) {
+	if s == nil || s.db == nil || reference == "" {
+		return false, errors.New("artifact reference store is not configured")
+	}
+	var count int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_notifications
+		WHERE artifact_ref = ? AND publish_state != ?
+		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')`, reference, domain.NotificationPublished).Scan(&count); err != nil {
+		return false, fmt.Errorf("inspect active result artifact reference: %w", err)
+	}
+	return count > 0, nil
+}
+
 func (s *ExternalAgentJobStore) MarkNotificationUnknown(ctx context.Context, notification *domain.ExternalAgentJobNotification, errorCode string) error {
 	if notification == nil || notification.JobID == "" || notification.LeaseOwner == "" {
 		return errors.New("notification failure identity is required")
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
+	now := time.Now().UTC()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin notification failure update: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	code := safeNotificationError(errorCode)
+	result, err := tx.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
 		publish_state = ?, lease_owner = '', lease_expiry = 0, next_attempt_at = ?, last_error_code = ?, updated_at = ?
+		, upload_state = CASE WHEN delivery_mode = 'file' THEN ? ELSE upload_state END
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND publish_state = ?
-		AND lease_owner = ? AND attempts = ?`, domain.NotificationUnknown, time.Now().UTC().UnixNano(), safeNotificationError(errorCode), time.Now().UTC().UnixNano(), notification.JobID,
-		notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
+		AND lease_owner = ? AND attempts = ?`, domain.NotificationUnknown, now.UnixNano(), code, now.UnixNano(),
+		domain.JobResultUploadUnknown, notification.JobID, notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
 	if err != nil {
 		return fmt.Errorf("mark notification unknown: %w", err)
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrNotificationStateConflict
 	}
-	return nil
+	if permanentNotificationError(code) {
+		markdown := fmt.Sprintf("OpenCode job `%s` completed, but its result could not be delivered.\nDelivery code: `%s`.", notification.JobID, code)
+		digest := sha256.Sum256([]byte(markdown))
+		_, err = tx.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
+			job_id, status_revision, kind, canonical_markdown, content_sha256,
+			renderer_version, channel_id, thread_ts, publish_state, lease_owner,
+			lease_expiry, attempts, next_attempt_at, recovered_slack_ts, last_error_code,
+			created_at, updated_at, delivery_mode, policy_version, artifact_ref, result_bytes,
+			max_markdown_parts, upload_state, slack_file_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, '', '', ?, ?, 'markdown', 'legacy_v1', '', 0, 1, 'not_applicable', '')
+			ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
+			notification.JobID, notification.StatusRevision, domain.JobNotificationFailure,
+			markdown, fmt.Sprintf("%x", digest), domain.JobNotificationRenderer,
+			notification.Target.ChannelID, notification.Target.ThreadTS,
+			domain.NotificationPending, now.UnixNano(), now.UnixNano(), now.UnixNano())
+		if err != nil {
+			return fmt.Errorf("enqueue result delivery failure notification: %w", err)
+		}
+	}
+	return tx.Commit()
+}
+
+func permanentNotificationError(code string) bool {
+	switch code {
+	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid":
+		return true
+	default:
+		return false
+	}
 }
 
 func safeNotificationError(value string) string {
@@ -540,19 +640,24 @@ func safeNotificationError(value string) string {
 	return value
 }
 
-const notificationColumns = `job_id, status_revision, kind, canonical_markdown, content_sha256, renderer_version, channel_id, thread_ts, publish_state, lease_owner, lease_expiry, attempts, next_attempt_at, recovered_slack_ts, last_error_code, created_at, updated_at`
+const notificationColumns = `job_id, status_revision, kind, canonical_markdown, content_sha256, renderer_version, channel_id, thread_ts, publish_state, lease_owner, lease_expiry, attempts, next_attempt_at, recovered_slack_ts, last_error_code, created_at, updated_at, delivery_mode, policy_version, artifact_ref, result_bytes, max_markdown_parts, upload_state, slack_file_id`
 
 func loadNotification(ctx context.Context, queryer queryRower, jobID string, revision int, kind string) (domain.ExternalAgentJobNotification, error) {
 	var n domain.ExternalAgentJobNotification
 	var state string
 	var leaseExpiry, nextAttempt, created, updated int64
+	var deliveryMode, policyVersion, uploadState string
 	row := queryer.QueryRowContext(ctx, `SELECT `+notificationColumns+` FROM external_agent_job_notifications WHERE job_id = ? AND status_revision = ? AND kind = ?`, jobID, revision, kind)
-	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &n.CanonicalMarkdown, &n.ContentSHA256, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated)
+	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &n.CanonicalMarkdown, &n.ContentSHA256, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID)
 	if err != nil {
 		return domain.ExternalAgentJobNotification{}, fmt.Errorf("load notification: %w", err)
 	}
 	n.Target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", n.JobID, n.StatusRevision, n.Kind)
 	n.PublishState = domain.NotificationPublishState(state)
+	n.DeliveryMode = domain.JobResultDeliveryMode(deliveryMode)
+	n.PolicyVersion = policyVersion
+	n.UploadState = domain.JobResultUploadState(uploadState)
+	n.ContentBytes = n.ResultBytes
 	n.LeaseExpiry, n.NextAttemptAt = fromUnix(leaseExpiry), fromUnix(nextAttempt)
 	return n, nil
 }

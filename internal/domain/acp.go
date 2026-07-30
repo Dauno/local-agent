@@ -43,6 +43,8 @@ const (
 	ACPErrorJobTimeout                 ACPErrorCode = "acp_job_timeout"
 	ACPErrorProcessExit                ACPErrorCode = "acp_process_exit"
 	ACPErrorResultTooLarge             ACPErrorCode = "acp_result_too_large"
+	ACPErrorResultArtifactInvalid      ACPErrorCode = "result_artifact_invalid"
+	ACPErrorResultDeliveryFailed       ACPErrorCode = "result_delivery_failed"
 	ACPErrorCompletedWithoutFinalText  ACPErrorCode = "acp_completed_without_final_message"
 	ACPErrorPermissionUnavailable      ACPErrorCode = "acp_permission_unavailable"
 	ACPErrorInvalidInput               ACPErrorCode = "acp_invalid_input"
@@ -157,13 +159,20 @@ type AcpInvocationRequest struct {
 }
 
 type AcpInvocationResult struct {
-	Text         string
-	Inline       bool
-	ArtifactRef  string
-	ResultSHA256 string
-	ResultBytes  int64
-	Usage        ACPUsage
-	Error        string
+	Text                      string
+	Inline                    bool
+	ArtifactRef               string
+	ResultSHA256              string
+	ResultBytes               int64
+	Usage                     ACPUsage
+	Error                     string
+	DeliveryMode              JobResultDeliveryMode
+	DeliveryCanonicalMarkdown string
+	DeliveryPolicyVersion     string
+	DeliveryMaxMarkdownParts  int
+	DeliveryContentSHA256     string
+	DeliveryContentBytes      int64
+	DeliveryArtifactRef       string
 }
 
 type ResultArtifact struct {

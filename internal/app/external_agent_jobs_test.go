@@ -2,6 +2,8 @@ package app
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -9,6 +11,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 func TestDurableACPDispatcherRejectsScopeRevisionDrift(t *testing.T) {
@@ -83,3 +86,52 @@ func TestAgentExecutionFingerprintChangesWithScopeInputs(t *testing.T) {
 		t.Fatalf("fingerprints = %q, %q", left, right)
 	}
 }
+
+func TestDurableACPDispatcherMaterializesSanitizedCompleteResult(t *testing.T) {
+	workspace := t.TempDir()
+	artifacts := &recordingResultArtifacts{}
+	child := preparedAgentTool{
+		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "safe <result>"}},
+		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
+	}
+	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, sanitize: func(value string) string { return value }, policy: domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
+	}}
+	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeliveryMode != domain.JobResultDeliveryMarkdown || result.Text != "safe &lt;result>" || result.DeliveryContentSHA256 == "" || len(artifacts.contents) != 0 {
+		t.Fatalf("materialized result = %+v, artifacts = %#v", result, artifacts.contents)
+	}
+	largeArtifacts := &recordingResultArtifacts{}
+	dispatcher.artifacts = largeArtifacts
+	child.acpRuntime = &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: strings.Repeat("x", domain.SlackMarkdownChunkRunes*6+1)}}
+	dispatcher.children = []preparedAgentTool{child}
+	large, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_2", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if large.DeliveryMode != domain.JobResultDeliveryFile || large.Text != "" || len(largeArtifacts.contents) != 1 {
+		t.Fatalf("large materialized result = %+v, artifacts = %#v", large, largeArtifacts.contents)
+	}
+}
+
+type recordingResultArtifacts struct{ contents map[string]string }
+
+func (s *recordingResultArtifacts) Put(_ context.Context, ownerID, content string) (domain.ResultArtifact, error) {
+	if s.contents == nil {
+		s.contents = make(map[string]string)
+	}
+	s.contents[ownerID] = content
+	digest := sha256.Sum256([]byte(content))
+	return domain.ResultArtifact{Reference: ownerID + ".result", SHA256: fmt.Sprintf("%x", digest), Bytes: int64(len([]byte(content)))}, nil
+}
+
+func (*recordingResultArtifacts) Get(context.Context, string, string, string, int64) ([]byte, error) {
+	return nil, fmt.Errorf("unexpected artifact read")
+}
+
+var _ port.ResultArtifactStore = (*recordingResultArtifacts)(nil)

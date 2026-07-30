@@ -26,10 +26,11 @@ var appTemplate = template.Must(
 
 // Identity contains the user-configurable names rendered into Slack.
 type Identity struct {
-	AppName         string
-	BotDisplayName  string
-	CanvasesEnabled bool
-	ExportsEnabled  bool
+	AppName           string
+	BotDisplayName    string
+	CanvasesEnabled   bool
+	ExportsEnabled    bool
+	DurableACPEnabled bool
 }
 
 // Render returns a deterministic Slack manifest for the supplied identity.

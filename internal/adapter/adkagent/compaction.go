@@ -289,38 +289,7 @@ func validateSelectedTurns(turns []domain.ConversationTurn, active bool) error {
 }
 
 func validateProtocol(contents []domain.Content, active bool) error {
-	calls := make(map[string]string)
-	responses := make(map[string]bool)
-	for _, content := range contents {
-		for _, part := range content.Parts {
-			switch {
-			case part.FunctionCall != nil:
-				call := part.FunctionCall
-				if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
-					return errors.New("invalid function call in ADK history")
-				}
-				if _, exists := calls[call.ID]; exists {
-					return fmt.Errorf("duplicate function call %q in ADK history", call.ID)
-				}
-				calls[call.ID] = call.Name
-			case part.FunctionResponse != nil:
-				response := part.FunctionResponse
-				name, exists := calls[response.ID]
-				if !exists || responses[response.ID] || name != response.Name {
-					return fmt.Errorf("function response %q is not paired with its call", response.ID)
-				}
-				responses[response.ID] = true
-			}
-		}
-	}
-	if !active {
-		for id := range calls {
-			if !responses[id] {
-				return fmt.Errorf("function call %q has no response in completed turn", id)
-			}
-		}
-	}
-	return nil
+	return domain.ValidateContentProtocol(contents, !active)
 }
 
 func validateProjectedContents(contents []domain.Content) error {
@@ -356,7 +325,7 @@ func BeforeModelCallback(projector port.ContextProjector) llmagent.BeforeModelCa
 		if err != nil {
 			return nil, err
 		}
-		compactionRequest := domain.CompactionRequest{Contents: contents, ConversationKey: conversationKeyFromSession(ctx), SessionRevision: sessionRevision(ctx)}
+		compactionRequest := domain.CompactionRequest{Contents: contents, ConversationKey: conversationKeyFromSession(ctx)}
 		if request.Config != nil {
 			if request.Config.SystemInstruction != nil {
 				for _, part := range request.Config.SystemInstruction.Parts {
@@ -413,18 +382,10 @@ func BeforeModelCallback(projector port.ContextProjector) llmagent.BeforeModelCa
 }
 
 func conversationKeyFromSession(ctx agent.Context) string {
-	if ctx == nil || ctx.Session() == nil {
+	if ctx == nil {
 		return ""
 	}
-	id := ctx.Session().ID()
-	return strings.TrimPrefix(id, "adk:")
-}
-
-func sessionRevision(ctx agent.Context) int64 {
-	if ctx == nil || ctx.Session() == nil || ctx.Session().Events() == nil {
-		return 0
-	}
-	return int64(ctx.Session().Events().Len())
+	return strings.TrimPrefix(ctx.SessionID(), "adk:")
 }
 
 func toDomainContents(contents []*genai.Content) ([]domain.Content, error) {

@@ -2,6 +2,8 @@ package fsartifact_test
 
 import (
 	"context"
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -77,5 +79,28 @@ func TestResultArtifactStoreCreateNoReplaceIsAtomic(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Fatalf("successful create calls = %d, want exactly one", wins)
+	}
+}
+
+func TestResultArtifactStoreVerifiedReadBindsOwnerAndDigest(t *testing.T) {
+	store, err := fsartifact.New(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const content = "complete sanitized result"
+	artifact, err := store.Put(context.Background(), "job_1-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	digest := sha256.Sum256([]byte(content))
+	data, err := store.Get(context.Background(), "job_1-delivery", artifact.Reference, fmt.Sprintf("%x", digest), 1024)
+	if err != nil || string(data) != content {
+		t.Fatalf("verified read = %q, err = %v", data, err)
+	}
+	if _, err := store.Get(context.Background(), "other", artifact.Reference, artifact.SHA256, 1024); err == nil {
+		t.Fatal("artifact was readable by a different owner")
+	}
+	if _, err := store.Get(context.Background(), "job_1-delivery", artifact.Reference, "wrong", 1024); err == nil {
+		t.Fatal("digest mismatch was accepted")
 	}
 }

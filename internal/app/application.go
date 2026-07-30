@@ -13,6 +13,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsproject"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/buildinfo"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/manifest"
@@ -124,8 +125,21 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 	if err != nil {
 		return "", "", err
 	}
+	durableACP := false
+	defs, err := agentdef.Load(paths.StateDir)
+	if err != nil {
+		return "", "", fmt.Errorf("load agent definitions for Slack manifest: %w", err)
+	}
+	if defs != nil {
+		for _, definition := range defs.Agents {
+			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
+				durableACP = true
+				break
+			}
+		}
+	}
 	rendered, err := manifest.Render(manifest.Identity{
-		AppName: cfg.Slack.AppName, BotDisplayName: cfg.Slack.BotDisplayName, CanvasesEnabled: cfg.Canvases.Enabled, ExportsEnabled: cfg.Exports.Enabled,
+		AppName: cfg.Slack.AppName, BotDisplayName: cfg.Slack.BotDisplayName, CanvasesEnabled: cfg.Canvases.Enabled, ExportsEnabled: cfg.Exports.Enabled, DurableACPEnabled: durableACP,
 	})
 	if err != nil {
 		return "", "", err

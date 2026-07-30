@@ -214,6 +214,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		resolvedModel  *agentdef.ResolvedModel
 		selectedModels []selectedModel
 		defsLoadFailed bool
+		durableACP     bool
 	)
 	if pathErr != nil {
 		report.fail("SQLite", pathErr.Error(), "Fix state.dir and state.db in .local-agent/config.yaml.", false)
@@ -354,12 +355,23 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			}
 		}
 	}
+	if defs != nil {
+		for _, definition := range defs.Agents {
+			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
+				durableACP = true
+				break
+			}
+		}
+	}
 	durableOpenAI := defs == nil || (resolvedModel != nil && resolvedModel.Type() == agentdef.ProviderTypeOpenAICompatible)
 	summarizerCompatible := durableOpenAI
 	if err := config.ValidateADKCompaction(cfg, durableOpenAI, summarizerCompatible); err != nil {
 		report.fail("ADK compaction", err.Error(), "Set context.adk_compaction.enabled=true with valid positive limits and keep summary composition compatible, then restart.", false)
 	} else if durableOpenAI {
 		report.pass("ADK compaction", "durable OpenAI-compatible model history projection is enabled")
+	}
+	if durableACP {
+		report.pass("ACP result delivery", fmt.Sprintf("complete results use up to %d Markdown parts or sanitized Markdown files", cfg.ACP.Delivery.MaxMarkdownParts))
 	}
 
 	modelAPIKeyEnv := cfg.Model.APIKeyEnv
@@ -554,6 +566,16 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			report.fail("Slack generated files", redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
 		} else {
 			report.pass("Slack generated files", "files:write scope check passed")
+		}
+	}
+	if durableACP && validSecrets[SlackBotTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.SlackAPITimeoutSeconds)
+		err := s.deps.Live.CheckSlackExports(liveCtx, values[SlackBotTokenKey])
+		cancel()
+		if err != nil {
+			report.fail("Slack ACP result delivery", redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
+		} else {
+			report.pass("Slack ACP result delivery", "files:write scope check passed")
 		}
 	}
 	if s.deps.CLI != nil {

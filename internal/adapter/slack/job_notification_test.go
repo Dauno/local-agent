@@ -50,6 +50,43 @@ func TestJobNotificationHistoryRejectsPartialEvidenceBeforeRetry(t *testing.T) {
 	}
 }
 
+func TestFileNotificationWithoutSlackIdentityRetriesInsteadOfReconciling(t *testing.T) {
+	notification := domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 3, Kind: domain.JobNotificationTerminal,
+		CanonicalMarkdown: "OpenCode job `job-1` completed. The complete result was attached.",
+		ContentSHA256:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ContentBytes:      4, RendererVersion: domain.JobNotificationRenderer,
+		Target: domain.ReplyTarget{ChannelID: "D12345678"}, DeliveryMode: domain.JobResultDeliveryFile,
+		PolicyVersion: domain.JobDeliveryPolicyV1, ArtifactRef: "job-1-delivery.result",
+		MaxMarkdownParts: 6, UploadState: domain.JobResultUploadUnknown,
+	}
+	history := newHistoryReader(&jobNotificationHistoryRecorder{}, "BOT", 0, nil, false)
+	_, found, err := NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, nil).Reconcile(t.Context(), notification)
+	if err != nil || found {
+		t.Fatalf("file delivery without Slack identity found=%v err=%v", found, err)
+	}
+}
+
+func TestFileShareEvidenceRequiresOriginalThread(t *testing.T) {
+	notification := domain.ExternalAgentJobNotification{
+		SlackFileID: "F123", Target: domain.ReplyTarget{ChannelID: "C123", ThreadTS: "1710000000.000001"},
+	}
+	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{{Msg: slackapi.Msg{
+		User: "BOT", Timestamp: "1710000000.000002", Files: []slackapi.File{{ID: "F999"}},
+	}}}}, "BOT", 0, nil, false)
+	shared, err := NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, nil).fileSharedInThread(t.Context(), notification)
+	if err != nil || shared {
+		t.Fatalf("foreign file share shared=%v err=%v", shared, err)
+	}
+	history.client = &jobNotificationHistoryRecorder{messages: []slackapi.Message{{Msg: slackapi.Msg{
+		User: "BOT", Timestamp: "1710000000.000002", Files: []slackapi.File{{ID: "F123"}},
+	}}}}
+	shared, err = NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, nil).fileSharedInThread(t.Context(), notification)
+	if err != nil || !shared {
+		t.Fatalf("matching file share shared=%v err=%v", shared, err)
+	}
+}
+
 type jobNotificationPostRecorder struct{ requests []postRequest }
 
 func (r *jobNotificationPostRecorder) PostMessage(_ context.Context, request postRequest) (string, error) {

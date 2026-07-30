@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -319,6 +320,9 @@ func terminalOutcome(job *domain.ExternalAgentJob, runErr, contextErr error, max
 	}
 	if runErr == nil {
 		return domain.JobCompleted, ""
+	}
+	if code := acpFailureCode(runErr); code == string(domain.ACPErrorResultTooLarge) || code == string(domain.ACPErrorResultArtifactInvalid) || code == string(domain.ACPErrorResultDeliveryFailed) || strings.HasPrefix(code, "result_") {
+		return domain.JobFailed, code
 	}
 	if job.Status == domain.JobCancelRequested {
 		if job.SideEffectsPossible || job.ACPSessionID != "" {
