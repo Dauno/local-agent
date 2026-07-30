@@ -639,19 +639,29 @@ func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup,
 	socket := socketmode.New(infra.api, socketmode.OptionLog(infra.sdkLog))
 	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(infra.auth.UserID, cfg.Slack.StandardAgent.ThreadedDM), models.logger).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs)
 	if composition != nil && composition.agentBuilderSvc != nil && setup.defs != nil && infra.publisher != nil && infra.store != nil {
-		var allowedProfiles []string
-		for name, provider := range setup.defs.Providers {
-			if provider.Type != agentdef.ProviderTypeOpenAICompatible {
-				continue
-			}
+		var providerNames []string
+		for name := range setup.defs.Providers {
+			providerNames = append(providerNames, name)
+		}
+		sort.Strings(providerNames)
+		var allowedProfiles []slackadapter.BuilderProviderProfile
+		for _, name := range providerNames {
+			provider := setup.defs.Providers[name]
+			var profileNames []string
 			for profileName := range provider.Profiles {
-				allowedProfiles = append(allowedProfiles, name+"/"+profileName)
+				profileNames = append(profileNames, profileName)
+			}
+			sort.Strings(profileNames)
+			for _, profileName := range profileNames {
+				allowedProfiles = append(allowedProfiles, slackadapter.BuilderProviderProfile{
+					Reference:    name + "/" + profileName,
+					ProviderType: provider.Type,
+				})
 			}
 		}
 		if len(allowedProfiles) > 0 {
-			sort.Strings(allowedProfiles)
 			draftStore := adaptersqlite.NewAgentDraftStore(infra.store)
-			presenter := slackadapter.NewBuilderModalPresenter(allowedProfiles)
+			presenter := slackadapter.NewBuilderModalPresenterWithProviders(allowedProfiles)
 			handler := slackadapter.NewBuilderSubmissionHandler(draftStore, composition.agentBuilderSvc, setup.defs, infra.publisher)
 			listener = listener.WithBuilderPresenter(presenter).WithBuilderHandler(handler)
 		}

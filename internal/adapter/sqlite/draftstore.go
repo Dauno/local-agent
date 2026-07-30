@@ -32,26 +32,38 @@ func (s *AgentDraftStore) Create(ctx context.Context, draft *port.AgentDraft) er
 	if draft == nil {
 		return errors.New("agent draft is required")
 	}
-	if err := validateDraft(*draft); err != nil {
+	persisted := *draft
+	if persisted.Kind == "" {
+		persisted.Kind = "llm"
+	}
+	if persisted.Kind == "llm" && persisted.ExecutionMode == "" {
+		persisted.ExecutionMode = "foreground"
+	}
+	if err := validateDraft(persisted); err != nil {
 		return err
 	}
-	status := draft.Status
+	status := persisted.Status
 	if status == "" {
 		status = port.DraftStatusDraft
 	}
 	if !validDraftStatus(status) {
 		return fmt.Errorf("invalid agent draft status %q", status)
 	}
+	var model any = persisted.Model
+	if persisted.Kind == "acp" && strings.TrimSpace(persisted.Model) == "" {
+		model = nil
+	}
 
 	_, err := s.db.ExecContext(ctx, `
 		INSERT INTO agent_drafts (
 			draft_id, team_id, actor_id, conversation_key, name, description,
-			instruction, model, definition_hash, catalog_revision, status,
-			created_at, expires_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		draft.DraftID, draft.TeamID, draft.ActorID, draft.ConversationKey, draft.Name,
-		draft.Description, draft.Instruction, draft.Model, draft.DefinitionHash,
-		draft.CatalogRevision, status, draft.CreatedAt.UTC().UnixNano(), draft.ExpiresAt.UTC().UnixNano())
+			instruction, model, definition_hash, catalog_revision, kind,
+			execution_mode, timeout_seconds, canonical_yaml, status, created_at, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		persisted.DraftID, persisted.TeamID, persisted.ActorID, persisted.ConversationKey, persisted.Name,
+		persisted.Description, persisted.Instruction, model, persisted.DefinitionHash,
+		persisted.CatalogRevision, persisted.Kind, persisted.ExecutionMode, persisted.TimeoutSeconds,
+		persisted.CanonicalYAML, status, persisted.CreatedAt.UTC().UnixNano(), persisted.ExpiresAt.UTC().UnixNano())
 	if err != nil {
 		return fmt.Errorf("create agent draft: %w", err)
 	}
@@ -65,16 +77,18 @@ func (s *AgentDraftStore) Get(ctx context.Context, draftID string) (*port.AgentD
 	var (
 		draft                     port.AgentDraft
 		status                    string
+		model                     sql.NullString
 		createdAtNanos, expiresAt int64
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT draft_id, team_id, actor_id, conversation_key, name, description,
-			instruction, model, definition_hash, catalog_revision, status,
-			created_at, expires_at
+			instruction, model, definition_hash, catalog_revision, kind,
+			execution_mode, timeout_seconds, canonical_yaml, status, created_at, expires_at
 		FROM agent_drafts WHERE draft_id = ?`, draftID).Scan(
 		&draft.DraftID, &draft.TeamID, &draft.ActorID, &draft.ConversationKey,
-		&draft.Name, &draft.Description, &draft.Instruction, &draft.Model,
-		&draft.DefinitionHash, &draft.CatalogRevision, &status,
+		&draft.Name, &draft.Description, &draft.Instruction, &model,
+		&draft.DefinitionHash, &draft.CatalogRevision, &draft.Kind,
+		&draft.ExecutionMode, &draft.TimeoutSeconds, &draft.CanonicalYAML, &status,
 		&createdAtNanos, &expiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -83,6 +97,7 @@ func (s *AgentDraftStore) Get(ctx context.Context, draftID string) (*port.AgentD
 	if err != nil {
 		return nil, fmt.Errorf("get agent draft: %w", err)
 	}
+	draft.Model = model.String
 	draft.Status = port.AgentDraftStatus(status)
 	draft.CreatedAt = time.Unix(0, createdAtNanos).UTC()
 	draft.ExpiresAt = time.Unix(0, expiresAt).UTC()
@@ -103,19 +118,21 @@ func (s *AgentDraftStore) FindByNameAndDefinitionHash(ctx context.Context, name,
 	var (
 		draft                     port.AgentDraft
 		status                    string
+		model                     sql.NullString
 		createdAtNanos, expiresAt int64
 	)
 	err := s.db.QueryRowContext(ctx, `
 		SELECT draft_id, team_id, actor_id, conversation_key, name, description,
-			instruction, model, definition_hash, catalog_revision, status,
-			created_at, expires_at
+			instruction, model, definition_hash, catalog_revision, kind,
+			execution_mode, timeout_seconds, canonical_yaml, status, created_at, expires_at
 		FROM agent_drafts
 		WHERE name = ? AND definition_hash = ?
 		ORDER BY created_at DESC
 		LIMIT 1`, name, definitionHash).Scan(
 		&draft.DraftID, &draft.TeamID, &draft.ActorID, &draft.ConversationKey,
-		&draft.Name, &draft.Description, &draft.Instruction, &draft.Model,
-		&draft.DefinitionHash, &draft.CatalogRevision, &status,
+		&draft.Name, &draft.Description, &draft.Instruction, &model,
+		&draft.DefinitionHash, &draft.CatalogRevision, &draft.Kind,
+		&draft.ExecutionMode, &draft.TimeoutSeconds, &draft.CanonicalYAML, &status,
 		&createdAtNanos, &expiresAt,
 	)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -124,6 +141,7 @@ func (s *AgentDraftStore) FindByNameAndDefinitionHash(ctx context.Context, name,
 	if err != nil {
 		return nil, fmt.Errorf("find agent draft: %w", err)
 	}
+	draft.Model = model.String
 	draft.Status = port.AgentDraftStatus(status)
 	draft.CreatedAt = time.Unix(0, createdAtNanos).UTC()
 	draft.ExpiresAt = time.Unix(0, expiresAt).UTC()
@@ -264,6 +282,28 @@ func validateDraft(draft port.AgentDraft) error {
 	}
 	if draft.CatalogRevision < 0 {
 		return errors.New("agent draft catalog revision must not be negative")
+	}
+	if draft.Kind != "" && draft.Kind != "llm" && draft.Kind != "acp" {
+		return errors.New("agent draft kind must be llm or acp")
+	}
+	if draft.ExecutionMode != "" && draft.ExecutionMode != "foreground" && draft.ExecutionMode != "durable_job" {
+		return errors.New("agent draft execution mode must be foreground or durable_job")
+	}
+	if draft.TimeoutSeconds < 0 || draft.TimeoutSeconds > 86400 {
+		return errors.New("agent draft timeout_seconds must be between 0 and 86400")
+	}
+	switch draft.Kind {
+	case "llm":
+		if draft.ExecutionMode != "foreground" {
+			return errors.New("agent draft LLM execution mode must be foreground")
+		}
+		if draft.TimeoutSeconds != 0 {
+			return errors.New("agent draft LLM timeout_seconds must be zero")
+		}
+	case "acp":
+		if strings.TrimSpace(draft.Model) != "" {
+			return errors.New("agent draft ACP model must be empty")
+		}
 	}
 	return nil
 }

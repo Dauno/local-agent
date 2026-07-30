@@ -129,7 +129,7 @@ type GenerateContentConfig struct {
 type AgentDef struct {
 	AgentClass                 string   `yaml:"agent_class"`
 	Name                       string   `yaml:"name"`
-	Model                      string   `yaml:"model"`
+	Model                      string   `yaml:"model,omitempty"`
 	Description                string   `yaml:"description,omitempty"`
 	GlobalInstruction          string   `yaml:"global_instruction,omitempty"`
 	DelegatedGlobalInstruction string   `yaml:"delegated_global_instruction,omitempty"`

@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/slack-go/slack"
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
@@ -180,6 +181,42 @@ func TestListenerRejectsMissingDependencies(t *testing.T) {
 	}
 }
 
+func TestListenerACKsBlockActionBeforeUpdatingBuilderView(t *testing.T) {
+	client := &fakeViewSocketClient{fakeSocketClient: newFakeSocketClient(), updates: make(chan viewUpdate, 1)}
+	listener := newListener(client, NewRouter(testBot), nil).WithBuilderPresenter(NewBuilderModalPresenter(nil))
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() {
+		done <- listener.Run(ctx, func(context.Context, domain.Invocation) {})
+	}()
+
+	client.events <- socketmode.Event{
+		Type: socketmode.EventTypeInteractive,
+		Data: slack.InteractionCallback{
+			Type:           slack.InteractionTypeBlockActions,
+			View:           slack.View{CallbackID: builderSubmitCallbackID, ID: "V123", Hash: "hash-1"},
+			ActionCallback: slack.ActionCallbacks{BlockActions: []*slack.BlockAction{{ActionID: "agent_type", Value: "acp"}}},
+		},
+		Request: &socketmode.Request{Type: socketmode.RequestTypeInteractive, EnvelopeID: "builder-action"},
+	}
+
+	select {
+	case update := <-client.updates:
+		if update.viewID != "V123" || update.hash != "hash-1" {
+			t.Fatalf("view update identity = %#v", update)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("builder view was not updated")
+	}
+	if !client.wasAcked("builder-action") {
+		t.Fatal("block action was not ACKed")
+	}
+	cancel()
+	if err := <-done; err != nil {
+		t.Fatalf("Run() shutdown error = %v", err)
+	}
+}
+
 type fakeSocketClient struct {
 	events chan socketmode.Event
 
@@ -187,6 +224,21 @@ type fakeSocketClient struct {
 	acked  map[string]bool
 	ackErr error
 	runErr error
+}
+
+type viewUpdate struct {
+	viewID string
+	hash   string
+}
+
+type fakeViewSocketClient struct {
+	*fakeSocketClient
+	updates chan viewUpdate
+}
+
+func (c *fakeViewSocketClient) UpdateViewContext(_ context.Context, _ slack.ModalViewRequest, _ string, hash, viewID string) (*slack.ViewResponse, error) {
+	c.updates <- viewUpdate{viewID: viewID, hash: hash}
+	return &slack.ViewResponse{}, nil
 }
 
 func newFakeSocketClient() *fakeSocketClient {
