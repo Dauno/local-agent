@@ -108,9 +108,18 @@ type Profile struct {
 	Approval string `yaml:"approval,omitempty"`
 	Variant  string `yaml:"variant,omitempty"`
 
+	ContextWindowTokens *int             `yaml:"context_window_tokens,omitempty"`
+	MaxOutputTokens     *int             `yaml:"max_output_tokens,omitempty"`
+	TokenCounter        *TokenCounterDef `yaml:"token_counter,omitempty"`
+
 	// acp profile fields.
 	ConfigOptions        []ACPConfigOption `yaml:"config_options,omitempty"`
 	PermissionOptionKind string            `yaml:"permission_option_kind,omitempty"`
+}
+
+type TokenCounterDef struct {
+	Strategy string `yaml:"strategy"`
+	ID       string `yaml:"id,omitempty"`
 }
 
 type ACPConfigOption struct {
@@ -200,6 +209,11 @@ type ResolvedModel struct {
 	Agent    string
 	Approval string
 	Variant  string
+
+	ContextWindowTokens int
+	MaxOutputTokens     int
+	CounterStrategy     string
+	CounterID           string
 
 	// acp provider fields.
 	Command              string

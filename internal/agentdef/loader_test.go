@@ -1422,3 +1422,501 @@ func acpEligibilityProviders() map[string]agentdef.Provider {
 		"acp": {Name: "acp", Type: agentdef.ProviderTypeACP},
 	}
 }
+
+func TestRejectProfileInvalidContextWindow(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 0
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for zero context_window_tokens")
+	}
+	if !strings.Contains(err.Error(), "context_window_tokens must be positive") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRejectProfileContextWindowExceedsMaximum(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 11111111
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for context_window_tokens exceeding max")
+	}
+	if !strings.Contains(err.Error(), "exceeds safe maximum") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRejectProfileOutputExceedsWindow(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 128000
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for max_output_tokens >= context_window_tokens")
+	}
+	if !strings.Contains(err.Error(), "max_output_tokens must be less than") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRejectProfileInvalidCounterStrategy(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 8000
+    token_counter:
+      strategy: unknown_xyz
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for invalid counter strategy")
+	}
+	if !strings.Contains(err.Error(), "token_counter.strategy must be one of") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRejectProfileEmptyCounterStrategy(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 8000
+    token_counter:
+      strategy: ""
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for empty counter strategy")
+	}
+	if !strings.Contains(err.Error(), "token_counter.strategy must not be empty") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestRejectProfileCounterMissingIDForOfficialStrategy(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 8000
+    token_counter:
+      strategy: official
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for official strategy without id")
+	}
+	if !strings.Contains(err.Error(), "token_counter.id is required for strategy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAcceptProfileEstimatorWithID(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 8000
+    token_counter:
+      strategy: estimator
+      id: my-estimator
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err != nil {
+		t.Fatalf("expected estimator with id to be valid: %v", err)
+	}
+}
+
+func TestRejectProfileEstimatorWithoutID(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 8000
+    token_counter:
+      strategy: estimator
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for estimator without id")
+	}
+	if !strings.Contains(err.Error(), "token_counter.id is required for strategy") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestAcceptProfileWithByteBoundCounter(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 8000
+    token_counter:
+      strategy: byte_bound
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err != nil {
+		t.Fatalf("expected byte_bound to be valid: %v", err)
+	}
+}
+
+func TestAcceptProfileNegativeOutputWithZeroWindowIsSeparateError(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 0
+    max_output_tokens: -1
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err == nil {
+		t.Fatal("expected error for invalid context window and output tokens")
+	}
+	if !strings.Contains(err.Error(), "must be positive") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestLoadValidProfileWithFullCapability(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  p1:
+    model: deepseek-v4-flash
+    context_window_tokens: 128000
+    max_output_tokens: 2400
+    token_counter:
+      strategy: official
+      id: deepseek-v4
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: root_agent
+description: root agent
+global_instruction: "test"
+model: deepseek/p1
+instruction: "test"
+`)
+
+	defs, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err != nil {
+		t.Fatalf("expected valid profile to load: %v", err)
+	}
+	p, ok := defs.Providers["deepseek"]
+	if !ok {
+		t.Fatal("provider not found")
+	}
+	profile, ok := p.Profiles["p1"]
+	if !ok {
+		t.Fatal("profile not found")
+	}
+	if profile.ContextWindowTokens == nil || *profile.ContextWindowTokens != 128000 {
+		t.Fatalf("context_window_tokens = %v", profile.ContextWindowTokens)
+	}
+	if profile.MaxOutputTokens == nil || *profile.MaxOutputTokens != 2400 {
+		t.Fatalf("max_output_tokens = %v", profile.MaxOutputTokens)
+	}
+	if profile.TokenCounter == nil || profile.TokenCounter.Strategy != "official" || profile.TokenCounter.ID != "deepseek-v4" {
+		t.Fatalf("token_counter = %#v", profile.TokenCounter)
+	}
+
+	resolved, err := defs.ResolveModel("deepseek/p1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.ContextWindowTokens != 128000 {
+		t.Fatalf("resolved context_window_tokens = %d", resolved.ContextWindowTokens)
+	}
+	if resolved.MaxOutputTokens != 2400 {
+		t.Fatalf("resolved max_output_tokens = %d", resolved.MaxOutputTokens)
+	}
+	if resolved.CounterStrategy != "official" || resolved.CounterID != "deepseek-v4" {
+		t.Fatalf("resolved counter = %s / %s", resolved.CounterStrategy, resolved.CounterID)
+	}
+}
+
+func TestValidateProfileCapability(t *testing.T) {
+	t.Parallel()
+
+	valid := agentdef.ResolvedModel{
+		Provider:            agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible},
+		Model:               "model",
+		ContextWindowTokens: 128_000,
+		MaxOutputTokens:     2_400,
+		CounterStrategy:     "official",
+		CounterID:           "official-model",
+	}
+	tests := []struct {
+		name   string
+		mutate func(*agentdef.ResolvedModel)
+	}{
+		{name: "missing window", mutate: func(model *agentdef.ResolvedModel) { model.ContextWindowTokens = 0 }},
+		{name: "window above maximum", mutate: func(model *agentdef.ResolvedModel) { model.ContextWindowTokens = 10_000_001 }},
+		{name: "negative output", mutate: func(model *agentdef.ResolvedModel) { model.MaxOutputTokens = -1 }},
+		{name: "output reaches window", mutate: func(model *agentdef.ResolvedModel) { model.MaxOutputTokens = model.ContextWindowTokens }},
+		{name: "missing strategy", mutate: func(model *agentdef.ResolvedModel) { model.CounterStrategy = "" }},
+		{name: "unknown strategy", mutate: func(model *agentdef.ResolvedModel) { model.CounterStrategy = "unknown" }},
+		{name: "missing official id", mutate: func(model *agentdef.ResolvedModel) { model.CounterID = "" }},
+		{name: "missing endpoint id", mutate: func(model *agentdef.ResolvedModel) { model.CounterStrategy, model.CounterID = "endpoint", "" }},
+		{name: "missing estimator id", mutate: func(model *agentdef.ResolvedModel) { model.CounterStrategy, model.CounterID = "estimator", "" }},
+	}
+	for _, test := range tests {
+		test := test
+		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
+			candidate := valid
+			test.mutate(&candidate)
+			if errs := agentdef.ValidateProfileCapability(&candidate); len(errs) == 0 {
+				t.Fatal("expected capability validation error")
+			}
+		})
+	}
+
+	if errs := agentdef.ValidateProfileCapability(&valid); len(errs) != 0 {
+		t.Fatalf("valid capability errors = %v", errs)
+	}
+	byteBound := valid
+	byteBound.CounterStrategy = "byte_bound"
+	byteBound.CounterID = ""
+	if errs := agentdef.ValidateProfileCapability(&byteBound); len(errs) != 0 {
+		t.Fatalf("byte_bound capability errors = %v", errs)
+	}
+	nonOpenAI := agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeAgentCLI}}
+	if errs := agentdef.ValidateProfileCapability(&nonOpenAI); len(errs) != 0 {
+		t.Fatalf("non-openai capability errors = %v", errs)
+	}
+	if errs := agentdef.ValidateProfileCapability(nil); len(errs) == 0 {
+		t.Fatal("nil capability should fail validation")
+	}
+}

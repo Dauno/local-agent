@@ -14,6 +14,9 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 func TestGenerateContentSendsConfiguredChatCompletionAndReturnsOnlyAssistantText(t *testing.T) {
@@ -81,6 +84,7 @@ func TestGenerateContentSendsConfiguredChatCompletionAndReturnsOnlyAssistantText
 	if err != nil {
 		t.Fatalf("New() error = %v", err)
 	}
+	configureTestGuard(t, llm)
 	// Options must own immutable copies of caller-supplied maps.
 	headers["X-Client-Name"] = "mutated"
 	extraBody["thinking"].(map[string]any)["type"] = "disabled"
@@ -184,6 +188,27 @@ func TestGenerateContentSendsConfiguredChatCompletionAndReturnsOnlyAssistantText
 	}
 }
 
+func TestRequestParamsUsesProfileDefaultMaxOutputTokens(t *testing.T) {
+	llm := &OpenAICompatibleLLM{model: "configured-model", defaultMaxOutputTokens: 32_000}
+	params, err := llm.requestParams(&model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(encoded, &body); err != nil {
+		t.Fatal(err)
+	}
+	if got, ok := body["max_tokens"].(float64); !ok || got != 32_000 {
+		t.Fatalf("max_tokens = %#v, want 32000", body["max_tokens"])
+	}
+}
+
 func TestGenerateContentStreamsTrueTextDeltasAndAuthoritativeFinal(t *testing.T) {
 	t.Parallel()
 	requestBody := make(chan map[string]any, 1)
@@ -205,6 +230,7 @@ func TestGenerateContentStreamsTrueTextDeltasAndAuthoritativeFinal(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
+	configureTestGuard(t, llm)
 
 	var responses []*model.LLMResponse
 	for response, err := range llm.GenerateContent(context.Background(), textRequest(), true) {
@@ -605,7 +631,47 @@ func mustTestLLM(t *testing.T, baseURL string) *OpenAICompatibleLLM {
 	if err != nil {
 		t.Fatal(err)
 	}
+	configureTestGuard(t, llm)
 	return llm
+}
+
+type testRequestCounter struct{}
+
+func (testRequestCounter) CountRequest(_ context.Context, envelope port.ModelRequestEnvelope) (port.TokenCount, error) {
+	return port.TokenCount{Tokens: len(envelope.Serialized), Strategy: "test"}, nil
+}
+
+type fixedRequestCounter int
+
+func (c fixedRequestCounter) CountRequest(context.Context, port.ModelRequestEnvelope) (port.TokenCount, error) {
+	return port.TokenCount{Tokens: int(c), Strategy: "fixed", Exact: true}, nil
+}
+
+func TestFinalRequestGuardRejectsBeforeProviderCall(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	t.Cleanup(server.Close)
+	llm, err := New(WithAPIKey("test"), WithBaseURL(server.URL), WithModel("model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := llm.ConfigureRequestGuard(fixedRequestCounter(11), domain.RequestBudget{HardTokens: 10}, "test/profile"); err != nil {
+		t.Fatal(err)
+	}
+	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), textRequest(), false))
+	if !errors.Is(gotErr, domain.ErrIrreducibleContext) {
+		t.Fatalf("GenerateContent() error = %v", gotErr)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("provider calls = %d, want 0", calls.Load())
+	}
+}
+
+func configureTestGuard(t *testing.T, llm *OpenAICompatibleLLM) {
+	t.Helper()
+	if err := llm.ConfigureRequestGuard(testRequestCounter{}, domain.RequestBudget{HardTokens: 1_000_000}, "test/profile"); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func textRequest() *model.LLMRequest {

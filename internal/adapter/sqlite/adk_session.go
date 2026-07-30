@@ -615,6 +615,7 @@ func (s *localSession) ID() string                { return s.sessionID }
 func (s *localSession) AppName() string           { return s.appName }
 func (s *localSession) UserID() string            { return s.userID }
 func (s *localSession) LastUpdateTime() time.Time { return s.updatedAt }
+func (s *localSession) Revision() int64           { return s.revision }
 
 func (s *localSession) State() adksession.State {
 	return &sessionState{mu: &s.mu, state: s.state}

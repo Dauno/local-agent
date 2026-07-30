@@ -84,8 +84,42 @@ func Validate(cfg Config) error {
 	if cfg.Context.RetainMessagesPerConversation <= 0 {
 		add("context.retain_messages_per_conversation", "must be greater than zero")
 	}
+	if cfg.Context.ModelBudget != nil {
+		validateModelBudget(&problems, *cfg.Context.ModelBudget)
+	} else {
+		add("context.model_budget", "must be configured")
+	}
+	if cfg.Context.RecoverableResults != nil {
+		validateRecoverableResults(&problems, *cfg.Context.RecoverableResults)
+	} else {
+		add("context.recoverable_results", "must be configured")
+	}
+	if cfg.Context.ContextFeatures == nil {
+		add("context.context_features", "must be configured")
+	} else if cfg.Context.ContextFeatures.ModelBudgetEnabled && !cfg.Context.ContextFeatures.RecoverableResultsEnabled {
+		add("context.context_features.recoverable_results_enabled", "must be enabled when model_budget_enabled is enabled")
+	}
 	if cfg.Context.ADKCompaction != nil {
 		validateADKCompaction(&problems, *cfg.Context.ADKCompaction)
+	}
+	if cfg.CodeIntelligence == nil {
+		add("code_intelligence", "must be configured")
+	} else if cfg.CodeIntelligence.Enabled {
+		if !cfg.Sandbox.Enabled {
+			add("code_intelligence.enabled", "requires sandbox.enabled")
+		}
+		if cfg.Context.ContextFeatures == nil || !cfg.Context.ContextFeatures.RecoverableResultsEnabled {
+			add("code_intelligence.enabled", "requires context.context_features.recoverable_results_enabled")
+		}
+		if cfg.CodeIntelligence.MaxProcesses <= 0 {
+			add("code_intelligence.max_processes", "must be greater than zero when enabled")
+		}
+		if cfg.CodeIntelligence.InitTimeoutSeconds <= 0 {
+			add("code_intelligence.initialization_timeout_seconds", "must be greater than zero when enabled")
+		}
+		if cfg.CodeIntelligence.RequestTimeoutSeconds <= 0 {
+			add("code_intelligence.request_timeout_seconds", "must be greater than zero when enabled")
+		}
 	}
 
 	switch cfg.Runtime.LogLevel {
@@ -282,6 +316,34 @@ func Validate(cfg Config) error {
 		return &ValidationError{Fields: problems}
 	}
 	return nil
+}
+
+func validateModelBudget(problems *[]FieldError, cfg ModelBudgetConfig) {
+	const (
+		minPercent = 20
+		maxPercent = 80
+	)
+	if cfg.MaxRequestPercent < minPercent || cfg.MaxRequestPercent > maxPercent {
+		addConfigProblem(problems, "context.model_budget.max_request_percent",
+			fmt.Sprintf("must be between %d and %d", minPercent, maxPercent))
+	}
+}
+
+func validateRecoverableResults(problems *[]FieldError, cfg RecoverableResultsConfig) {
+	if cfg.MaxResultBytes <= 0 {
+		addConfigProblem(problems, "context.recoverable_results.max_result_bytes", "must be greater than zero")
+	}
+	if cfg.ChunkMaxBytes <= 0 {
+		addConfigProblem(problems, "context.recoverable_results.chunk_max_bytes", "must be greater than zero")
+	} else if cfg.MaxResultBytes > 0 && cfg.ChunkMaxBytes > int(cfg.MaxResultBytes) {
+		addConfigProblem(problems, "context.recoverable_results.chunk_max_bytes", "must not exceed max_result_bytes")
+	}
+	if cfg.RetentionDays <= 0 {
+		addConfigProblem(problems, "context.recoverable_results.retention_days", "must be greater than zero")
+	}
+	if cfg.CleanupBatchSize <= 0 {
+		addConfigProblem(problems, "context.recoverable_results.cleanup_batch_size", "must be greater than zero")
+	}
 }
 
 func validateADKCompaction(problems *[]FieldError, cfg ADKCompactionConfig) {

@@ -16,6 +16,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/acpclient"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
+	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -100,6 +101,11 @@ func (liveChecker) CheckModel(ctx context.Context, cfg config.ModelConfig, apiKe
 	if err != nil {
 		return err
 	}
+	counter, _ := tokencounter.New("byte_bound")
+	budget, _ := domain.NewRequestBudget(domain.MaxSafeContextWindow, domain.RequestBudgetPolicy{MaxRequestPercent: 60})
+	if err := llm.ConfigureRequestGuard(counter, budget, "legacy-doctor-probe"); err != nil {
+		return err
+	}
 	request := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText("Reply with OK.", genai.RoleUser)},
 	}
@@ -150,7 +156,25 @@ func newModelFromResolved(resolved *agentdef.ResolvedModel, apiKey string) (*ope
 	if len(resolved.ExtraBody) > 0 {
 		opts = append(opts, openaillm.WithExtraBody(resolved.ExtraBody))
 	}
-	return openaillm.New(opts...)
+	llm, err := openaillm.New(opts...)
+	if err != nil {
+		return nil, err
+	}
+	counter, err := composeRootTokenCounter(resolved)
+	if err != nil {
+		return nil, err
+	}
+	budget, err := domain.NewRequestBudget(resolved.ContextWindowTokens, domain.RequestBudgetPolicy{MaxRequestPercent: 60})
+	if err != nil {
+		return nil, err
+	}
+	if err := llm.ConfigureRequestGuard(counter, budget, resolved.Provider.Name+"/"+resolved.Model); err != nil {
+		return nil, err
+	}
+	if err := llm.ConfigureDefaultMaxOutputTokens(resolved.MaxOutputTokens); err != nil {
+		return nil, err
+	}
+	return llm, nil
 }
 
 // cliProviderChecker implements doctor.CLIProviderChecker for agent_cli

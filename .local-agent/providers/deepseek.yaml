@@ -5,6 +5,10 @@ api_key_env: DEEPSEEK_API_KEY
 profiles:
     flash-json:
         model: deepseek-v4-flash
+        context_window_tokens: 1000000
+        max_output_tokens: 2400
+        token_counter:
+            strategy: byte_bound
         extra_body:
             thinking:
                 type: disabled
@@ -16,12 +20,20 @@ profiles:
     flash-reasoning:
         model: deepseek-v4-flash
         reasoning_effort: xhigh
+        context_window_tokens: 1000000
+        max_output_tokens: 32000
+        token_counter:
+            strategy: byte_bound
         extra_body:
             thinking:
                 type: enabled
     pro-reasoning:
         model: deepseek-v4-pro
         reasoning_effort: xhigh
+        context_window_tokens: 1000000
+        max_output_tokens: 32000
+        token_counter:
+            strategy: byte_bound
         extra_body:
             thinking:
                 type: enabled

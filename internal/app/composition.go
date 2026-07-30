@@ -24,14 +24,20 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/filesystem"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fssandbox"
+	"github.com/Dauno/slack-local-agent/internal/adapter/goast"
 	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
+	"github.com/Dauno/slack-local-agent/internal/adapter/lspclient"
+	"github.com/Dauno/slack-local-agent/internal/adapter/lspdiscovery"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/adapter/opencodemanager"
+	"github.com/Dauno/slack-local-agent/internal/adapter/rangedreader"
+	"github.com/Dauno/slack-local-agent/internal/adapter/recoverableresult"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
+	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
@@ -42,6 +48,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
+	contextcompilerusecase "github.com/Dauno/slack-local-agent/internal/usecase/contextcompiler"
 	contextsummary "github.com/Dauno/slack-local-agent/internal/usecase/contextsummary"
 	externalagentusecase "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
@@ -79,6 +86,8 @@ type runtimeModels struct {
 	logger              *logging.Logger
 	openCodeCoordinator *opencodeusecase.Coordinator
 	artifactStore       port.ResultArtifactStore
+	requestTokenCounter port.RequestTokenCounter
+	contextWindowTokens int
 }
 
 func bindForegroundRuntimes(models runtimeModels, jobs synchronousExternalAgentJobs) {
@@ -188,6 +197,9 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	}
 	prepared.redactor = secure.NewRedactor(append(secrets, prepared.botToken, prepared.appToken)...)
 	prepared.logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, prepared.redactor)
+	if cfg.Context.ModelBudget != nil && cfg.Context.ModelBudget.MaxRequestPercent > 70 {
+		prepared.logger.Warn("model request ceiling is above the recommended maximum", "max_request_percent", cfg.Context.ModelBudget.MaxRequestPercent)
+	}
 	artifactStore, artifactErr := fsartifact.New(paths.ArtifactDir, int64(cfg.ACP.MaxResultArtifactBytes))
 	if artifactErr != nil {
 		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize ACP result artifact store: %w", artifactErr))
@@ -198,6 +210,11 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	if err != nil {
 		return runtimeModels{}, fmt.Errorf("resolve root agent model: %w", err)
 	}
+	prepared.requestTokenCounter, err = composeRootTokenCounter(resolved)
+	if err != nil {
+		return runtimeModels{}, err
+	}
+	prepared.contextWindowTokens = resolved.ContextWindowTokens
 	if err := config.ValidateADKCompaction(cfg, resolved.Type() == agentdef.ProviderTypeOpenAICompatible, resolved.Type() == agentdef.ProviderTypeOpenAICompatible); err != nil {
 		return runtimeModels{}, err
 	}
@@ -207,6 +224,18 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 			return runtimeModels{}, fmt.Errorf("build model client: %w", err)
 		}
 		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build root model client: %w", err))
+	}
+	if httpModel, ok := builtRoot.(*openaillm.OpenAICompatibleLLM); ok {
+		budget, budgetErr := domain.NewRequestBudget(resolved.ContextWindowTokens, domain.RequestBudgetPolicy{
+			MaxRequestPercent: cfg.Context.ModelBudget.MaxRequestPercent,
+		})
+		if budgetErr != nil {
+			return runtimeModels{}, fmt.Errorf("compose root model request budget: %w", budgetErr)
+		}
+		profileID := resolved.Provider.Name + "/" + resolved.Model
+		if guardErr := httpModel.ConfigureRequestGuard(prepared.requestTokenCounter, budget, profileID); guardErr != nil {
+			return runtimeModels{}, fmt.Errorf("configure root model final request guard: %w", guardErr)
+		}
 	}
 	if err := handshakeSelectedAgentCLI(ctx, resolved, builtRoot, describedCLIProviders); err != nil {
 		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("validate root agent model: %w", err))
@@ -278,6 +307,20 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		}
 	}
 	return prepared, nil
+}
+
+func composeRootTokenCounter(resolved *agentdef.ResolvedModel) (port.RequestTokenCounter, error) {
+	if problems := agentdef.ValidateProfileCapability(resolved); len(problems) > 0 {
+		return nil, fmt.Errorf("validate root model context capability: %s", strings.Join(problems, "; "))
+	}
+	if resolved.Type() != agentdef.ProviderTypeOpenAICompatible {
+		return nil, nil
+	}
+	counter, err := tokencounter.New(resolved.CounterStrategy)
+	if err != nil {
+		return nil, fmt.Errorf("compose root model token counter strategy %q: %w", resolved.CounterStrategy, err)
+	}
+	return counter, nil
 }
 
 func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runtimeSetup, models runtimeModels) (*runtimeInfrastructure, error) {
@@ -425,9 +468,26 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var externalJobService *externalagentusecase.Service
 	var notificationWorker *externalagentusecase.NotificationWorker
 	var summaryScheduler port.SummaryScheduler
+	var continuityStore port.ContinuityStore
+	var resultStore *recoverableresult.Store
+	features := cfg.Context.ContextFeatures
 	var err error
+	if !models.rootIsAgentCLI && features != nil && features.ContinuityCapsuleEnabled {
+		continuityStore = adaptersqlite.NewContinuityStore(infra.store)
+	}
+	if !models.rootIsAgentCLI && features != nil && features.RecoverableResultsEnabled {
+		resultsCfg := cfg.Context.RecoverableResults
+		resultStore = recoverableresult.NewStore(infra.store.DB(), filepath.Join(paths.StateDir, "recoverable-results"), resultsCfg.MaxResultBytes, resultsCfg.ChunkMaxBytes, resultsCfg.RetentionDays, resultsCfg.CleanupBatchSize)
+		resultStore.SetReferenceChecker(infra.store)
+		if _, cleanupErr := resultStore.DeleteExpired(ctx, time.Now().UTC(), resultsCfg.CleanupBatchSize); cleanupErr != nil {
+			return nil, models.redactor.Error(cleanupErr)
+		}
+	}
 	if !models.rootIsAgentCLI {
 		var sandboxService *sandboxusecase.Service
+		var codeReaders map[string]port.CodeReader
+		var syntaxEngine port.SyntaxEngine
+		var codeIntelligence port.CodeIntelligence
 		if cfg.Sandbox.Enabled {
 			projects := paths.SandboxProjectRoots
 			if len(projects) == 0 {
@@ -444,6 +504,54 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(infra.store), Executor: executor})
 			if err != nil {
 				return nil, models.redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
+			}
+			if resultStore != nil && cfg.CodeIntelligence != nil && cfg.CodeIntelligence.Enabled {
+				codeReaders = make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
+				syntaxReaders := make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
+				for name, root := range paths.SandboxProjectRoots {
+					codeReaders[name] = rangedreader.NewReader(root, cfg.Sandbox.MaxOutputBytes, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore)
+					syntaxReaders[name] = rangedreader.NewReader(root, 1<<20, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithPreservedLineEndings()
+				}
+				syntaxEngine = goast.New(syntaxReaders)
+				if len(cfg.CodeIntelligence.LSPServers) > 0 {
+					candidates := make([]port.ServerCandidate, 0, len(cfg.CodeIntelligence.LSPServers))
+					for _, server := range cfg.CodeIntelligence.LSPServers {
+						candidates = append(candidates, port.ServerCandidate{ID: server.ID, Command: server.Command, Args: server.Args, Languages: server.Languages})
+					}
+					rootList := make([]string, 0, len(paths.SandboxProjectRoots))
+					for _, root := range paths.SandboxProjectRoots {
+						rootList = append(rootList, root)
+					}
+					descriptors, discoveryErr := lspdiscovery.New(rootList).Discover(ctx, candidates)
+					if discoveryErr != nil {
+						return nil, models.redactor.Error(fmt.Errorf("discover language servers: %w", discoveryErr))
+					}
+					definitions := make(map[string]config.LSPServerConfig, len(cfg.CodeIntelligence.LSPServers))
+					for _, server := range cfg.CodeIntelligence.LSPServers {
+						definitions[server.ID] = server
+					}
+					servers := make([]lspclient.Server, 0, len(descriptors))
+					for _, descriptor := range descriptors {
+						if descriptor.Status != "available" {
+							continue
+						}
+						definition := definitions[descriptor.ID]
+						servers = append(servers, lspclient.Server{ID: descriptor.ID, Path: descriptor.Path, SHA256: descriptor.BinarySHA256, Args: definition.Args, Languages: definition.Languages})
+					}
+					if len(servers) > 0 {
+						routes := make(map[string][]string, len(cfg.CodeIntelligence.LSPRoutes))
+						for language, route := range cfg.CodeIntelligence.LSPRoutes {
+							routes[language] = append([]string(nil), route.Priority...)
+						}
+						codeIntelligence, err = lspclient.New(lspclient.Config{Servers: servers, Routes: routes,
+							ProjectRoots: paths.SandboxProjectRoots, Readers: syntaxReaders, ResultStore: resultStore, MaxProcesses: cfg.CodeIntelligence.MaxProcesses,
+							InitTimeout:    time.Duration(cfg.CodeIntelligence.InitTimeoutSeconds) * time.Second,
+							RequestTimeout: time.Duration(cfg.CodeIntelligence.RequestTimeoutSeconds) * time.Second})
+						if err != nil {
+							return nil, models.redactor.Error(fmt.Errorf("initialize language server runtime: %w", err))
+						}
+					}
+				}
 			}
 		}
 		var canvasService *canvasusecase.Service
@@ -462,7 +570,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 				return nil, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
 			}
 		}
-		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs)
+		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence)
 		// Configurar Agent Builder (preview + install tools).
 		if agentBuilderSvc != nil && defs != nil {
 			agentsDir := filepath.Join(paths.StateDir, "agents")
@@ -543,6 +651,15 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		rtInstruction, rtGlobalInstruction = models.rootDef.Instruction, models.rootDef.EffectiveRootGlobalInstruction()
 	}
 	var projector port.ContextProjector
+	var compiler port.ContextCompiler
+	var contextBudget domain.RequestBudget
+	if !models.rootIsAgentCLI && features != nil && features.ModelBudgetEnabled {
+		contextBudget, err = domain.NewRequestBudget(models.contextWindowTokens, domain.RequestBudgetPolicy{MaxRequestPercent: cfg.Context.ModelBudget.MaxRequestPercent})
+		if err != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize context budget: %w", err))
+		}
+		compiler = contextcompilerusecase.New(resultStore, models.requestTokenCounter)
+	}
 	if !models.rootIsAgentCLI {
 		compaction := cfg.Context.ADKCompaction
 		if compaction == nil {
@@ -561,7 +678,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			concrete.SetLogger(models.logger)
 		}
 	}
-	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ProviderFamily: models.rootFamily})
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContinuityStore: continuityStore, SummaryStore: infra.store, ProviderFamily: models.rootFamily})
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}

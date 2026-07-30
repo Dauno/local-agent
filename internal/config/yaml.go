@@ -33,12 +33,26 @@ var configSchema = []schemaField{
 		{name: "max_messages"},
 		{name: "max_chars"},
 		{name: "retain_messages_per_conversation"},
+		{name: "model_budget", children: []schemaField{
+			{name: "max_request_percent"},
+		}},
+		{name: "recoverable_results", children: []schemaField{
+			{name: "max_result_bytes"},
+			{name: "chunk_max_bytes"},
+			{name: "retention_days"},
+			{name: "cleanup_batch_size"},
+		}},
 		{name: "adk_compaction", children: []schemaField{
 			{name: "enabled"},
 			{name: "max_history_chars"},
 			{name: "recent_turns"},
 			{name: "summary_enabled"},
 			{name: "summary_max_chars"},
+		}},
+		{name: "context_features", children: []schemaField{
+			{name: "model_budget_enabled"},
+			{name: "recoverable_results_enabled"},
+			{name: "continuity_capsule_enabled"},
 		}},
 	}},
 	{name: "runtime", children: []schemaField{
@@ -139,6 +153,14 @@ var configSchema = []schemaField{
 			{name: "max_markdown_parts"},
 			{name: "max_file_bytes"},
 		}},
+	}},
+	{name: "code_intelligence", children: []schemaField{
+		{name: "enabled"},
+		{name: "max_processes"},
+		{name: "initialization_timeout_seconds"},
+		{name: "request_timeout_seconds"},
+		{name: "lsp_servers"},
+		{name: "lsp_routes"},
 	}},
 }
 
@@ -366,6 +388,14 @@ func normalizeCollections(cfg *Config) {
 	}
 	if cfg.OpenCode.Management.AllowedUserIDs == nil {
 		cfg.OpenCode.Management.AllowedUserIDs = []string{}
+	}
+	if cfg.CodeIntelligence != nil {
+		if cfg.CodeIntelligence.LSPServers == nil {
+			cfg.CodeIntelligence.LSPServers = []LSPServerConfig{}
+		}
+		if cfg.CodeIntelligence.LSPRoutes == nil {
+			cfg.CodeIntelligence.LSPRoutes = map[string]LSPRouteConfig{}
+		}
 	}
 }
 

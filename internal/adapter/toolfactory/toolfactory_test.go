@@ -68,6 +68,30 @@ func (stubCanvasCreator) CreateCanvas(context.Context, string, string) (port.Can
 
 type stubCanvasStore struct{}
 
+type stubCodeReader struct{}
+
+func (stubCodeReader) ReadRange(context.Context, domain.SourceRangeRequest) (domain.SourceRange, error) {
+	return domain.SourceRange{}, nil
+}
+
+type stubSyntaxEngine struct{}
+
+func (stubSyntaxEngine) Query(context.Context, domain.SyntaxQueryRequest) (domain.SyntaxQueryResult, error) {
+	return domain.SyntaxQueryResult{}, nil
+}
+
+type stubCodeIntelligence struct{}
+
+func (stubCodeIntelligence) Symbols(context.Context, domain.SymbolRequest) (domain.SymbolResult, error) {
+	return domain.SymbolResult{}, nil
+}
+func (stubCodeIntelligence) Definition(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
+	return domain.LocationResult{}, nil
+}
+func (stubCodeIntelligence) References(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
+	return domain.LocationResult{}, nil
+}
+
 func (stubCanvasStore) CreateOperation(context.Context, domain.CanvasOperation) error { return nil }
 func (stubCanvasStore) UpdateOperationStatus(context.Context, string, domain.CanvasOperationStatus, string) error {
 	return nil
@@ -125,6 +149,27 @@ func TestFactoryWithoutSandboxExposesOnlyConversationTools(t *testing.T) {
 	}
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool without sandbox, got %d", len(tools))
+	}
+}
+
+func TestFactoryExposesProjectScopedCodeTools(t *testing.T) {
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).
+		WithCodeReaders(map[string]port.CodeReader{"workspace": stubCodeReader{}}).
+		WithSyntaxEngine(stubSyntaxEngine{}).
+		WithCodeIntelligence(stubCodeIntelligence{})
+	tools, err := factory.ToolsForInvocation("U12345678", "slack:T:dm:D")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []string{"list_messages", "read_file_range", "code_symbols", "read_symbol", "code_definition", "code_references"}
+	if len(tools) != len(want) {
+		t.Fatalf("tools = %d, want %d", len(tools), len(want))
+	}
+	for index, candidate := range tools {
+		named, ok := candidate.(interface{ Name() string })
+		if !ok || named.Name() != want[index] {
+			t.Fatalf("tool %d = %T/%v, want %q", index, candidate, ok, want[index])
+		}
 	}
 }
 

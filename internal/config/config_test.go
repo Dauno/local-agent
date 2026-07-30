@@ -25,10 +25,18 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			MaxMessages:                   30,
 			MaxChars:                      20_000,
 			RetainMessagesPerConversation: 100,
+			ModelBudget:                   &config.ModelBudgetConfig{MaxRequestPercent: 60},
+			RecoverableResults: &config.RecoverableResultsConfig{
+				MaxResultBytes:   4 * 1024 * 1024,
+				ChunkMaxBytes:    16384,
+				RetentionDays:    7,
+				CleanupBatchSize: 100,
+			},
 			ADKCompaction: &config.ADKCompactionConfig{
 				Enabled: true, MaxHistoryChars: 120_000, RecentTurns: 8,
 				SummaryEnabled: true, SummaryMaxChars: 8_000,
 			},
+			ContextFeatures: &config.ContextFeaturesConfig{},
 		},
 		Runtime: config.RuntimeConfig{
 			LogLevel:                "info",
@@ -84,11 +92,12 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			MaxTopicChars:         10000,
 			MaxPatchOps:           10,
 		},
-		Sandbox:  config.SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
-		Canvases: config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
-		Exports:  config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
-		OpenCode: config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
-		ACP:      config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
+		Sandbox:          config.SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
+		Canvases:         config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
+		Exports:          config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
+		OpenCode:         config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
+		ACP:              config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
+		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
 	}
 
 	got := config.Default()
@@ -187,6 +196,17 @@ context:
     recent_turns: 8
     summary_enabled: true
     summary_max_chars: 8000
+  model_budget:
+    max_request_percent: 60
+   recoverable_results:
+     max_result_bytes: 4194304
+     chunk_max_bytes: 16384
+     retention_days: 7
+     cleanup_batch_size: 100
+   context_features:
+     model_budget_enabled: false
+     recoverable_results_enabled: false
+     continuity_capsule_enabled: false
 runtime:
   log_level: info
   model_timeout_seconds: 0
@@ -276,7 +296,14 @@ acp:
    delivery:
      max_markdown_parts: 6
      max_file_bytes: 16777216
-        `
+code_intelligence:
+  enabled: false
+  max_processes: 4
+  initialization_timeout_seconds: 20
+  request_timeout_seconds: 10
+  lsp_servers: []
+  lsp_routes: {}
+         `
 
 	if !reflect.DeepEqual(strings.Fields(string(got)), strings.Fields(want)) {
 		t.Fatalf("default YAML fields mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
@@ -871,5 +898,125 @@ func TestParseThreadedDMExplicitTrue(t *testing.T) {
 	}
 	if !cfg.Slack.StandardAgent.ThreadedDM {
 		t.Fatal("threaded_dm should be true when explicitly set")
+	}
+}
+
+func TestValidateModelBudgetBoundaries(t *testing.T) {
+	t.Parallel()
+
+	for _, pct := range []int{0, 19, 81, 100} {
+		cfg := config.Default()
+		cfg.Context.ModelBudget.MaxRequestPercent = pct
+		err := cfg.Validate()
+		if err == nil || !strings.Contains(err.Error(), "between 20 and 80") {
+			t.Fatalf("Validate(ModelBudget=%d) = %v, want error", pct, err)
+		}
+	}
+
+	for _, pct := range []int{20, 40, 60, 80} {
+		cfg := config.Default()
+		cfg.Context.ModelBudget.MaxRequestPercent = pct
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("Validate(ModelBudget=%d) should be valid: %v", pct, err)
+		}
+	}
+}
+
+func TestValidateRecoverableResultsBounds(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name        string
+		mutate      func(cfg *config.Config)
+		wantErrText string
+	}{
+		{
+			name:        "max_result_bytes zero",
+			mutate:      func(cfg *config.Config) { cfg.Context.RecoverableResults.MaxResultBytes = 0 },
+			wantErrText: "max_result_bytes",
+		},
+		{
+			name:        "chunk_max_bytes zero",
+			mutate:      func(cfg *config.Config) { cfg.Context.RecoverableResults.ChunkMaxBytes = 0 },
+			wantErrText: "chunk_max_bytes",
+		},
+		{
+			name: "chunk exceeds max result",
+			mutate: func(cfg *config.Config) {
+				cfg.Context.RecoverableResults.ChunkMaxBytes = int(cfg.Context.RecoverableResults.MaxResultBytes) + 1
+			},
+			wantErrText: "must not exceed max_result_bytes",
+		},
+		{
+			name:        "retention_days zero",
+			mutate:      func(cfg *config.Config) { cfg.Context.RecoverableResults.RetentionDays = 0 },
+			wantErrText: "retention_days",
+		},
+	}
+
+	for _, tt := range tests {
+		tt := tt
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.Default()
+			tt.mutate(&cfg)
+			err := cfg.Validate()
+			if err == nil || !strings.Contains(err.Error(), tt.wantErrText) {
+				t.Fatalf("Validate() = %v, want error containing %q", err, tt.wantErrText)
+			}
+		})
+	}
+}
+
+func TestValidateContextContractMustBePresent(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	cfg.Context.ModelBudget = nil
+	err := cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "context.model_budget") || !strings.Contains(err.Error(), "must be configured") {
+		t.Fatalf("nil ModelBudget validation = %v", err)
+	}
+
+	cfg = config.Default()
+	cfg.Context.RecoverableResults = nil
+	err = cfg.Validate()
+	if err == nil || !strings.Contains(err.Error(), "context.recoverable_results") || !strings.Contains(err.Error(), "must be configured") {
+		t.Fatalf("nil RecoverableResults validation = %v", err)
+	}
+}
+
+func TestParseWithExplicitZeroBudgetPercentFailsValidation(t *testing.T) {
+	t.Parallel()
+
+	_, err := config.Parse([]byte("context:\n  model_budget:\n    max_request_percent: 0\n"))
+	if err == nil || !strings.Contains(err.Error(), "between 20 and 80") {
+		t.Fatalf("explicit zero should fail Parse validation: %v", err)
+	}
+}
+
+func TestRecoverableResultsDefaultChunksNotExceed(t *testing.T) {
+	t.Parallel()
+
+	cfg := config.Default()
+	if cfg.Context.RecoverableResults.ChunkMaxBytes > int(cfg.Context.RecoverableResults.MaxResultBytes) {
+		t.Fatal("default chunk_max_bytes must not exceed max_result_bytes")
+	}
+}
+
+func TestCodeIntelligenceRequiresSandboxAndRecoverableResults(t *testing.T) {
+	cfg := config.Default()
+	cfg.CodeIntelligence.Enabled = true
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires sandbox.enabled") {
+		t.Fatalf("Validate() = %v, want sandbox dependency error", err)
+	}
+	cfg.Sandbox.Enabled = true
+	cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "recoverable_results_enabled") {
+		t.Fatalf("Validate() = %v, want recoverable result dependency error", err)
+	}
+	cfg.Context.ContextFeatures.RecoverableResultsEnabled = true
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("Validate() with dependencies = %v", err)
 	}
 }

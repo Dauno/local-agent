@@ -97,6 +97,38 @@ func TestMigrationV21CreatesContextSummaryTables(t *testing.T) {
 	}
 }
 
+func TestMigrationV24CreatesRecoverableResultCleanupClaims(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "recoverable.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(recoverable_results)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"cleanup_claim", "cleanup_version", "cleanup_claimed_at"} {
+		if !columns[name] {
+			t.Fatalf("recoverable_results missing %s", name)
+		}
+	}
+}
+
 func TestCreateUsesRestrictivePermissions(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "local-agent.db")
 	store, err := Create(context.Background(), path)
