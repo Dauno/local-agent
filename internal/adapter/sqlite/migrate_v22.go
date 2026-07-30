@@ -6,7 +6,9 @@ import (
 )
 
 // v22 adds immutable result-delivery metadata without rewriting legacy rows.
-// Rows carrying legacy_v1 remain readable and are deliberately not replayed.
+// Agent Builder draft columns are intentionally in v23 because v22 may already
+// exist in deployed databases. Rows carrying legacy_v1 remain readable and are
+// deliberately not replayed.
 func migrateV22(ctx context.Context, tx *sql.Tx) error {
 	return execMigration(ctx, tx, 22, []string{
 		`ALTER TABLE external_agent_job_notifications ADD COLUMN delivery_mode TEXT NOT NULL DEFAULT 'markdown'`,

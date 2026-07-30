@@ -169,19 +169,26 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 
 func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
 	type previewAgentDefArgs struct {
-		Name        string `json:"name" jsonschema:"nombre del agente en snake_case (3-64 caracteres)"`
-		Description string `json:"description" jsonschema:"descripcion breve para routing del LLM (max 500 caracteres)"`
-		Instruction string `json:"instruction" jsonschema:"instruccion completa del agente (max 3000 caracteres)"`
-		Model       string `json:"model,omitempty" jsonschema:"modelo en formato provider/profile (opcional)"`
+		Name            string           `json:"name" jsonschema:"nombre del agente en snake_case (3-64 caracteres)"`
+		Description     string           `json:"description" jsonschema:"descripcion breve para routing del LLM (max 500 caracteres)"`
+		Instruction     string           `json:"instruction" jsonschema:"instruccion completa del agente (max 3000 caracteres)"`
+		Kind            domain.AgentKind `json:"kind,omitempty" jsonschema:"tipo de agente: llm o acp (por defecto llm)"`
+		ProviderProfile string           `json:"provider_profile,omitempty" jsonschema:"perfil en formato provider/profile"`
+		Model           string           `json:"model,omitempty" jsonschema:"alias legacy de provider_profile"`
+		ExecutionMode   string           `json:"execution_mode,omitempty" jsonschema:"foreground o durable_job (solo ACP)"`
+		TimeoutSeconds  int              `json:"timeout_seconds,omitempty" jsonschema:"timeout ACP en segundos"`
 	}
 	type previewAgentDefResult struct {
-		YAML     string   `json:"yaml"`
-		SHA256   string   `json:"sha_256"`
-		DraftID  string   `json:"draft_id"`
-		Name     string   `json:"name"`
-		Model    string   `json:"model"`
-		Class    string   `json:"class"`
-		Warnings []string `json:"warnings,omitempty"`
+		YAML          string   `json:"yaml"`
+		SHA256        string   `json:"sha_256"`
+		DraftID       string   `json:"draft_id"`
+		Name          string   `json:"name"`
+		Model         string   `json:"model"`
+		Class         string   `json:"class"`
+		ExecutionMode string   `json:"execution_mode"`
+		TimeoutSec    int      `json:"timeout_seconds"`
+		Profile       string   `json:"profile,omitempty"`
+		Warnings      []string `json:"warnings,omitempty"`
 	}
 
 	return functiontool.New(
@@ -195,10 +202,14 @@ func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) 
 			}
 
 			draft := domain.AgentDraft{
-				Name:        args.Name,
-				Description: args.Description,
-				Instruction: args.Instruction,
-				Model:       args.Model,
+				Name:            args.Name,
+				Description:     args.Description,
+				Instruction:     args.Instruction,
+				Kind:            args.Kind,
+				ProviderProfile: args.ProviderProfile,
+				Model:           args.Model,
+				ExecutionMode:   args.ExecutionMode,
+				TimeoutSeconds:  args.TimeoutSeconds,
 			}
 
 			result, err := f.agentBuilder.Preview(draft, f.currentDefs)
@@ -215,6 +226,10 @@ func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) 
 			}
 			teamID, actorID, conversationKey := agentDraftScope(actor, key)
 			now := time.Now().UTC()
+			kind := draft.Kind
+			if kind == "" {
+				kind = domain.AgentKindLLM
+			}
 			if err := f.draftStore.Create(ctx, &port.AgentDraft{
 				DraftID:         draftID,
 				TeamID:          teamID,
@@ -225,20 +240,31 @@ func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) 
 				Instruction:     draft.Instruction,
 				Model:           result.AgentDef.Model,
 				DefinitionHash:  result.SHA256,
+				Kind:            string(kind),
+				ExecutionMode:   result.AgentDef.ExecutionMode,
+				TimeoutSeconds:  result.AgentDef.TimeoutSec,
+				CanonicalYAML:   result.YAML,
 				Status:          port.DraftStatusPreviewed,
 				CreatedAt:       now,
 				ExpiresAt:       now.Add(agentDraftTTL),
 			}); err != nil {
 				return previewAgentDefResult{}, fmt.Errorf("persist agent draft: %w", err)
 			}
+			profile := draft.ProviderProfile
+			if profile == "" {
+				profile = result.AgentDef.Model
+			}
 
 			return previewAgentDefResult{
-				YAML:    result.YAML,
-				SHA256:  result.SHA256,
-				DraftID: draftID,
-				Name:    result.AgentDef.Name,
-				Model:   result.AgentDef.Model,
-				Class:   result.AgentDef.AgentClass,
+				YAML:          result.YAML,
+				SHA256:        result.SHA256,
+				DraftID:       draftID,
+				Name:          result.AgentDef.Name,
+				Model:         result.AgentDef.Model,
+				Class:         result.AgentDef.AgentClass,
+				ExecutionMode: result.AgentDef.ExecutionMode,
+				TimeoutSec:    result.AgentDef.TimeoutSec,
+				Profile:       profile,
 			}, nil
 		},
 	)
@@ -306,6 +332,10 @@ func (f *Factory) installAgentDefTool(actor string, key domain.ConversationKey) 
 			if draft.ActorID != actor || draft.ConversationKey != string(key) {
 				return installAgentDefResult{}, fmt.Errorf("agent draft does not belong to the current actor and conversation")
 			}
+			teamID, _, _ := agentDraftScope(actor, key)
+			if draft.TeamID != "" && draft.TeamID != teamID {
+				return installAgentDefResult{}, fmt.Errorf("agent draft does not belong to the current team")
+			}
 			if strings.TrimSpace(args.Name) != "" && draft.Name != args.Name {
 				return installAgentDefResult{}, fmt.Errorf("agent draft does not match requested name")
 			}
@@ -319,27 +349,24 @@ func (f *Factory) installAgentDefTool(actor string, key domain.ConversationKey) 
 				return installAgentDefResult{}, fmt.Errorf("agent draft %q is not installable from status %q", draft.DraftID, draft.Status)
 			}
 
-			if err := agentdef.ValidateAgentName(draft.Name); err != nil {
-				return installAgentDefResult{}, fmt.Errorf("invalid agent name: %w", err)
+			if strings.TrimSpace(draft.CanonicalYAML) == "" {
+				return installAgentDefResult{}, fmt.Errorf("draft has no canonical YAML; regenerate with preview")
 			}
-
-			candidate := agentdef.AgentDef{
-				AgentClass:      "LlmAgent",
-				Name:            draft.Name,
-				Model:           draft.Model,
-				Description:     draft.Description,
-				Instruction:     draft.Instruction,
-				IncludeContents: "none",
-				ToolScope:       "invocation_scoped",
-			}
-			yamlBytes, err := agentdef.MarshalAgentDef(candidate)
-			if err != nil {
-				return installAgentDefResult{}, fmt.Errorf("marshal agent definition: %w", err)
-			}
+			yamlBytes := []byte(draft.CanonicalYAML)
 			hash := sha256.Sum256(yamlBytes)
 			definitionHash := fmt.Sprintf("%x", hash)
 			if definitionHash != draft.DefinitionHash || (strings.TrimSpace(args.DefinitionHash) != "" && definitionHash != args.DefinitionHash) {
 				return installAgentDefResult{}, fmt.Errorf("agent definition hash does not match draft")
+			}
+			candidate, err := agentdef.UnmarshalAgentDef(yamlBytes)
+			if err != nil {
+				return installAgentDefResult{}, fmt.Errorf("decode canonical agent definition: %w", err)
+			}
+			if candidate.Name != draft.Name {
+				return installAgentDefResult{}, fmt.Errorf("canonical agent definition does not match draft name")
+			}
+			if err := validateCanonicalAgent(candidate, draft, f.currentDefs, f.agentBuilder); err != nil {
+				return installAgentDefResult{}, err
 			}
 
 			if draft.Status == port.DraftStatusPreviewed {
@@ -368,6 +395,29 @@ func (f *Factory) installAgentDefTool(actor string, key domain.ConversationKey) 
 			}, nil
 		},
 	)
+}
+
+type installCandidateValidator interface {
+	ValidateInstallCandidate(domain.AgentDraft, agentdef.AgentDef, *agentdef.Definitions) error
+}
+
+func validateCanonicalAgent(candidate agentdef.AgentDef, draft *port.AgentDraft, defs *agentdef.Definitions, builder port.AgentBuilderService) error {
+	if draft == nil {
+		return fmt.Errorf("agent draft is required")
+	}
+	validator, ok := builder.(installCandidateValidator)
+	if !ok {
+		return fmt.Errorf("agent builder does not support install validation")
+	}
+	return validator.ValidateInstallCandidate(domain.AgentDraft{
+		Name:           draft.Name,
+		Description:    draft.Description,
+		Instruction:    draft.Instruction,
+		Model:          draft.Model,
+		Kind:           domain.AgentKind(draft.Kind),
+		ExecutionMode:  draft.ExecutionMode,
+		TimeoutSeconds: draft.TimeoutSeconds,
+	}, candidate, defs)
 }
 
 const agentDraftTTL = 24 * time.Hour

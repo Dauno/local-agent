@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -75,6 +76,15 @@ func (h *BuilderSubmissionHandler) HandleSubmission(_ context.Context, callback 
 			"instruction": fmt.Sprintf("Maximo %d caracteres", agentdef.MaxInstructionLength),
 		})
 	}
+	if err := validateBuilderDraft(callback, draft); err != nil {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderValidationField(err): err.Error()})
+	}
+	if h == nil || h.agentBuilder == nil {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"model": "El catalogo de proveedores no esta disponible"})
+	}
+	if _, err := h.agentBuilder.Preview(draft, h.currentDefs); err != nil {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderValidationField(err): err.Error()})
+	}
 	return nil
 }
 
@@ -120,6 +130,10 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 		Description:     draftInput.Description,
 		Instruction:     draftInput.Instruction,
 		Model:           draftInput.Model,
+		Kind:            string(draftInput.Kind),
+		ExecutionMode:   preview.AgentDef.ExecutionMode,
+		TimeoutSeconds:  preview.AgentDef.TimeoutSec,
+		CanonicalYAML:   preview.YAML,
 		DefinitionHash:  preview.SHA256,
 		Status:          port.DraftStatusPreviewed,
 		CreatedAt:       now,
@@ -130,12 +144,12 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 	}
 
 	if publisher, ok := h.publisher.(*Publisher); ok {
-		if err := publisher.publishBuilderPreview(ctx, target, draftInput.Name, preview.YAML, preview.SHA256, draftID); err != nil {
+		if err := publisher.publishBuilderPreview(ctx, target, draftInput, preview.AgentDef, preview.YAML, preview.SHA256, draftID); err != nil {
 			return fmt.Errorf("publish agent preview: %w", err)
 		}
 		return nil
 	}
-	text := builderPreviewMarkdown(draftInput.Name, preview.YAML, preview.SHA256)
+	text := builderPreviewMarkdown(draftInput, preview.AgentDef, preview.YAML, preview.SHA256)
 	if _, err := h.publisher.Publish(ctx, target, text); err != nil {
 		return fmt.Errorf("publish agent preview: %w", err)
 	}
@@ -239,15 +253,118 @@ func builderDraftFromCallback(callback slackapi.InteractionCallback) (domain.Age
 	if !ok {
 		return domain.AgentDraft{}, "instruction"
 	}
-	model, _ := value("model", "model")
-	if model == "" {
-		if block, exists := values["model"]; exists {
-			if action, exists := block["model"]; exists {
-				model = action.SelectedOption.Value
+	kind, _ := value("agent_type", "agent_type")
+	if kind == "" {
+		if block, exists := values["agent_type"]; exists {
+			if action, exists := block["agent_type"]; exists {
+				kind = action.SelectedOption.Value
 			}
 		}
 	}
-	return domain.AgentDraft{Name: name, Description: description, Instruction: instruction, Model: model}, ""
+	if kind == "" {
+		kind = string(domain.AgentKindLLM)
+	}
+	providerProfile := selectedValue(values, "provider_profile", "provider_profile")
+	if providerProfile == "" {
+		providerProfile = selectedValue(values, "model", "model")
+	}
+	model := ""
+	if kind == string(domain.AgentKindLLM) {
+		model = selectedValue(values, "model", "model")
+	}
+	executionMode := valueFromState(values, "execution_mode", "execution_mode")
+	timeoutSeconds := 0
+	if timeoutText := valueFromState(values, "timeout_seconds", "timeout_seconds"); timeoutText != "" {
+		timeoutSeconds, _ = strconv.Atoi(timeoutText)
+	}
+	return domain.AgentDraft{
+		Name:            name,
+		Description:     description,
+		Instruction:     instruction,
+		Model:           model,
+		Kind:            domain.AgentKind(kind),
+		ProviderProfile: providerProfile,
+		ExecutionMode:   executionMode,
+		TimeoutSeconds:  timeoutSeconds,
+	}, ""
+}
+
+func selectedValue(values map[string]map[string]slackapi.BlockAction, blockID, actionID string) string {
+	if block, ok := values[blockID]; ok {
+		if action, ok := block[actionID]; ok {
+			if action.Value != "" {
+				return action.Value
+			}
+			return action.SelectedOption.Value
+		}
+	}
+	return ""
+}
+
+func valueFromState(values map[string]map[string]slackapi.BlockAction, blockID, actionID string) string {
+	if block, ok := values[blockID]; ok {
+		if action, ok := block[actionID]; ok {
+			if action.Value != "" {
+				return action.Value
+			}
+			return action.SelectedOption.Value
+		}
+	}
+	return ""
+}
+
+func validateBuilderDraft(callback slackapi.InteractionCallback, draft domain.AgentDraft) error {
+	if err := domain.ValidateAgentKind(draft.Kind); err != nil {
+		return err
+	}
+	if draft.ProviderProfile == "" {
+		return errors.New("selecciona un proveedor/perfil")
+	}
+	if draft.Kind == domain.AgentKindLLM {
+		if draft.ExecutionMode != "" && draft.ExecutionMode != domain.ExecutionModeForeground {
+			return errors.New("execution_mode solo admite foreground para LLM")
+		}
+		if draft.TimeoutSeconds != 0 {
+			return errors.New("timeout_seconds solo es valido para ACP")
+		}
+		return nil
+	}
+	mode := draft.ExecutionMode
+	if mode == "" {
+		mode = domain.ExecutionModeForeground
+	}
+	if err := domain.ValidateExecutionMode(draft.Kind, mode); err != nil {
+		return err
+	}
+	if err := domain.ValidateACPTimeout(draft.TimeoutSeconds); err != nil {
+		return err
+	}
+	// Parse the raw value so malformed numeric input is not silently treated as zero.
+	if callback.View.State != nil {
+		if raw := valueFromState(callback.View.State.Values, "timeout_seconds", "timeout_seconds"); raw != "" {
+			if _, err := strconv.Atoi(raw); err != nil {
+				return errors.New("timeout_seconds debe ser un numero entero")
+			}
+		}
+	}
+	return nil
+}
+
+func builderValidationField(err error) string {
+	message := err.Error()
+	if strings.Contains(message, "timeout") {
+		return "timeout_seconds"
+	}
+	if strings.Contains(message, "execution") {
+		return "execution_mode"
+	}
+	if strings.Contains(message, "proveedor") || strings.Contains(message, "provider") || strings.Contains(message, "perfil") {
+		return "model"
+	}
+	if strings.Contains(message, "kind") || strings.Contains(message, "tipo") {
+		return "agent_type"
+	}
+	return "model"
 }
 
 func builderConversation(callback slackapi.InteractionCallback, fallback string) (string, domain.ReplyTarget, error) {
@@ -303,9 +420,17 @@ func newBuilderDraftID() (string, error) {
 	return "draft_" + hex.EncodeToString(data), nil
 }
 
-func builderPreviewMarkdown(name, yaml, sha256 string) string {
-	return fmt.Sprintf("*Previsualizacion del agente `%s`*\n\n```yaml\n%s\n```\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
-		neutralizeUnsafeControls(name), neutralizeUnsafeControls(yaml), sha256)
+func builderPreviewMarkdown(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256 string) string {
+	profile := draft.ProviderProfile
+	if profile == "" {
+		profile = draft.Model
+	}
+	timeout := "no aplica"
+	if definition.TimeoutSec > 0 {
+		timeout = strconv.Itoa(definition.TimeoutSec) + " segundos"
+	}
+	return fmt.Sprintf("*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\n```yaml\n%s\n```\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
+		neutralizeUnsafeControls(draft.Name), definition.AgentClass, neutralizeUnsafeControls(profile), definition.ExecutionMode, timeout, neutralizeUnsafeControls(yaml), sha256)
 }
 
 type builderBlockPoster interface {
@@ -329,23 +454,23 @@ func (c sdkPostClient) PostBlocks(ctx context.Context, channelID, fallbackText s
 	return timestamp, err
 }
 
-func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.ReplyTarget, name, yaml, sha256, draftID string) error {
+func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.ReplyTarget, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) error {
 	if p == nil || p.client == nil {
 		return errors.New("Slack posting client is required")
 	}
 	poster, ok := p.client.(builderBlockPoster)
 	if !ok {
-		_, err := p.Publish(ctx, target, builderPreviewMarkdown(name, yaml, sha256))
+		_, err := p.Publish(ctx, target, builderPreviewMarkdown(draft, definition, yaml, sha256))
 		return err
 	}
-	blocks := renderBuilderPreviewBlocks(name, yaml, sha256, draftID)
+	blocks := renderBuilderPreviewBlocks(draft, definition, yaml, sha256, draftID)
 	callCtx := ctx
 	cancel := func() {}
 	if p.timeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, p.timeout)
 	}
 	defer cancel()
-	timestamp, err := poster.PostBlocks(callCtx, target.ChannelID, builderPreviewMarkdown(name, yaml, sha256), blocks, slackapi.SlackMetadata{}, target.ThreadTS)
+	timestamp, err := poster.PostBlocks(callCtx, target.ChannelID, builderPreviewMarkdown(draft, definition, yaml, sha256), blocks, slackapi.SlackMetadata{}, target.ThreadTS)
 	if err != nil {
 		return err
 	}
@@ -355,14 +480,16 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 	return nil
 }
 
-func renderBuilderPreviewBlocks(name, yaml, sha256, draftID string) []slackapi.Block {
+func renderBuilderPreviewBlocks(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) []slackapi.Block {
 	blocks := []slackapi.Block{
 		slackapi.NewSectionBlock(
-			slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Previsualizacion del agente `%s`*", neutralizeUnsafeControls(name)), false, false),
+			slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Previsualizacion del agente `%s`*", neutralizeUnsafeControls(draft.Name)), false, false),
 			nil,
 			nil,
 		),
 	}
+	metadata := fmt.Sprintf("*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`", definition.AgentClass, neutralizeUnsafeControls(draft.ProviderProfile), definition.ExecutionMode, previewTimeout(definition.TimeoutSec))
+	blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", metadata, false, false), nil, nil))
 	code := "```yaml\n" + neutralizeUnsafeControls(yaml) + "\n```"
 	for _, part := range splitBuilderBlockText(code, builderBlockTextLimit) {
 		blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", part, false, false), nil, nil))
@@ -374,6 +501,13 @@ func renderBuilderPreviewBlocks(name, yaml, sha256, draftID string) []slackapi.B
 		),
 	)
 	return blocks
+}
+
+func previewTimeout(seconds int) string {
+	if seconds <= 0 {
+		return "no aplica"
+	}
+	return strconv.Itoa(seconds) + " segundos"
 }
 
 func splitBuilderBlockText(text string, maxRunes int) []string {

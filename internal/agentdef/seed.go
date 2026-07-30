@@ -160,3 +160,12 @@ func MarshalProvider(p Provider) ([]byte, error) {
 func MarshalAgentDef(a AgentDef) ([]byte, error) {
 	return yaml.Marshal(a)
 }
+
+// UnmarshalAgentDef decodes one strict, canonical AgentDef YAML document.
+func UnmarshalAgentDef(data []byte) (AgentDef, error) {
+	var agent AgentDef
+	if err := decodeStrictYAML(data, &agent); err != nil {
+		return AgentDef{}, err
+	}
+	return agent, nil
+}

@@ -15,9 +15,11 @@ type PreviewResult struct {
 
 // AgentDefPreview contains the definition identity needed by delivery ports.
 type AgentDefPreview struct {
-	Name       string
-	Model      string
-	AgentClass string
+	Name          string
+	Model         string
+	AgentClass    string
+	ExecutionMode string
+	TimeoutSec    int
 }
 
 // AgentBuilderService compiles an AgentDraft into a validated agent definition.

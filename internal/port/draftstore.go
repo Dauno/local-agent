@@ -30,6 +30,10 @@ type AgentDraft struct {
 	Model           string           `json:"model"`
 	DefinitionHash  string           `json:"definition_hash"`
 	CatalogRevision int              `json:"catalog_revision"`
+	Kind            string           `json:"kind"`
+	ExecutionMode   string           `json:"execution_mode"`
+	TimeoutSeconds  int              `json:"timeout_seconds"`
+	CanonicalYAML   string           `json:"canonical_yaml"`
 	Status          AgentDraftStatus `json:"status"`
 	CreatedAt       time.Time        `json:"created_at"`
 	ExpiresAt       time.Time        `json:"expires_at"`

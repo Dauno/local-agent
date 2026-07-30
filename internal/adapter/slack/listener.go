@@ -28,6 +28,10 @@ type viewOpener interface {
 	OpenViewContext(context.Context, string, slack.ModalViewRequest) (*slack.ViewResponse, error)
 }
 
+type viewUpdater interface {
+	UpdateViewContext(context.Context, slack.ModalViewRequest, string, string, string) (*slack.ViewResponse, error)
+}
+
 type sdkSocketClient struct {
 	client *socketmode.Client
 }
@@ -50,6 +54,10 @@ func (c sdkSocketClient) AckResponse(ctx context.Context, request socketmode.Req
 
 func (c sdkSocketClient) OpenViewContext(ctx context.Context, triggerID string, view slack.ModalViewRequest) (*slack.ViewResponse, error) {
 	return c.client.OpenViewContext(ctx, triggerID, view)
+}
+
+func (c sdkSocketClient) UpdateViewContext(ctx context.Context, view slack.ModalViewRequest, externalID, hash, viewID string) (*slack.ViewResponse, error) {
+	return c.client.UpdateViewContext(ctx, view, externalID, hash, viewID)
 }
 
 // Listener owns the Socket Mode lifecycle and its acknowledge-before-dispatch
@@ -212,6 +220,32 @@ func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event
 	}
 
 	if callback.Type == slack.InteractionTypeBlockActions {
+		if callback.View.CallbackID == builderSubmitCallbackID && l.builderPresenter != nil {
+			for _, action := range callback.ActionCallback.BlockActions {
+				if action != nil && action.ActionID == "agent_type" {
+					if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
+						l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
+						if ctx.Err() != nil {
+							return
+						}
+					}
+					updater, ok := l.client.(viewUpdater)
+					if !ok {
+						l.logger.Error("Slack Socket Mode builder modal update failed", "error", "Slack view updater is not configured")
+						return
+					}
+					view := l.builderPresenter.BuildViewForCallback(callback)
+					if callback.View.ID == "" || callback.View.Hash == "" {
+						l.logger.Error("Slack Socket Mode builder modal update failed", "error", "view ID and hash are required")
+						return
+					}
+					if _, err := updater.UpdateViewContext(ctx, view, "", callback.View.Hash, callback.View.ID); err != nil {
+						l.logger.Error("Slack Socket Mode builder modal update failed", "envelope_id", event.Request.EnvelopeID, "error", err)
+					}
+					return
+				}
+			}
+		}
 		for _, action := range callback.ActionCallback.BlockActions {
 			if action != nil && action.ActionID == builderInstallActionID {
 				if !domain.PlausibleUserID(callback.User.ID) || !domain.PlausibleTeamID(callback.Team.ID) || action.Value == "" {
