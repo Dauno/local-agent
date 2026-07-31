@@ -55,6 +55,20 @@ type ExternalAgentJobStarter interface {
 	Start(ctx context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error)
 }
 
+// ExternalAgentJobReader exposes only actor- and conversation-bound job
+// inspection to host tools. Implementations must not trust model-supplied
+// destination or actor values.
+type ExternalAgentJobReader interface {
+	Status(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error)
+	ReadResult(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.ExternalAgentJobResult, error)
+}
+
+// ExternalAgentJobHostCompleter is the deterministic response phase after a
+// detached job has completed. It must not create a confirmation or rerun ACP.
+type ExternalAgentJobHostCompleter interface {
+	HostCompletionTurn(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (AgentTurn, error)
+}
+
 // ExternalAgentJobRuntime executes one already-admitted job. It is deliberately
 // provider-neutral so use cases do not import ACP or process types.
 type ExternalAgentJobRuntime interface {

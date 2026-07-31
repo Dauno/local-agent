@@ -617,6 +617,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		if err != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent jobs: %w", err))
 		}
+		factory.WithExternalAgentJobs(externalJobService)
 		if compositeFactory != nil {
 			compositeFactory.setJobStarter(externalJobService)
 		}
