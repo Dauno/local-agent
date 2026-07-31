@@ -30,6 +30,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/lspdiscovery"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
+	metricsadapter "github.com/Dauno/slack-local-agent/internal/adapter/metrics"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/adapter/opencodemanager"
@@ -88,6 +89,15 @@ type runtimeModels struct {
 	artifactStore       port.ResultArtifactStore
 	requestTokenCounter port.RequestTokenCounter
 	contextWindowTokens int
+	metrics             port.MetricRecorder
+}
+
+func newRuntimeModels() runtimeModels {
+	return runtimeModels{
+		rootFamily:          domain.ProviderFamilyOpenAICompatible,
+		openCodeCoordinator: opencodeusecase.NewCoordinator(),
+		metrics:             metricsadapter.NewRecorder(),
+	}
 }
 
 func bindForegroundRuntimes(models runtimeModels, jobs synchronousExternalAgentJobs) {
@@ -163,7 +173,7 @@ func (a *Application) loadRuntimeSetup() (runtimeSetup, error) {
 
 func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSetup) (runtimeModels, error) {
 	cfg, paths, defs := setup.cfg, setup.paths, setup.defs
-	prepared := runtimeModels{rootFamily: domain.ProviderFamilyOpenAICompatible, openCodeCoordinator: opencodeusecase.NewCoordinator()}
+	prepared := newRuntimeModels()
 	describedCLIProviders := make(map[string]bool)
 	rootDefCandidate, ok := defs.Agents["root_agent"]
 	if !ok {
@@ -233,7 +243,7 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 			return runtimeModels{}, fmt.Errorf("compose root model request budget: %w", budgetErr)
 		}
 		profileID := resolved.Provider.Name + "/" + resolved.Model
-		if guardErr := httpModel.ConfigureRequestGuard(prepared.requestTokenCounter, budget, profileID); guardErr != nil {
+		if guardErr := httpModel.ConfigureRequestGuard(prepared.requestTokenCounter, budget, profileID, prepared.metrics); guardErr != nil {
 			return runtimeModels{}, fmt.Errorf("configure root model final request guard: %w", guardErr)
 		}
 	}
@@ -477,7 +487,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	}
 	if !models.rootIsAgentCLI && features != nil && features.RecoverableResultsEnabled {
 		resultsCfg := cfg.Context.RecoverableResults
-		resultStore = recoverableresult.NewStore(infra.store.DB(), filepath.Join(paths.StateDir, "recoverable-results"), resultsCfg.MaxResultBytes, resultsCfg.ChunkMaxBytes, resultsCfg.RetentionDays, resultsCfg.CleanupBatchSize)
+		resultStore = recoverableresult.NewStore(infra.store.DB(), filepath.Join(paths.StateDir, "recoverable-results"), resultsCfg.MaxResultBytes, resultsCfg.ChunkMaxBytes, resultsCfg.RetentionDays, resultsCfg.CleanupBatchSize, models.metrics)
 		resultStore.SetReferenceChecker(infra.store)
 		if _, cleanupErr := resultStore.DeleteExpired(ctx, time.Now().UTC(), resultsCfg.CleanupBatchSize); cleanupErr != nil {
 			return nil, models.redactor.Error(cleanupErr)
@@ -497,6 +507,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			if err != nil {
 				return nil, models.redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
 			}
+			executor.WithMetrics(models.metrics)
 			sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
 				AllowedCapabilities: []domain.Capability{domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees},
 				CommandTimeout:      time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
@@ -509,10 +520,10 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 				codeReaders = make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
 				syntaxReaders := make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
 				for name, root := range paths.SandboxProjectRoots {
-					codeReaders[name] = rangedreader.NewReader(root, cfg.Sandbox.MaxOutputBytes, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore)
-					syntaxReaders[name] = rangedreader.NewReader(root, 1<<20, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithPreservedLineEndings()
+					codeReaders[name] = rangedreader.NewReader(root, cfg.Sandbox.MaxOutputBytes, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithMetrics(models.metrics)
+					syntaxReaders[name] = rangedreader.NewReader(root, 1<<20, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithPreservedLineEndings().WithMetrics(models.metrics)
 				}
-				syntaxEngine = goast.New(syntaxReaders)
+				syntaxEngine = goast.New(syntaxReaders).WithMetrics(models.metrics)
 				if len(cfg.CodeIntelligence.LSPServers) > 0 {
 					candidates := make([]port.ServerCandidate, 0, len(cfg.CodeIntelligence.LSPServers))
 					for _, server := range cfg.CodeIntelligence.LSPServers {
@@ -550,6 +561,9 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 						if err != nil {
 							return nil, models.redactor.Error(fmt.Errorf("initialize language server runtime: %w", err))
 						}
+						if concrete, ok := codeIntelligence.(*lspclient.Client); ok {
+							concrete.WithMetrics(models.metrics)
+						}
 					}
 				}
 			}
@@ -570,7 +584,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 				return nil, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
 			}
 		}
-		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence)
+		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence).WithMetrics(models.metrics)
 		// Configurar Agent Builder (preview + install tools).
 		if agentBuilderSvc != nil && defs != nil {
 			agentsDir := filepath.Join(paths.StateDir, "agents")
@@ -658,7 +672,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		if err != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize context budget: %w", err))
 		}
-		compiler = contextcompilerusecase.New(resultStore, models.requestTokenCounter)
+		compiler = contextcompilerusecase.New(resultStore, models.requestTokenCounter, models.metrics)
 	}
 	if !models.rootIsAgentCLI {
 		compaction := cfg.Context.ADKCompaction
@@ -678,7 +692,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			concrete.SetLogger(models.logger)
 		}
 	}
-	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContinuityStore: continuityStore, SummaryStore: infra.store, ProviderFamily: models.rootFamily})
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContinuityStore: continuityStore, SummaryStore: infra.store, Metrics: models.metrics, ProviderFamily: models.rootFamily})
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}

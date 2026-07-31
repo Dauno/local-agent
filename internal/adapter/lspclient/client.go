@@ -45,8 +45,9 @@ type Config struct {
 }
 
 type Client struct {
-	config Config
-	sem    chan struct{}
+	config  Config
+	sem     chan struct{}
+	metrics port.MetricRecorder
 }
 
 func New(config Config) (*Client, error) {
@@ -54,6 +55,13 @@ func New(config Config) (*Client, error) {
 		return nil, errors.New("LSP runtime requires positive process and timeout limits")
 	}
 	return &Client{config: config, sem: make(chan struct{}, config.MaxProcesses)}, nil
+}
+
+func (c *Client) WithMetrics(recorder port.MetricRecorder) *Client {
+	if c != nil {
+		c.metrics = recorder
+	}
+	return c
 }
 
 func (c *Client) Symbols(ctx context.Context, req domain.SymbolRequest) (domain.SymbolResult, error) {
@@ -124,7 +132,7 @@ type sourceSnapshot struct {
 	content string
 }
 
-func (c *Client) query(ctx context.Context, project, path, actor, conversation, method string, params map[string]any) (json.RawMessage, sourceSnapshot, error) {
+func (c *Client) query(ctx context.Context, project, path, actor, conversation, method string, params map[string]any) (result json.RawMessage, snapshot sourceSnapshot, err error) {
 	reader := c.config.Readers[project]
 	root := c.config.ProjectRoots[project]
 	if reader == nil || root == "" {
@@ -137,7 +145,13 @@ func (c *Client) query(ctx context.Context, project, path, actor, conversation, 
 	language := languageForPath(path)
 	servers := c.serversFor(language)
 	if len(servers) == 0 {
+		if c.metrics != nil {
+			c.metrics.SetGauge(domain.MetricLSPServerState, 0, port.MetricLabels{"language": language})
+		}
 		return nil, sourceSnapshot{}, errors.New("language server is unavailable")
+	}
+	if c.metrics != nil {
+		c.metrics.SetGauge(domain.MetricLSPServerState, 1, port.MetricLabels{"language": language})
 	}
 	select {
 	case c.sem <- struct{}{}:
@@ -145,12 +159,21 @@ func (c *Client) query(ctx context.Context, project, path, actor, conversation, 
 	case <-ctx.Done():
 		return nil, sourceSnapshot{}, ctx.Err()
 	}
-	snapshot := sourceSnapshot{project: project, path: path, digest: source.Location.FileSHA256, content: source.Content}
+	snapshot = sourceSnapshot{project: project, path: path, digest: source.Location.FileSHA256, content: source.Content}
 	var lastErr error
-	for _, server := range servers {
+	for index, server := range servers {
+		started := time.Now()
 		raw, queryErr := c.run(ctx, server, root, path, language, source.Content, method, params)
+		if c.metrics != nil {
+			labels := port.MetricLabels{"language": language, "lsp_server_id": server.ID}
+			c.metrics.AddCounter(domain.MetricLSPRequestTotal, 1, labels)
+			c.metrics.Observe(domain.MetricLSPRequestDuration, time.Since(started).Seconds(), labels)
+		}
 		if queryErr == nil {
 			return raw, snapshot, nil
+		}
+		if c.metrics != nil && index+1 < len(servers) {
+			c.metrics.AddCounter(domain.MetricLSPFallbackTotal, 1, port.MetricLabels{"language": language})
 		}
 		lastErr = queryErr
 	}

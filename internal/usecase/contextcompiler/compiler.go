@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"strings"
+	"time"
 	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -19,16 +20,27 @@ import (
 type Compiler struct {
 	resultStore  port.RecoverableResultStore
 	tokenCounter port.RequestTokenCounter
+	metrics      port.MetricRecorder
 }
 
 // New creates a compiler. tokenCounter is available for final-guard
 // serialized-token counting; the internal budget tracking uses code points.
-func New(resultStore port.RecoverableResultStore, counter port.RequestTokenCounter) *Compiler {
-	return &Compiler{resultStore: resultStore, tokenCounter: counter}
+func New(resultStore port.RecoverableResultStore, counter port.RequestTokenCounter, recorders ...port.MetricRecorder) *Compiler {
+	var recorder port.MetricRecorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
+	return &Compiler{resultStore: resultStore, tokenCounter: counter, metrics: recorder}
 }
 
 // Compile executes the context compilation stages.
 func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (domain.CompileResult, error) {
+	started := time.Now()
+	defer func() {
+		if c != nil && c.metrics != nil {
+			c.metrics.Observe(domain.MetricContextCompileDuration, time.Since(started).Seconds(), nil)
+		}
+	}()
 	beforeChars, err := domain.ContentCost(req.Contents)
 	if err != nil {
 		return domain.CompileResult{}, fmt.Errorf("context compiler: measure before: %w", err)
@@ -80,10 +92,14 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 		effectiveMinCosts[i] = minVal(rp.cost, minEnvCosts[i])
 	}
 	totalEffectiveMin := sumCosts(effectiveMinCosts)
+	diag.ProtectedTokens = sumCosts([]int{protectedCost, totalEffectiveMin})
 
-	minimumRequired := req.FixedRequestTokens + protectedCost + totalEffectiveMin
+	minimumRequired := sumCosts([]int{req.FixedRequestTokens, protectedCost, totalEffectiveMin})
 	if minimumRequired > hardLimit {
-		return domain.CompileResult{}, &domain.IrreducibleContextError{
+		diag.RequestTokensAfter = minimumRequired
+		diag.ReductionReason = "irreducible"
+		c.recordDiagnostics(diag, true)
+		return domain.CompileResult{Diagnostics: diag}, &domain.IrreducibleContextError{
 			MinimumTokens: minimumRequired,
 			HardTokens:    hardLimit,
 		}
@@ -93,7 +109,6 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	}
 
 	available := allocationLimit - req.FixedRequestTokens - protectedCost - totalEffectiveMin
-	diag.ProtectedTokens = protectedCost + totalEffectiveMin
 
 	// For budget allocation, only consider responses where minEnvCost < currentCost.
 	var reducibleForAlloc []reduciblePart
@@ -109,14 +124,16 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	var responsesExternalized int
 
 	if len(reducibleForAlloc) > 0 {
-		perResponseBudget := available / len(reducibleForAlloc)
+		allocations := allocateResponseBudgets(reducibleForAlloc, minEnvForAlloc, available)
 		responseTokensRemoved, responsesExternalized, err = c.reduceResponses(
-			ctx, req, reducibleForAlloc, minEnvForAlloc, perResponseBudget, activeContents,
+			ctx, req, reducibleForAlloc, allocations, activeContents,
 		)
 		if err != nil {
 			return domain.CompileResult{}, err
 		}
 	}
+	diag.ResponsesExternalized = responsesExternalized
+	diag.ResponseTokensRemoved = responseTokensRemoved
 
 	// Compute reduced active suffix cost.
 	reducedActiveCost, err := domain.ContentCost(activeContents)
@@ -143,6 +160,9 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 		}
 	}
 	diag.ContinuityTokens = capsuleTokens
+	if c.metrics != nil && capsuleTokens > 0 {
+		c.metrics.Observe(domain.MetricContinuityCheckpointRenderTokens, float64(capsuleTokens), nil)
+	}
 
 	// Select recent completed turns newest-first within remaining budget.
 	selectedTurns, retained := selectRecentTurns(completed, remaining)
@@ -177,6 +197,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	// Bounded recount stage 1: optional summary and completed turns are lower
 	// priority than continuity and the active protocol frontier.
 	if count.Tokens > hardLimit {
+		diag.RecountPasses++
 		summaryContent = nil
 		selectedTurns = nil
 		diag.RecentTurnsRetained = 0
@@ -189,6 +210,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	// Bounded recount stage 2: remove optional continuity and inline excerpts.
 	// Recoverable markers and protected call/response identities remain intact.
 	if count.Tokens > hardLimit {
+		diag.RecountPasses++
 		capsuleContent = nil
 		diag.ContinuityTokens = 0
 		stripProjectedExcerpts(activeContents)
@@ -199,11 +221,12 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 		}
 	}
 	if count.Tokens > hardLimit {
-		return domain.CompileResult{}, &domain.IrreducibleContextError{MinimumTokens: count.Tokens, HardTokens: hardLimit}
+		diag.RequestTokensAfter = count.Tokens
+		diag.ReductionReason = "irreducible"
+		c.recordDiagnostics(diag, true)
+		return domain.CompileResult{Diagnostics: diag}, &domain.IrreducibleContextError{MinimumTokens: count.Tokens, HardTokens: hardLimit}
 	}
 	diag.RequestTokensAfter = count.Tokens
-	diag.ResponsesExternalized = responsesExternalized
-	diag.ResponseTokensRemoved = responseTokensRemoved
 	switch {
 	case responsesExternalized > 0:
 		diag.ReductionReason = "request_budget"
@@ -212,8 +235,40 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	default:
 		diag.ReductionReason = "unchanged"
 	}
+	c.recordDiagnostics(diag, false)
 
 	return domain.CompileResult{Contents: resultContents, Diagnostics: diag}, nil
+}
+
+func (c *Compiler) recordDiagnostics(diag domain.CompileDiagnostics, irreducible bool) {
+	if c == nil || c.metrics == nil {
+		return
+	}
+	c.metrics.Observe(domain.MetricContextProtectedTokens, float64(diag.ProtectedTokens), nil)
+	c.metrics.Observe(domain.MetricContextContinuityTokens, float64(diag.ContinuityTokens), nil)
+	c.metrics.Observe(domain.MetricContextRecentTurnsRetained, float64(diag.RecentTurnsRetained), nil)
+	if diag.ResponsesExternalized > 0 {
+		c.metrics.AddCounter(domain.MetricContextResponsesExternalized, int64(diag.ResponsesExternalized), nil)
+	}
+	c.metrics.Observe(domain.MetricContextTokensRemoved, float64(diag.ResponseTokensRemoved), nil)
+	c.metrics.Observe(domain.MetricContextRecountPasses, float64(diag.RecountPasses), nil)
+	reductionReason := diag.ReductionReason
+	if reductionReason == "irreducible" {
+		switch {
+		case diag.ResponsesExternalized > 0:
+			reductionReason = "request_budget"
+		case diag.RecountPasses > 0:
+			reductionReason = "bounded"
+		default:
+			reductionReason = ""
+		}
+	}
+	if reductionReason != "" && reductionReason != "unchanged" && reductionReason != "empty" {
+		c.metrics.AddCounter(domain.MetricModelRequestReductionTotal, 1, port.MetricLabels{"reduction_reason": reductionReason})
+	}
+	if irreducible {
+		c.metrics.AddCounter(domain.MetricModelRequestIrreducibleTotal, 1, port.MetricLabels{"guard_outcome": "irreducible"})
+	}
 }
 
 func (c *Compiler) countProjection(ctx context.Context, contents []domain.Content, fixedTokens int) (port.TokenCount, error) {
@@ -229,9 +284,14 @@ func (c *Compiler) countProjection(ctx context.Context, contents []domain.Conten
 	// provider conversion. A 2x byte bound remains conservative for that second
 	// serialization; the provider-shaped guard is still authoritative.
 	if count.Strategy == "byte_bound" {
-		count.Tokens *= 2
+		maxInt := int(^uint(0) >> 1)
+		if count.Tokens > maxInt/2 {
+			count.Tokens = maxInt
+		} else {
+			count.Tokens *= 2
+		}
 	}
-	count.Tokens += fixedTokens
+	count.Tokens = sumCosts([]int{count.Tokens, fixedTokens})
 	return count, nil
 }
 
@@ -287,13 +347,12 @@ func (c *Compiler) reduceResponses(
 	ctx context.Context,
 	req domain.CompileRequest,
 	parts []reduciblePart,
-	minEnvCosts []int,
-	perResponseBudget int,
+	allocations []int,
 	activeContents []domain.Content,
 ) (tokensRemoved int, externalized int, err error) {
 	for i, rp := range parts {
 		currentCost := rp.cost
-		allocation := minEnvCosts[i] + perResponseBudget
+		allocation := allocations[i]
 		if currentCost <= allocation {
 			continue
 		}
@@ -379,6 +438,73 @@ func (c *Compiler) reduceResponses(
 		externalized++
 	}
 	return tokensRemoved, externalized, nil
+}
+
+// allocateResponseBudgets reserves every response envelope, then fills the
+// remaining demand equally. Completed small responses leave their unused share
+// available to the remaining responses. Input order is the remainder tie-break.
+func allocateResponseBudgets(parts []reduciblePart, minimums []int, available int) []int {
+	allocations := make([]int, len(parts))
+	if len(parts) == 0 {
+		return allocations
+	}
+	demands := make([]int, len(parts))
+	active := make([]int, 0, len(parts))
+	for i, part := range parts {
+		minimum := minimums[i]
+		if minimum < 0 {
+			minimum = 0
+		}
+		allocations[i] = minimum
+		if part.cost > minimum {
+			demands[i] = part.cost - minimum
+			active = append(active, i)
+		}
+	}
+	if available <= 0 {
+		return allocations
+	}
+	for len(active) > 0 && available > 0 {
+		share := available / len(active)
+		if share == 0 {
+			for _, index := range active {
+				if available == 0 {
+					break
+				}
+				allocations[index]++
+				available--
+			}
+			break
+		}
+		completed := make(map[int]bool)
+		spent := 0
+		for _, index := range active {
+			need := demands[index] - (allocations[index] - minimums[index])
+			add := share
+			if add > need {
+				add = need
+			}
+			allocations[index] += add
+			spent += add
+			if add == need {
+				completed[index] = true
+			}
+		}
+		if spent == 0 {
+			break
+		}
+		available -= spent
+		if len(completed) > 0 {
+			remaining := active[:0]
+			for _, index := range active {
+				if !completed[index] {
+					remaining = append(remaining, index)
+				}
+			}
+			active = remaining
+		}
+	}
+	return allocations
 }
 
 // ---------------------------------------------------------------------------
@@ -527,7 +653,11 @@ func truncateToCodePoints(s string, maxCodePoints int) string {
 
 func sumCosts(costs []int) int {
 	total := 0
+	maxInt := int(^uint(0) >> 1)
 	for _, c := range costs {
+		if c > 0 && total > maxInt-c {
+			return maxInt
+		}
 		total += c
 	}
 	return total

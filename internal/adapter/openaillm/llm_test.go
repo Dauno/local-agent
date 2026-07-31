@@ -12,6 +12,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
@@ -647,6 +648,33 @@ func (c fixedRequestCounter) CountRequest(context.Context, port.ModelRequestEnve
 	return port.TokenCount{Tokens: int(c), Strategy: "fixed", Exact: true}, nil
 }
 
+type failingRequestCounter struct{}
+
+func (failingRequestCounter) CountRequest(context.Context, port.ModelRequestEnvelope) (port.TokenCount, error) {
+	return port.TokenCount{}, errors.New("counter unavailable")
+}
+
+type guardMetricCapture struct {
+	samples map[string][]port.MetricSample
+}
+
+func (m *guardMetricCapture) add(sample port.MetricSample) {
+	if m.samples == nil {
+		m.samples = make(map[string][]port.MetricSample)
+	}
+	m.samples[sample.Name] = append(m.samples[sample.Name], sample)
+}
+func (m *guardMetricCapture) AddCounter(name string, delta int64, labels port.MetricLabels) {
+	m.add(port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: labels})
+}
+func (m *guardMetricCapture) SetGauge(name string, value int64, labels port.MetricLabels) {
+	m.add(port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: labels})
+}
+func (m *guardMetricCapture) Observe(name string, value float64, labels port.MetricLabels) {
+	m.add(port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: labels})
+}
+func (m *guardMetricCapture) Snapshot() []port.MetricSample { return nil }
+
 func TestFinalRequestGuardRejectsBeforeProviderCall(t *testing.T) {
 	var calls atomic.Int64
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
@@ -664,6 +692,54 @@ func TestFinalRequestGuardRejectsBeforeProviderCall(t *testing.T) {
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("provider calls = %d, want 0", calls.Load())
+	}
+}
+
+func TestFinalRequestGuardEmitsCompleteMetrics(t *testing.T) {
+	metrics := &guardMetricCapture{}
+	llm, err := New(WithAPIKey("test"), WithBaseURL("https://model.example/v1"), WithModel("model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := domain.RequestBudget{WindowTokens: 100, HardTokens: 10}
+	if err := llm.ConfigureRequestGuard(fixedRequestCounter(5), budget, "test/profile", metrics); err != nil {
+		t.Fatal(err)
+	}
+	if err := llm.guardRequest(t.Context(), openai.ChatCompletionNewParams{}, false); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{
+		domain.MetricModelRequestContextWindowTokens,
+		domain.MetricModelRequestHardLimitTokens,
+		domain.MetricModelRequestTokens,
+		domain.MetricModelRequestUtilizationBasisPoints,
+		domain.MetricModelRequestCounterStrategyTotal,
+		domain.MetricModelRequestGuardOutcomeTotal,
+	} {
+		if len(metrics.samples[name]) == 0 {
+			t.Errorf("metric %q was not emitted", name)
+		}
+	}
+
+	if err := llm.ConfigureRequestGuard(fixedRequestCounter(11), budget, "test/profile", metrics); err != nil {
+		t.Fatal(err)
+	}
+	if err := llm.guardRequest(t.Context(), openai.ChatCompletionNewParams{}, false); !errors.Is(err, domain.ErrIrreducibleContext) {
+		t.Fatalf("rejected guard error = %v", err)
+	}
+	if len(metrics.samples[domain.MetricModelRequestIrreducibleTotal]) == 0 {
+		t.Fatal("irreducible metric was not emitted")
+	}
+
+	if err := llm.ConfigureRequestGuard(failingRequestCounter{}, budget, "test/profile", metrics); err != nil {
+		t.Fatal(err)
+	}
+	if err := llm.guardRequest(t.Context(), openai.ChatCompletionNewParams{}, false); err == nil {
+		t.Fatal("count failure was accepted")
+	}
+	outcomes := metrics.samples[domain.MetricModelRequestGuardOutcomeTotal]
+	if outcomes[len(outcomes)-1].Labels["guard_outcome"] != "count_failed" {
+		t.Fatalf("guard outcomes = %#v", outcomes)
 	}
 }
 

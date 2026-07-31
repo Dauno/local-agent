@@ -77,7 +77,9 @@ func (p *BuilderModalPresenter) BuildViewForCallback(callback slackapi.Interacti
 	if kind == "" {
 		kind = domain.AgentKindLLM
 	}
-	return p.BuildViewForKind(kind, values)
+	view := p.BuildViewForKind(kind, values)
+	view.PrivateMetadata = callback.View.PrivateMetadata
+	return view
 }
 
 // BuildViewForKind renders the form for a selected kind, preserving values when

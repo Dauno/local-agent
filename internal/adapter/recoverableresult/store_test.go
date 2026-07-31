@@ -68,6 +68,27 @@ func setupTestDB(t *testing.T) (*sql.DB, string) {
 	return db, dir
 }
 
+type resultMetricCapture struct {
+	samples map[string][]port.MetricSample
+}
+
+func (m *resultMetricCapture) add(sample port.MetricSample) {
+	if m.samples == nil {
+		m.samples = make(map[string][]port.MetricSample)
+	}
+	m.samples[sample.Name] = append(m.samples[sample.Name], sample)
+}
+func (m *resultMetricCapture) AddCounter(name string, delta int64, labels port.MetricLabels) {
+	m.add(port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: labels})
+}
+func (m *resultMetricCapture) SetGauge(name string, value int64, labels port.MetricLabels) {
+	m.add(port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: labels})
+}
+func (m *resultMetricCapture) Observe(name string, value float64, labels port.MetricLabels) {
+	m.add(port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: labels})
+}
+func (m *resultMetricCapture) Snapshot() []port.MetricSample { return nil }
+
 func TestPutAndStatRoundTrip(t *testing.T) {
 	db, dir := setupTestDB(t)
 	storageDir := filepath.Join(dir, "results")
@@ -772,6 +793,59 @@ func TestRestartRecovery(t *testing.T) {
 	}
 	if chunk.Content != content {
 		t.Fatalf("recovered content = %q, want %q", chunk.Content, content)
+	}
+}
+
+func TestStoreEmitsRecoverableResultMetrics(t *testing.T) {
+	db, dir := setupTestDB(t)
+	metrics := &resultMetricCapture{}
+	store := recoverableresult.NewStore(db, filepath.Join(dir, "results"), 1024, 32, 7, 100, metrics)
+	store.SetReferenceChecker(referenceChecker(func(context.Context, string) (bool, error) { return false, nil }))
+	req := port.PutResultRequest{Actor: "U123", ConversationKey: "slack:T:dm:D", Kind: "context_projection", Content: "metric payload"}
+	result, err := store.Put(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.ReadChunk(t.Context(), domain.ResultChunkRequest{Ref: result.Ref, Actor: req.Actor, ConversationKey: req.ConversationKey, MaxBytes: 32}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Stat(t.Context(), port.StatResultRequest{Ref: "missing", Actor: req.Actor, ConversationKey: req.ConversationKey}); err == nil {
+		t.Fatal("missing result was accepted")
+	}
+
+	corrupt, err := store.Put(t.Context(), port.PutResultRequest{Actor: req.Actor, ConversationKey: req.ConversationKey, Kind: "source_snapshot", Content: "corrupt me"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var locator string
+	if err := db.QueryRowContext(t.Context(), `SELECT storage_locator FROM recoverable_results WHERE ref = ?`, corrupt.Ref).Scan(&locator); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "results", locator), []byte("changed"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Stat(t.Context(), port.StatResultRequest{Ref: corrupt.Ref, Actor: req.Actor, ConversationKey: req.ConversationKey}); err == nil {
+		t.Fatal("corrupt result was accepted")
+	}
+
+	if _, err := db.ExecContext(t.Context(), `UPDATE recoverable_results SET created_at = 0, expires_at = 1 WHERE ref = ?`, result.Ref); err != nil {
+		t.Fatal(err)
+	}
+	if deleted, err := store.DeleteExpired(t.Context(), time.Now().UTC(), 100); err != nil || deleted != 1 {
+		t.Fatalf("DeleteExpired() = %d, %v", deleted, err)
+	}
+	for _, name := range []string{
+		domain.MetricRecoverableResultPutTotal,
+		domain.MetricRecoverableResultPutBytes,
+		domain.MetricRecoverableResultChunkReadTotal,
+		domain.MetricRecoverableResultUnavailableTotal,
+		domain.MetricRecoverableResultIntegrityFailure,
+		domain.MetricRecoverableResultCleanupTotal,
+		domain.MetricRecoverableResultActiveCount,
+	} {
+		if len(metrics.samples[name]) == 0 {
+			t.Errorf("metric %q was not emitted", name)
+		}
 	}
 }
 

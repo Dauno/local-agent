@@ -13,7 +13,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var ErrContinuityCAS = errors.New("continuity capsule revision conflict")
+var ErrContinuityCAS = port.ErrContinuityCASConflict
 
 type ContinuityStore struct{ store *Store }
 
@@ -21,7 +21,7 @@ func NewContinuityStore(store *Store) *ContinuityStore { return &ContinuityStore
 
 func (s *ContinuityStore) Latest(ctx context.Context, sessionID string) (domain.ContinuityCapsule, error) {
 	if s == nil || s.store == nil || strings.TrimSpace(sessionID) == "" {
-		return domain.ContinuityCapsule{}, errors.New("continuity store and session ID are required")
+		return domain.ContinuityCapsule{}, fmt.Errorf("%w: continuity store and session ID are required", port.ErrContinuityUnavailable)
 	}
 	var raw string
 	err := s.store.db.QueryRowContext(ctx, `SELECT capsule_json FROM continuity_capsules WHERE session_id = ?`, sessionID).Scan(&raw)
@@ -29,11 +29,11 @@ func (s *ContinuityStore) Latest(ctx context.Context, sessionID string) (domain.
 		return domain.ContinuityCapsule{}, nil
 	}
 	if err != nil {
-		return domain.ContinuityCapsule{}, fmt.Errorf("load continuity capsule: %w", err)
+		return domain.ContinuityCapsule{}, fmt.Errorf("%w: load continuity capsule", port.ErrContinuityUnavailable)
 	}
 	var capsule domain.ContinuityCapsule
 	if err := json.Unmarshal([]byte(raw), &capsule); err != nil {
-		return domain.ContinuityCapsule{}, errors.New("load continuity capsule: invalid stored data")
+		return domain.ContinuityCapsule{}, fmt.Errorf("%w: invalid stored data", port.ErrContinuityValidation)
 	}
 	if err := validateContinuityCapsule(capsule); err != nil {
 		return domain.ContinuityCapsule{}, fmt.Errorf("load continuity capsule: %w", err)
@@ -43,7 +43,7 @@ func (s *ContinuityStore) Latest(ctx context.Context, sessionID string) (domain.
 
 func (s *ContinuityStore) Commit(ctx context.Context, sessionID string, capsule domain.ContinuityCapsule, expectedRevision int64) error {
 	if s == nil || s.store == nil || strings.TrimSpace(sessionID) == "" {
-		return errors.New("continuity store and session ID are required")
+		return fmt.Errorf("%w: continuity store and session ID are required", port.ErrContinuityUnavailable)
 	}
 	if expectedRevision < 0 || capsule.Revision != expectedRevision+1 {
 		return ErrContinuityCAS
@@ -69,11 +69,11 @@ func (s *ContinuityStore) Commit(ctx context.Context, sessionID string, capsule 
 			capsule.CoveredThrough, now, sessionID, expectedRevision)
 	}
 	if err != nil {
-		return fmt.Errorf("commit continuity capsule: %w", err)
+		return fmt.Errorf("%w: commit continuity capsule", port.ErrContinuityUnavailable)
 	}
 	affected, err := result.RowsAffected()
 	if err != nil {
-		return fmt.Errorf("commit continuity capsule: %w", err)
+		return fmt.Errorf("%w: commit continuity capsule", port.ErrContinuityUnavailable)
 	}
 	if affected != 1 {
 		return ErrContinuityCAS
@@ -94,10 +94,10 @@ func validateContinuityCapsule(capsule domain.ContinuityCapsule) error {
 	items = append(items, capsule.Superseded...)
 	for _, item := range items {
 		if _, ok := domain.SanitizeContinuityItem(item); !ok {
-			return errors.New("continuity capsule contains unsafe item")
+			return fmt.Errorf("%w: continuity capsule contains unsafe item", port.ErrContinuityValidation)
 		}
 		if item.SourceEventOrdinal < 0 || item.SourceSessionRevision < 0 || strings.TrimSpace(item.SourceDigest) == "" {
-			return errors.New("continuity capsule item provenance is invalid")
+			return fmt.Errorf("%w: continuity capsule item provenance is invalid", port.ErrContinuityValidation)
 		}
 	}
 	return nil

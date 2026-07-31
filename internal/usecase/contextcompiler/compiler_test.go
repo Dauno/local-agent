@@ -71,6 +71,45 @@ func (serializedByteCounter) CountRequest(_ context.Context, envelope port.Model
 	return port.TokenCount{Tokens: len(envelope.Serialized), Strategy: "byte_bound"}, nil
 }
 
+type sequenceTokenCounter struct {
+	counts []int
+	calls  int
+}
+
+type compilerMetricCapture struct {
+	samples []port.MetricSample
+}
+
+func (m *compilerMetricCapture) AddCounter(name string, delta int64, labels port.MetricLabels) {
+	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: labels})
+}
+func (m *compilerMetricCapture) SetGauge(name string, value int64, labels port.MetricLabels) {
+	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: labels})
+}
+func (m *compilerMetricCapture) Observe(name string, value float64, labels port.MetricLabels) {
+	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: labels})
+}
+func (m *compilerMetricCapture) Snapshot() []port.MetricSample {
+	return append([]port.MetricSample(nil), m.samples...)
+}
+func (m *compilerMetricCapture) find(name string) (port.MetricSample, bool) {
+	for _, sample := range m.samples {
+		if sample.Name == name {
+			return sample, true
+		}
+	}
+	return port.MetricSample{}, false
+}
+
+func (c *sequenceTokenCounter) CountRequest(context.Context, port.ModelRequestEnvelope) (port.TokenCount, error) {
+	index := c.calls
+	if index >= len(c.counts) {
+		index = len(c.counts) - 1
+	}
+	c.calls++
+	return port.TokenCount{Tokens: c.counts[index], Strategy: "exact"}, nil
+}
+
 func TestCompilerAccountsForFixedProviderInput(t *testing.T) {
 	contents := []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}}}
 	serialized, err := domain.CanonicalJSON(contents)
@@ -84,6 +123,114 @@ func TestCompilerAccountsForFixedProviderInput(t *testing.T) {
 		FixedRequestTokens: fixed})
 	if !errors.Is(err, domain.ErrIrreducibleContext) {
 		t.Fatalf("Compile() error = %v, want fixed input to cross hard limit", err)
+	}
+}
+
+func TestCompilerRecountsSummaryAndTurnsAtMostOnce(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{101, 50}}
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
+	}
+	result, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ExistingSummary: "summary", ModelBudget: domain.RequestBudget{HardTokens: 100, TargetTokens: 100},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Diagnostics.RecountPasses != 1 || counter.calls != 2 {
+		t.Fatalf("diagnostics = %#v, counter calls = %d", result.Diagnostics, counter.calls)
+	}
+}
+
+func TestCompilerRecountsContinuityAndExcerptsThenFailsClosed(t *testing.T) {
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file", Args: map[string]any{}}}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": readableText(500)}}}}},
+	}
+	base := domain.CompileRequest{Contents: contents, ExistingSummary: "summary", ModelBudget: domain.RequestBudget{HardTokens: 10_000, TargetTokens: 10_000}, Continuity: domain.ContinuityCapsule{Objective: &domain.ContinuityItem{ID: "objective", Kind: domain.ContinuityKindObjective, Text: "keep context bounded", Status: domain.ContinuityStatusCurrent}}}
+
+	for _, tc := range []struct {
+		name    string
+		counts  []int
+		passes  int
+		wantErr bool
+	}{
+		{name: "stage two admits", counts: []int{10_001, 10_001, 500}, passes: 2},
+		{name: "irreducible", counts: []int{10_001, 10_001, 10_001}, passes: 2, wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &sequenceTokenCounter{counts: tc.counts}
+			_, err := New(newFakeResultStore(), counter).Compile(t.Context(), base)
+			if tc.wantErr != (err != nil) {
+				t.Fatalf("error = %v, want error=%t", err, tc.wantErr)
+			}
+			if !tc.wantErr {
+				result, resultErr := New(newFakeResultStore(), &sequenceTokenCounter{counts: tc.counts}).Compile(t.Context(), base)
+				if resultErr != nil || result.Diagnostics.RecountPasses != tc.passes {
+					t.Fatalf("result = %#v, error = %v", result.Diagnostics, resultErr)
+				}
+			}
+			if counter.calls > 3 {
+				t.Fatalf("counter calls = %d, want at most 3", counter.calls)
+			}
+		})
+	}
+}
+
+func TestCompilerIrreducibleResultExposesRecountMetrics(t *testing.T) {
+	contents := []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}}}
+	recorder := &compilerMetricCapture{}
+	result, err := New(newFakeResultStore(), &sequenceTokenCounter{counts: []int{101, 101, 101}}, recorder).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ExistingSummary: "summary", ModelBudget: domain.RequestBudget{HardTokens: 100, TargetTokens: 100},
+		Continuity: domain.ContinuityCapsule{Objective: &domain.ContinuityItem{ID: "objective", Kind: domain.ContinuityKindObjective, Text: "retain", Status: domain.ContinuityStatusCurrent}},
+	})
+	if err == nil {
+		t.Fatal("expected irreducible error")
+	}
+	if result.Diagnostics.RecountPasses != 2 || result.Diagnostics.ReductionReason != "irreducible" {
+		t.Fatalf("diagnostics = %#v", result.Diagnostics)
+	}
+	recount, ok := recorder.find(domain.MetricContextRecountPasses)
+	if !ok || recount.Value != 2 {
+		t.Fatalf("recount metric = %#v, found=%t", recount, ok)
+	}
+	if _, ok := recorder.find(domain.MetricModelRequestIrreducibleTotal); !ok {
+		t.Fatal("irreducible metric was not emitted")
+	}
+	if _, ok := recorder.find(domain.MetricContinuityCheckpointRenderTokens); !ok {
+		t.Fatal("continuity render metric was not emitted")
+	}
+	if _, ok := recorder.find(domain.MetricContextCompileDuration); !ok {
+		t.Fatal("compile duration metric was not emitted")
+	}
+}
+
+func TestCompilerExternalizedTotalIsCounter(t *testing.T) {
+	recorder := &compilerMetricCapture{}
+	compiler := New(newFakeResultStore(), fakeTokenCounter{}, recorder)
+	compiler.recordDiagnostics(domain.CompileDiagnostics{
+		ProtectedTokens: 10, ContinuityTokens: 5, RecentTurnsRetained: 2,
+		ResponsesExternalized: 3, ResponseTokensRemoved: 20, RecountPasses: 1,
+		ReductionReason: "request_budget",
+	}, false)
+	sample, ok := recorder.find(domain.MetricContextResponsesExternalized)
+	if !ok || sample.Kind != port.MetricKindCounter || sample.Value != 3 {
+		t.Fatalf("externalized metric = %#v, found=%t", sample, ok)
+	}
+	for _, name := range []string{
+		domain.MetricContextProtectedTokens,
+		domain.MetricContextContinuityTokens,
+		domain.MetricContextRecentTurnsRetained,
+		domain.MetricContextTokensRemoved,
+		domain.MetricContextRecountPasses,
+		domain.MetricModelRequestReductionTotal,
+	} {
+		if _, ok := recorder.find(name); !ok {
+			t.Errorf("metric %q was not emitted", name)
+		}
 	}
 }
 
@@ -536,6 +683,47 @@ func TestAllHugeResponsesFairDivision(t *testing.T) {
 	markers := collectProjectionMarkers(result.Contents)
 	if len(markers) != numResponses {
 		t.Fatalf("expected %d markers, got %d", numResponses, len(markers))
+	}
+}
+
+func TestSmallResponseDonatesUnusedAllocationToLargeResponse(t *testing.T) {
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect files"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{
+			{FunctionCall: &domain.FunctionCall{ID: "small", Name: "read_file", Args: map[string]any{"path": "small.go"}}},
+			{FunctionCall: &domain.FunctionCall{ID: "large", Name: "read_file", Args: map[string]any{"path": "large.go"}}},
+		}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{
+			ID: "small", Name: "read_file", Response: map[string]any{"text": readableText(600)},
+		}}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{
+			ID: "large", Name: "read_file", Response: map[string]any{"text": readableText(10_000)},
+		}}}},
+	}
+	_, reducible := classifyActiveParts(contents)
+	mins := minEnvelopeCosts(reducible)
+	protected, err := domain.ContentCost([]domain.Content{{Role: contents[0].Role, Parts: contents[0].Parts}, {Role: contents[1].Role, Parts: contents[1].Parts}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Give the small response its complete cost plus a small remainder. Equal
+	// division would incorrectly externalize it instead of donating the remainder.
+	smallCost := reducible[0].cost
+	hard := protected + mins[0] + mins[1] + 2*(smallCost-mins[0]) + 100
+	result, err := newCompiler().Compile(t.Context(), domain.CompileRequest{
+		Contents:        contents,
+		ModelBudget:     domain.RequestBudget{HardTokens: hard, TargetTokens: hard},
+		ConversationKey: "fair-water-fill",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	markers := collectProjectionMarkers(result.Contents)
+	if len(markers) != 1 {
+		t.Fatalf("projection markers = %d, want only large response externalized", len(markers))
+	}
+	if result.Contents[2].Parts[0].FunctionResponse.Response["_local_agent_context_projection"] != nil {
+		t.Fatal("small response was externalized")
 	}
 }
 

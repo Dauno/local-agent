@@ -285,8 +285,9 @@ func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event
 				}
 				return
 			}
-			if callback.User.ID != action.Value {
-				l.logger.Warn("builder modal action rejected because the clicking user does not match the launcher actor", "actor", action.Value, "user", callback.User.ID)
+			metadata, _, contextErr := builderActionContext(callback, action.Value)
+			if contextErr != nil {
+				l.logger.Warn("builder modal action rejected because its conversation context is invalid", "error", contextErr)
 				if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
 					l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
 				}
@@ -315,7 +316,9 @@ func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event
 				l.publishBuilderModalFallback(ctx, callback, handlers)
 				return
 			}
-			if _, err := opener.OpenViewContext(ctx, callback.TriggerID, l.builderPresenter.BuildView()); err != nil {
+			view := l.builderPresenter.BuildView()
+			view.PrivateMetadata = metadata
+			if _, err := opener.OpenViewContext(ctx, callback.TriggerID, view); err != nil {
 				l.logger.Error("open builder modal", "error", err)
 				l.publishBuilderModalFallback(ctx, callback, handlers)
 			}

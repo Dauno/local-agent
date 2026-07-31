@@ -9,8 +9,26 @@ import (
 	"testing"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 )
+
+type sandboxMetricCapture struct{ counts map[string]int }
+
+func (m *sandboxMetricCapture) AddCounter(name string, _ int64, _ port.MetricLabels) {
+	if m.counts == nil {
+		m.counts = make(map[string]int)
+	}
+	m.counts[name]++
+}
+func (*sandboxMetricCapture) SetGauge(string, int64, port.MetricLabels) {}
+func (m *sandboxMetricCapture) Observe(name string, _ float64, _ port.MetricLabels) {
+	if m.counts == nil {
+		m.counts = make(map[string]int)
+	}
+	m.counts[name]++
+}
+func (*sandboxMetricCapture) Snapshot() []port.MetricSample { return nil }
 
 func TestReadFileRejectsSymlinkOutsideRegisteredProject(t *testing.T) {
 	root := t.TempDir()
@@ -41,10 +59,12 @@ func TestReadFileRespectsConfiguredOutputLimit(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "large.txt"), []byte("123456"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	metrics := &sandboxMetricCapture{}
 	executor, err := New(map[string]string{"project": root}, 4)
 	if err != nil {
 		t.Fatal(err)
 	}
+	executor.WithMetrics(metrics)
 	result, err := executor.Execute(context.Background(), sandbox.SandboxOperation{
 		Capability: domain.CapReadFile, Args: map[string]any{"project": "project", "path": "large.txt"},
 	})
@@ -53,6 +73,9 @@ func TestReadFileRespectsConfiguredOutputLimit(t *testing.T) {
 	}
 	if result.Output != "1234" || result.OutputBytes != 4 || !result.Truncated {
 		t.Fatalf("result = %#v", result)
+	}
+	if metrics.counts[domain.MetricCodeReadFullTotal] != 1 || metrics.counts[domain.MetricCodeReadBytes] != 1 {
+		t.Fatalf("metrics = %#v", metrics.counts)
 	}
 }
 

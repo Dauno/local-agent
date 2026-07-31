@@ -80,11 +80,44 @@ func (stubSyntaxEngine) Query(context.Context, domain.SyntaxQueryRequest) (domai
 	return domain.SyntaxQueryResult{}, nil
 }
 
+type recordingSyntaxEngine struct {
+	req domain.SyntaxQueryRequest
+}
+
+func (e *recordingSyntaxEngine) Query(_ context.Context, req domain.SyntaxQueryRequest) (domain.SyntaxQueryResult, error) {
+	e.req = req
+	return domain.SyntaxQueryResult{Language: "go", GrammarVersion: "go/ast", Total: 1}, nil
+}
+
 type stubCodeIntelligence struct{}
 
 func (stubCodeIntelligence) Symbols(context.Context, domain.SymbolRequest) (domain.SymbolResult, error) {
 	return domain.SymbolResult{}, nil
 }
+
+type failingCodeIntelligence struct{}
+
+func (failingCodeIntelligence) Symbols(context.Context, domain.SymbolRequest) (domain.SymbolResult, error) {
+	return domain.SymbolResult{}, errors.New("LSP unavailable")
+}
+func (failingCodeIntelligence) Definition(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
+	return domain.LocationResult{}, errors.New("LSP unavailable")
+}
+func (failingCodeIntelligence) References(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
+	return domain.LocationResult{}, errors.New("LSP unavailable")
+}
+
+type toolMetricCapture struct{ counts map[string]int64 }
+
+func (m *toolMetricCapture) AddCounter(name string, delta int64, _ port.MetricLabels) {
+	if m.counts == nil {
+		m.counts = make(map[string]int64)
+	}
+	m.counts[name] += delta
+}
+func (*toolMetricCapture) SetGauge(string, int64, port.MetricLabels)  {}
+func (*toolMetricCapture) Observe(string, float64, port.MetricLabels) {}
+func (*toolMetricCapture) Snapshot() []port.MetricSample              { return nil }
 func (stubCodeIntelligence) Definition(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
 	return domain.LocationResult{}, nil
 }
@@ -161,7 +194,7 @@ func TestFactoryExposesProjectScopedCodeTools(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"list_messages", "read_file_range", "code_symbols", "read_symbol", "code_definition", "code_references"}
+	want := []string{"list_messages", "read_file_range", "syntax_query", "code_symbols", "read_symbol", "code_definition", "code_references"}
 	if len(tools) != len(want) {
 		t.Fatalf("tools = %d, want %d", len(tools), len(want))
 	}
@@ -171,6 +204,66 @@ func TestFactoryExposesProjectScopedCodeTools(t *testing.T) {
 			t.Fatalf("tool %d = %T/%v, want %q", index, candidate, ok, want[index])
 		}
 	}
+}
+
+func TestSyntaxQueryClampsLimitsAndBindsTrustedInvocation(t *testing.T) {
+	engine := &recordingSyntaxEngine{}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithSyntaxEngine(engine)
+	tools, err := factory.ToolsForInvocation("U12345678", "slack:T12345678:dm:D12345678")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var syntax runnableFunctionTool
+	for _, candidate := range tools {
+		if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == "syntax_query" {
+			syntax, _ = candidate.(runnableFunctionTool)
+		}
+	}
+	if syntax == nil {
+		t.Fatal("syntax_query tool is unavailable")
+	}
+	if _, err := syntax.Run(&stubToolContext{}, map[string]any{"project": "workspace", "path": "main.go", "query": "outline", "max_results": -10}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.req.MaxResults != 1 || engine.req.Actor != "U12345678" || engine.req.ConversationKey != "slack:T12345678:dm:D12345678" {
+		t.Fatalf("syntax request = %#v", engine.req)
+	}
+	if _, err := syntax.Run(&stubToolContext{}, map[string]any{"project": "workspace", "path": "main.go", "query": "symbol", "max_results": 500}); err != nil {
+		t.Fatal(err)
+	}
+	if engine.req.MaxResults != 200 {
+		t.Fatalf("maximum syntax results = %d, want 200", engine.req.MaxResults)
+	}
+	if _, err := syntax.Run(&stubToolContext{}, map[string]any{"project": "workspace", "path": "main.go", "query": "arbitrary"}); !errors.Is(err, port.ErrSyntaxUnsupportedQuery) {
+		t.Fatalf("unsupported query error = %v", err)
+	}
+}
+
+func TestCodeSymbolsRecordsLSPToSyntaxFallback(t *testing.T) {
+	engine := &recordingSyntaxEngine{}
+	metrics := &toolMetricCapture{}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).
+		WithSyntaxEngine(engine).
+		WithCodeIntelligence(failingCodeIntelligence{}).
+		WithMetrics(metrics)
+	tools, err := factory.ToolsForInvocation("U12345678", "slack:T12345678:dm:D12345678")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, candidate := range tools {
+		named, ok := candidate.(interface{ Name() string })
+		if !ok || named.Name() != "code_symbols" {
+			continue
+		}
+		if _, err := candidate.(runnableFunctionTool).Run(&stubToolContext{}, map[string]any{"project": "workspace", "path": "main.go"}); err != nil {
+			t.Fatal(err)
+		}
+		if metrics.counts[domain.MetricLSPFallbackTotal] != 1 || engine.req.Query != "outline" {
+			t.Fatalf("metrics = %#v, syntax request = %#v", metrics.counts, engine.req)
+		}
+		return
+	}
+	t.Fatal("code_symbols tool is unavailable")
 }
 
 func TestFactoryWithSandboxExposesAllReadOnlyTools(t *testing.T) {

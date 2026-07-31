@@ -34,9 +34,10 @@ type Store struct {
 	retentionDays    int
 	cleanupBatchSize int
 	refChecker       port.RecoverableResultReferenceChecker
+	metrics          port.MetricRecorder
 }
 
-func NewStore(db *sql.DB, dir string, maxResultBytes int64, chunkMaxBytes int, retentionDays int, cleanupBatchSize int) *Store {
+func NewStore(db *sql.DB, dir string, maxResultBytes int64, chunkMaxBytes int, retentionDays int, cleanupBatchSize int, recorders ...port.MetricRecorder) *Store {
 	if db == nil || strings.TrimSpace(dir) == "" {
 		panic("recoverable result store requires a database and storage directory")
 	}
@@ -54,13 +55,17 @@ func NewStore(db *sql.DB, dir string, maxResultBytes int64, chunkMaxBytes int, r
 	if err != nil || filepath.Clean(canonical) != filepath.Clean(dir) {
 		panic("recoverable result directory must be canonical")
 	}
+	var recorder port.MetricRecorder
+	if len(recorders) > 0 {
+		recorder = recorders[0]
+	}
 	return &Store{
 		db:               db,
 		dir:              filepath.Clean(dir),
 		maxResultBytes:   maxResultBytes,
 		chunkMaxBytes:    chunkMaxBytes,
 		retentionDays:    retentionDays,
-		cleanupBatchSize: cleanupBatchSize,
+		cleanupBatchSize: cleanupBatchSize, metrics: recorder,
 	}
 }
 
@@ -70,7 +75,13 @@ func (s *Store) SetReferenceChecker(checker port.RecoverableResultReferenceCheck
 	}
 }
 
-func (s *Store) Put(ctx context.Context, req port.PutResultRequest) (domain.RecoverableResult, error) {
+func (s *Store) Put(ctx context.Context, req port.PutResultRequest) (result domain.RecoverableResult, err error) {
+	succeeded := false
+	defer func() {
+		if s != nil && s.metrics != nil && !succeeded {
+			s.metrics.AddCounter(domain.MetricRecoverableResultUnavailableTotal, 1, port.MetricLabels{"result_kind": req.Kind})
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return domain.RecoverableResult{}, err
 	}
@@ -116,7 +127,7 @@ func (s *Store) Put(ctx context.Context, req port.PutResultRequest) (domain.Reco
 		expiresAt = now.Add(1 * time.Second)
 	}
 
-	_, err := s.db.ExecContext(ctx,
+	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO recoverable_results
 			(ref, actor, conversation_key, kind, storage_locator, size_bytes,
 			 code_points, sha256, created_at, expires_at)
@@ -128,7 +139,7 @@ func (s *Store) Put(ctx context.Context, req port.PutResultRequest) (domain.Reco
 		return domain.RecoverableResult{}, errUnavailable
 	}
 
-	return domain.RecoverableResult{
+	result = domain.RecoverableResult{
 		Ref:             ref,
 		Kind:            req.Kind,
 		Actor:           req.Actor,
@@ -138,10 +149,27 @@ func (s *Store) Put(ctx context.Context, req port.PutResultRequest) (domain.Reco
 		SHA256:          sha256Hex,
 		CreatedAt:       now,
 		ExpiresAt:       expiresAt,
-	}, nil
+	}
+	if s.metrics != nil {
+		s.metrics.AddCounter(domain.MetricRecoverableResultPutTotal, 1, port.MetricLabels{"result_kind": req.Kind})
+		s.metrics.Observe(domain.MetricRecoverableResultPutBytes, float64(contentBytes), port.MetricLabels{"result_kind": req.Kind})
+		s.recordActiveCount(ctx)
+	}
+	succeeded = true
+	return result, nil
 }
 
-func (s *Store) ReadChunk(ctx context.Context, req domain.ResultChunkRequest) (domain.ResultChunk, error) {
+func (s *Store) ReadChunk(ctx context.Context, req domain.ResultChunkRequest) (result domain.ResultChunk, err error) {
+	defer func() {
+		if s == nil || s.metrics == nil {
+			return
+		}
+		if err != nil {
+			s.metrics.AddCounter(domain.MetricRecoverableResultUnavailableTotal, 1, nil)
+		} else {
+			s.metrics.AddCounter(domain.MetricRecoverableResultChunkReadTotal, 1, nil)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return domain.ResultChunk{}, err
 	}
@@ -160,6 +188,9 @@ func (s *Store) ReadChunk(ctx context.Context, req domain.ResultChunkRequest) (d
 
 	fileData, fileSHA256, err := readAndVerifyFile(s.dir, row.StorageLocator, row.SizeBytes, row.SHA256)
 	if err != nil {
+		if s.metrics != nil {
+			s.metrics.AddCounter(domain.MetricRecoverableResultIntegrityFailure, 1, nil)
+		}
 		return domain.ResultChunk{}, errUnavailable
 	}
 
@@ -194,16 +225,22 @@ func (s *Store) ReadChunk(ctx context.Context, req domain.ResultChunkRequest) (d
 	content := string(fileData[start:end])
 	nextOffset := int64(end)
 
-	return domain.ResultChunk{
+	result = domain.ResultChunk{
 		Content:         content,
 		OffsetBytes:     int64(start),
 		NextOffsetBytes: nextOffset,
 		EOF:             end == len(fileData),
 		SHA256:          fileSHA256,
-	}, nil
+	}
+	return result, nil
 }
 
-func (s *Store) Stat(ctx context.Context, req port.StatResultRequest) (domain.RecoverableResult, error) {
+func (s *Store) Stat(ctx context.Context, req port.StatResultRequest) (result domain.RecoverableResult, err error) {
+	defer func() {
+		if s != nil && s.metrics != nil && err != nil {
+			s.metrics.AddCounter(domain.MetricRecoverableResultUnavailableTotal, 1, nil)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return domain.RecoverableResult{}, err
 	}
@@ -221,10 +258,13 @@ func (s *Store) Stat(ctx context.Context, req port.StatResultRequest) (domain.Re
 	}
 
 	if _, _, err := readAndVerifyFile(s.dir, row.StorageLocator, row.SizeBytes, row.SHA256); err != nil {
+		if s.metrics != nil {
+			s.metrics.AddCounter(domain.MetricRecoverableResultIntegrityFailure, 1, nil)
+		}
 		return domain.RecoverableResult{}, errUnavailable
 	}
 
-	return domain.RecoverableResult{
+	result = domain.RecoverableResult{
 		Ref:             row.Ref,
 		Kind:            row.Kind,
 		Actor:           row.Actor,
@@ -234,7 +274,8 @@ func (s *Store) Stat(ctx context.Context, req port.StatResultRequest) (domain.Re
 		SHA256:          row.SHA256,
 		CreatedAt:       time.Unix(row.CreatedAt, 0).UTC(),
 		ExpiresAt:       time.Unix(row.ExpiresAt, 0).UTC(),
-	}, nil
+	}
+	return result, nil
 }
 
 func (s *Store) DeleteExpired(ctx context.Context, cutoff time.Time, batchSize int) (int, error) {
@@ -332,7 +373,21 @@ func (s *Store) DeleteExpired(ctx context.Context, cutoff time.Time, batchSize i
 		deleted++
 	}
 
+	if s.metrics != nil && deleted > 0 {
+		s.metrics.AddCounter(domain.MetricRecoverableResultCleanupTotal, int64(deleted), nil)
+		s.recordActiveCount(ctx)
+	}
 	return deleted, nil
+}
+
+func (s *Store) recordActiveCount(ctx context.Context) {
+	if s == nil || s.metrics == nil {
+		return
+	}
+	var count int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM recoverable_results`).Scan(&count); err == nil {
+		s.metrics.SetGauge(domain.MetricRecoverableResultActiveCount, count, nil)
+	}
 }
 
 type cleanupCandidate struct {

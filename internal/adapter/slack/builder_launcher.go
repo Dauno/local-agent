@@ -24,16 +24,25 @@ func NewBuilderLauncherPublisher(client *slackapi.Client, publisher port.Respons
 }
 
 func (p *builderLauncherPublisher) PublishBuilderLauncher(ctx context.Context, req port.BuilderLauncherRequest) error {
+	if !domain.PlausibleUserID(req.Actor) {
+		return fmt.Errorf("builder actor is invalid")
+	}
+	metadata, err := encodeBuilderInteractionContext(req.Actor, req.ConversationKey)
+	if err != nil {
+		return fmt.Errorf("encode builder launcher context: %w", err)
+	}
+	target, err := domain.ConversationReplyTarget(req.ConversationKey)
+	if err != nil {
+		return fmt.Errorf("resolve builder launcher target: %w", err)
+	}
+	if p == nil || p.client == nil {
+		return fmt.Errorf("Slack client is required")
+	}
 	if req.IdempotencyKey != "" {
 		if _, loaded := p.delivered.LoadOrStore(req.IdempotencyKey, true); loaded {
 			p.logger.Debug("builder launcher already published for this idempotency key")
 			return nil
 		}
-	}
-
-	target, err := domain.ConversationReplyTarget(req.ConversationKey)
-	if err != nil {
-		return fmt.Errorf("resolve builder launcher target: %w", err)
 	}
 
 	blocks := []slackapi.Block{
@@ -44,7 +53,7 @@ func (p *builderLauncherPublisher) PublishBuilderLauncher(ctx context.Context, r
 		slackapi.NewActionBlock("builder_launcher",
 			slackapi.NewButtonBlockElement(
 				"local_agent.builder.open",
-				req.Actor,
+				metadata,
 				slackapi.NewTextBlockObject("plain_text", "Abrir formulario", false, false),
 			).WithStyle(slackapi.StylePrimary),
 		),

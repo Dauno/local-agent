@@ -35,6 +35,7 @@ type RuntimeConfig struct {
 	ContextBudget     domain.RequestBudget
 	ContinuityStore   port.ContinuityStore
 	SummaryStore      port.SummaryStore
+	Metrics           port.MetricRecorder
 	// StaticTools are reusable ADK tools composed at startup, such as AgentTool
 	// wrappers. Invocation-scoped tools continue to come from ToolFactory.
 	StaticTools []tool.Tool
@@ -59,6 +60,7 @@ type Runtime struct {
 	summaryStore      port.SummaryStore
 	staticTools       []tool.Tool
 	providerFamily    string
+	metrics           port.MetricRecorder
 }
 
 var _ port.AgentRuntime = (*Runtime)(nil)
@@ -94,6 +96,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		contextBudget:     cfg.ContextBudget,
 		continuityStore:   cfg.ContinuityStore,
 		summaryStore:      cfg.SummaryStore,
+		metrics:           cfg.Metrics,
 		staticTools:       append([]tool.Tool(nil), cfg.StaticTools...),
 		providerFamily:    providerFamily,
 	}, nil
@@ -281,6 +284,7 @@ func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, 
 	}
 	loaded, err := r.sessionService.Get(ctx, &session.GetRequest{AppName: applicationName, UserID: ephemeralUserID, SessionID: sessionID})
 	if err != nil || loaded == nil || loaded.Session == nil || loaded.Session.Events() == nil || loaded.Session.Events().Len() == 0 {
+		r.recordContinuityFallback()
 		return
 	}
 	ordinal := int64(loaded.Session.Events().Len() - 1)
@@ -290,6 +294,13 @@ func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, 
 	}
 	prior, err := r.continuityStore.Latest(ctx, sessionID)
 	if err != nil {
+		if errors.Is(err, port.ErrContinuityValidation) {
+			if r.metrics != nil {
+				r.metrics.AddCounter(domain.MetricContinuityCheckpointValidationFailure, 1, port.MetricLabels{"continuity_outcome": "validation_failure"})
+			}
+		} else {
+			r.recordContinuityFallback()
+		}
 		return
 	}
 	revision := prior.Revision + 1
@@ -312,7 +323,31 @@ func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, 
 		}
 	}
 	applyContinuityOutcome(&candidate, finalText, ordinal, sourceRevision, sourceDigest)
-	_ = r.continuityStore.Commit(ctx, sessionID, candidate, prior.Revision)
+	commitErr := r.continuityStore.Commit(ctx, sessionID, candidate, prior.Revision)
+	if commitErr == nil {
+		if r.metrics != nil {
+			r.metrics.AddCounter(domain.MetricContinuityCheckpointCommitTotal, 1, port.MetricLabels{"continuity_outcome": "success"})
+		}
+		return
+	}
+	switch {
+	case errors.Is(commitErr, port.ErrContinuityCASConflict):
+		if r.metrics != nil {
+			r.metrics.AddCounter(domain.MetricContinuityCheckpointCASConflictTotal, 1, port.MetricLabels{"continuity_outcome": "cas_conflict"})
+		}
+	case errors.Is(commitErr, port.ErrContinuityValidation):
+		if r.metrics != nil {
+			r.metrics.AddCounter(domain.MetricContinuityCheckpointValidationFailure, 1, port.MetricLabels{"continuity_outcome": "validation_failure"})
+		}
+	default:
+		r.recordContinuityFallback()
+	}
+}
+
+func (r *Runtime) recordContinuityFallback() {
+	if r != nil && r.metrics != nil {
+		r.metrics.AddCounter(domain.MetricContinuityCheckpointFallbackTotal, 1, port.MetricLabels{"continuity_outcome": "fallback"})
+	}
 }
 
 func continuityItem(kind domain.ContinuityItemKind, prefix, text string, ordinal, sourceRevision int64, digest string) (domain.ContinuityItem, bool) {
