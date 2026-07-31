@@ -18,6 +18,25 @@ import (
 
 type sourceReader struct{ digest string }
 
+type lspMetricCapture struct{ counts map[string]int }
+
+func (m *lspMetricCapture) record(name string) {
+	if m.counts == nil {
+		m.counts = make(map[string]int)
+	}
+	m.counts[name]++
+}
+func (m *lspMetricCapture) AddCounter(name string, _ int64, _ port.MetricLabels) {
+	m.record(name)
+}
+func (m *lspMetricCapture) SetGauge(name string, _ int64, _ port.MetricLabels) {
+	m.record(name)
+}
+func (m *lspMetricCapture) Observe(name string, _ float64, _ port.MetricLabels) {
+	m.record(name)
+}
+func (*lspMetricCapture) Snapshot() []port.MetricSample { return nil }
+
 func (r sourceReader) ReadRange(context.Context, domain.SourceRangeRequest) (domain.SourceRange, error) {
 	return domain.SourceRange{Location: domain.CodeLocation{FileSHA256: r.digest}, Content: "package sample\nfunc Hello() {}\n", EOF: true}, nil
 }
@@ -66,12 +85,19 @@ func TestClientNegotiatesAndReturnsDigestBoundSymbols(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	metrics := &lspMetricCapture{}
+	client.WithMetrics(metrics)
 	result, err := client.Symbols(context.Background(), domain.SymbolRequest{Project: "workspace", Path: "main.go", MaxResults: 10})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Symbols) != 1 || result.Symbols[0].Name != "Hello" || result.Symbols[0].Location.FileSHA256 != "digest" || result.Symbols[0].Location.Path != "main.go" {
 		t.Fatalf("symbols = %#v", result.Symbols)
+	}
+	for _, name := range []string{domain.MetricLSPServerState, domain.MetricLSPRequestTotal, domain.MetricLSPRequestDuration} {
+		if metrics.counts[name] == 0 {
+			t.Errorf("metric %q was not emitted", name)
+		}
 	}
 	if _, err := client.Definition(context.Background(), domain.LocationRequest{Project: "workspace", Path: "main.go", Line: 2, Column: 6}); err == nil {
 		t.Fatal("definition should fail when capability is not advertised")

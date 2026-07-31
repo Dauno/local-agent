@@ -13,11 +13,29 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
+type rangeMetricCapture struct{ counts map[string]int }
+
+func (m *rangeMetricCapture) AddCounter(name string, _ int64, _ port.MetricLabels) {
+	if m.counts == nil {
+		m.counts = make(map[string]int)
+	}
+	m.counts[name]++
+}
+func (*rangeMetricCapture) SetGauge(string, int64, port.MetricLabels) {}
+func (m *rangeMetricCapture) Observe(name string, _ float64, _ port.MetricLabels) {
+	if m.counts == nil {
+		m.counts = make(map[string]int)
+	}
+	m.counts[name]++
+}
+func (*rangeMetricCapture) Snapshot() []port.MetricSample { return nil }
+
 func TestReadRange_ExactLineRange(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "test.go", "line1\nline2\nline3\nline4\nline5\n")
 
-	reader := NewReader(root, 4096, 4096, 1<<20)
+	metrics := &rangeMetricCapture{}
+	reader := NewReader(root, 4096, 4096, 1<<20).WithMetrics(metrics)
 	result, err := reader.ReadRange(context.Background(), domain.SourceRangeRequest{
 		Project:   "test",
 		Path:      "test.go",
@@ -38,6 +56,9 @@ func TestReadRange_ExactLineRange(t *testing.T) {
 	}
 	if result.Location.StartLine != 2 || result.Location.EndLine != 3 || result.Location.StartByte != 6 || result.Location.EndByte != 18 {
 		t.Fatalf("location = %#v", result.Location)
+	}
+	if metrics.counts[domain.MetricCodeReadRangeTotal] != 1 || metrics.counts[domain.MetricCodeReadBytes] != 1 {
+		t.Fatalf("metrics = %#v", metrics.counts)
 	}
 }
 

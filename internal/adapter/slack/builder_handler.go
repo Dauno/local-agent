@@ -26,12 +26,11 @@ const (
 
 // BuilderSubmissionHandler processes view_submission from the agent builder modal.
 type BuilderSubmissionHandler struct {
-	draftStore      port.AgentDraftStore
-	agentBuilder    port.AgentBuilderService
-	currentDefs     *agentdef.Definitions
-	conversationKey string
-	publisher       port.ResponsePublisher
-	now             func() time.Time
+	draftStore   port.AgentDraftStore
+	agentBuilder port.AgentBuilderService
+	currentDefs  *agentdef.Definitions
+	publisher    port.ResponsePublisher
+	now          func() time.Time
 }
 
 func NewBuilderSubmissionHandler(
@@ -44,15 +43,6 @@ func NewBuilderSubmissionHandler(
 		draftStore: draftStore, agentBuilder: agentBuilder,
 		currentDefs: currentDefs, publisher: publisher, now: time.Now,
 	}
-}
-
-// WithConversationKey supplies a fallback conversation for Slack payloads that
-// omit channel information from a view_submission callback.
-func (h *BuilderSubmissionHandler) WithConversationKey(key string) *BuilderSubmissionHandler {
-	if h != nil {
-		h.conversationKey = key
-	}
-	return h
 }
 
 // HandleSubmission validates only the fields needed for the synchronous ACK.
@@ -85,6 +75,9 @@ func (h *BuilderSubmissionHandler) HandleSubmission(_ context.Context, callback 
 	if _, err := h.agentBuilder.Preview(draft, h.currentDefs); err != nil {
 		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderValidationField(err): err.Error()})
 	}
+	if _, _, err := builderContextForSubmission(callback); err != nil {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"name": err.Error()})
+	}
 	return nil
 }
 
@@ -101,6 +94,10 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 	if missing != "" {
 		return fmt.Errorf("builder field %q is missing", missing)
 	}
+	conversationKey, target, err := builderContextForSubmission(callback)
+	if err != nil {
+		return err
+	}
 	preview, err := h.agentBuilder.Preview(draftInput, h.currentDefs)
 	if err != nil {
 		return fmt.Errorf("preview agent definition: %w", err)
@@ -109,10 +106,6 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 		return errors.New("preview agent definition returned no result")
 	}
 
-	conversationKey, target, err := builderConversation(callback, h.conversationKey)
-	if err != nil {
-		return err
-	}
 	now := time.Now().UTC()
 	if h.now != nil {
 		now = h.now().UTC()
@@ -177,12 +170,25 @@ func (h *BuilderSubmissionHandler) HandleInstallRequest(ctx context.Context, cal
 	if draft == nil {
 		return fmt.Errorf("agent draft %q was not found", draftID)
 	}
-	conversationKey, target, err := builderConversation(callback, h.conversationKey)
+	if draft.TeamID != callback.Team.ID || draft.ActorID != callback.User.ID {
+		return errors.New("agent draft does not belong to the current actor and conversation")
+	}
+	parts := strings.Split(draft.ConversationKey, ":")
+	if len(parts) < 4 || parts[1] != callback.Team.ID {
+		return errors.New("agent draft does not belong to the current actor and conversation")
+	}
+	target, err := domain.ConversationReplyTarget(domain.ConversationKey(draft.ConversationKey))
 	if err != nil {
 		return err
 	}
-	if draft.TeamID != callback.Team.ID || draft.ActorID != callback.User.ID || draft.ConversationKey != conversationKey {
+	if _, err := encodeBuilderInteractionContext(draft.ActorID, domain.ConversationKey(draft.ConversationKey)); err != nil {
+		return errors.New("agent draft conversation is invalid")
+	}
+	if !domain.PlausibleChannelID(target.ChannelID) {
 		return errors.New("agent draft does not belong to the current actor and conversation")
+	}
+	if err := callbackTargetMatches(callback, target); err != nil {
+		return err
 	}
 	now := time.Now().UTC()
 	if h.now != nil {
@@ -214,7 +220,7 @@ func (h *BuilderSubmissionHandler) publishModalFallback(ctx context.Context, cal
 	if h == nil || h.publisher == nil {
 		return errors.New("builder publisher is not configured")
 	}
-	_, target, err := builderConversation(callback, h.conversationKey)
+	_, target, err := builderConversation(callback, "")
 	if err != nil {
 		return err
 	}
@@ -374,9 +380,6 @@ func builderConversation(callback slackapi.InteractionCallback, fallback string)
 		channelID = callback.Container.ChannelID
 	}
 	threadTS := callback.Container.ThreadTs
-	if threadTS == "" {
-		threadTS = callback.Message.ThreadTimestamp
-	}
 
 	if teamID != "" && channelID != "" && domain.PlausibleTeamID(teamID) && domain.PlausibleChannelID(channelID) {
 		if channelID[0] == 'D' {
@@ -387,15 +390,13 @@ func builderConversation(callback slackapi.InteractionCallback, fallback string)
 			return string(key), domain.ReplyTarget{ChannelID: channelID, ThreadTS: threadTS}, nil
 		}
 		if threadTS == "" {
-			threadTS = callback.Message.Timestamp
-		}
-		if threadTS == "" {
-			threadTS = callback.Container.MessageTs
-		}
-		if threadTS == "" {
 			return "", domain.ReplyTarget{}, errors.New("builder conversation thread is required")
 		}
-		key := domain.ConversationKey(fmt.Sprintf("slack:%s:channel:%s:thread:%s", teamID, channelID, threadTS))
+		kind := "channel"
+		if channelID[0] == 'G' {
+			kind = "group"
+		}
+		key := domain.ConversationKey(fmt.Sprintf("slack:%s:%s:%s:thread:%s", teamID, kind, channelID, threadTS))
 		return string(key), domain.ReplyTarget{ChannelID: channelID, ThreadTS: threadTS}, nil
 	}
 

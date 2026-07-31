@@ -92,6 +92,7 @@ type OpenAICompatibleLLM struct {
 	requestBudget          domain.RequestBudget
 	profileID              string
 	defaultMaxOutputTokens int32
+	recorder               port.MetricRecorder
 }
 
 var _ model.LLM = (*OpenAICompatibleLLM)(nil)
@@ -144,9 +145,17 @@ func (m *OpenAICompatibleLLM) Name() string {
 
 func (m *OpenAICompatibleLLM) SupportsStreaming() bool { return m != nil }
 
+// ConfigureMetrics attaches an optional observational recorder without
+// changing the mandatory request-guard behavior.
+func (m *OpenAICompatibleLLM) ConfigureMetrics(recorder port.MetricRecorder) {
+	if m != nil {
+		m.recorder = recorder
+	}
+}
+
 // ConfigureRequestGuard installs the mandatory final request guard. It must be
 // called during composition, before the model is shared with any runtime.
-func (m *OpenAICompatibleLLM) ConfigureRequestGuard(counter port.RequestTokenCounter, budget domain.RequestBudget, profileID string) error {
+func (m *OpenAICompatibleLLM) ConfigureRequestGuard(counter port.RequestTokenCounter, budget domain.RequestBudget, profileID string, recorders ...port.MetricRecorder) error {
 	if m == nil || counter == nil {
 		return errors.New("OpenAI-compatible request guard requires a token counter")
 	}
@@ -156,6 +165,9 @@ func (m *OpenAICompatibleLLM) ConfigureRequestGuard(counter port.RequestTokenCou
 	m.requestCounter = counter
 	m.requestBudget = budget
 	m.profileID = profileID
+	if len(recorders) > 0 {
+		m.recorder = recorders[0]
+	}
 	return nil
 }
 
@@ -173,7 +185,14 @@ func (m *OpenAICompatibleLLM) ConfigureDefaultMaxOutputTokens(tokens int) error 
 }
 
 func (m *OpenAICompatibleLLM) guardRequest(ctx context.Context, params openai.ChatCompletionNewParams, stream bool) error {
+	if m != nil && m.recorder != nil {
+		m.recorder.SetGauge(domain.MetricModelRequestContextWindowTokens, int64(m.requestBudget.WindowTokens), port.MetricLabels{"profile_id": m.profileID})
+		m.recorder.SetGauge(domain.MetricModelRequestHardLimitTokens, int64(m.requestBudget.HardTokens), port.MetricLabels{"profile_id": m.profileID})
+	}
 	if m.requestCounter == nil {
+		if m.recorder != nil {
+			m.recorder.AddCounter(domain.MetricModelRequestGuardOutcomeTotal, 1, port.MetricLabels{"guard_outcome": "not_configured", "profile_id": m.profileID})
+		}
 		return errors.New("OpenAI-compatible final request guard is not configured")
 	}
 	serialized, err := json.Marshal(struct {
@@ -189,12 +208,42 @@ func (m *OpenAICompatibleLLM) guardRequest(ctx context.Context, params openai.Ch
 		Serialized:   string(serialized),
 	})
 	if err != nil {
+		if m.recorder != nil {
+			m.recorder.AddCounter(domain.MetricModelRequestGuardOutcomeTotal, 1, port.MetricLabels{"guard_outcome": "count_failed", "profile_id": m.profileID})
+		}
 		return fmt.Errorf("request_token_count_unavailable: %w", err)
 	}
+	if m.recorder != nil {
+		m.recorder.Observe(domain.MetricModelRequestTokens, float64(max(count.Tokens, 0)), port.MetricLabels{"profile_id": m.profileID})
+		m.recorder.Observe(domain.MetricModelRequestUtilizationBasisPoints, float64(utilizationBasisPoints(count.Tokens, m.requestBudget.HardTokens)), port.MetricLabels{"profile_id": m.profileID})
+		m.recorder.AddCounter(domain.MetricModelRequestCounterStrategyTotal, 1, port.MetricLabels{"counter_strategy": count.Strategy, "profile_id": m.profileID})
+	}
 	if count.Tokens > m.requestBudget.HardTokens {
+		if m.recorder != nil {
+			m.recorder.AddCounter(domain.MetricModelRequestGuardOutcomeTotal, 1, port.MetricLabels{"guard_outcome": "rejected", "profile_id": m.profileID})
+			m.recorder.AddCounter(domain.MetricModelRequestIrreducibleTotal, 1, port.MetricLabels{"profile_id": m.profileID})
+		}
 		return &domain.IrreducibleContextError{MinimumTokens: count.Tokens, HardTokens: m.requestBudget.HardTokens}
 	}
+	if m.recorder != nil {
+		m.recorder.AddCounter(domain.MetricModelRequestGuardOutcomeTotal, 1, port.MetricLabels{"guard_outcome": "admitted", "profile_id": m.profileID})
+	}
 	return nil
+}
+
+func utilizationBasisPoints(tokens, hard int) int64 {
+	if tokens <= 0 || hard <= 0 {
+		return 0
+	}
+	const scale = int64(10_000)
+	if tokens > int(^uint(0)>>1)/int(scale) {
+		return scale
+	}
+	value := int64(tokens) * scale / int64(hard)
+	if value > scale {
+		return scale
+	}
+	return value
 }
 
 // GenerateContent converts one ADK request into one non-streaming Chat

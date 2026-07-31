@@ -7,8 +7,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -20,6 +20,7 @@ const defaultMaxSourceBytes = 1 << 20
 
 type Engine struct {
 	readers map[string]port.CodeReader
+	metrics port.MetricRecorder
 }
 
 func New(readers ...map[string]port.CodeReader) *Engine {
@@ -30,13 +31,39 @@ func New(readers ...map[string]port.CodeReader) *Engine {
 	return &Engine{readers: configured}
 }
 
-func (e *Engine) Query(ctx context.Context, req domain.SyntaxQueryRequest) (domain.SyntaxQueryResult, error) {
+func (e *Engine) WithMetrics(recorder port.MetricRecorder) *Engine {
+	if e != nil {
+		e.metrics = recorder
+	}
+	return e
+}
+
+func (e *Engine) Query(ctx context.Context, req domain.SyntaxQueryRequest) (result domain.SyntaxQueryResult, err error) {
+	started := time.Now()
+	defer func() {
+		if e == nil || e.metrics == nil {
+			return
+		}
+		labels := port.MetricLabels{"language": "go", "engine_id": "go/ast", "query_id": syntaxQueryLabel(req.Query)}
+		e.metrics.AddCounter(domain.MetricSyntaxQueryTotal, 1, labels)
+		if err != nil {
+			e.metrics.AddCounter(domain.MetricSyntaxQueryFailureTotal, 1, port.MetricLabels{"failure_category": syntaxFailureCategory(err), "query_id": syntaxQueryLabel(req.Query)})
+		} else {
+			if result.Truncated {
+				e.metrics.AddCounter(domain.MetricSyntaxResultTruncated, 1, labels)
+			}
+		}
+		e.metrics.Observe(domain.MetricSyntaxQueryDuration, time.Since(started).Seconds(), labels)
+	}()
 	if !strings.HasSuffix(req.Path, ".go") {
-		return domain.SyntaxQueryResult{}, fmt.Errorf("unsupported language: %s", strings.TrimPrefix(filepath.Ext(req.Path), "."))
+		return domain.SyntaxQueryResult{}, port.ErrSyntaxUnsupportedLanguage
 	}
 	reader := e.readers[req.Project]
 	if reader == nil {
-		return domain.SyntaxQueryResult{}, errors.New("project is unavailable")
+		return domain.SyntaxQueryResult{}, port.ErrSyntaxProjectUnavailable
+	}
+	if req.Query != "outline" && req.Query != "symbol" {
+		return domain.SyntaxQueryResult{}, port.ErrSyntaxUnsupportedQuery
 	}
 	rangeResult, err := reader.ReadRange(ctx, domain.SourceRangeRequest{Project: req.Project, Path: req.Path,
 		StartLine: 1, MaxLines: 10_000, Actor: req.Actor, ConversationKey: req.ConversationKey})
@@ -44,7 +71,7 @@ func (e *Engine) Query(ctx context.Context, req domain.SyntaxQueryRequest) (doma
 		return domain.SyntaxQueryResult{}, fmt.Errorf("read source: %w", err)
 	}
 	if rangeResult.Truncated || !rangeResult.EOF || len(rangeResult.Content) > defaultMaxSourceBytes {
-		return domain.SyntaxQueryResult{}, errors.New("source exceeds syntax inspection limit")
+		return domain.SyntaxQueryResult{}, port.ErrSyntaxSourceTooLarge
 	}
 	src := []byte(rangeResult.Content)
 	fileSHA256 := rangeResult.Location.FileSHA256
@@ -52,7 +79,7 @@ func (e *Engine) Query(ctx context.Context, req domain.SyntaxQueryRequest) (doma
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, req.Path, src, parser.ParseComments|parser.SkipObjectResolution)
 	if err != nil {
-		return domain.SyntaxQueryResult{}, fmt.Errorf("parse file %s: %w", req.Path, err)
+		return domain.SyntaxQueryResult{}, port.ErrSyntaxParseFailed
 	}
 
 	var captures []domain.SyntaxCapture
@@ -61,8 +88,6 @@ func (e *Engine) Query(ctx context.Context, req domain.SyntaxQueryRequest) (doma
 		captures = extractOutline(fset, file, src, req.Project, req.Path, fileSHA256, req.IncludeText)
 	case "symbol":
 		captures = extractSymbols(fset, file, src, req.Project, req.Path, fileSHA256, req.IncludeText)
-	default:
-		return domain.SyntaxQueryResult{}, fmt.Errorf("unknown query type: %s", req.Query)
 	}
 
 	total := len(captures)
@@ -72,14 +97,44 @@ func (e *Engine) Query(ctx context.Context, req domain.SyntaxQueryRequest) (doma
 		truncated = true
 	}
 
-	return domain.SyntaxQueryResult{
+	result = domain.SyntaxQueryResult{
 		Language:       "go",
 		GrammarVersion: "go/ast (stdlib)",
 		Captures:       captures,
 		Total:          total,
 		Truncated:      truncated,
 		ResultRef:      rangeResult.ResultRef,
-	}, nil
+	}
+	return result, nil
+}
+
+func syntaxQueryLabel(query string) string {
+	if query == "outline" || query == "symbol" {
+		return query
+	}
+	return "unsupported"
+}
+
+func syntaxFailureCategory(err error) string {
+	if err == nil {
+		return "none"
+	}
+	switch {
+	case errors.Is(err, port.ErrSyntaxUnsupportedLanguage):
+		return "unsupported_language"
+	case errors.Is(err, port.ErrSyntaxUnsupportedQuery):
+		return "unsupported_query"
+	case errors.Is(err, port.ErrSyntaxSourceTooLarge):
+		return "source_too_large"
+	case errors.Is(err, port.ErrSyntaxParseFailed):
+		return "parse_failed"
+	case errors.Is(err, context.Canceled), errors.Is(err, context.DeadlineExceeded):
+		return "canceled"
+	case errors.Is(err, port.ErrSyntaxProjectUnavailable):
+		return "project_unavailable"
+	default:
+		return "query_failed"
+	}
 }
 
 func extractOutline(fset *token.FileSet, file *ast.File, src []byte, project, path, fileSHA256 string, includeText bool) []domain.SyntaxCapture {

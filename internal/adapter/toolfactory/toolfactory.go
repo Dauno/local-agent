@@ -44,6 +44,7 @@ type Factory struct {
 	codeReaders        map[string]port.CodeReader
 	syntaxEngine       port.SyntaxEngine
 	codeIntelligence   port.CodeIntelligence
+	metrics            port.MetricRecorder
 }
 
 func (f *Factory) WithCodeReaders(readers map[string]port.CodeReader) *Factory {
@@ -63,6 +64,11 @@ func (f *Factory) WithSyntaxEngine(engine port.SyntaxEngine) *Factory {
 
 func (f *Factory) WithCodeIntelligence(intelligence port.CodeIntelligence) *Factory {
 	f.codeIntelligence = intelligence
+	return f
+}
+
+func (f *Factory) WithMetrics(recorder port.MetricRecorder) *Factory {
+	f.metrics = recorder
 	return f
 }
 
@@ -139,6 +145,10 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		tools = append(tools, readRange)
 	}
 	if f.syntaxEngine != nil {
+		syntax, err := f.syntaxQueryTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build syntax_query tool: %w", err)
+		}
 		codeSymbols, err := f.codeSymbolsTool(actor, key)
 		if err != nil {
 			return nil, fmt.Errorf("build code_symbols tool: %w", err)
@@ -147,7 +157,7 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		if err != nil {
 			return nil, fmt.Errorf("build read_symbol tool: %w", err)
 		}
-		tools = append(tools, codeSymbols, readSymbol)
+		tools = append(tools, syntax, codeSymbols, readSymbol)
 	}
 	if f.codeIntelligence != nil {
 		definition, err := f.codeLocationTool(actor, key, "code_definition", false)
@@ -228,6 +238,59 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 	return tools, nil
 }
 
+func (f *Factory) syntaxQueryTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	type args struct {
+		Project     string `json:"project"`
+		Path        string `json:"path"`
+		Query       string `json:"query"`
+		IncludeText bool   `json:"include_text,omitempty"`
+		MaxResults  int    `json:"max_results,omitempty"`
+	}
+	return functiontool.New(functiontool.Config{Name: "syntax_query", Description: "Runs a bounded project-scoped syntax operation (outline or symbol)."},
+		func(ctx agent.Context, input args) (domain.SyntaxQueryResult, error) {
+			if input.Query != "outline" && input.Query != "symbol" {
+				return domain.SyntaxQueryResult{}, port.ErrSyntaxUnsupportedQuery
+			}
+			maxResults := input.MaxResults
+			if maxResults == 0 {
+				maxResults = 50
+			} else if maxResults < 0 {
+				maxResults = 1
+			}
+			if maxResults > 200 {
+				maxResults = 200
+			}
+			result, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{
+				Project: input.Project, Path: input.Path, Query: input.Query,
+				MaxResults: maxResults, IncludeText: input.IncludeText,
+				Actor: actor, ConversationKey: string(key),
+			})
+			if err != nil {
+				return domain.SyntaxQueryResult{}, err
+			}
+			if input.IncludeText {
+				const maxInlineCodePoints = 16_000
+				used := 0
+				for index := range result.Captures {
+					remaining := maxInlineCodePoints - used
+					if remaining <= 0 {
+						result.Captures[index].Text = ""
+						result.Truncated = true
+						continue
+					}
+					text := []rune(result.Captures[index].Text)
+					if len(text) > remaining {
+						text = text[:remaining]
+						result.Truncated = true
+					}
+					result.Captures[index].Text = string(text)
+					used += len(text)
+				}
+			}
+			return result, nil
+		})
+}
+
 func (f *Factory) readFileRangeTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
 	type args struct {
 		Project        string `json:"project"`
@@ -292,6 +355,13 @@ func (f *Factory) codeSymbolsTool(actor string, key domain.ConversationKey) (too
 					MaxResults: maxResults, Actor: actor, ConversationKey: string(key)})
 				if semanticErr == nil {
 					return result{Symbols: semantic.Symbols, TotalCount: semantic.TotalCount, Truncated: semantic.Truncated, ResultRef: semantic.ResultRef}, nil
+				}
+				if f.metrics != nil {
+					language := "unsupported"
+					if strings.HasSuffix(input.Path, ".go") {
+						language = "go"
+					}
+					f.metrics.AddCounter(domain.MetricLSPFallbackTotal, 1, port.MetricLabels{"language": language})
 				}
 			}
 			syntaxResult, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{Project: input.Project, Path: input.Path, Query: "outline",

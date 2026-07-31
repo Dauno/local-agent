@@ -31,6 +31,7 @@ type Reader struct {
 	maxFileBytes   int64
 	resultStore    port.RecoverableResultStore
 	preserveCRLF   bool
+	metrics        port.MetricRecorder
 }
 
 // WithResultStore enables immutable owner-bound snapshots for every read.
@@ -43,6 +44,13 @@ func (r *Reader) WithResultStore(store port.RecoverableResultStore) *Reader {
 // whose byte offsets must remain digest-bound to the original file.
 func (r *Reader) WithPreservedLineEndings() *Reader {
 	r.preserveCRLF = true
+	return r
+}
+
+func (r *Reader) WithMetrics(recorder port.MetricRecorder) *Reader {
+	if r != nil {
+		r.metrics = recorder
+	}
 	return r
 }
 
@@ -61,7 +69,13 @@ func NewReader(rootDir string, maxOutputBytes int, chunkMaxBytes int, maxFileByt
 }
 
 // ReadRange reads a line range from a text file. See port.CodeReader.
-func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (domain.SourceRange, error) {
+func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (result domain.SourceRange, err error) {
+	defer func() {
+		if r != nil && r.metrics != nil && err == nil {
+			r.metrics.AddCounter(domain.MetricCodeReadRangeTotal, 1, nil)
+			r.metrics.Observe(domain.MetricCodeReadBytes, float64(len(result.Content)), nil)
+		}
+	}()
 	if err := ctx.Err(); err != nil {
 		return domain.SourceRange{}, err
 	}
@@ -241,7 +255,7 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 	if truncated {
 		nextOffsetBytes = resultEndByte
 	}
-	return domain.SourceRange{
+	result = domain.SourceRange{
 		Location:        location,
 		Content:         content,
 		NextStartLine:   nextStartLine,
@@ -249,7 +263,8 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 		EOF:             eof,
 		Truncated:       truncated,
 		ResultRef:       resultRef,
-	}, nil
+	}
+	return result, nil
 }
 
 // buildLineStarts returns the byte offset of the start of each line.

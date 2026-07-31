@@ -2,8 +2,15 @@ package port
 
 import (
 	"context"
+	"errors"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+)
+
+var (
+	ErrContinuityCASConflict = errors.New("continuity CAS conflict")
+	ErrContinuityValidation  = errors.New("continuity validation failure")
+	ErrContinuityUnavailable = errors.New("continuity storage unavailable")
 )
 
 // ContinuityStore persists and retrieves continuity capsules for sessions.

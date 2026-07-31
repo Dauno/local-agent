@@ -1,6 +1,7 @@
 package domain
 
-// Request budget metrics (names only, not wired — instrumentation happens in Wave 4).
+// Request budget metrics. Values are emitted through port.MetricRecorder with
+// bounded, non-sensitive labels.
 const (
 	MetricModelRequestContextWindowTokens    = "model_request_context_window_tokens"
 	MetricModelRequestHardLimitTokens        = "model_request_hard_limit_tokens"

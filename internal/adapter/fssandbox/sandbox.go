@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 )
 
@@ -24,6 +25,7 @@ var _ sandbox.SandboxExecutor = (*Executor)(nil)
 type Executor struct {
 	projects       map[string]string // name → resolved absolute path
 	maxOutputBytes int
+	metrics        port.MetricRecorder
 }
 
 // New creates a filesystem sandbox executor. projects maps human-readable project
@@ -55,6 +57,13 @@ func New(projects map[string]string, maxOutputBytes int) (*Executor, error) {
 		return nil, errors.New("maximum output bytes must be positive")
 	}
 	return &Executor{projects: clean, maxOutputBytes: maxOutputBytes}, nil
+}
+
+func (e *Executor) WithMetrics(recorder port.MetricRecorder) *Executor {
+	if e != nil {
+		e.metrics = recorder
+	}
+	return e
 }
 
 func (e *Executor) Execute(ctx context.Context, op sandbox.SandboxOperation) (sandbox.SandboxResult, error) {
@@ -139,11 +148,16 @@ func (e *Executor) readFile(args map[string]any) (sandbox.SandboxResult, error) 
 		return sandbox.SandboxResult{}, unsupportedFile(path)
 	}
 
-	return sandbox.SandboxResult{
+	result := sandbox.SandboxResult{
 		Output:      string(data),
 		OutputBytes: len(data),
 		Truncated:   truncated,
-	}, nil
+	}
+	if e.metrics != nil {
+		e.metrics.AddCounter(domain.MetricCodeReadFullTotal, 1, nil)
+		e.metrics.Observe(domain.MetricCodeReadBytes, float64(len(data)), nil)
+	}
+	return result, nil
 }
 
 func (e *Executor) listDirectory(args map[string]any) (sandbox.SandboxResult, error) {

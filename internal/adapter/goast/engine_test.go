@@ -3,6 +3,7 @@ package goast
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,6 +15,23 @@ import (
 )
 
 type testCodeReader struct{}
+
+type syntaxMetricCapture struct{ counts map[string]int64 }
+
+func (m *syntaxMetricCapture) AddCounter(name string, delta int64, _ port.MetricLabels) {
+	if m.counts == nil {
+		m.counts = make(map[string]int64)
+	}
+	m.counts[name] += delta
+}
+func (*syntaxMetricCapture) SetGauge(string, int64, port.MetricLabels) {}
+func (m *syntaxMetricCapture) Observe(name string, _ float64, _ port.MetricLabels) {
+	if m.counts == nil {
+		m.counts = make(map[string]int64)
+	}
+	m.counts[name]++
+}
+func (*syntaxMetricCapture) Snapshot() []port.MetricSample { return nil }
 
 func (testCodeReader) ReadRange(_ context.Context, req domain.SourceRangeRequest) (domain.SourceRange, error) {
 	data, err := os.ReadFile(req.Path)
@@ -68,7 +86,8 @@ type Runner interface {
 	Run() error
 }
 `)
-	engine := newTestEngine()
+	metrics := &syntaxMetricCapture{}
+	engine := newTestEngine().WithMetrics(metrics)
 	result, err := engine.Query(context.Background(), domain.SyntaxQueryRequest{
 		Project: "test",
 		Path:    path,
@@ -287,7 +306,8 @@ func C() {}
 func D() {}
 func E() {}
 `)
-	engine := newTestEngine()
+	metrics := &syntaxMetricCapture{}
+	engine := newTestEngine().WithMetrics(metrics)
 	result, err := engine.Query(context.Background(), domain.SyntaxQueryRequest{
 		Project:    "test",
 		Path:       path,
@@ -305,6 +325,11 @@ func E() {}
 	}
 	if len(result.Captures) != 2 {
 		t.Fatalf("Captures = %d, want 2 (clamped)", len(result.Captures))
+	}
+	for _, name := range []string{domain.MetricSyntaxQueryTotal, domain.MetricSyntaxQueryDuration, domain.MetricSyntaxResultTruncated} {
+		if metrics.counts[name] != 1 {
+			t.Errorf("metric %q = %d, want 1", name, metrics.counts[name])
+		}
 	}
 }
 
@@ -435,15 +460,15 @@ func TestQuery_NonGoFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error for non-Go file")
 	}
-	if !strings.Contains(err.Error(), "unsupported language") {
-		t.Fatalf("error = %q, want to contain 'unsupported language'", err.Error())
+	if !errors.Is(err, port.ErrSyntaxUnsupportedLanguage) {
+		t.Fatalf("error = %v, want typed unsupported language", err)
 	}
 }
 
 func TestQueryWithoutRegisteredProjectCannotReadHostPath(t *testing.T) {
 	path := writeGoFile(t, t.TempDir(), "secret.go", "package secret\n")
 	_, err := New().Query(context.Background(), domain.SyntaxQueryRequest{Project: "missing", Path: path, Query: "outline"})
-	if err == nil || !strings.Contains(err.Error(), "project is unavailable") {
+	if !errors.Is(err, port.ErrSyntaxProjectUnavailable) {
 		t.Fatalf("Query() error = %v", err)
 	}
 }
@@ -468,8 +493,22 @@ func F() {}
 	if err == nil {
 		t.Fatal("expected error for unknown query type")
 	}
-	if !strings.Contains(err.Error(), "unknown query type") {
-		t.Fatalf("error = %q, want to contain 'unknown query type'", err.Error())
+	if !errors.Is(err, port.ErrSyntaxUnsupportedQuery) {
+		t.Fatalf("error = %v, want typed unsupported query", err)
+	}
+}
+
+func TestQueryMalformedSourceReturnsTypedFailureAndMetrics(t *testing.T) {
+	dir := t.TempDir()
+	path := writeGoFile(t, dir, "broken.go", "package broken\nfunc {")
+	metrics := &syntaxMetricCapture{}
+	engine := New(map[string]port.CodeReader{"test": testCodeReader{}}).WithMetrics(metrics)
+	_, err := engine.Query(t.Context(), domain.SyntaxQueryRequest{Project: "test", Path: path, Query: "outline"})
+	if !errors.Is(err, port.ErrSyntaxParseFailed) {
+		t.Fatalf("Query() error = %v", err)
+	}
+	if metrics.counts[domain.MetricSyntaxQueryTotal] != 1 || metrics.counts[domain.MetricSyntaxQueryFailureTotal] != 1 {
+		t.Fatalf("metrics = %#v", metrics.counts)
 	}
 }
 

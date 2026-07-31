@@ -39,6 +39,7 @@ type CompileDiagnostics struct {
 	ResponseTokensRemoved int
 	ReductionReason       string
 	HardLimitTokens       int
+	RecountPasses         int
 }
 
 // ContextProjectionMarker is the application-owned structured field inserted
