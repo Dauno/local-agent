@@ -74,9 +74,16 @@ func (p ResultDeliveryPolicy) Validate() error {
 }
 
 type ExternalAgentJobNotification struct {
-	JobID               string
-	StatusRevision      int
-	Kind                string
+	JobID          string
+	StatusRevision int
+	Kind           string
+	// Actor and ConversationKey are loaded from the authoritative job row for
+	// host-owned completion. They are not part of the immutable delivery key.
+	Actor           string
+	ConversationKey ConversationKey
+	// HostResultText is ephemeral completion data. It is never written to the
+	// notification row or exposed through an ADK function response.
+	HostResultText      string
 	CanonicalMarkdown   string
 	ContentSHA256       string
 	RendererVersion     string
@@ -135,6 +142,7 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
+		Actor: job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: fmt.Sprintf("%x", digest),
 		RendererVersion: JobNotificationRenderer, Target: target,
 		PublishState: NotificationPending,
@@ -235,6 +243,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
+		Actor: job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: contentDigest, RendererVersion: JobNotificationRenderer,
 		Target: target, PublishState: NotificationPending, DeliveryMode: mode, PolicyVersion: policyVersion,
 		ArtifactRef: artifactRef, ResultBytes: contentBytes, MaxMarkdownParts: maxParts,
