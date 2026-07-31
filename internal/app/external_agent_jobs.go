@@ -251,7 +251,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	}
 	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
 	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, verifiedArtifacts, store, infra.api, cfg.Slack.PartLabels)
-	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher})
+	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher, HostCompleter: service})
 	if err != nil {
 		return nil, nil, err
 	}

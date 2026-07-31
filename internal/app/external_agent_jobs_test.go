@@ -4,14 +4,17 @@ import (
 	"context"
 	"crypto/sha256"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/secure"
 )
 
 func TestDurableACPDispatcherRejectsScopeRevisionDrift(t *testing.T) {
@@ -28,6 +31,16 @@ func TestDurableACPDispatcherRejectsScopeRevisionDrift(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "scope revision") || runtime.runs != 0 {
 		t.Fatalf("err = %v, runtime runs = %d", err, runtime.runs)
+	}
+}
+
+func TestNoACPConfigurationReturnsNilJobService(t *testing.T) {
+	service, worker, err := newExternalAgentJobService(config.Default(), newRuntimeModels(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if service != nil || worker != nil {
+		t.Fatalf("no-ACP configuration returned service=%v worker=%v", service, worker)
 	}
 }
 
@@ -116,6 +129,79 @@ func TestDurableACPDispatcherMaterializesSanitizedCompleteResult(t *testing.T) {
 	}
 	if large.DeliveryMode != domain.JobResultDeliveryFile || large.Text != "" || len(largeArtifacts.contents) != 1 {
 		t.Fatalf("large materialized result = %+v, artifacts = %#v", large, largeArtifacts.contents)
+	}
+}
+
+func TestDurableACPDispatcherFallsBackForUnicodeTwentyThousandCharacters(t *testing.T) {
+	artifacts := &recordingResultArtifacts{}
+	workspace := t.TempDir()
+	child := preparedAgentTool{
+		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: strings.Repeat("界", 20000)}},
+		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
+	}
+	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, policy: domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
+	}}
+	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_unicode", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.DeliveryMode != domain.JobResultDeliveryFile || result.Text != "" || len(artifacts.contents) != 1 || len([]rune(artifacts.contents["job_unicode-delivery"])) != 20000 {
+		t.Fatalf("Unicode fallback result=%+v artifacts=%#v", result, artifacts.contents)
+	}
+}
+
+func TestDurableACPMaterializationRedactsBeforeSQLiteDelivery(t *testing.T) {
+	secret := "xoxb-super-secret-value-12345"
+	workspace := t.TempDir()
+	child := preparedAgentTool{
+		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "result=" + secret}},
+		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
+	}
+	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, sanitize: secure.NewRedactor(secret).String, policy: domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
+	}}
+	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", ConversationKey: "slack:T12345678:dm:D12345678", Actor: "U12345678", TimeoutAt: time.Now().Add(time.Minute)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(result.Text, secret) || strings.Contains(result.DeliveryCanonicalMarkdown, secret) {
+		t.Fatalf("secret survived materialization: %+v", result)
+	}
+	store, err := adaptersqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := adaptersqlite.NewExternalAgentJobStore(store)
+	job := domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "opencode", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued, TimeoutAt: time.Now().Add(time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now(), OriginalCallID: "secret-call", RequestSHA256: "request"}
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create job = %v, err = %v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), time.Now().UTC(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &result, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := jobs.GetJob(t.Context(), job.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(stored.ResultSummary, secret) {
+		t.Fatal("secret survived SQLite job persistence")
+	}
+	notification, err := jobs.ClaimNextNotification(t.Context(), time.Now().Add(time.Second), "publisher", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if notification == nil || strings.Contains(notification.CanonicalMarkdown, secret) {
+		t.Fatalf("notification leaked secret: %#v", notification)
 	}
 }
 

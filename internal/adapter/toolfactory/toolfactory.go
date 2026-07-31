@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -108,6 +109,18 @@ func (f *Factory) WithDraftStore(svc port.AgentDraftStore) *Factory {
 // the host to complete detached ACP work. The service owns authorization and
 // artifact verification; this adapter only binds the current invocation.
 func (f *Factory) WithExternalAgentJobs(reader port.ExternalAgentJobReader) *Factory {
+	if f == nil {
+		return f
+	}
+	if reader == nil {
+		f.externalJobs = nil
+		return f
+	}
+	value := reflect.ValueOf(reader)
+	if (value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface || value.Kind() == reflect.Map || value.Kind() == reflect.Slice || value.Kind() == reflect.Func) && value.IsNil() {
+		f.externalJobs = nil
+		return f
+	}
 	f.externalJobs = reader
 	return f
 }
@@ -830,12 +843,14 @@ func (f *Factory) jobStatusTool(actor string, key domain.ConversationKey) (tool.
 }
 
 type readJobResultResult struct {
-	JobID          string `json:"job_id"`
-	StatusRevision int    `json:"status_revision"`
-	Result         string `json:"result"`
-	ContentSHA256  string `json:"content_sha256"`
-	ContentBytes   int64  `json:"content_bytes"`
-	DeliveryMode   string `json:"delivery_mode"`
+	JobID           string `json:"job_id"`
+	StatusRevision  int    `json:"status_revision"`
+	ResultAvailable bool   `json:"result_available"`
+	HostDelivery    bool   `json:"host_delivery"`
+	Result          string `json:"result"`
+	ContentSHA256   string `json:"content_sha256"`
+	ContentBytes    int64  `json:"content_bytes"`
+	DeliveryMode    string `json:"delivery_mode"`
 }
 
 func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
@@ -847,13 +862,32 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 		if strings.TrimSpace(args.JobID) == "" {
 			return readJobResultResult{}, errors.New("job_id is required")
 		}
+		job, err := reader.Status(ctx, args.JobID, actor, key)
+		if err != nil {
+			return readJobResultResult{}, err
+		}
+		if job == nil {
+			return readJobResultResult{}, errors.New("external-agent job was not found")
+		}
+		status := job.StatusView()
+		if status.DeliveryMode == domain.JobResultDeliveryFile {
+			// File-mode bytes are host-owned Slack delivery data. Returning them
+			// here would serialize the complete artifact into the ADK event and
+			// durable SQLite session.
+			return readJobResultResult{
+				JobID: job.ID, StatusRevision: job.StatusRevision,
+				ResultAvailable: status.ResultAvailable, HostDelivery: true,
+				ContentBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode),
+			}, nil
+		}
 		result, err := reader.ReadResult(ctx, args.JobID, actor, key)
 		if err != nil {
 			return readJobResultResult{}, err
 		}
 		return readJobResultResult{
 			JobID: result.JobID, StatusRevision: result.StatusRevision, Result: result.Text,
-			ContentSHA256: result.ContentSHA256, ContentBytes: result.ContentBytes,
+			ResultAvailable: true,
+			ContentSHA256:   result.ContentSHA256, ContentBytes: result.ContentBytes,
 			DeliveryMode: string(result.DeliveryMode),
 		}, nil
 	})

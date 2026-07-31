@@ -202,6 +202,9 @@ func (s *Service) ReadResult(ctx context.Context, jobID, actor string, conversat
 	if len(content) == 0 || int64(len(content)) > s.maxResultBytes {
 		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
 	}
+	if job.ResultBytes <= 0 || int64(len(content)) != job.ResultBytes {
+		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+	}
 	digest := sha256.Sum256(content)
 	contentSHA := fmt.Sprintf("%x", digest)
 	if job.ResultSHA256 != "" && !strings.EqualFold(job.ResultSHA256, contentSHA) {

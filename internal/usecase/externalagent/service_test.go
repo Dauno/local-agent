@@ -255,9 +255,18 @@ func TestHostCompletionReadsOnlyAuthorizedCompleteResult(t *testing.T) {
 	if _, err := service.ReadResult(t.Context(), created.ID, "U99999999", job.ConversationKey); err == nil {
 		t.Fatal("wrong actor read the job result")
 	}
+	if _, err := service.ReadResult(t.Context(), created.ID, job.Actor, "slack:T12345678:dm:D99999999"); err == nil {
+		t.Fatal("wrong conversation read the job result")
+	}
 	turn, err := service.HostCompletionTurn(t.Context(), created.ID, job.Actor, job.ConversationKey)
 	if err != nil || turn.Text != content || turn.PendingConfirmation != nil {
 		t.Fatalf("completion turn = %#v, err = %v", turn, err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_jobs SET result_bytes = result_bytes + 1 WHERE job_id = ?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReadResult(t.Context(), created.ID, job.Actor, job.ConversationKey); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
+		t.Fatalf("altered ResultBytes was accepted: %v", err)
 	}
 }
 
