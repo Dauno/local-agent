@@ -230,7 +230,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 				MaxMarkdownParts: cfg.ACP.Delivery.MaxMarkdownParts, MaxFileBytes: int64(cfg.ACP.Delivery.MaxFileBytes),
 				MaxInlineResultBytes: int64(cfg.ACP.MaxInlineResultBytes), MaxResultArtifactBytes: int64(cfg.ACP.MaxResultArtifactBytes),
 			}, partLabels: cfg.Slack.PartLabels},
-		Publisher: nil,
+		Publisher: nil, Artifacts: models.artifactStore, MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes),
 	})
 	if err != nil {
 		return nil, nil, err

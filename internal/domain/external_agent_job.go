@@ -13,6 +13,11 @@ import (
 
 const MaxExternalAgentTaskRunes = 200_000
 
+// MaxExternalAgentResultBytes is a final defensive bound for result reads made
+// through the host-completion path. Configured artifact bounds remain stricter
+// in normal composition.
+const MaxExternalAgentResultBytes = 256 * 1024 * 1024
+
 const (
 	JobNotificationTerminal = "terminal"
 	JobNotificationFailure  = "delivery_failure"
@@ -374,6 +379,47 @@ type ExternalAgentJob struct {
 	StartedAt           time.Time
 	FinishedAt          time.Time
 	UpdatedAt           time.Time
+}
+
+// ExternalAgentJobStatusView is the host-owned, model-facing subset of a job.
+// It intentionally omits task text, provider configuration, actor identity,
+// and the persisted destination.
+type ExternalAgentJobStatusView struct {
+	JobID           string
+	Status          ExternalAgentJobStatus
+	StatusRevision  int
+	ResultAvailable bool
+	ResultSHA256    string
+	ResultBytes     int64
+	DeliveryMode    JobResultDeliveryMode
+	ErrorCode       string
+	FinishedAt      time.Time
+}
+
+// ExternalAgentJobResult is the complete sanitized result returned by the
+// host-completion path. Artifact references never cross this boundary.
+type ExternalAgentJobResult struct {
+	JobID          string
+	StatusRevision int
+	Text           string
+	ContentSHA256  string
+	ContentBytes   int64
+	DeliveryMode   JobResultDeliveryMode
+}
+
+func (j ExternalAgentJob) StatusView() ExternalAgentJobStatusView {
+	mode := JobResultDeliveryMode("")
+	if j.ResultArtifact != "" {
+		mode = JobResultDeliveryFile
+	} else if j.ResultSummary != "" {
+		mode = JobResultDeliveryMarkdown
+	}
+	return ExternalAgentJobStatusView{
+		JobID: j.ID, Status: j.Status, StatusRevision: j.StatusRevision,
+		ResultAvailable: j.Status == JobCompleted && (j.ResultSummary != "" || j.ResultArtifact != ""),
+		ResultSHA256:    j.ResultSHA256, ResultBytes: j.ResultBytes, DeliveryMode: mode,
+		ErrorCode: j.ErrorCode, FinishedAt: j.FinishedAt,
+	}
 }
 
 func (j ExternalAgentJob) Validate() error {

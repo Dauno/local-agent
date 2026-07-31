@@ -22,6 +22,23 @@ type stubConversationStore struct {
 	messages []domain.Message
 }
 
+type stubExternalJobReader struct {
+	job    *domain.ExternalAgentJob
+	result domain.ExternalAgentJobResult
+}
+
+func (r stubExternalJobReader) Status(context.Context, string, string, domain.ConversationKey) (*domain.ExternalAgentJob, error) {
+	return r.job, nil
+}
+
+func (r stubExternalJobReader) ReadResult(context.Context, string, string, domain.ConversationKey) (domain.ExternalAgentJobResult, error) {
+	return r.result, nil
+}
+
+func (r stubExternalJobReader) HostCompletionTurn(context.Context, string, string, domain.ConversationKey) (port.AgentTurn, error) {
+	return port.AgentTurn{Text: r.result.Text}, nil
+}
+
 var _ port.ConversationStore = (*stubConversationStore)(nil)
 
 func (s *stubConversationStore) ClaimDedupe(_ context.Context, _ []string, _, _ time.Time) (bool, error) {
@@ -182,6 +199,46 @@ func TestFactoryWithoutSandboxExposesOnlyConversationTools(t *testing.T) {
 	}
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool without sandbox, got %d", len(tools))
+	}
+}
+
+func TestFactoryBindsJobInspectionToolsToTrustedInvocation(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	reader := stubExternalJobReader{
+		job:    &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete", ResultSHA256: "digest", ResultBytes: 8},
+		result: domain.ExternalAgentJobResult{JobID: "job_1", StatusRevision: 4, Text: "complete", ContentSHA256: "digest", ContentBytes: 8, DeliveryMode: domain.JobResultDeliveryMarkdown},
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("tools = %d, want list_messages, job_status, read_job_result", len(tools))
+	}
+	var status, result runnableFunctionTool
+	for _, candidate := range tools {
+		named, ok := candidate.(interface{ Name() string })
+		if !ok {
+			continue
+		}
+		switch named.Name() {
+		case "job_status":
+			status, _ = candidate.(runnableFunctionTool)
+		case "read_job_result":
+			result, _ = candidate.(runnableFunctionTool)
+		}
+	}
+	if status == nil || result == nil {
+		t.Fatal("job inspection tools are unavailable")
+	}
+	statusValue, err := status.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"})
+	if err != nil || statusValue["result_available"] != true || statusValue["status"] != string(domain.JobCompleted) {
+		t.Fatalf("status = %#v, err = %v", statusValue, err)
+	}
+	resultValue, err := result.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"})
+	if err != nil || resultValue["result"] != "complete" || resultValue["delivery_mode"] != string(domain.JobResultDeliveryMarkdown) {
+		t.Fatalf("result = %#v, err = %v", resultValue, err)
 	}
 }
 
