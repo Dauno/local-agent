@@ -170,7 +170,7 @@ func TestPermanentDeliveryFailureEnqueuesHostDiagnostic(t *testing.T) {
 	if err != nil || delivery == nil {
 		t.Fatalf("delivery = %#v, err = %v", delivery, err)
 	}
-	if err := jobs.MarkNotificationUnknown(t.Context(), delivery, "result_artifact_invalid"); err != nil {
+	if err := jobs.MarkNotificationUnknown(t.Context(), delivery, "result_file_upload_unknown"); err != nil {
 		t.Fatal(err)
 	}
 	referenced, err := jobs.IsArtifactReferenced(t.Context(), result.DeliveryArtifactRef)
