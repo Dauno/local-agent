@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
@@ -139,6 +140,9 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 			}
 			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: int64(len(safeBytes))}
 		}
+		if artifact.Reference == "" || !strings.EqualFold(artifact.SHA256, contentSHA) || artifact.Bytes != int64(len(safeBytes)) {
+			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultDeliveryFailed, Err: errors.New("sanitized ACP result artifact identity is invalid")}
+		}
 		artifactRef = artifact.Reference
 	}
 	result.Text = text
@@ -212,6 +216,15 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	if len(children) == 0 {
 		return nil, nil, nil
 	}
+	policy := domain.ResultDeliveryPolicy{
+		MaxMarkdownParts:       cfg.ACP.Delivery.MaxMarkdownParts,
+		MaxFileBytes:           int64(cfg.ACP.Delivery.MaxFileBytes),
+		MaxInlineResultBytes:   int64(cfg.ACP.MaxInlineResultBytes),
+		MaxResultArtifactBytes: int64(cfg.ACP.MaxResultArtifactBytes),
+	}
+	if err := policy.Validate(); err != nil {
+		return nil, nil, fmt.Errorf("validate durable ACP result delivery policy: %w", err)
+	}
 	store := adaptersqlite.NewExternalAgentJobStore(infra.store)
 	if store == nil {
 		return nil, nil, errors.New("initialize external-agent job store")
@@ -226,10 +239,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		LeaseTTL:       30 * time.Second, PollInterval: time.Second, Concurrency: cfg.ACP.WorkerConcurrency, MaxAttempts: 2,
 	}, externalagent.Dependencies{
 		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String,
-			artifacts: models.artifactStore, policy: domain.ResultDeliveryPolicy{
-				MaxMarkdownParts: cfg.ACP.Delivery.MaxMarkdownParts, MaxFileBytes: int64(cfg.ACP.Delivery.MaxFileBytes),
-				MaxInlineResultBytes: int64(cfg.ACP.MaxInlineResultBytes), MaxResultArtifactBytes: int64(cfg.ACP.MaxResultArtifactBytes),
-			}, partLabels: cfg.Slack.PartLabels},
+			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels},
 		Publisher: nil, Artifacts: models.artifactStore, MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes),
 	})
 	if err != nil {
@@ -240,7 +250,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		return nil, nil, errors.New("initialize durable ACP result delivery: verified artifact store is unavailable")
 	}
 	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
-	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, verifiedArtifacts, store, infra.api)
+	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, verifiedArtifacts, store, infra.api, cfg.Slack.PartLabels)
 	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher})
 	if err != nil {
 		return nil, nil, err
