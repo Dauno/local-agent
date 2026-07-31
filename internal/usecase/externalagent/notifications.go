@@ -66,6 +66,13 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 		return err
 	}
 	if notification.NeedsReconciliation {
+		if notification.DeliveryMode == "file" && notification.SlackFileID == "" {
+			// An ambiguous URL request did not leave a durable Slack file ID.
+			// Reissuing it could create a duplicate file that cannot be
+			// reconciled by identity, so fail closed instead.
+			_ = w.store.MarkNotificationUnknown(context.WithoutCancel(ctx), notification, "result_file_upload_unknown")
+			return nil
+		}
 		ts, found, reconcileErr := w.publisher.Reconcile(ctx, *notification)
 		if reconcileErr != nil {
 			_ = w.store.MarkNotificationUnknown(context.WithoutCancel(ctx), notification, notificationErrorCode(reconcileErr))

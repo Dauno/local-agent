@@ -99,3 +99,23 @@ func TestNotificationWorkerRetriesDefinitiveFailureWithPersistedBackoff(t *testi
 		t.Fatalf("retry code=%q next=%v published=%v", store.retriedCode, store.retriedAt, publisher.publishCalled)
 	}
 }
+
+func TestNotificationWorkerDoesNotReissueAmbiguousFileRequestWithoutID(t *testing.T) {
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		CanonicalMarkdown: "OpenCode job `job-1` completed.", ContentSHA256: "digest",
+		RendererVersion: domain.JobNotificationRenderer, DeliveryMode: domain.JobResultDeliveryFile,
+		PublishState: domain.NotificationPublishState("unknown"),
+	}}
+	publisher := &fakeNotificationPublisher{}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.publishCalled || publisher.reconcileCalled {
+		t.Fatalf("ambiguous file was reissued: publish=%v reconcile=%v", publisher.publishCalled, publisher.reconcileCalled)
+	}
+}
