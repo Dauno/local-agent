@@ -7,6 +7,8 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
+	"strings"
 	"testing"
 )
 
@@ -126,6 +128,132 @@ func TestMigrationV24CreatesRecoverableResultCleanupClaims(t *testing.T) {
 		if !columns[name] {
 			t.Fatalf("recoverable_results missing %s", name)
 		}
+	}
+}
+
+func TestOpenExistingUpgradesV21ToV26AndPreservesLegacyNotification(t *testing.T) {
+	ctx := context.Background()
+	path, raw := createSchemaAtVersion(t, 21)
+	seedLegacyExternalAgentNotification(t, raw)
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var policy string
+	if err := store.db.QueryRowContext(ctx, `SELECT policy_version FROM external_agent_job_notifications WHERE job_id = 'migration-job'`).Scan(&policy); err != nil {
+		t.Fatal(err)
+	}
+	if policy != "legacy_v1" {
+		t.Fatalf("legacy v21 notification policy = %q, want legacy_v1", policy)
+	}
+	var version int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("upgraded schema version = %d, want %d", version, SchemaVersion)
+	}
+}
+
+func TestOpenExistingUpgradesV25ToV26PreservesLegacyRowsAndAddsEvidenceTriggers(t *testing.T) {
+	ctx := context.Background()
+	path, raw := createSchemaAtVersion(t, 25)
+	seedLegacyExternalAgentNotification(t, raw)
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var count int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_notifications WHERE job_id = 'migration-job' AND policy_version = 'legacy_v1'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("legacy v25 notification count = %d, want 1", count)
+	}
+	var triggerCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_v26'`).Scan(&triggerCount); err != nil {
+		t.Fatal(err)
+	}
+	if triggerCount != 3 {
+		t.Fatalf("v26 trigger count = %d, want 3", triggerCount)
+	}
+	_, err = store.db.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
+		job_id, status_revision, kind, canonical_markdown, content_sha256, renderer_version,
+		channel_id, publish_state, next_attempt_at, delivery_mode, policy_version,
+		result_bytes, max_markdown_parts, upload_state, recovered_slack_ts)
+		VALUES ('migration-job', 1, 'invalid', 'result', ?, 'markdown_v1', 'D12345678',
+		'published', 1, 'markdown', 'delivery_v1', 1, 1, 'not_applicable', '')`, strings.Repeat("a", 64))
+	if err == nil {
+		t.Fatal("v26 published delivery without Slack evidence was accepted")
+	}
+}
+
+func createSchemaAtVersion(t *testing.T, version int) (string, *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "migration.db")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dsn, err := dataSourceName(path, "rw")
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := sql.Open("sqlite", dsn)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tx, err := raw.BeginTx(ctx, nil)
+	if err != nil {
+		raw.Close()
+		t.Fatal(err)
+	}
+	for current := 1; current <= version; current++ {
+		if err := migrations[current](ctx, tx); err != nil {
+			_ = tx.Rollback()
+			_ = raw.Close()
+			t.Fatalf("migration %d: %v", current, err)
+		}
+	}
+	if _, err := tx.ExecContext(ctx, "PRAGMA user_version = "+strconv.Itoa(version)); err != nil {
+		_ = tx.Rollback()
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	if err := tx.Commit(); err != nil {
+		_ = raw.Close()
+		t.Fatal(err)
+	}
+	return path, raw
+}
+
+func seedLegacyExternalAgentNotification(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	if _, err := db.ExecContext(ctx, `INSERT INTO external_agent_jobs (
+		job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
+		task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
+		conversation_key, status, timeout_at, created_at, updated_at)
+		VALUES ('migration-job', 'detached', 'opencode', 'build', 'workspace', '[]', 'r1',
+		'task', 'request', 'wrapper', 'original', 'U12345678', 'T12345678',
+		'slack:T12345678:dm:D12345678', 'completed', 2, 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
+		job_id, status_revision, kind, canonical_markdown, content_sha256, renderer_version,
+		channel_id, next_attempt_at, created_at, updated_at)
+		VALUES ('migration-job', 0, 'terminal', 'legacy result', 'legacy', 'markdown_v1', 'D12345678', 1, 1, 1)`); err != nil {
+		t.Fatal(err)
 	}
 }
 
