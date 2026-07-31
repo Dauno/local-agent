@@ -155,6 +155,9 @@ func (s *Service) Cancel(ctx context.Context, jobID, actor string) (*domain.Exte
 }
 
 func (s *Service) Status(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error) {
+	if strings.TrimSpace(jobID) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(string(conversationKey)) == "" {
+		return nil, errors.New("external-agent job operation binding is required")
+	}
 	job, err := s.store.GetJob(ctx, jobID)
 	if err != nil || job == nil {
 		return job, err

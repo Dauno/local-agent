@@ -23,14 +23,19 @@ type JobNotificationPublisher struct {
 	artifacts     port.VerifiedResultArtifactStore
 	deliveryStore port.ExternalAgentJobDeliveryStore
 	fileClient    *slackapi.Client
+	partLabels    bool
 }
 
 func NewJobNotificationPublisher(publisher *Publisher, history *HistoryReader) *JobNotificationPublisher {
 	return &JobNotificationPublisher{publisher: publisher, history: history}
 }
 
-func NewDurableJobNotificationPublisher(publisher *Publisher, history *HistoryReader, uploader port.GeneratedFileUploader, artifacts port.VerifiedResultArtifactStore, deliveryStore port.ExternalAgentJobDeliveryStore, fileClient *slackapi.Client) *JobNotificationPublisher {
-	return &JobNotificationPublisher{publisher: publisher, history: history, uploader: uploader, artifacts: artifacts, deliveryStore: deliveryStore, fileClient: fileClient}
+func NewDurableJobNotificationPublisher(publisher *Publisher, history *HistoryReader, uploader port.GeneratedFileUploader, artifacts port.VerifiedResultArtifactStore, deliveryStore port.ExternalAgentJobDeliveryStore, fileClient *slackapi.Client, partLabels ...bool) *JobNotificationPublisher {
+	labels := false
+	if len(partLabels) > 0 {
+		labels = partLabels[0]
+	}
+	return &JobNotificationPublisher{publisher: publisher, history: history, uploader: uploader, artifacts: artifacts, deliveryStore: deliveryStore, fileClient: fileClient, partLabels: labels}
 }
 
 func (p *JobNotificationPublisher) Publish(ctx context.Context, notification domain.ExternalAgentJobNotification) (port.PublishedResponse, error) {
@@ -43,6 +48,10 @@ func (p *JobNotificationPublisher) Publish(ctx context.Context, notification dom
 	}
 	if notification.DeliveryMode == domain.JobResultDeliveryFile {
 		return p.publishFile(ctx, notification)
+	}
+	parts = renderMarkdownV1(notification.CanonicalMarkdown, p.partLabels)
+	if notification.MaxMarkdownParts > 0 && len(parts) > notification.MaxMarkdownParts {
+		return port.PublishedResponse{}, errors.New("job notification exceeds its persisted Markdown part policy")
 	}
 	if notification.Target.CorrelationID == "" {
 		notification.Target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", notification.JobID, notification.StatusRevision, notification.Kind)
@@ -74,7 +83,7 @@ func (p *JobNotificationPublisher) Publish(ctx context.Context, notification dom
 		ts, err := p.publisher.postWithRetry(ctx, req)
 		channel.lastAttempt = p.publisher.now()
 		if err != nil {
-			return result, err
+			return result, port.NewNotificationPublishError("notification_publish_ambiguous", true, false, errors.New("Slack job notification publication outcome is ambiguous"))
 		}
 		result.LastMessageTS = ts
 	}
@@ -93,6 +102,12 @@ func (p *JobNotificationPublisher) Reconcile(ctx context.Context, notification d
 		// No durable Slack identity exists yet, so there is nothing to
 		// reconcile. Let the worker retry the upload URL request.
 		return "", false, nil
+	}
+	if notification.DeliveryMode == domain.JobResultDeliveryMarkdown {
+		parts = renderMarkdownV1(notification.CanonicalMarkdown, p.partLabels)
+		if notification.MaxMarkdownParts > 0 && len(parts) > notification.MaxMarkdownParts {
+			return "", false, errors.New("job notification exceeds its persisted Markdown part policy")
+		}
 	}
 	callCtx := ctx
 	cancel := func() {}
@@ -216,7 +231,10 @@ func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification
 			target, requestErr = p.uploader.RequestUploadURL(ctx, filename, len(content))
 		}
 		if requestErr != nil || target.FileID == "" || target.UploadURL == "" {
-			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+			if requestErr == nil {
+				requestErr = errors.New("Slack returned an incomplete upload target")
+			}
+			return port.PublishedResponse{}, classifyUploadError("result_file_upload_failed", requestErr, true)
 		}
 		if p.deliveryStore != nil {
 			if err := p.deliveryStore.MarkNotificationFileID(ctx, &notification, target.FileID, time.Now().UTC()); err != nil {
@@ -225,7 +243,7 @@ func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification
 		}
 		notification.SlackFileID = target.FileID
 		if err := p.uploader.UploadBytes(ctx, target, content); err != nil {
-			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+			return port.PublishedResponse{}, classifyUploadError("result_file_upload_unknown", err, false)
 		}
 		if p.deliveryStore != nil {
 			if err := p.deliveryStore.MarkNotificationUploadState(ctx, &notification, domain.JobResultUploadBytesUploaded, time.Now().UTC()); err != nil {
@@ -257,7 +275,7 @@ func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification
 	}
 	if notification.UploadState != domain.JobResultUploadCompleted {
 		if err := p.uploader.CompleteUpload(ctx, notification.SlackFileID, notification.Target.ChannelID, notification.Target.ThreadTS, "OpenCode result "+notification.JobID); err != nil {
-			return port.PublishedResponse{}, errors.New("result_file_upload_unknown")
+			return port.PublishedResponse{}, classifyUploadError("result_file_completion_failed", err, true)
 		}
 		if p.deliveryStore != nil {
 			if err := p.deliveryStore.MarkNotificationUploadState(ctx, &notification, domain.JobResultUploadCompleted, time.Now().UTC()); err != nil {
@@ -295,11 +313,22 @@ func (p *JobNotificationPublisher) publishParts(ctx context.Context, notificatio
 			partIndex: index + 1, partCount: len(parts), contentSHA256: contentSHA256(part), eventType: jobNotificationMetadataEventType, extraMetadata: extra})
 		channel.lastAttempt = p.publisher.now()
 		if err != nil {
-			return result, err
+			return result, port.NewNotificationPublishError("notification_publish_ambiguous", true, false, errors.New("Slack job notification publication outcome is ambiguous"))
 		}
 		result.LastMessageTS = ts
 	}
 	return result, nil
+}
+
+func classifyUploadError(code string, err error, retryDefinitive bool) error {
+	var uploadErr *port.GeneratedFileUploadError
+	if errors.As(err, &uploadErr) {
+		if uploadErr.Ambiguous {
+			return port.NewNotificationPublishError(code, true, false, errors.New(code))
+		}
+		return port.NewNotificationPublishError(code, false, retryDefinitive, errors.New(code))
+	}
+	return port.NewNotificationPublishError(code, true, false, errors.New(code))
 }
 
 func (p *JobNotificationPublisher) reconcileFile(ctx context.Context, notification domain.ExternalAgentJobNotification, callCtx context.Context) (string, bool, error) {

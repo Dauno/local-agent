@@ -174,9 +174,9 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	if maxParts > 8 {
 		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown part policy is invalid")
 	}
-	contentDigest := result.DeliveryContentSHA256
+	contentDigest := strings.ToLower(result.DeliveryContentSHA256)
 	if contentDigest == "" {
-		contentDigest = result.ResultSHA256
+		contentDigest = strings.ToLower(result.ResultSHA256)
 	}
 	if contentDigest == "" {
 		digest := sha256.Sum256([]byte(result.Text))
@@ -194,6 +194,12 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	}
 	if _, err := hex.DecodeString(contentDigest); err != nil || len(contentDigest) != sha256.Size*2 {
 		return ExternalAgentJobNotification{}, errors.New("result delivery digest is invalid")
+	}
+	if mode == JobResultDeliveryMarkdown && result.Text != "" {
+		digest := sha256.Sum256([]byte(result.Text))
+		if contentDigest != fmt.Sprintf("%x", digest) || contentBytes != int64(len([]byte(result.Text))) {
+			return ExternalAgentJobNotification{}, errors.New("result delivery digest does not match complete Markdown content")
+		}
 	}
 	markdown := fmt.Sprintf("OpenCode job `%s` completed.", job.ID)
 	artifactRef := ""

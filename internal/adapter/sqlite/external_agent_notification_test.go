@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -181,5 +183,53 @@ func TestPermanentDeliveryFailureEnqueuesHostDiagnostic(t *testing.T) {
 	}
 	if diagnostic.Kind != domain.JobNotificationFailure || diagnostic.PolicyVersion != "legacy_v1" || diagnostic.ArtifactRef != "" || diagnostic.CanonicalMarkdown == "" {
 		t.Fatalf("diagnostic = %#v", diagnostic)
+	}
+}
+
+func TestFileNotificationCannotPublishWithoutUploadEvidence(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	now := time.Now().UTC()
+	job := testExternalAgentJob(now)
+	job.Mode = domain.JobDetached
+	if _, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), now, "worker-1", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "file result"
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	result := &domain.AcpInvocationResult{
+		Text: "", DeliveryMode: domain.JobResultDeliveryFile, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
+		DeliveryArtifactRef: job.ID + "-delivery.result", DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len(content)),
+		ArtifactRef: job.ID + "-delivery.result", ResultSHA256: digest, ResultBytes: int64(len(content)), DeliveryMaxMarkdownParts: 6,
+	}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	delivery, err := jobs.ClaimNextNotification(t.Context(), now.Add(2*time.Second), "publisher-1", time.Minute)
+	if err != nil || delivery == nil {
+		t.Fatalf("delivery = %#v, err = %v", delivery, err)
+	}
+	if err := jobs.MarkNotificationPublished(t.Context(), delivery, "1710000000.000001", now.Add(3*time.Second)); !errors.Is(err, ErrNotificationStateConflict) {
+		t.Fatalf("publish without evidence err = %v", err)
+	}
+	if err := jobs.MarkNotificationFileID(t.Context(), delivery, "F123", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.MarkNotificationFileID(t.Context(), delivery, "F999", now.Add(3*time.Second)); !errors.Is(err, ErrNotificationStateConflict) {
+		t.Fatalf("file identity changed err = %v", err)
+	}
+	if err := jobs.MarkNotificationUploadState(t.Context(), delivery, domain.JobResultUploadCompleted, now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.MarkNotificationPublished(t.Context(), delivery, "1710000000.000001", now.Add(4*time.Second)); err != nil {
+		t.Fatal(err)
 	}
 }

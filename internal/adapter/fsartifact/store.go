@@ -34,11 +34,11 @@ func New(dir string, maxBytes int64) (*Store, error) {
 		return nil, errors.New("artifact directory and positive maximum size are required")
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, fmt.Errorf("create artifact directory: %w", err)
+		return nil, errors.New("create artifact directory failed")
 	}
 	info, err := os.Lstat(dir)
 	if err != nil {
-		return nil, fmt.Errorf("inspect artifact directory: %w", err)
+		return nil, errors.New("inspect artifact directory failed")
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("artifact directory must be a real directory")
@@ -72,12 +72,12 @@ func (s *Store) Put(ctx context.Context, ownerID, content string) (domain.Result
 		}
 		return domain.ResultArtifact{}, errors.New("result artifact already exists")
 	} else if !errors.Is(err, os.ErrNotExist) {
-		return domain.ResultArtifact{}, fmt.Errorf("inspect result artifact: %w", err)
+		return domain.ResultArtifact{}, errors.New("inspect result artifact failed")
 	}
 
 	tmp, err := os.CreateTemp(s.dir, ".result-*")
 	if err != nil {
-		return domain.ResultArtifact{}, fmt.Errorf("create result artifact: %w", err)
+		return domain.ResultArtifact{}, errors.New("create result artifact failed")
 	}
 	tmpName := tmp.Name()
 	defer func() { _ = os.Remove(tmpName) }()
@@ -102,7 +102,7 @@ func (s *Store) Put(ctx context.Context, ownerID, content string) (domain.Result
 		if errors.Is(err, os.ErrExist) {
 			return domain.ResultArtifact{}, errors.New("result artifact already exists")
 		}
-		return domain.ResultArtifact{}, fmt.Errorf("commit result artifact: %w", err)
+		return domain.ResultArtifact{}, errors.New("commit result artifact failed")
 	}
 	if err := syncDirectory(s.dir); err != nil {
 		return domain.ResultArtifact{}, fmt.Errorf("sync artifact directory: %w", err)
@@ -136,14 +136,14 @@ func (s *Store) Get(ctx context.Context, ownerID, reference, expectedSHA256 stri
 	path := filepath.Join(s.dir, reference)
 	info, err := os.Lstat(path)
 	if err != nil {
-		return nil, fmt.Errorf("inspect result artifact: %w", err)
+		return nil, errors.New("inspect result artifact failed")
 	}
 	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
 		return nil, errors.New("result artifact is not a regular application-owned file")
 	}
 	file, err := os.Open(path)
 	if err != nil {
-		return nil, fmt.Errorf("open result artifact: %w", err)
+		return nil, errors.New("open result artifact failed")
 	}
 	defer file.Close()
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
@@ -175,7 +175,7 @@ func (s *Store) Check(ctx context.Context) error {
 	}
 	info, err := os.Lstat(s.dir)
 	if err != nil {
-		return fmt.Errorf("inspect artifact directory: %w", err)
+		return errors.New("inspect artifact directory failed")
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("artifact directory must be a real directory")
