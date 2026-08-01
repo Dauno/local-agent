@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"reflect"
 	"strings"
 	"time"
 
@@ -39,6 +40,7 @@ type Factory struct {
 	currentDefs        *agentdef.Definitions
 	agentWriter        port.AgentDefinitionWriter
 	draftStore         port.AgentDraftStore
+	externalJobs       port.ExternalAgentJobReader
 	allowedUserIDs     []string
 	recoverableResults port.RecoverableResultStore
 	codeReaders        map[string]port.CodeReader
@@ -103,6 +105,26 @@ func (f *Factory) WithDraftStore(svc port.AgentDraftStore) *Factory {
 	return f
 }
 
+// WithExternalAgentJobs configures the actor-bound inspection tools used by
+// the host to complete detached ACP work. The service owns authorization and
+// artifact verification; this adapter only binds the current invocation.
+func (f *Factory) WithExternalAgentJobs(reader port.ExternalAgentJobReader) *Factory {
+	if f == nil {
+		return f
+	}
+	if reader == nil {
+		f.externalJobs = nil
+		return f
+	}
+	value := reflect.ValueOf(reader)
+	if (value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface || value.Kind() == reflect.Map || value.Kind() == reflect.Slice || value.Kind() == reflect.Func) && value.IsNil() {
+		f.externalJobs = nil
+		return f
+	}
+	f.externalJobs = reader
+	return f
+}
+
 // WithAllowedUserIDs configures the users allowed to install agent definitions.
 func (f *Factory) WithAllowedUserIDs(ids []string) *Factory {
 	f.allowedUserIDs = append([]string(nil), ids...)
@@ -130,6 +152,17 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, fmt.Errorf("build list_messages tool: %w", err)
 	}
 	tools = append(tools, ro)
+	if f.externalJobs != nil {
+		statusTool, err := f.jobStatusTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build job_status tool: %w", err)
+		}
+		resultTool, err := f.readJobResultTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_job_result tool: %w", err)
+		}
+		tools = append(tools, statusTool, resultTool)
+	}
 	if f.recoverableResults != nil {
 		readResult, err := f.readResultChunkTool(actor, key)
 		if err != nil {
@@ -762,6 +795,102 @@ func (f *Factory) listMessagesTool(key domain.ConversationKey) (tool.Tool, error
 			return result, nil
 		},
 	)
+}
+
+type jobIDArgs struct {
+	JobID string `json:"job_id" jsonschema:"durable ACP job ID returned when the job was accepted"`
+}
+
+type jobStatusResult struct {
+	JobID           string `json:"job_id"`
+	Status          string `json:"status"`
+	StatusRevision  int    `json:"status_revision"`
+	ResultAvailable bool   `json:"result_available"`
+	ResultSHA256    string `json:"result_sha256,omitempty"`
+	ResultBytes     int64  `json:"result_bytes,omitempty"`
+	DeliveryMode    string `json:"delivery_mode,omitempty"`
+	ErrorCode       string `json:"error_code,omitempty"`
+	FinishedAt      string `json:"finished_at,omitempty"`
+}
+
+func (f *Factory) jobStatusTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	reader := f.externalJobs
+	return functiontool.New(functiontool.Config{
+		Name:        "job_status",
+		Description: "Returns the status of an ACP durable job created in this Slack conversation. Read-only; actor and destination are bound by the host.",
+	}, func(ctx agent.Context, args jobIDArgs) (jobStatusResult, error) {
+		if strings.TrimSpace(args.JobID) == "" {
+			return jobStatusResult{}, errors.New("job_id is required")
+		}
+		job, err := reader.Status(ctx, args.JobID, actor, key)
+		if err != nil {
+			return jobStatusResult{}, err
+		}
+		if job == nil {
+			return jobStatusResult{}, errors.New("external-agent job was not found")
+		}
+		status := job.StatusView()
+		view := jobStatusResult{
+			JobID: status.JobID, Status: string(status.Status), StatusRevision: status.StatusRevision,
+			ResultAvailable: status.ResultAvailable, ResultSHA256: status.ResultSHA256,
+			ResultBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode), ErrorCode: status.ErrorCode,
+		}
+		if !status.FinishedAt.IsZero() {
+			view.FinishedAt = status.FinishedAt.UTC().Format(time.RFC3339)
+		}
+		return view, nil
+	})
+}
+
+type readJobResultResult struct {
+	JobID           string `json:"job_id"`
+	StatusRevision  int    `json:"status_revision"`
+	ResultAvailable bool   `json:"result_available"`
+	HostDelivery    bool   `json:"host_delivery"`
+	Result          string `json:"result"`
+	ContentSHA256   string `json:"content_sha256"`
+	ContentBytes    int64  `json:"content_bytes"`
+	DeliveryMode    string `json:"delivery_mode"`
+}
+
+func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	reader := f.externalJobs
+	return functiontool.New(functiontool.Config{
+		Name:        "read_job_result",
+		Description: "Reads the complete sanitized result of a completed ACP durable job in this Slack conversation. Read-only; no ACP task is rerun and no confirmation is requested.",
+	}, func(ctx agent.Context, args jobIDArgs) (readJobResultResult, error) {
+		if strings.TrimSpace(args.JobID) == "" {
+			return readJobResultResult{}, errors.New("job_id is required")
+		}
+		job, err := reader.Status(ctx, args.JobID, actor, key)
+		if err != nil {
+			return readJobResultResult{}, err
+		}
+		if job == nil {
+			return readJobResultResult{}, errors.New("external-agent job was not found")
+		}
+		status := job.StatusView()
+		if status.DeliveryMode == domain.JobResultDeliveryFile {
+			// File-mode bytes are host-owned Slack delivery data. Returning them
+			// here would serialize the complete artifact into the ADK event and
+			// durable SQLite session.
+			return readJobResultResult{
+				JobID: job.ID, StatusRevision: job.StatusRevision,
+				ResultAvailable: status.ResultAvailable, HostDelivery: true,
+				ContentBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode),
+			}, nil
+		}
+		result, err := reader.ReadResult(ctx, args.JobID, actor, key)
+		if err != nil {
+			return readJobResultResult{}, err
+		}
+		return readJobResultResult{
+			JobID: result.JobID, StatusRevision: result.StatusRevision, Result: result.Text,
+			ResultAvailable: true,
+			ContentSHA256:   result.ContentSHA256, ContentBytes: result.ContentBytes,
+			DeliveryMode: string(result.DeliveryMode),
+		}, nil
+	})
 }
 
 // --- read-only: sandbox ---

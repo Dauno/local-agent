@@ -15,11 +15,29 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
+	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 )
 
 type stubConversationStore struct {
 	messages []domain.Message
+}
+
+type stubExternalJobReader struct {
+	job    *domain.ExternalAgentJob
+	result domain.ExternalAgentJobResult
+}
+
+func (r stubExternalJobReader) Status(context.Context, string, string, domain.ConversationKey) (*domain.ExternalAgentJob, error) {
+	return r.job, nil
+}
+
+func (r stubExternalJobReader) ReadResult(context.Context, string, string, domain.ConversationKey) (domain.ExternalAgentJobResult, error) {
+	return r.result, nil
+}
+
+func (r stubExternalJobReader) HostCompletionTurn(context.Context, string, string, domain.ConversationKey) (port.AgentTurn, error) {
+	return port.AgentTurn{Text: r.result.Text}, nil
 }
 
 var _ port.ConversationStore = (*stubConversationStore)(nil)
@@ -182,6 +200,90 @@ func TestFactoryWithoutSandboxExposesOnlyConversationTools(t *testing.T) {
 	}
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool without sandbox, got %d", len(tools))
+	}
+}
+
+func TestFactoryIgnoresTypedNilExternalAgentReader(t *testing.T) {
+	var reader *externalagent.Service
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	tools, err := factory.ToolsForInvocation("U12345678", "slack:T12345678:dm:D12345678")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 1 {
+		t.Fatalf("typed-nil reader exposed %d tools, want only list_messages", len(tools))
+	}
+}
+
+func TestFactoryBindsJobInspectionToolsToTrustedInvocation(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	reader := stubExternalJobReader{
+		job:    &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete", ResultSHA256: "digest", ResultBytes: 8},
+		result: domain.ExternalAgentJobResult{JobID: "job_1", StatusRevision: 4, Text: "complete", ContentSHA256: "digest", ContentBytes: 8, DeliveryMode: domain.JobResultDeliveryMarkdown},
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 3 {
+		t.Fatalf("tools = %d, want list_messages, job_status, read_job_result", len(tools))
+	}
+	var status, result runnableFunctionTool
+	for _, candidate := range tools {
+		named, ok := candidate.(interface{ Name() string })
+		if !ok {
+			continue
+		}
+		switch named.Name() {
+		case "job_status":
+			status, _ = candidate.(runnableFunctionTool)
+		case "read_job_result":
+			result, _ = candidate.(runnableFunctionTool)
+		}
+	}
+	if status == nil || result == nil {
+		t.Fatal("job inspection tools are unavailable")
+	}
+	statusValue, err := status.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"})
+	if err != nil || statusValue["result_available"] != true || statusValue["status"] != string(domain.JobCompleted) {
+		t.Fatalf("status = %#v, err = %v", statusValue, err)
+	}
+	resultValue, err := result.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"})
+	if err != nil || resultValue["result"] != "complete" || resultValue["delivery_mode"] != string(domain.JobResultDeliveryMarkdown) {
+		t.Fatalf("result = %#v, err = %v", resultValue, err)
+	}
+}
+
+func TestFactoryDoesNotPlaceFileModeResultInToolResponse(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	reader := stubExternalJobReader{
+		job: &domain.ExternalAgentJob{
+			ID: "job_file", Status: domain.JobCompleted, StatusRevision: 4,
+			ResultArtifact: "job_file-delivery.result", ResultSHA256: "digest", ResultBytes: 1024,
+		},
+		result: domain.ExternalAgentJobResult{JobID: "job_file", StatusRevision: 4, Text: "must not enter ADK", ContentBytes: 1024, DeliveryMode: domain.JobResultDeliveryFile},
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var result runnableFunctionTool
+	for _, candidate := range tools {
+		if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == "read_job_result" {
+			result, _ = candidate.(runnableFunctionTool)
+		}
+	}
+	if result == nil {
+		t.Fatal("read_job_result tool is unavailable")
+	}
+	value, err := result.Run(&stubToolContext{}, map[string]any{"job_id": "job_file"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value["result"] != "" || value["host_delivery"] != true || value["result_available"] != true {
+		t.Fatalf("file-mode tool response leaked content: %#v", value)
 	}
 }
 
