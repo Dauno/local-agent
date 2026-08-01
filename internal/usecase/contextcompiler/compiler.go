@@ -761,9 +761,14 @@ func validateProjectedContents(contents []domain.Content, openInvocationIDs map[
 		activeIdx = 0
 	}
 	if activeIdx > 0 {
-		if err := domain.ValidateContentProtocol(flattenTurns(turns[:activeIdx]), false); err != nil {
+		if err := domain.ValidateContentProtocol(flattenTurns(turns[:activeIdx]), domain.ProtocolValidationOptions{
+			RequireComplete:            true,
+			AllowConfirmationLifecycle: true,
+		}); err != nil {
 			return err
 		}
 	}
-	return domain.ValidateContentProtocol(flattenTurns(turns[activeIdx:]), true)
+	return domain.ValidateContentProtocol(flattenTurns(turns[activeIdx:]), domain.ProtocolValidationOptions{
+		AllowConfirmationLifecycle: true,
+	})
 }
