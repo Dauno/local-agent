@@ -465,7 +465,7 @@ func TestNotificationHealthAndAdminInspectionAreContentFree(t *testing.T) {
 	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
 		t.Fatalf("inspection = %#v, err=%v", inspection, err)
 	}
-	if inspection.Deliveries[0].DeliveryMode != domain.JobResultDeliveryFile || !inspection.Deliveries[0].SlackFileIDPresent || inspection.Deliveries[0].UploadState != domain.JobResultUploadCompleted || !inspection.Deliveries[0].LeaseOwnerPresent || !inspection.Deliveries[0].LeaseExpiry.Equal(healthNow.Add(time.Minute)) {
+	if inspection.Deliveries[0].DeliveryMode != domain.JobResultDeliveryFile || !inspection.Deliveries[0].SlackFileIDPresent || inspection.Deliveries[0].UploadState != domain.JobResultUploadCompleted || inspection.Deliveries[0].LeaseOwner != "worker-secret" || !inspection.Deliveries[0].LeaseOwnerPresent || !inspection.Deliveries[0].LeaseExpiry.Equal(healthNow.Add(time.Minute)) {
 		t.Fatalf("file inspection = %#v", inspection.Deliveries[0])
 	}
 	if inspection.Deliveries[0].LastErrorCode != "notification_publish_ambiguous" {

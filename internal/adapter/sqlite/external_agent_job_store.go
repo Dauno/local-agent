@@ -143,7 +143,7 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 		FinishedAt: fromUnix(finishedAt),
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT status_revision, kind, publish_state,
-		attempts, length(lease_owner) > 0, lease_expiry, last_error_code, next_attempt_at, recovered_slack_ts,
+		attempts, lease_owner, lease_expiry, last_error_code, next_attempt_at, recovered_slack_ts,
 		delivery_mode, upload_state, length(slack_file_id) > 0
 		FROM external_agent_job_notifications WHERE job_id = ?
 		ORDER BY status_revision ASC, kind ASC`, jobID)
@@ -154,14 +154,16 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	for rows.Next() {
 		var delivery domain.ExternalAgentJobDeliveryInspection
 		var kind, publishState, errorCode, deliveryMode, uploadState, recoveredTS string
-		var leaseOwnerPresent, leaseExpiry, nextAttemptAt int64
+		var leaseOwner string
+		var leaseExpiry, nextAttemptAt int64
 		var filePresent int
-		if err := rows.Scan(&delivery.StatusRevision, &kind, &publishState, &delivery.Attempts, &leaseOwnerPresent, &leaseExpiry, &errorCode, &nextAttemptAt, &recoveredTS, &deliveryMode, &uploadState, &filePresent); err != nil {
+		if err := rows.Scan(&delivery.StatusRevision, &kind, &publishState, &delivery.Attempts, &leaseOwner, &leaseExpiry, &errorCode, &nextAttemptAt, &recoveredTS, &deliveryMode, &uploadState, &filePresent); err != nil {
 			return nil, fmt.Errorf("scan external-agent job delivery inspection: %w", err)
 		}
 		delivery.NotificationKind = safeAdminNotificationKind(kind)
 		delivery.PublishState = safeAdminPublishState(publishState)
-		delivery.LeaseOwnerPresent = leaseOwnerPresent != 0
+		delivery.LeaseOwner = safeAdminLeaseOwner(leaseOwner)
+		delivery.LeaseOwnerPresent = delivery.LeaseOwner != ""
 		delivery.LeaseExpiry = fromUnix(leaseExpiry)
 		delivery.LastErrorCode = safeAdminErrorCode(errorCode)
 		delivery.NextAttemptAt = fromUnix(nextAttemptAt)
@@ -865,6 +867,18 @@ func safeAdminPublishState(value string) domain.NotificationPublishState {
 	default:
 		return domain.NotificationUnknown
 	}
+}
+
+func safeAdminLeaseOwner(value string) string {
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if r < ' ' || r == '\x7f' {
+			return ""
+		}
+	}
+	return value
 }
 
 func safeAdminErrorCode(value string) string {
