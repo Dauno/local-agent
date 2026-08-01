@@ -8,6 +8,9 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
+var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
+var ErrNotificationClaimConflict = ErrNotificationStateConflict
+
 // ExternalAgentJobStore is the durable source of truth for external-agent
 // execution. Implementations must bind lease operations to owner and attempt.
 type ExternalAgentJobStore interface {
@@ -32,6 +35,17 @@ type ExternalAgentJobNotificationStore interface {
 // publication failure without manufacturing Slack evidence.
 type ExternalAgentJobNotificationRetryStore interface {
 	MarkNotificationRetry(ctx context.Context, notification *domain.ExternalAgentJobNotification, errorCode string, nextAttemptAt, now time.Time) error
+}
+
+// ExternalAgentJobNotificationHealthStore exposes bounded, content-free
+// outbox aggregates for health checks and worker gauges.
+type ExternalAgentJobNotificationHealthStore interface {
+	NotificationHealth(ctx context.Context, now time.Time, stuckThreshold time.Duration) (domain.ExternalAgentJobNotificationHealth, error)
+}
+
+// ExternalAgentJobAdminStore exposes a read-only, redacted job inspection view.
+type ExternalAgentJobAdminStore interface {
+	InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error)
 }
 
 // NotificationPublishError classifies a failed delivery boundary without

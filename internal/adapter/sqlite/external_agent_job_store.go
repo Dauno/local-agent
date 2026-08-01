@@ -19,11 +19,14 @@ var _ port.ExternalAgentJobStore = (*ExternalAgentJobStore)(nil)
 var _ port.ExpiredExternalAgentJobRecovery = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobNotificationStore = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobNotificationRetryStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobNotificationHealthStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobAdminStore = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobDeliveryStore = (*ExternalAgentJobStore)(nil)
 var _ port.ArtifactReferenceChecker = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobReconciler = (*ExternalAgentJobStore)(nil)
 
-var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
+var ErrNotificationStateConflict = port.ErrNotificationStateConflict
+var ErrNotificationClaimConflict = port.ErrNotificationClaimConflict
 
 const (
 	notificationRetryBaseDelay = time.Second
@@ -115,6 +118,136 @@ func (s *ExternalAgentJobStore) GetJob(ctx context.Context, jobID string) (*doma
 		return nil, fmt.Errorf("get external-agent job: %w", err)
 	}
 	return &job, nil
+}
+
+// InspectJob returns only fields approved for the local administrative view.
+// Querying the projection directly avoids loading task text, result content,
+// artifact references, or the actor/conversation binding into this boundary.
+func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(jobID) == "" || strings.ContainsAny(jobID, "\x00\r\n") {
+		return nil, nil
+	}
+	var status string
+	var statusRevision int
+	var finishedAt int64
+	err := s.db.QueryRowContext(ctx, `SELECT status, status_revision, finished_at
+		FROM external_agent_jobs WHERE job_id = ?`, jobID).Scan(&status, &statusRevision, &finishedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("inspect external-agent job: %w", err)
+	}
+	view := &domain.ExternalAgentJobInspection{
+		JobID: jobID, Status: safeAdminJobStatus(status), StatusRevision: statusRevision,
+		FinishedAt: fromUnix(finishedAt),
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT status_revision, kind, publish_state,
+		attempts, lease_owner, lease_expiry, last_error_code, next_attempt_at, recovered_slack_ts,
+		delivery_mode, upload_state, length(slack_file_id) > 0
+		FROM external_agent_job_notifications WHERE job_id = ?
+		ORDER BY status_revision ASC, kind ASC`, jobID)
+	if err != nil {
+		return nil, fmt.Errorf("inspect external-agent job deliveries: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var delivery domain.ExternalAgentJobDeliveryInspection
+		var kind, publishState, errorCode, deliveryMode, uploadState, recoveredTS string
+		var leaseOwner string
+		var leaseExpiry, nextAttemptAt int64
+		var filePresent int
+		if err := rows.Scan(&delivery.StatusRevision, &kind, &publishState, &delivery.Attempts, &leaseOwner, &leaseExpiry, &errorCode, &nextAttemptAt, &recoveredTS, &deliveryMode, &uploadState, &filePresent); err != nil {
+			return nil, fmt.Errorf("scan external-agent job delivery inspection: %w", err)
+		}
+		delivery.NotificationKind = safeAdminNotificationKind(kind)
+		delivery.PublishState = safeAdminPublishState(publishState)
+		delivery.LeaseOwner = safeAdminLeaseOwner(leaseOwner)
+		delivery.LeaseOwnerPresent = delivery.LeaseOwner != ""
+		delivery.LeaseExpiry = fromUnix(leaseExpiry)
+		delivery.LastErrorCode = safeAdminErrorCode(errorCode)
+		delivery.NextAttemptAt = fromUnix(nextAttemptAt)
+		delivery.RecoveredSlackTS = safeAdminSlackTimestamp(recoveredTS)
+		delivery.DeliveryMode = safeAdminDeliveryMode(deliveryMode)
+		delivery.UploadState = safeAdminUploadState(uploadState)
+		delivery.SlackFileIDPresent = filePresent != 0
+		view.Deliveries = append(view.Deliveries, delivery)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read external-agent job delivery inspection: %w", err)
+	}
+	return view, nil
+}
+
+// NotificationHealth returns content-free counts for the durable notification
+// outbox. Expired leases are immediately stuck; overdue retries are stuck only
+// after the configured threshold.
+func (s *ExternalAgentJobStore) NotificationHealth(ctx context.Context, now time.Time, stuckThreshold time.Duration) (domain.ExternalAgentJobNotificationHealth, error) {
+	if s == nil || s.db == nil {
+		return domain.ExternalAgentJobNotificationHealth{}, errors.New("external-agent notification health store is not configured")
+	}
+	if stuckThreshold < 0 {
+		return domain.ExternalAgentJobNotificationHealth{}, errors.New("notification stuck threshold must not be negative")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	var health domain.ExternalAgentJobNotificationHealth
+	rows, err := s.db.QueryContext(ctx, `SELECT publish_state, COUNT(*)
+		FROM external_agent_job_notifications GROUP BY publish_state`)
+	if err != nil {
+		return health, fmt.Errorf("count external-agent notification states: %w", err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			return health, fmt.Errorf("scan external-agent notification state count: %w", err)
+		}
+		switch domain.NotificationPublishState(state) {
+		case domain.NotificationPending:
+			health.Pending += count
+		case domain.NotificationPublishing:
+			health.Publishing += count
+		case domain.NotificationUnknown:
+			health.Unknown += count
+		case domain.NotificationPublished:
+			health.Published += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return health, fmt.Errorf("read external-agent notification state counts: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return health, fmt.Errorf("close external-agent notification state counts: %w", err)
+	}
+	permanentCodes := []string{"result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown"}
+	args := make([]any, 0, len(permanentCodes)+1)
+	args = append(args, domain.NotificationPublished)
+	for _, code := range permanentCodes {
+		args = append(args, code)
+	}
+	placeholders := strings.TrimSuffix(strings.Repeat("?,", len(permanentCodes)), ",")
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_notifications
+		WHERE publish_state != ? AND last_error_code IN (`+placeholders+`)`, args...).Scan(&health.PermanentFailures); err != nil {
+		return health, fmt.Errorf("count permanent external-agent notification failures: %w", err)
+	}
+	cutoff := now.Add(-stuckThreshold).UnixNano()
+	stuckArgs := make([]any, 0, len(permanentCodes)+4)
+	stuckArgs = append(stuckArgs, domain.NotificationPublished)
+	for _, code := range permanentCodes {
+		stuckArgs = append(stuckArgs, code)
+	}
+	stuckArgs = append(stuckArgs, domain.NotificationPublishing, now.UnixNano(), cutoff)
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_notifications
+		WHERE publish_state != ? AND last_error_code NOT IN (`+placeholders+`)
+		AND ((publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?) OR
+		(next_attempt_at > 0 AND next_attempt_at <= ?))`, stuckArgs...).Scan(&health.Stuck); err != nil {
+		return health, fmt.Errorf("count stuck external-agent notifications: %w", err)
+	}
+	return health, nil
 }
 
 func (s *ExternalAgentJobStore) ClaimNext(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error) {
@@ -512,7 +645,7 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		return nil, fmt.Errorf("claim notification: %w", err)
 	}
 	if affected, _ := changed.RowsAffected(); affected != 1 {
-		return nil, nil
+		return nil, port.ErrNotificationClaimConflict
 	}
 	notification, err := loadNotification(ctx, tx, jobID, revision, kind)
 	if err != nil {
@@ -704,6 +837,101 @@ func safeNotificationError(value string) string {
 		}
 	}
 	return value
+}
+
+func safeAdminJobStatus(value string) domain.ExternalAgentJobStatus {
+	switch domain.ExternalAgentJobStatus(value) {
+	case domain.JobQueued, domain.JobRunning, domain.JobCancelRequested,
+		domain.JobInterruptedSafe, domain.JobCompletionUnknown, domain.JobReconciling,
+		domain.JobCompleted, domain.JobFailed, domain.JobCancelled, domain.JobAbandoned:
+		return domain.ExternalAgentJobStatus(value)
+	default:
+		return domain.ExternalAgentJobStatus("unknown")
+	}
+}
+
+func safeAdminNotificationKind(value string) string {
+	switch value {
+	case domain.JobNotificationTerminal, domain.JobNotificationFailure:
+		return value
+	default:
+		return "unknown"
+	}
+}
+
+func safeAdminPublishState(value string) domain.NotificationPublishState {
+	switch domain.NotificationPublishState(value) {
+	case domain.NotificationPending, domain.NotificationPublishing,
+		domain.NotificationPublished, domain.NotificationUnknown:
+		return domain.NotificationPublishState(value)
+	default:
+		return domain.NotificationUnknown
+	}
+}
+
+func safeAdminLeaseOwner(value string) string {
+	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if r < ' ' || r == '\x7f' {
+			return ""
+		}
+	}
+	return value
+}
+
+func safeAdminErrorCode(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return ""
+	}
+	code := safeNotificationError(value)
+	switch code {
+	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch",
+		"notification_delivery_invalid", "notification_publish_ambiguous", "result_file_upload_failed",
+		"result_file_upload_unknown", "result_file_completion_failed", "notification_state_conflict",
+		"notification_state_persist_failed":
+		return code
+	default:
+		return "notification_publish_ambiguous"
+	}
+}
+
+func safeAdminSlackTimestamp(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) == 0 || len(value) > 64 {
+		return ""
+	}
+	dot := strings.IndexByte(value, '.')
+	if dot <= 0 || dot == len(value)-1 || strings.IndexByte(value[dot+1:], '.') >= 0 {
+		return ""
+	}
+	for _, r := range value {
+		if r != '.' && (r < '0' || r > '9') {
+			return ""
+		}
+	}
+	return value
+}
+
+func safeAdminDeliveryMode(value string) domain.JobResultDeliveryMode {
+	switch domain.JobResultDeliveryMode(value) {
+	case domain.JobResultDeliveryMarkdown, domain.JobResultDeliveryFile:
+		return domain.JobResultDeliveryMode(value)
+	default:
+		return ""
+	}
+}
+
+func safeAdminUploadState(value string) domain.JobResultUploadState {
+	switch domain.JobResultUploadState(value) {
+	case domain.JobResultUploadNotApplicable, domain.JobResultUploadPending,
+		domain.JobResultUploadURLRequested, domain.JobResultUploadBytesUploaded,
+		domain.JobResultUploadCompleted, domain.JobResultUploadUnknown:
+		return domain.JobResultUploadState(value)
+	default:
+		return domain.JobResultUploadUnknown
+	}
 }
 
 const notificationColumns = `n.job_id, n.status_revision, n.kind, n.canonical_markdown, n.content_sha256, n.renderer_version, n.channel_id, n.thread_ts, n.publish_state, n.lease_owner, n.lease_expiry, n.attempts, n.next_attempt_at, n.recovered_slack_ts, n.last_error_code, n.created_at, n.updated_at, n.delivery_mode, n.policy_version, n.artifact_ref, n.result_bytes, n.max_markdown_parts, n.upload_state, n.slack_file_id`

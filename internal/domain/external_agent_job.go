@@ -106,6 +106,53 @@ type ExternalAgentJobNotification struct {
 	SlackFileID         string
 }
 
+// ExternalAgentJobNotificationHealth is a read-only aggregate of the durable
+// notification outbox. It contains no job identity or delivery content.
+type ExternalAgentJobNotificationHealth struct {
+	Pending           int
+	Publishing        int
+	Unknown           int
+	Published         int
+	PermanentFailures int
+	Stuck             int
+}
+
+// NotificationHealthSnapshot is kept as a descriptive alias for callers that
+// expose the aggregate as a health snapshot.
+type NotificationHealthSnapshot = ExternalAgentJobNotificationHealth
+
+// ExternalAgentJobDeliveryInspection is the redacted administrative view of a
+// single delivery. Artifact references, canonical content, actor identity and
+// conversation keys are intentionally absent.
+type ExternalAgentJobDeliveryInspection struct {
+	StatusRevision     int                      `json:"status_revision"`
+	NotificationKind   string                   `json:"notification_kind"`
+	DeliveryMode       JobResultDeliveryMode    `json:"delivery_mode"`
+	PublishState       NotificationPublishState `json:"publish_state"`
+	Attempts           int                      `json:"attempts"`
+	LeaseOwner         string                   `json:"lease_owner"`
+	LeaseOwnerPresent  bool                     `json:"lease_owner_present"`
+	LeaseExpiry        time.Time                `json:"lease_expiry"`
+	LastErrorCode      string                   `json:"last_error_code"`
+	NextAttemptAt      time.Time                `json:"next_attempt_at"`
+	RecoveredSlackTS   string                   `json:"recovered_slack_ts"`
+	UploadState        JobResultUploadState     `json:"upload_state"`
+	SlackFileIDPresent bool                     `json:"slack_file_id_present"`
+}
+
+// ExternalAgentJobInspection is the safe local operator view of one job.
+type ExternalAgentJobInspection struct {
+	JobID          string                               `json:"job_id"`
+	Status         ExternalAgentJobStatus               `json:"status"`
+	StatusRevision int                                  `json:"status_revision"`
+	FinishedAt     time.Time                            `json:"finished_at"`
+	Deliveries     []ExternalAgentJobDeliveryInspection `json:"deliveries"`
+}
+
+// ExternalAgentJobAdminView is an explicit name for the same safe view used by
+// the local jobs inspect command.
+type ExternalAgentJobAdminView = ExternalAgentJobInspection
+
 // ExternalAgentJobDelivery is the durable, immutable delivery identity. The
 // notification name remains as the compatibility-facing store type.
 type ExternalAgentJobDelivery = ExternalAgentJobNotification

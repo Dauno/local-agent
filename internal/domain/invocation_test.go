@@ -87,6 +87,49 @@ func TestConversationKeyAndReplyTarget(t *testing.T) {
 	}
 }
 
+func TestConversationKeyEqualityForContinuationCases(t *testing.T) {
+	cases := []struct {
+		name  string
+		root  Invocation
+		reply Invocation
+		want  ConversationKey
+	}{
+		{
+			name:  "legacy dm",
+			root:  Invocation{EventType: "message.im", TeamID: "T12345678", ChannelID: "D12345678", ChannelKind: ChannelDM, UserID: "U12345678", EventTS: "1700000000.000001", Trigger: TriggerDirectMessage, Text: "root"},
+			reply: Invocation{EventType: "message.im", TeamID: "T12345678", ChannelID: "D12345678", ChannelKind: ChannelDM, UserID: "U12345678", EventTS: "1700000001.000002", Trigger: TriggerDirectMessage, Text: "reply"},
+			want:  "slack:T12345678:dm:D12345678",
+		},
+		{
+			name:  "threaded dm",
+			root:  Invocation{EventType: "message.im", TeamID: "T12345678", ChannelID: "D12345678", ChannelKind: ChannelDM, UserID: "U12345678", EventTS: "1700000000.000001", Trigger: TriggerDirectMessage, ThreadedDM: true, Text: "root"},
+			reply: Invocation{EventType: "message.im", TeamID: "T12345678", ChannelID: "D12345678", ChannelKind: ChannelDM, UserID: "U12345678", EventTS: "1700000001.000002", ThreadTS: "1700000000.000001", Trigger: TriggerDirectMessage, ThreadedDM: true, Text: "reply"},
+			want:  "slack:T12345678:dm:D12345678:thread:1700000000.000001",
+		},
+		{
+			name:  "channel thread",
+			root:  Invocation{EventType: "app_mention", TeamID: "T12345678", ChannelID: "C12345678", ChannelKind: ChannelPublic, UserID: "U12345678", EventTS: "1700000000.000001", Trigger: TriggerMention, Text: "root"},
+			reply: Invocation{EventType: "message", TeamID: "T12345678", ChannelID: "C12345678", ChannelKind: ChannelPublic, UserID: "U12345678", EventTS: "1700000001.000002", ThreadTS: "1700000000.000001", Trigger: TriggerThreadReply, Text: "reply"},
+			want:  "slack:T12345678:channel:C12345678:thread:1700000000.000001",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			rootKey, err := testCase.root.ConversationKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			replyKey, err := testCase.reply.ConversationKey()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if rootKey != testCase.want || replyKey != rootKey {
+				t.Fatalf("root=%q reply=%q want=%q", rootKey, replyKey, testCase.want)
+			}
+		})
+	}
+}
+
 func TestMetadataForThreadedDMRetainsRoot(t *testing.T) {
 	invocation := Invocation{
 		EventType: "message.im", TeamID: "T12345678", ChannelID: "D12345678",

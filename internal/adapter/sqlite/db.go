@@ -71,7 +71,24 @@ func OpenExisting(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("SQLite database path %q is a directory", path)
 	}
 
-	return open(ctx, path, "rw")
+	return open(ctx, path, "rw", true)
+}
+
+// OpenReadOnly opens an existing database without running migrations or
+// creating it. It is used by local administrative inspection commands.
+func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, fmt.Errorf("%w: %s", ErrDatabaseNotFound, path)
+		}
+		return nil, fmt.Errorf("stat SQLite database %q: %w", path, err)
+	}
+	if info.IsDir() {
+		return nil, fmt.Errorf("SQLite database path %q is a directory", path)
+	}
+
+	return open(ctx, path, "ro", false)
 }
 
 // Create creates a new database file with restrictive permissions and applies
@@ -116,7 +133,7 @@ func Initialize(ctx context.Context, path string) (*Store, error) {
 	return nil, err
 }
 
-func open(ctx context.Context, path, mode string) (*Store, error) {
+func open(ctx context.Context, path, mode string, migrateDatabase bool) (*Store, error) {
 	dsn, err := dataSourceName(path, mode)
 	if err != nil {
 		return nil, err
@@ -134,9 +151,11 @@ func open(ctx context.Context, path, mode string) (*Store, error) {
 		_ = db.Close()
 		return nil, fmt.Errorf("open SQLite database %q: %w", path, err)
 	}
-	if err := migrate(ctx, db); err != nil {
-		_ = db.Close()
-		return nil, fmt.Errorf("migrate SQLite database %q: %w", path, err)
+	if migrateDatabase {
+		if err := migrate(ctx, db); err != nil {
+			_ = db.Close()
+			return nil, fmt.Errorf("migrate SQLite database %q: %w", path, err)
+		}
 	}
 	return &Store{db: db}, nil
 }
