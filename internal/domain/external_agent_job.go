@@ -130,6 +130,8 @@ type ExternalAgentJobDeliveryInspection struct {
 	DeliveryMode       JobResultDeliveryMode
 	PublishState       NotificationPublishState
 	Attempts           int
+	LeaseOwnerPresent  bool
+	LeaseExpiry        time.Time
 	LastErrorCode      string
 	NextAttemptAt      time.Time
 	RecoveredSlackTS   string

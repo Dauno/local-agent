@@ -107,7 +107,11 @@ func (w *NotificationWorker) Run(ctx context.Context) {
 // errors remain visible to the caller instead of being converted into success.
 func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 	notification, err := w.store.ClaimNextNotification(ctx, time.Now().UTC(), w.owner, w.cfg.LeaseTTL)
-	if err != nil || notification == nil {
+	if err != nil {
+		w.recordCASConflict(err, nil)
+		return err
+	}
+	if notification == nil {
 		return err
 	}
 	w.metrics.AddCounter(domain.MetricExternalAgentNotificationClaimTotal, 1, port.MetricLabels{
@@ -177,8 +181,14 @@ func (w *NotificationWorker) SnapshotHealth(ctx context.Context, now time.Time) 
 // delivery path. It never invokes the model runtime and never returns result
 // bytes to an ADK event.
 func (w *NotificationWorker) verifyHostCompletion(ctx context.Context, notification *domain.ExternalAgentJobNotification) error {
-	if w == nil || w.completer == nil || notification == nil || notification.PolicyVersion != domain.JobDeliveryPolicyV1 {
+	if notification == nil {
+		return port.NewNotificationPublishError("notification_delivery_invalid", false, false, errors.New("durable notification is unavailable"))
+	}
+	if notification.PolicyVersion != domain.JobDeliveryPolicyV1 {
 		return nil
+	}
+	if w == nil || w.completer == nil {
+		return port.NewNotificationPublishError("result_delivery_failed", false, false, errors.New("durable host completion verifier is unavailable"))
 	}
 	if notification.Actor == "" || notification.ConversationKey == "" {
 		return port.NewNotificationPublishError("result_destination_mismatch", false, false, errors.New("durable notification actor binding is unavailable"))
@@ -217,6 +227,7 @@ func (w *NotificationWorker) recordFailure(ctx context.Context, notification *do
 			now := time.Now().UTC()
 			if err := retryStore.MarkNotificationRetry(context.WithoutCancel(ctx), notification, code, now.Add(w.retryDelay(notification.Attempts)), now); err == nil {
 				w.recordFailureMetric(notification, code)
+				w.logPersistedFailure(notification, code)
 				return nil
 			} else {
 				retryPersistErr = err
@@ -235,6 +246,7 @@ func (w *NotificationWorker) recordFailure(ctx context.Context, notification *do
 		return err
 	}
 	w.recordFailureMetric(notification, code)
+	w.logPersistedFailure(notification, code)
 	// A retry persistence error is surfaced even when the conservative fallback
 	// to unknown succeeded, so Run cannot silently hide a durable write failure.
 	return retryPersistErr
@@ -248,13 +260,26 @@ func (w *NotificationWorker) recordFailureMetric(notification *domain.ExternalAg
 }
 
 func (w *NotificationWorker) recordCASConflict(err error, notification *domain.ExternalAgentJobNotification) {
-	if errors.Is(err, port.ErrNotificationStateConflict) {
+	if errors.Is(err, port.ErrNotificationStateConflict) || errors.Is(err, port.ErrNotificationClaimConflict) {
 		labels := port.MetricLabels(nil)
 		if notification != nil {
 			labels = port.MetricLabels{"result_kind": boundedResultKind(notification.Kind)}
 		}
 		w.metrics.AddCounter(domain.MetricExternalAgentNotificationCASConflictTotal, 1, labels)
 	}
+}
+
+func (w *NotificationWorker) logPersistedFailure(notification *domain.ExternalAgentJobNotification, code string) {
+	if w == nil || notification == nil {
+		return
+	}
+	w.logger.Warn("external-agent notification provider failure persisted",
+		"error_code", safeNotificationErrorCode(code),
+		"job_id", notification.JobID,
+		"status_revision", notification.StatusRevision,
+		"kind", boundedResultKind(notification.Kind),
+		"attempts", notification.Attempts,
+	)
 }
 
 func (w *NotificationWorker) logProcessingError(err error) {
@@ -339,7 +364,7 @@ func notificationErrorCode(err error) string {
 	if err == nil {
 		return "notification_publish_ambiguous"
 	}
-	if errors.Is(err, port.ErrNotificationStateConflict) {
+	if errors.Is(err, port.ErrNotificationStateConflict) || errors.Is(err, port.ErrNotificationClaimConflict) {
 		return "notification_state_conflict"
 	}
 	var classified *port.NotificationPublishError

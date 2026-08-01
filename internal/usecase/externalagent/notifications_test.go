@@ -61,6 +61,7 @@ type fakeNotificationStore struct {
 	markPublishedErr error
 	markUnknownErr   error
 	markRetryErr     error
+	unknownCode      string
 }
 
 func (s *fakeNotificationStore) ClaimNextNotification(context.Context, time.Time, string, time.Duration) (*domain.ExternalAgentJobNotification, error) {
@@ -85,8 +86,14 @@ func (s *fakeNotificationStore) MarkNotificationPublished(_ context.Context, n *
 	s.notification.PublishState = domain.NotificationPublished
 	return nil
 }
-func (s *fakeNotificationStore) MarkNotificationUnknown(context.Context, *domain.ExternalAgentJobNotification, string) error {
-	return s.markUnknownErr
+func (s *fakeNotificationStore) MarkNotificationUnknown(_ context.Context, _ *domain.ExternalAgentJobNotification, code string) error {
+	if s.markUnknownErr != nil {
+		return s.markUnknownErr
+	}
+	s.unknownCode = code
+	s.notification.PublishState = domain.NotificationUnknown
+	s.notification.LastErrorCode = code
+	return nil
 }
 func (s *fakeNotificationStore) MarkNotificationRetry(_ context.Context, _ *domain.ExternalAgentJobNotification, code string, next, _ time.Time) error {
 	if s.markRetryErr != nil {
@@ -199,14 +206,42 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 	}
 }
 
+func TestNotificationWorkerRejectsDeliveryV1WithoutHostCompleter(t *testing.T) {
+	content := "complete host-owned result"
+	notification := domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
+		CanonicalMarkdown: "OpenCode job `job-1` completed.", ContentSHA256: contentSHA256ForTest(content), ContentBytes: int64(len(content)),
+		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
+		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
+	}
+	store := &fakeNotificationStore{notification: notification}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var classified *port.NotificationPublishError
+	if err := worker.verifyHostCompletion(t.Context(), &notification); !errors.As(err, &classified) || classified.Code != "result_delivery_failed" {
+		t.Fatalf("missing host completer error = %v", err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.publishCalled || store.unknownCode != "result_delivery_failed" {
+		t.Fatalf("delivery-v1 bypassed verifier: publish=%v unknown_code=%q", publisher.publishCalled, store.unknownCode)
+	}
+}
+
 type recordingNotificationLogger struct {
-	errors []string
+	warnings []string
+	errors   []string
 }
 
 func (l *recordingNotificationLogger) Debug(string, ...any) {}
 func (l *recordingNotificationLogger) Info(string, ...any)  {}
 func (l *recordingNotificationLogger) Warn(message string, args ...any) {
-	l.errors = append(l.errors, fmt.Sprint(append([]any{message}, args...)...))
+	l.warnings = append(l.warnings, fmt.Sprint(append([]any{message}, args...)...))
 }
 func (l *recordingNotificationLogger) Error(message string, args ...any) {
 	l.errors = append(l.errors, fmt.Sprint(append([]any{message}, args...)...))
@@ -267,6 +302,65 @@ func TestNotificationWorkerReturnsFailurePersistenceError(t *testing.T) {
 	}
 	if err := worker.ProcessOne(t.Context()); err == nil || !errors.Is(err, storeErr) || !errors.Is(err, unknownErr) {
 		t.Fatalf("ProcessOne error = %v, want both persistence errors", err)
+	}
+}
+
+func TestNotificationWorkerPersistsProviderFailureLogsWarningAndRecordsMetric(t *testing.T) {
+	secret := "provider response body must not be logged"
+	logger := &recordingNotificationLogger{}
+	metrics := &recordingNotificationMetrics{}
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		CanonicalMarkdown: "safe", ContentSHA256: "digest", RendererVersion: domain.JobNotificationRenderer,
+		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
+	}}
+	publisher := &fakeNotificationPublisher{publishErr: port.NewNotificationPublishError("notification_publish_ambiguous", false, false, errors.New(secret))}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{
+		Store: store, Publisher: publisher, Logger: logger, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if store.unknownCode != "notification_publish_ambiguous" || store.notification.PublishState != domain.NotificationUnknown || store.notification.LastErrorCode != "notification_publish_ambiguous" {
+		t.Fatalf("provider failure durable state = %#v code=%q", store.notification, store.unknownCode)
+	}
+	if len(logger.warnings) != 1 || !strings.Contains(logger.warnings[0], "notification_publish_ambiguous") || strings.Contains(logger.warnings[0], secret) {
+		t.Fatalf("provider failure warning = %#v", logger.warnings)
+	}
+	foundFailureMetric := false
+	for _, sample := range metrics.samples {
+		if sample.Name == domain.MetricExternalAgentNotificationFailureTotal && sample.Labels["failure_category"] == "provider" && sample.Labels["delivery_mode"] == "markdown" && sample.Value == 1 {
+			foundFailureMetric = true
+		}
+	}
+	if !foundFailureMetric {
+		t.Fatalf("provider failure metrics = %#v", metrics.samples)
+	}
+}
+
+func TestNotificationWorkerExposesClaimCASConflict(t *testing.T) {
+	metrics := &recordingNotificationMetrics{}
+	store := &fakeNotificationStore{claimErr: port.ErrNotificationClaimConflict}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{
+		Store: store, Publisher: &fakeNotificationPublisher{}, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); !errors.Is(err, port.ErrNotificationClaimConflict) {
+		t.Fatalf("claim conflict error = %v", err)
+	}
+	foundConflictMetric := false
+	for _, sample := range metrics.samples {
+		if sample.Name == domain.MetricExternalAgentNotificationCASConflictTotal && sample.Value == 1 {
+			foundConflictMetric = true
+		}
+	}
+	if !foundConflictMetric {
+		t.Fatalf("claim conflict metrics = %#v", metrics.samples)
 	}
 }
 

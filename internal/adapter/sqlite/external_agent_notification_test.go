@@ -46,6 +46,36 @@ func TestTerminalTransitionEnqueuesOneDurableNotification(t *testing.T) {
 	}
 }
 
+func TestNotificationClaimCASConflictReturnsTypedError(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	now := time.Now().UTC()
+	job := testExternalAgentJob(now)
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create = %v, err = %v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), now, "worker-1", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobFailed, nil, "acp_process_exit", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `CREATE TRIGGER ignore_notification_claim_update
+		BEFORE UPDATE OF publish_state ON external_agent_job_notifications
+		WHEN NEW.publish_state = 'publishing'
+		BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobs.ClaimNextNotification(t.Context(), now.Add(2*time.Second), "publisher-1", time.Minute); !errors.Is(err, ErrNotificationClaimConflict) {
+		t.Fatalf("claim CAS error = %v", err)
+	}
+}
+
 func TestNotificationRestartAndAmbiguousPublishAreReconciledBeforeRetry(t *testing.T) {
 	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
@@ -427,15 +457,15 @@ func TestNotificationHealthAndAdminInspectionAreContentFree(t *testing.T) {
 	}
 
 	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications
-		SET delivery_mode = 'file', upload_state = 'completed', slack_file_id = 'FSECRET', last_error_code = 'raw provider body'
-		WHERE job_id = ?`, "job_health_pending"); err != nil {
+		SET delivery_mode = 'file', upload_state = 'completed', slack_file_id = 'FSECRET', last_error_code = 'raw provider body', lease_owner = 'worker-secret', lease_expiry = ?
+		WHERE job_id = ?`, healthNow.Add(time.Minute).UnixNano(), "job_health_pending"); err != nil {
 		t.Fatal(err)
 	}
 	inspection, err := jobs.InspectJob(t.Context(), "job_health_pending")
 	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
 		t.Fatalf("inspection = %#v, err=%v", inspection, err)
 	}
-	if inspection.Deliveries[0].DeliveryMode != domain.JobResultDeliveryFile || !inspection.Deliveries[0].SlackFileIDPresent || inspection.Deliveries[0].UploadState != domain.JobResultUploadCompleted {
+	if inspection.Deliveries[0].DeliveryMode != domain.JobResultDeliveryFile || !inspection.Deliveries[0].SlackFileIDPresent || inspection.Deliveries[0].UploadState != domain.JobResultUploadCompleted || !inspection.Deliveries[0].LeaseOwnerPresent || !inspection.Deliveries[0].LeaseExpiry.Equal(healthNow.Add(time.Minute)) {
 		t.Fatalf("file inspection = %#v", inspection.Deliveries[0])
 	}
 	if inspection.Deliveries[0].LastErrorCode != "notification_publish_ambiguous" {

@@ -262,6 +262,8 @@ func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
 		fmt.Fprintln(out, "notification_kind:")
 		fmt.Fprintln(out, "publish_state:")
 		fmt.Fprintln(out, "attempts: 0")
+		fmt.Fprintln(out, "lease_owner_present: false")
+		fmt.Fprintln(out, "lease_expiry:")
 		fmt.Fprintln(out, "last_error_code:")
 		fmt.Fprintln(out, "next_attempt_at:")
 		fmt.Fprintln(out, "recovered_slack_ts:")
@@ -271,10 +273,13 @@ func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
 		if len(view.Deliveries) > 1 {
 			fmt.Fprintf(out, "delivery_%d:\n", index+1)
 		}
+		fmt.Fprintf(out, "delivery_revision: %d\n", delivery.StatusRevision)
 		fmt.Fprintf(out, "delivery_mode: %s\n", delivery.DeliveryMode)
 		fmt.Fprintf(out, "notification_kind: %s\n", delivery.NotificationKind)
 		fmt.Fprintf(out, "publish_state: %s\n", delivery.PublishState)
 		fmt.Fprintf(out, "attempts: %d\n", delivery.Attempts)
+		fmt.Fprintf(out, "lease_owner_present: %t\n", delivery.LeaseOwnerPresent)
+		fmt.Fprintf(out, "lease_expiry: %s\n", inspectionTime(delivery.LeaseExpiry))
 		fmt.Fprintf(out, "last_error_code: %s\n", delivery.LastErrorCode)
 		fmt.Fprintf(out, "next_attempt_at: %s\n", inspectionTime(delivery.NextAttemptAt))
 		fmt.Fprintf(out, "recovered_slack_ts: %s\n", delivery.RecoveredSlackTS)

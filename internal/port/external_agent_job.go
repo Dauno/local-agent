@@ -9,6 +9,7 @@ import (
 )
 
 var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
+var ErrNotificationClaimConflict = ErrNotificationStateConflict
 
 // ExternalAgentJobStore is the durable source of truth for external-agent
 // execution. Implementations must bind lease operations to owner and attempt.
