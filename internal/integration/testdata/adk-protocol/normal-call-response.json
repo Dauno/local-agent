@@ -1,0 +1,68 @@
+{
+  "schema": "adk-protocol-ledger/v1",
+  "adk": "google.golang.org/adk/v2@v2.0.0",
+  "scenario": "normal-call-response",
+  "events": [
+    {
+      "ordinal": 0,
+      "role": "user",
+      "author": "user",
+      "partial": false,
+      "turn_complete": false,
+      "parts": [
+        {
+          "kind": "text",
+          "text": "run normal-call-response"
+        }
+      ]
+    },
+    {
+      "ordinal": 1,
+      "role": "model",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": true,
+      "parts": [
+        {
+          "kind": "function_call",
+          "id": "call_normal_001",
+          "name": "normal_tool",
+          "args": {
+            "value": "normal"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 2,
+      "role": "user",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": false,
+      "parts": [
+        {
+          "kind": "function_response",
+          "id": "call_normal_001",
+          "name": "normal_tool",
+          "response": {
+            "status": "executed",
+            "value": "normal"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 3,
+      "role": "model",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": true,
+      "parts": [
+        {
+          "kind": "text",
+          "text": "normal complete"
+        }
+      ]
+    }
+  ]
+}
