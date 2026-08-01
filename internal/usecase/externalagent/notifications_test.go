@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,14 +52,21 @@ func TestNotificationWorkerBacksOffAmbiguousReconciliation(t *testing.T) {
 }
 
 type fakeNotificationStore struct {
-	notification domain.ExternalAgentJobNotification
-	claimed      bool
-	publishedTS  string
-	retriedCode  string
-	retriedAt    time.Time
+	notification     domain.ExternalAgentJobNotification
+	claimed          bool
+	publishedTS      string
+	retriedCode      string
+	retriedAt        time.Time
+	claimErr         error
+	markPublishedErr error
+	markUnknownErr   error
+	markRetryErr     error
 }
 
 func (s *fakeNotificationStore) ClaimNextNotification(context.Context, time.Time, string, time.Duration) (*domain.ExternalAgentJobNotification, error) {
+	if s.claimErr != nil {
+		return nil, s.claimErr
+	}
 	if s.claimed || s.notification.PublishState == domain.NotificationPublished {
 		return nil, nil
 	}
@@ -67,6 +75,9 @@ func (s *fakeNotificationStore) ClaimNextNotification(context.Context, time.Time
 	return &s.notification, nil
 }
 func (s *fakeNotificationStore) MarkNotificationPublished(_ context.Context, n *domain.ExternalAgentJobNotification, ts string, _ time.Time) error {
+	if s.markPublishedErr != nil {
+		return s.markPublishedErr
+	}
 	if n == nil || n.JobID != s.notification.JobID {
 		return errors.New("wrong notification")
 	}
@@ -75,9 +86,12 @@ func (s *fakeNotificationStore) MarkNotificationPublished(_ context.Context, n *
 	return nil
 }
 func (s *fakeNotificationStore) MarkNotificationUnknown(context.Context, *domain.ExternalAgentJobNotification, string) error {
-	return nil
+	return s.markUnknownErr
 }
 func (s *fakeNotificationStore) MarkNotificationRetry(_ context.Context, _ *domain.ExternalAgentJobNotification, code string, next, _ time.Time) error {
+	if s.markRetryErr != nil {
+		return s.markRetryErr
+	}
 	s.retriedCode = code
 	s.retriedAt = next
 	return nil
@@ -182,5 +196,105 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 	}
 	if completer.calls != 1 || !publisher.publishCalled || store.publishedTS == "" {
 		t.Fatalf("host completion calls=%d publish=%v timestamp=%q", completer.calls, publisher.publishCalled, store.publishedTS)
+	}
+}
+
+type recordingNotificationLogger struct {
+	errors []string
+}
+
+func (l *recordingNotificationLogger) Debug(string, ...any) {}
+func (l *recordingNotificationLogger) Info(string, ...any)  {}
+func (l *recordingNotificationLogger) Warn(message string, args ...any) {
+	l.errors = append(l.errors, fmt.Sprint(append([]any{message}, args...)...))
+}
+func (l *recordingNotificationLogger) Error(message string, args ...any) {
+	l.errors = append(l.errors, fmt.Sprint(append([]any{message}, args...)...))
+}
+
+type recordingNotificationMetrics struct {
+	samples []port.MetricSample
+}
+
+func (m *recordingNotificationMetrics) AddCounter(name string, delta int64, labels port.MetricLabels) {
+	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: port.CloneMetricLabels(labels)})
+}
+func (m *recordingNotificationMetrics) SetGauge(name string, value int64, labels port.MetricLabels) {
+	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: port.CloneMetricLabels(labels)})
+}
+func (m *recordingNotificationMetrics) Observe(name string, value float64, labels port.MetricLabels) {
+	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: port.CloneMetricLabels(labels)})
+}
+func (m *recordingNotificationMetrics) Snapshot() []port.MetricSample {
+	return append([]port.MetricSample(nil), m.samples...)
+}
+
+func TestNotificationWorkerRunLogsProcessErrorsAndKeepsCodesBounded(t *testing.T) {
+	secret := "provider response body should not appear"
+	logger := &recordingNotificationLogger{}
+	store := &fakeNotificationStore{claimErr: errors.New(secret)}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Hour, LeaseTTL: time.Second}, NotificationDependencies{
+		Store: store, Publisher: &fakeNotificationPublisher{}, Logger: logger,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	worker.Run(ctx)
+	if len(logger.errors) != 1 {
+		t.Fatalf("logged errors = %d, want 1", len(logger.errors))
+	}
+	if strings.Contains(logger.errors[0], secret) {
+		t.Fatalf("raw error leaked to logger: %s", logger.errors[0])
+	}
+	if !strings.Contains(logger.errors[0], "notification_publish_ambiguous") {
+		t.Fatalf("bounded error code missing: %s", logger.errors[0])
+	}
+}
+
+func TestNotificationWorkerReturnsFailurePersistenceError(t *testing.T) {
+	storeErr := errors.New("retry persistence failed")
+	unknownErr := errors.New("unknown persistence failed")
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		PublishState: domain.NotificationPending,
+	}, markRetryErr: storeErr, markUnknownErr: unknownErr}
+	publisher := &fakeNotificationPublisher{publishErr: port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("provider body"))}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err == nil || !errors.Is(err, storeErr) || !errors.Is(err, unknownErr) {
+		t.Fatalf("ProcessOne error = %v, want both persistence errors", err)
+	}
+}
+
+func TestNotificationWorkerMetricsUseOnlyBoundedLabels(t *testing.T) {
+	metrics := &recordingNotificationMetrics{}
+	content := "safe result"
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "secret-job-id", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		Actor: "secret-actor", ConversationKey: "secret-conversation", CanonicalMarkdown: content,
+		ContentSHA256: contentSHA256ForTest(content), ContentBytes: int64(len(content)),
+		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range metrics.samples {
+		for key, value := range sample.Labels {
+			if key != "result_kind" && key != "delivery_mode" && key != "failure_category" {
+				t.Fatalf("unexpected notification metric label %q=%q in %#v", key, value, sample)
+			}
+			if strings.Contains(value, "secret-") {
+				t.Fatalf("sensitive metric label %q=%q", key, value)
+			}
+		}
 	}
 }

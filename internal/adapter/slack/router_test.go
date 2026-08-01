@@ -280,6 +280,12 @@ func TestRouterIgnoresUnsupportedOrUnsafeEvents(t *testing.T) {
 			m.User = testBot
 			return callbackEvent(slackevents.Message, m)
 		}()},
+		{name: "own durable job notification metadata", event: func() slackevents.EventsAPIEvent {
+			m := baseMessage()
+			m.User = testBot
+			m.Message = &slackapi.Msg{User: testBot, Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job"}}
+			return callbackEvent(slackevents.Message, m)
+		}()},
 		{name: "bot message ID", event: func() slackevents.EventsAPIEvent {
 			m := baseMessage()
 			m.BotID = "B00000001"

@@ -241,6 +241,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String,
 			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels},
 		Publisher: nil, Artifacts: models.artifactStore, MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes),
+		Logger: models.logger, Metrics: models.metrics,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -251,7 +252,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	}
 	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
 	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, verifiedArtifacts, store, infra.api, cfg.Slack.PartLabels)
-	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher, HostCompleter: service})
+	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher, HostCompleter: service, Logger: models.logger, Metrics: models.metrics})
 	if err != nil {
 		return nil, nil, err
 	}

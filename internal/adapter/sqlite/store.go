@@ -668,5 +668,12 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	if columns != 7 {
 		return errors.New("external-agent result delivery fields are incomplete")
 	}
+	health, err := NewExternalAgentJobStore(s).NotificationHealth(ctx, time.Now().UTC(), 5*time.Minute)
+	if err != nil {
+		return fmt.Errorf("inspect external-agent notification health: %w", err)
+	}
+	if health.Stuck > 0 {
+		return fmt.Errorf("external-agent notification outbox has %d stuck notifications", health.Stuck)
+	}
 	return nil
 }

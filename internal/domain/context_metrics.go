@@ -58,3 +58,15 @@ const (
 	MetricSyntaxQueryFailureTotal = "syntax_query_failure_total"
 	MetricSyntaxResultTruncated   = "syntax_result_truncated_total"
 )
+
+// Durable external-agent notification metrics. Labels are restricted by the
+// in-process recorder to bounded, non-sensitive dimensions.
+const (
+	MetricExternalAgentNotificationClaimTotal       = "external_agent_notification_claim_total"
+	MetricExternalAgentNotificationPublishTotal     = "external_agent_notification_publish_total"
+	MetricExternalAgentNotificationFailureTotal     = "external_agent_notification_failure_total"
+	MetricExternalAgentNotificationReconcileTotal   = "external_agent_notification_reconcile_total"
+	MetricExternalAgentNotificationCASConflictTotal = "external_agent_notification_cas_conflict_total"
+	MetricExternalAgentNotificationStuck            = "external_agent_notification_stuck"
+	MetricExternalAgentStatusAuthorizationTotal     = "external_agent_status_authorization_total"
+)
