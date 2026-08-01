@@ -27,6 +27,9 @@ var allowedLabelKeys = map[string]struct{}{
 	"language":           {},
 	"engine_id":          {},
 	"failure_category":   {},
+	"delivery_mode":      {},
+	"actor_match":        {},
+	"conversation_match": {},
 	"query_id":           {},
 }
 

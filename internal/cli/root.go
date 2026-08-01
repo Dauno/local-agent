@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
@@ -21,6 +23,12 @@ type Backend interface {
 	Manifest(ctx context.Context, write bool) (content, path string, err error)
 	ResetState(ctx context.Context) error
 	Version() string
+}
+
+// JobInspectionBackend is optional so existing embedders of the CLI backend
+// remain valid while the concrete application exposes local jobs inspect.
+type JobInspectionBackend interface {
+	InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error)
 }
 
 type Streams struct {
@@ -71,6 +79,7 @@ func NewRoot(backend Backend, streams Streams) (*cobra.Command, error) {
 		newRunCommand(backend),
 		newManifestCommand(backend, streams),
 		newVersionCommand(backend, streams),
+		newJobsCommand(backend, streams),
 		newShimCommand(streams),
 	)
 	return root, nil
@@ -204,4 +213,88 @@ func newVersionCommand(backend Backend, streams Streams) *cobra.Command {
 			fmt.Fprintln(streams.Out, backend.Version())
 		},
 	}
+}
+
+func newJobsCommand(backend Backend, streams Streams) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "jobs",
+		Short: "Inspect durable external-agent jobs",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return command.Help()
+		},
+	}
+	command.AddCommand(newJobsInspectCommand(backend, streams))
+	return command
+}
+
+func newJobsInspectCommand(backend Backend, streams Streams) *cobra.Command {
+	return &cobra.Command{
+		Use:   "inspect <job_id>",
+		Short: "Inspect a durable external-agent job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			inspector, ok := backend.(JobInspectionBackend)
+			if !ok {
+				return &ExitError{Code: 1, Cause: errors.New("jobs inspect is unavailable")}
+			}
+			view, err := inspector.InspectJob(command.Context(), args[0])
+			if err != nil {
+				return &ExitError{Code: 1, Cause: errors.New("could not inspect durable job")}
+			}
+			if view == nil {
+				fmt.Fprintln(streams.Out, "job: not found")
+				return nil
+			}
+			writeJobInspection(streams.Out, *view)
+			return nil
+		},
+	}
+}
+
+func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
+	fmt.Fprintf(out, "job_id: %s\n", view.JobID)
+	fmt.Fprintf(out, "status: %s\n", view.Status)
+	fmt.Fprintf(out, "status_revision: %d\n", view.StatusRevision)
+	fmt.Fprintf(out, "finished_at: %s\n", inspectionTime(view.FinishedAt))
+	if len(view.Deliveries) == 0 {
+		fmt.Fprintln(out, "delivery_mode:")
+		fmt.Fprintln(out, "notification_kind:")
+		fmt.Fprintln(out, "publish_state:")
+		fmt.Fprintln(out, "attempts: 0")
+		fmt.Fprintln(out, "lease_owner:")
+		fmt.Fprintln(out, "lease_owner_present: false")
+		fmt.Fprintln(out, "lease_expiry:")
+		fmt.Fprintln(out, "last_error_code:")
+		fmt.Fprintln(out, "next_attempt_at:")
+		fmt.Fprintln(out, "recovered_slack_ts:")
+		return
+	}
+	for index, delivery := range view.Deliveries {
+		if len(view.Deliveries) > 1 {
+			fmt.Fprintf(out, "delivery_%d:\n", index+1)
+		}
+		fmt.Fprintf(out, "delivery_revision: %d\n", delivery.StatusRevision)
+		fmt.Fprintf(out, "delivery_mode: %s\n", delivery.DeliveryMode)
+		fmt.Fprintf(out, "notification_kind: %s\n", delivery.NotificationKind)
+		fmt.Fprintf(out, "publish_state: %s\n", delivery.PublishState)
+		fmt.Fprintf(out, "attempts: %d\n", delivery.Attempts)
+		fmt.Fprintf(out, "lease_owner: %s\n", delivery.LeaseOwner)
+		fmt.Fprintf(out, "lease_owner_present: %t\n", delivery.LeaseOwnerPresent)
+		fmt.Fprintf(out, "lease_expiry: %s\n", inspectionTime(delivery.LeaseExpiry))
+		fmt.Fprintf(out, "last_error_code: %s\n", delivery.LastErrorCode)
+		fmt.Fprintf(out, "next_attempt_at: %s\n", inspectionTime(delivery.NextAttemptAt))
+		fmt.Fprintf(out, "recovered_slack_ts: %s\n", delivery.RecoveredSlackTS)
+		if delivery.DeliveryMode == domain.JobResultDeliveryFile {
+			fmt.Fprintf(out, "upload_state: %s\n", delivery.UploadState)
+			fmt.Fprintf(out, "slack_file_id_present: %t\n", delivery.SlackFileIDPresent)
+		}
+	}
+}
+
+func inspectionTime(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	return value.UTC().Format(time.RFC3339Nano)
 }

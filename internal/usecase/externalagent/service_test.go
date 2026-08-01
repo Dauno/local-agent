@@ -270,6 +270,61 @@ func TestHostCompletionReadsOnlyAuthorizedCompleteResult(t *testing.T) {
 	}
 }
 
+func TestStatusMismatchSignalsDoNotRevealComparedBindings(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	logger := &recordingNotificationLogger{}
+	metrics := &recordingNotificationMetrics{}
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+		Store: jobStore, Runtime: &fakeJobRuntime{}, Logger: logger, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequest(domain.JobDetached)
+	job, err := service.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, testCase := range []struct {
+		name              string
+		actor             string
+		conversation      domain.ConversationKey
+		actorMatch        string
+		conversationMatch string
+	}{
+		{name: "actor mismatch", actor: "U99999999", conversation: job.ConversationKey, actorMatch: "false", conversationMatch: "true"},
+		{name: "conversation mismatch", actor: job.Actor, conversation: "slack:T12345678:dm:D99999999", actorMatch: "true", conversationMatch: "false"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := service.Status(t.Context(), job.ID, testCase.actor, testCase.conversation); err == nil || !strings.Contains(err.Error(), "not authorized") {
+				t.Fatalf("Status error = %v", err)
+			}
+			found := false
+			for _, sample := range metrics.samples {
+				if sample.Name != domain.MetricExternalAgentStatusAuthorizationTotal {
+					continue
+				}
+				if sample.Labels["actor_match"] == testCase.actorMatch && sample.Labels["conversation_match"] == testCase.conversationMatch {
+					found = true
+				}
+			}
+			if !found {
+				t.Fatalf("authorization metrics = %#v", metrics.samples)
+			}
+		})
+	}
+	for _, log := range logger.errors {
+		if strings.Contains(log, "U99999999") || strings.Contains(log, "D99999999") {
+			t.Fatalf("authorization log revealed compared binding: %s", log)
+		}
+	}
+}
+
 func TestHostCompletionVerifiesPrivateArtifactDigest(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {

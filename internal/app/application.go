@@ -16,6 +16,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/buildinfo"
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/manifest"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
@@ -158,6 +159,36 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 }
 
 func (*Application) Version() string { return buildinfo.String() }
+
+// InspectJob is a local, read-only administrative query. It deliberately
+// avoids runtime composition, Slack credentials, model calls, and migrations.
+func (a *Application) InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error) {
+	if strings.TrimSpace(jobID) == "" {
+		return nil, errors.New("job ID is required")
+	}
+	configPath, err := config.ConfigPath(a.root)
+	if err != nil {
+		return nil, err
+	}
+	cfg, err := config.Load(configPath)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil, errors.New("configuration not found")
+		}
+		return nil, err
+	}
+	paths, err := cfg.ResolvePaths(a.root)
+	if err != nil {
+		return nil, err
+	}
+	store, err := adaptersqlite.OpenReadOnly(ctx, paths.DatabaseFile)
+	if err != nil {
+		return nil, err
+	}
+	defer store.Close()
+	jobStore := adaptersqlite.NewExternalAgentJobStore(store)
+	return jobStore.InspectJob(ctx, jobID)
+}
 
 // ResetState implements the destructive init --reset-state command.
 // It deletes the SQLite database and generated memory projections.
