@@ -11,7 +11,15 @@ profiles:
       - id: mode
         value: build
     permission_option_kind: reject_once
-
+  flash-h:
+    config_options:
+      - id: model
+        value: deepseek/deepseek-v4-flash
+      - id: effort
+        value: high
+      - id: mode
+        value: build
+    permission_option_kind: allow_once
   flash-reasoning:
     config_options:
       - id: model
@@ -38,7 +46,7 @@ profiles:
       - id: effort
         value: high
       - id: mode
-        value: plan
+        value: thinker
     permission_option_kind: allow_once
   luna-xhigh:
     config_options:

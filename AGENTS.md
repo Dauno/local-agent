@@ -144,7 +144,7 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - **Ephemeral context**: Slack enrichment and memory snippets are injected per-turn via the user message text; they must never become durable ADK events.
 - **Sandbox**: workspace inspection is opt-in through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env`, `.local-agent`, and `.git` at every depth (including symlinks).
 - **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, verified owner/digest reads, and are cleaned by `acp.artifact_retention_days` only when no unpublished delivery references them. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, delivery policy, and v22 job/outbox fields without reading result content or secrets. Durable ACP file fallback requires Slack `files:write`.
-- **Worktrees**: new worktrees live under `.local-agent/worktrees/<name>` relative to the repo root (gitignored). Use the repo alias `git wtadd <name> [git-worktree-add args...]`, which resolves to `git worktree add .local-agent/worktrees/<name> <args...>`.
+- **Worktrees**: new worktrees live under `.worktrees/<name>` relative to the repo root (gitignored). Use the repo alias `git wtadd <name> [git-worktree-add args...]`, which resolves to `git worktree add .worktrees/<name> <args...>`.
 
 ## OpenCode config
 

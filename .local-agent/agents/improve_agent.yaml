@@ -1,6 +1,8 @@
 agent_class: AcpAgent
 name: improve_agent
 runtime: opencode/sol-high
+execution_mode: durable_job
+timeout_seconds: 7200
 description: |
   Audits registered codebases as a senior advisor and returns prioritized,
   self-contained implementation plans for a separate executor.
