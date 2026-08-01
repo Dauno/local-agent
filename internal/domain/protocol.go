@@ -47,6 +47,8 @@ type ProviderProtocolCapabilities struct {
 
 var ErrProtocolValidation = errors.New("protocol_validation_failed")
 
+const protocolDigestVersion = "v1"
+
 // ProtocolValidationRule identifies the independently testable structural or
 // policy rule that rejected a content sequence.
 type ProtocolValidationRule string
@@ -254,10 +256,10 @@ func ClassifyProtocolFrontier(contents []Content, options ...ProtocolValidationO
 	return ScanProtocolFrontier(contents, options...)
 }
 
-// ProtocolDigest returns a deterministic digest of protocol identity and
-// ordering. Text, arguments, response data, and structured payloads are
-// represented only by their kind, so the digest is safe for diagnostics and
-// independent of map iteration order.
+// ProtocolDigest returns a deterministic v1:<lowercase SHA-256> digest of
+// protocol identity and ordering. Text, arguments, response data, and
+// structured payloads are represented only by their kind, so the digest is
+// safe for diagnostics and independent of map iteration order.
 func ProtocolDigest(contents []Content) string {
 	type digestPart struct {
 		Kind         string `json:"kind"`
@@ -306,7 +308,7 @@ func ProtocolDigest(contents []Content) string {
 	}
 	encoded, _ := json.Marshal(digestContents)
 	digest := sha256.Sum256(encoded)
-	return fmt.Sprintf("%x", digest[:])
+	return fmt.Sprintf("%s:%x", protocolDigestVersion, digest[:])
 }
 
 // ContentProtocolDigest keeps the digest name explicit for callers that deal

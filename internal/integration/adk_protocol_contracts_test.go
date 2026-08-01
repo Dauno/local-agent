@@ -10,7 +10,9 @@ import (
 	"iter"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -34,12 +36,87 @@ import (
 var updateADKProtocolFixtures = flag.Bool("update-adk-protocol-fixtures", false, "regenerate testdata/adk-protocol fixtures from the pinned ADK")
 
 const (
-	protocolAppName = "local-agent"
-	protocolUserID  = "local_user"
-	protocolActor   = "U12345678"
-	protocolSchema  = "adk-protocol-ledger/v1"
-	protocolADK     = "google.golang.org/adk/v2@v2.0.0"
+	protocolAppName   = "local-agent"
+	protocolUserID    = "local_user"
+	protocolActor     = "U12345678"
+	protocolSchema    = "adk-protocol-ledger/v1"
+	protocolADKModule = "google.golang.org/adk/v2"
+	protocolADK       = "google.golang.org/adk/v2@v2.0.0"
 )
+
+type protocolGoMod struct {
+	Require []struct {
+		Path    string
+		Version string
+	} `json:"Require"`
+}
+
+// TestADKProtocolPinMatchesCompiledModule guards the fixture's ADK identity
+// against both go.mod and the dependency recorded in this test binary.
+func TestADKProtocolPinMatchesCompiledModule(t *testing.T) {
+	declared := declaredProtocolADKVersion(t)
+	compiled := compiledProtocolADKVersion(t)
+	if declared != compiled {
+		t.Fatalf("ADK version mismatch: go.mod declares %s, test binary compiled %s", declared, compiled)
+	}
+	wantFixtureADK := protocolADKModule + "@" + declared
+	if protocolADK != wantFixtureADK {
+		t.Fatalf("fixture ADK identity = %q, want %q from go.mod", protocolADK, wantFixtureADK)
+	}
+}
+
+func declaredProtocolADKVersion(t *testing.T) string {
+	t.Helper()
+	output, err := exec.Command("go", "mod", "edit", "-json", "../../go.mod").CombinedOutput()
+	if err != nil {
+		t.Fatalf("read go.mod with go mod edit: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	var module protocolGoMod
+	if err := json.Unmarshal(output, &module); err != nil {
+		t.Fatalf("decode go.mod metadata: %v", err)
+	}
+	for _, requirement := range module.Require {
+		if requirement.Path == protocolADKModule {
+			if requirement.Version == "" {
+				t.Fatalf("go.mod has empty version for %s", protocolADKModule)
+			}
+			return requirement.Version
+		}
+	}
+	t.Fatalf("go.mod does not require %s", protocolADKModule)
+	return ""
+}
+
+func compiledProtocolADKVersion(t *testing.T) string {
+	t.Helper()
+	buildInfo, ok := debug.ReadBuildInfo()
+	if ok {
+		for _, dependency := range buildInfo.Deps {
+			if dependency.Path != protocolADKModule {
+				continue
+			}
+			if dependency.Replace != nil {
+				t.Fatalf("test binary uses replaced ADK module %q instead of pinned module", dependency.Replace.Path)
+			}
+			if dependency.Version == "" {
+				t.Fatalf("test binary has empty compiled version for %s", protocolADKModule)
+			}
+			return dependency.Version
+		}
+	}
+
+	// Go test binaries omit package dependencies from BuildInfo. The module
+	// graph selected by go list is therefore the compiled version's source.
+	output, err := exec.Command("go", "list", "-m", "-f", "{{.Version}}", protocolADKModule).CombinedOutput()
+	if err != nil {
+		t.Fatalf("resolve compiled ADK module with go list: %v: %s", err, strings.TrimSpace(string(output)))
+	}
+	version := strings.TrimSpace(string(output))
+	if version == "" {
+		t.Fatalf("go list returned empty version for %s", protocolADKModule)
+	}
+	return version
+}
 
 type scriptedModelStep struct {
 	responses []*model.LLMResponse

@@ -3,6 +3,7 @@ package domain
 import (
 	"encoding/json"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -24,6 +25,10 @@ func protocolCalls(idName ...string) Content {
 
 func protocolResponse(id, name string, response map[string]any) Content {
 	return Content{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: id, Name: name, Response: response}}}}
+}
+
+func protocolContinuationResponse(id, name string, continuation bool) Content {
+	return Content{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: id, Name: name, WillContinue: &continuation}}}}
 }
 
 func protocolConfirmationCall(id, originalID, originalName string) Content {
@@ -104,14 +109,22 @@ func TestScanProtocolFrontierClassifiesMissingParallelResponse(t *testing.T) {
 
 func TestProtocolValidationRejectsMalformedSequencesWithTypedErrors(t *testing.T) {
 	tests := []struct {
-		name     string
-		contents []Content
-		rule     ProtocolValidationRule
+		name            string
+		contents        []Content
+		options         ProtocolValidationOptions
+		rule            ProtocolValidationRule
+		contentIndex    int
+		partIndex       int
+		frontierCorrupt bool
 	}{
 		{
-			name:     "response before call",
-			contents: []Content{protocolResponse("call-1", "lookup", nil)},
-			rule:     ProtocolRuleResponseBeforeCall,
+			name:            "response before call",
+			contents:        []Content{protocolResponse("call-1", "lookup", nil)},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleResponseBeforeCall,
+			contentIndex:    0,
+			partIndex:       0,
+			frontierCorrupt: true,
 		},
 		{
 			name: "duplicate call ID",
@@ -119,7 +132,11 @@ func TestProtocolValidationRejectsMalformedSequencesWithTypedErrors(t *testing.T
 				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
 				protocolCallContent(ContentRoleModel, "call-1", "write"),
 			},
-			rule: ProtocolRuleDuplicateCall,
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleDuplicateCall,
+			contentIndex:    1,
+			partIndex:       0,
+			frontierCorrupt: true,
 		},
 		{
 			name: "mismatched response name",
@@ -127,12 +144,311 @@ func TestProtocolValidationRejectsMalformedSequencesWithTypedErrors(t *testing.T
 				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
 				protocolResponse("call-1", "write", nil),
 			},
-			rule: ProtocolRuleResponseName,
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleResponseName,
+			contentIndex:    1,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name:            "unsupported content role",
+			contents:        []Content{{Role: ContentRole("tool"), Parts: []ContentPart{{Text: "invalid"}}}},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleContentRole,
+			contentIndex:    0,
+			partIndex:       -1,
+			frontierCorrupt: true,
+		},
+		{
+			name:     "content has no parts",
+			contents: []Content{{Role: ContentRoleUser}},
+			options: ProtocolValidationOptions{
+				AllowConfirmationLifecycle: true,
+				RequireProviderReadyOrder:  true,
+			},
+			rule:            ProtocolRuleProviderReadyOrder,
+			contentIndex:    0,
+			partIndex:       -1,
+			frontierCorrupt: true,
+		},
+		{
+			name:     "content has empty part",
+			contents: []Content{{Role: ContentRoleUser, Parts: []ContentPart{{}}}},
+			options: ProtocolValidationOptions{
+				AllowConfirmationLifecycle: true,
+				RequireProviderReadyOrder:  true,
+			},
+			rule:            ProtocolRuleProviderReadyOrder,
+			contentIndex:    0,
+			partIndex:       -1,
+			frontierCorrupt: true,
+		},
+		{
+			name: "part contains call and response",
+			contents: []Content{{
+				Role: ContentRoleModel,
+				Parts: []ContentPart{{
+					FunctionCall:     &FunctionCall{ID: "call-1", Name: "lookup"},
+					FunctionResponse: &FunctionResponse{ID: "call-1", Name: "lookup"},
+				}},
+			}},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleContentPart,
+			contentIndex:    0,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "function call contains text",
+			contents: []Content{{
+				Role:  ContentRoleModel,
+				Parts: []ContentPart{{FunctionCall: &FunctionCall{ID: "call-1", Name: "lookup"}, Text: "ambiguous"}},
+			}},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleContentPart,
+			contentIndex:    0,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "function response contains text",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
+				{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "lookup"}, Text: "ambiguous"}}},
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleContentPart,
+			contentIndex:    1,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name:            "function call has empty ID",
+			contents:        []Content{protocolCallContent(ContentRoleModel, "", "lookup")},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleCallIdentity,
+			contentIndex:    0,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name:            "function call has empty name",
+			contents:        []Content{protocolCallContent(ContentRoleModel, "call-1", "")},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleCallIdentity,
+			contentIndex:    0,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name:            "function response has empty ID",
+			contents:        []Content{protocolResponse("", "lookup", nil)},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleResponseIdentity,
+			contentIndex:    0,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name:            "function response has empty name",
+			contents:        []Content{protocolResponse("call-1", "", nil)},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleResponseIdentity,
+			contentIndex:    0,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "duplicate response",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
+				protocolResponse("call-1", "lookup", nil),
+				protocolResponse("call-1", "lookup", nil),
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleDuplicateResponse,
+			contentIndex:    2,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "continuation is disabled",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
+				protocolContinuationResponse("call-1", "lookup", true),
+			},
+			options:         protocolOptions(true),
+			rule:            ProtocolRuleContinuationNotAllowed,
+			contentIndex:    1,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "confirmation lifecycle is disabled",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				protocolConfirmationCall("wrapper-1", "call-1", "write"),
+			},
+			options:         ProtocolValidationOptions{},
+			rule:            ProtocolRuleConfirmationLifecycle,
+			contentIndex:    2,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "confirmation original call is missing",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				protocolConfirmationCall("wrapper-1", "", "write"),
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleConfirmationLifecycle,
+			contentIndex:    2,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "confirmation original call has empty name",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				protocolConfirmationCall("wrapper-1", "call-1", ""),
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleConfirmationLifecycle,
+			contentIndex:    2,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "confirmation original call has invalid encoding",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				{Role: ContentRoleModel, Parts: []ContentPart{{FunctionCall: &FunctionCall{
+					ID: "wrapper-1", Name: ConfirmationFunctionName, Args: map[string]any{"originalFunctionCall": "call-1"},
+				}}}},
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleConfirmationLifecycle,
+			contentIndex:    2,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "confirmation original call is unknown",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				protocolConfirmationCall("wrapper-1", "missing-call", "write"),
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleConfirmationLifecycle,
+			contentIndex:    2,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "duplicate confirmation",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				protocolConfirmationCall("wrapper-1", "call-1", "write"),
+				protocolConfirmationCall("wrapper-2", "call-1", "write"),
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleConfirmationLifecycle,
+			contentIndex:    3,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name: "terminal response precedes confirmation decision",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				protocolConfirmationCall("wrapper-1", "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"result": "done"}),
+			},
+			options:         protocolOptions(false),
+			rule:            ProtocolRuleConfirmationLifecycle,
+			contentIndex:    3,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name:     "function call has user role for provider",
+			contents: []Content{protocolCallContent(ContentRoleUser, "call-1", "lookup")},
+			options: ProtocolValidationOptions{
+				AllowConfirmationLifecycle: true,
+				RequireProviderReadyOrder:  true,
+			},
+			rule:            ProtocolRuleProviderReadyOrder,
+			contentIndex:    0,
+			partIndex:       -1,
+			frontierCorrupt: true,
+		},
+		{
+			name:     "function response has model role for provider",
+			contents: []Content{{Role: ContentRoleModel, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "lookup"}}}}},
+			options: ProtocolValidationOptions{
+				AllowConfirmationLifecycle: true,
+				RequireProviderReadyOrder:  true,
+			},
+			rule:            ProtocolRuleProviderReadyOrder,
+			contentIndex:    0,
+			partIndex:       -1,
+			frontierCorrupt: true,
+		},
+		{
+			name: "new call follows open invocation for provider",
+			contents: []Content{
+				protocolText(ContentRoleUser, "start"),
+				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
+				protocolCallContent(ContentRoleModel, "call-2", "write"),
+			},
+			options: ProtocolValidationOptions{
+				AllowConfirmationLifecycle: true,
+				RequireProviderReadyOrder:  true,
+			},
+			rule:            ProtocolRuleProviderReadyOrder,
+			contentIndex:    2,
+			partIndex:       0,
+			frontierCorrupt: true,
+		},
+		{
+			name:         "incomplete call has no terminal response",
+			contents:     []Content{protocolCallContent(ContentRoleModel, "call-1", "lookup")},
+			options:      protocolOptions(true),
+			rule:         ProtocolRuleIncompleteCall,
+			contentIndex: -1,
+			partIndex:    -1,
+		},
+		{
+			name: "incomplete confirmation has no terminal response",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "write"),
+				protocolResponse("call-1", "write", map[string]any{"error": "requires confirmation"}),
+				protocolConfirmationCall("wrapper-1", "call-1", "write"),
+				protocolResponse("wrapper-1", ConfirmationFunctionName, map[string]any{"confirmed": true}),
+			},
+			options:      protocolOptions(true),
+			rule:         ProtocolRuleIncompleteConfirmation,
+			contentIndex: -1,
+			partIndex:    -1,
 		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			err := ValidateContentProtocol(test.contents, protocolOptions(false))
+			err := ValidateContentProtocol(test.contents, test.options)
+			if err == nil {
+				t.Fatal("malformed protocol unexpectedly passed validation")
+			}
+			if !errors.Is(err, ErrProtocolValidation) {
+				t.Fatalf("error = %v, want errors.Is(err, ErrProtocolValidation)", err)
+			}
 			var validationErr *ProtocolValidationError
 			if !errors.As(err, &validationErr) {
 				t.Fatalf("error = %v, want ProtocolValidationError", err)
@@ -140,10 +456,18 @@ func TestProtocolValidationRejectsMalformedSequencesWithTypedErrors(t *testing.T
 			if validationErr.Rule != test.rule {
 				t.Fatalf("rule = %q, want %q", validationErr.Rule, test.rule)
 			}
-			frontier, frontierErr := ScanProtocolFrontier(test.contents)
-			var classificationErr *ProtocolFrontierError
-			if frontier.Status != ProtocolCorrupt || !errors.As(frontierErr, &classificationErr) {
-				t.Fatalf("corrupt scan = %#v, %v", frontier, frontierErr)
+			if validationErr.ContentIndex != test.contentIndex || validationErr.PartIndex != test.partIndex {
+				t.Fatalf("error indexes = (%d, %d), want (%d, %d)", validationErr.ContentIndex, validationErr.PartIndex, test.contentIndex, test.partIndex)
+			}
+			if test.frontierCorrupt {
+				frontier, frontierErr := ScanProtocolFrontier(test.contents, test.options)
+				var classificationErr *ProtocolFrontierError
+				if frontier.Status != ProtocolCorrupt || !errors.As(frontierErr, &classificationErr) {
+					t.Fatalf("corrupt scan = %#v, %v", frontier, frontierErr)
+				}
+				if !errors.Is(frontierErr, ErrProtocolValidation) {
+					t.Fatalf("frontier error = %v, want errors.Is(err, ErrProtocolValidation)", frontierErr)
+				}
 			}
 		})
 	}
@@ -383,5 +707,65 @@ func TestProtocolDigestIgnoresMapIterationAndContentData(t *testing.T) {
 	}
 	if ProtocolDigest(left) != ContentProtocolDigest(left) {
 		t.Fatal("digest alias changed protocol digest")
+	}
+}
+
+func TestProtocolDigestV1IsStableAndSensitiveToIdentity(t *testing.T) {
+	continuation := false
+	base := []Content{
+		protocolText(ContentRoleUser, "request"),
+		protocolCallContent(ContentRoleModel, "call-1", "lookup"),
+		{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{
+			ID: "call-1", Name: "lookup", WillContinue: &continuation,
+		}}}},
+		protocolConfirmationCall("wrapper-1", "call-1", "lookup"),
+	}
+
+	const wantGolden = "v1:9f95e04120eaebd5bb8d460f8392f52481aaea1d79f61effd380e3afaaaffa06"
+	got := ProtocolDigest(base)
+	if got != wantGolden {
+		t.Fatalf("protocol digest = %q, want golden %q", got, wantGolden)
+	}
+	if !strings.HasPrefix(got, "v1:") {
+		t.Fatalf("protocol digest = %q, want explicit v1 format", got)
+	}
+
+	clone := func() []Content {
+		result := make([]Content, len(base))
+		for index, content := range base {
+			result[index] = content.Clone()
+		}
+		return result
+	}
+	variants := []struct {
+		name   string
+		mutate func([]Content)
+	}{
+		{name: "role", mutate: func(contents []Content) { contents[0].Role = ContentRoleModel }},
+		{name: "order", mutate: func(contents []Content) { contents[1], contents[2] = contents[2], contents[1] }},
+		{name: "IDs", mutate: func(contents []Content) {
+			contents[1].Parts[0].FunctionCall.ID = "call-2"
+			contents[2].Parts[0].FunctionResponse.ID = "call-2"
+		}},
+		{name: "names", mutate: func(contents []Content) {
+			contents[1].Parts[0].FunctionCall.Name = "search"
+			contents[2].Parts[0].FunctionResponse.Name = "search"
+		}},
+		{name: "WillContinue", mutate: func(contents []Content) {
+			value := true
+			contents[2].Parts[0].FunctionResponse.WillContinue = &value
+		}},
+		{name: "original confirmation identity", mutate: func(contents []Content) {
+			contents[3].Parts[0].FunctionCall.Args["originalFunctionCall"] = map[string]any{"id": "call-2", "name": "search"}
+		}},
+	}
+	for _, variant := range variants {
+		t.Run(variant.name, func(t *testing.T) {
+			contents := clone()
+			variant.mutate(contents)
+			if digest := ProtocolDigest(contents); digest == got {
+				t.Fatalf("protocol digest did not change for %s: %q", variant.name, digest)
+			}
+		})
 	}
 }
