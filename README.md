@@ -15,25 +15,25 @@ in a project-local SQLite database.
 
 ## Install
 
-With Go 1.25+ installed, download and build the latest release:
+With Go 1.25+ installed, download and build a pinned release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Dauno/local-agent/main/install.sh | bash
+VERSION=v0.2.0
+installer="$(mktemp)"
+trap 'rm -f "$installer"' EXIT
+curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
+  "https://raw.githubusercontent.com/Dauno/local-agent/${VERSION}/install.sh" -o "$installer"
+VERSION="$VERSION" bash "$installer"
 ```
 
-The installer downloads the GitHub release source archive and records its tag
-and commit in `local-agent version`. Install a specific release with:
+The installer verifies the release archive's SHA-256 checksum before building
+and records its tag and commit in `local-agent version`.
 
-```sh
-curl -fsSL https://raw.githubusercontent.com/Dauno/local-agent/main/install.sh \
-  | VERSION=v0.2.0 bash
-```
-
-From a local clone, `./install.sh` builds the checkout. An untagged checkout is
+From a local clone, `./install.sh --local` builds the checkout. An untagged checkout is
 reported as `dev`:
 
 ```sh
-./install.sh
+./install.sh --local
 ```
 
 The binary is placed in `$HOME/.local-agent/bin/local-agent`. Make sure the
@@ -46,7 +46,7 @@ export PATH="$HOME/.local-agent/bin:$PATH"
 Override the destination with `PREFIX`:
 
 ```sh
-PREFIX=$HOME/.local/bin ./install.sh
+PREFIX=$HOME/.local/bin ./install.sh --local
 ```
 
 Build metadata includes the selected tag, current commit, and build date.
