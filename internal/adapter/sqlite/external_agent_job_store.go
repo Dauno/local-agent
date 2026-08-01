@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"strings"
 	"time"
 
@@ -23,6 +24,12 @@ var _ port.ArtifactReferenceChecker = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobReconciler = (*ExternalAgentJobStore)(nil)
 
 var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
+
+const (
+	notificationRetryBaseDelay = time.Second
+	notificationRetryMaxDelay  = 60 * time.Second
+	notificationRetryJitter    = 0.2
+)
 
 type ExternalAgentJobStore struct{ db *sql.DB }
 
@@ -479,7 +486,7 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		WHERE ((publish_state IN (?, ?) AND next_attempt_at <= ?) OR
 			(publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?))
 		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
-		AND NOT (last_error_code = 'result_file_upload_unknown' AND length(slack_file_id) = 0)
+		AND NOT (last_error_code = 'result_file_upload_unknown' AND publish_state = 'unknown')
 		ORDER BY next_attempt_at ASC, created_at ASC LIMIT 1`,
 		domain.NotificationPending, domain.NotificationUnknown, now.UnixNano(), domain.NotificationPublishing, now.UnixNano()).Scan(&jobID, &revision, &kind)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -498,7 +505,7 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		((publish_state IN (?, ?) AND next_attempt_at <= ?) OR
 		 (publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?))
 		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
-		AND NOT (last_error_code = 'result_file_upload_unknown' AND length(slack_file_id) = 0)`,
+		AND NOT (last_error_code = 'result_file_upload_unknown' AND publish_state = 'unknown')`,
 		domain.NotificationPublishing, owner, leaseExpiry.UnixNano(), now.UnixNano(), jobID, revision, kind,
 		domain.NotificationPending, domain.NotificationUnknown, now.UnixNano(), domain.NotificationPublishing, now.UnixNano())
 	if err != nil {
@@ -618,11 +625,17 @@ func (s *ExternalAgentJobStore) MarkNotificationUnknown(ctx context.Context, not
 	}
 	defer func() { _ = tx.Rollback() }()
 	code := safeNotificationError(errorCode)
+	permanent := permanentNotificationError(code)
+	nextAttemptAt := now
+	if !permanent {
+		nextAttemptAt = now.Add(notificationRetryDelay(notification.Attempts, rand.Float64()*2-1))
+	}
 	result, err := tx.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
-		publish_state = ?, lease_owner = '', lease_expiry = 0, next_attempt_at = ?, last_error_code = ?, updated_at = ?
+		publish_state = ?, lease_owner = '', lease_expiry = 0,
+		next_attempt_at = CASE WHEN ? THEN next_attempt_at ELSE ? END, last_error_code = ?, updated_at = ?
 		, upload_state = CASE WHEN delivery_mode = 'file' THEN ? ELSE upload_state END
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND publish_state = ?
-		AND lease_owner = ? AND attempts = ?`, domain.NotificationUnknown, now.UnixNano(), code, now.UnixNano(),
+		AND lease_owner = ? AND attempts = ?`, domain.NotificationUnknown, boolInt(permanent), nextAttemptAt.UnixNano(), code, now.UnixNano(),
 		domain.JobResultUploadUnknown, notification.JobID, notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
 	if err != nil {
 		return fmt.Errorf("mark notification unknown: %w", err)
@@ -630,7 +643,7 @@ func (s *ExternalAgentJobStore) MarkNotificationUnknown(ctx context.Context, not
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrNotificationStateConflict
 	}
-	if permanentNotificationError(code) {
+	if permanent {
 		markdown := fmt.Sprintf("OpenCode job `%s` completed, but its result could not be delivered.\nDelivery code: `%s`.", notification.JobID, code)
 		digest := sha256.Sum256([]byte(markdown))
 		_, err = tx.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
@@ -650,6 +663,25 @@ func (s *ExternalAgentJobStore) MarkNotificationUnknown(ctx context.Context, not
 		}
 	}
 	return tx.Commit()
+}
+
+func notificationRetryDelay(attempt int, jitter float64) time.Duration {
+	if attempt < 1 {
+		attempt = 1
+	}
+	delay := notificationRetryBaseDelay
+	for current := 1; current < attempt && delay < notificationRetryMaxDelay; current++ {
+		if delay >= notificationRetryMaxDelay/2 {
+			delay = notificationRetryMaxDelay
+			break
+		}
+		delay *= 2
+	}
+	if delay >= notificationRetryMaxDelay {
+		return notificationRetryMaxDelay
+	}
+	jitter = min(max(jitter, -1), 1)
+	return delay + time.Duration(float64(delay)*notificationRetryJitter*jitter)
 }
 
 func permanentNotificationError(code string) bool {

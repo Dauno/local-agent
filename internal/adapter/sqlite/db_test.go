@@ -163,6 +163,7 @@ func TestOpenExistingUpgradesV21ToV26AndPreservesLegacyNotification(t *testing.T
 func TestOpenExistingUpgradesV25ToV26PreservesLegacyRowsAndAddsEvidenceTriggers(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 25)
+	restoreHistoricalV25DeliveryTriggers(t, raw)
 	seedLegacyExternalAgentNotification(t, raw)
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
@@ -184,8 +185,8 @@ func TestOpenExistingUpgradesV25ToV26PreservesLegacyRowsAndAddsEvidenceTriggers(
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_schema WHERE type = 'trigger' AND name LIKE '%_v26'`).Scan(&triggerCount); err != nil {
 		t.Fatal(err)
 	}
-	if triggerCount != 3 {
-		t.Fatalf("v26 trigger count = %d, want 3", triggerCount)
+	if triggerCount != 4 {
+		t.Fatalf("v26 trigger count = %d, want 4", triggerCount)
 	}
 	_, err = store.db.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
 		job_id, status_revision, kind, canonical_markdown, content_sha256, renderer_version,
@@ -195,6 +196,56 @@ func TestOpenExistingUpgradesV25ToV26PreservesLegacyRowsAndAddsEvidenceTriggers(
 		'published', 1, 'markdown', 'delivery_v1', 1, 1, 'not_applicable', '')`, strings.Repeat("a", 64))
 	if err == nil {
 		t.Fatal("v26 published delivery without Slack evidence was accepted")
+	}
+	_, err = store.db.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
+		job_id, status_revision, kind, canonical_markdown, content_sha256, renderer_version,
+		channel_id, publish_state, next_attempt_at, delivery_mode, policy_version,
+		artifact_ref, result_bytes, max_markdown_parts, upload_state)
+		VALUES ('migration-job', 1, 'invalid-file', 'result', ?, 'markdown_v1', 'D12345678',
+		'pending', 1, 'file', 'delivery_v1', 'migration-job-delivery.result', 1, 1, 'not_applicable')`, strings.Repeat("a", 64))
+	if err == nil {
+		t.Fatal("v26 file delivery with inapplicable upload state was accepted")
+	}
+}
+
+func restoreHistoricalV25DeliveryTriggers(t *testing.T, db *sql.DB) {
+	t.Helper()
+	ctx := context.Background()
+	for _, name := range []string{
+		"external_agent_job_notifications_delivery_insert",
+		"external_agent_job_notifications_delivery_shape_update",
+		"external_agent_job_notifications_delivery_evidence_insert",
+		"external_agent_job_notifications_delivery_evidence_update",
+	} {
+		if _, err := db.ExecContext(ctx, "DROP TRIGGER "+name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := db.ExecContext(ctx, `CREATE TRIGGER external_agent_job_notifications_delivery_insert
+		BEFORE INSERT ON external_agent_job_notifications
+		WHEN NEW.policy_version != 'legacy_v1' AND (
+			NEW.delivery_mode NOT IN ('markdown', 'file') OR
+			length(NEW.content_sha256) != 64 OR NEW.result_bytes <= 0 OR NEW.max_markdown_parts < 1 OR NEW.max_markdown_parts > 8 OR
+			(NEW.delivery_mode = 'markdown' AND (length(NEW.artifact_ref) > 0 OR NEW.upload_state != 'not_applicable')) OR
+			(NEW.delivery_mode = 'file' AND length(NEW.artifact_ref) = 0) OR
+			NEW.upload_state NOT IN ('not_applicable', 'pending', 'url_requested', 'bytes_uploaded', 'completed', 'unknown')
+		)
+		BEGIN SELECT RAISE(ABORT, 'invalid external-agent result delivery'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.ExecContext(ctx, `CREATE TRIGGER external_agent_job_notifications_delivery_shape_update
+		BEFORE UPDATE ON external_agent_job_notifications
+		WHEN NEW.policy_version != 'legacy_v1' AND (
+			NEW.delivery_mode NOT IN ('markdown', 'file') OR length(NEW.content_sha256) != 64 OR NEW.result_bytes <= 0 OR
+			NEW.max_markdown_parts < 1 OR NEW.max_markdown_parts > 8 OR
+			(NEW.delivery_mode = 'markdown' AND (length(NEW.artifact_ref) > 0 OR NEW.upload_state != 'not_applicable')) OR
+			(NEW.delivery_mode = 'file' AND length(NEW.artifact_ref) = 0) OR
+			NEW.upload_state NOT IN ('not_applicable', 'pending', 'url_requested', 'bytes_uploaded', 'completed', 'unknown')
+		)
+		BEGIN SELECT RAISE(ABORT, 'invalid external-agent result delivery'); END`)
+	if err != nil {
+		t.Fatal(err)
 	}
 }
 
