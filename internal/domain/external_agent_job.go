@@ -106,6 +106,50 @@ type ExternalAgentJobNotification struct {
 	SlackFileID         string
 }
 
+// ExternalAgentJobNotificationHealth is a read-only aggregate of the durable
+// notification outbox. It contains no job identity or delivery content.
+type ExternalAgentJobNotificationHealth struct {
+	Pending           int
+	Publishing        int
+	Unknown           int
+	Published         int
+	PermanentFailures int
+	Stuck             int
+}
+
+// NotificationHealthSnapshot is kept as a descriptive alias for callers that
+// expose the aggregate as a health snapshot.
+type NotificationHealthSnapshot = ExternalAgentJobNotificationHealth
+
+// ExternalAgentJobDeliveryInspection is the redacted administrative view of a
+// single delivery. Artifact references, canonical content, actor identity and
+// conversation keys are intentionally absent.
+type ExternalAgentJobDeliveryInspection struct {
+	StatusRevision     int
+	NotificationKind   string
+	DeliveryMode       JobResultDeliveryMode
+	PublishState       NotificationPublishState
+	Attempts           int
+	LastErrorCode      string
+	NextAttemptAt      time.Time
+	RecoveredSlackTS   string
+	UploadState        JobResultUploadState
+	SlackFileIDPresent bool
+}
+
+// ExternalAgentJobInspection is the safe local operator view of one job.
+type ExternalAgentJobInspection struct {
+	JobID          string
+	Status         ExternalAgentJobStatus
+	StatusRevision int
+	FinishedAt     time.Time
+	Deliveries     []ExternalAgentJobDeliveryInspection
+}
+
+// ExternalAgentJobAdminView is an explicit name for the same safe view used by
+// the local jobs inspect command.
+type ExternalAgentJobAdminView = ExternalAgentJobInspection
+
 // ExternalAgentJobDelivery is the durable, immutable delivery identity. The
 // notification name remains as the compatibility-facing store type.
 type ExternalAgentJobDelivery = ExternalAgentJobNotification

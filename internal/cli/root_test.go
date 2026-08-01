@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
@@ -30,6 +31,15 @@ type fakeBackend struct {
 	access          bootstrap.AccessControl
 	secrets         bootstrap.Secrets
 	applyHook       func()
+}
+
+type inspectionBackend struct {
+	*fakeBackend
+	view *domain.ExternalAgentJobInspection
+}
+
+func (b *inspectionBackend) InspectJob(context.Context, string) (*domain.ExternalAgentJobInspection, error) {
+	return b.view, nil
 }
 
 func (f *fakeBackend) PrepareSetup(context.Context) (bootstrap.Snapshot, bootstrap.Secrets, error) {
@@ -204,5 +214,52 @@ func TestInitResetStateRequiresConfirmation(t *testing.T) {
 				t.Fatalf("ResetState calls = %d, want %d", backend.resetCalls, tt.wantCalls)
 			}
 		})
+	}
+}
+
+func TestJobsInspectPrintsOnlySafeDeliveryFields(t *testing.T) {
+	backend := &inspectionBackend{
+		fakeBackend: setupBackend(),
+		view: &domain.ExternalAgentJobInspection{
+			JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 4,
+			Deliveries: []domain.ExternalAgentJobDeliveryInspection{{
+				StatusRevision: 4, NotificationKind: domain.JobNotificationTerminal,
+				DeliveryMode: domain.JobResultDeliveryFile, PublishState: domain.NotificationPublished,
+				Attempts: 2, LastErrorCode: "notification_publish_ambiguous",
+				RecoveredSlackTS: "1710000000.000001", UploadState: domain.JobResultUploadCompleted,
+				SlackFileIDPresent: true,
+			}},
+		},
+	}
+	var output, stderr bytes.Buffer
+	root, err := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Execute(t.Context(), root, []string{"jobs", "inspect", "job_123"}, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	text := output.String()
+	for _, expected := range []string{"status: completed", "status_revision: 4", "delivery_mode: file", "notification_kind: terminal", "publish_state: published", "attempts: 2", "last_error_code: notification_publish_ambiguous", "upload_state: completed", "recovered_slack_ts: 1710000000.000001"} {
+		if !strings.Contains(text, expected) {
+			t.Fatalf("output missing %q: %s", expected, text)
+		}
+	}
+	for _, forbidden := range []string{"task", "result text", "artifact", "U123", "slack:T"} {
+		if strings.Contains(strings.ToLower(text), strings.ToLower(forbidden)) {
+			t.Fatalf("unsafe field %q in output: %s", forbidden, text)
+		}
+	}
+}
+
+func TestJobsInspectMissingJobReturnsSafeResult(t *testing.T) {
+	backend := &inspectionBackend{fakeBackend: setupBackend()}
+	var output, stderr bytes.Buffer
+	root, _ := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if code := Execute(t.Context(), root, []string{"jobs", "inspect", "job_missing"}, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if output.String() != "job: not found\n" || stderr.Len() != 0 {
+		t.Fatalf("safe missing output=%q stderr=%q", output.String(), stderr.String())
 	}
 }

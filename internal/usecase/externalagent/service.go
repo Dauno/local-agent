@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -34,6 +35,8 @@ type Dependencies struct {
 	// its own bound as a second, independent check.
 	MaxResultBytes int64
 	Clock          port.Clock
+	Logger         port.Logger
+	Metrics        port.MetricRecorder
 }
 
 type Service struct {
@@ -44,6 +47,8 @@ type Service struct {
 	artifacts      port.ResultArtifactStore
 	maxResultBytes int64
 	clock          port.Clock
+	logger         port.Logger
+	metrics        port.MetricRecorder
 }
 
 var _ port.ExternalAgentJobReader = (*Service)(nil)
@@ -62,8 +67,16 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.MaxResultBytes <= 0 || deps.MaxResultBytes > domain.MaxExternalAgentResultBytes {
 		deps.MaxResultBytes = domain.MaxExternalAgentResultBytes
 	}
+	logger := deps.Logger
+	if logger == nil {
+		logger = noopLogger{}
+	}
+	metrics := deps.Metrics
+	if metrics == nil {
+		metrics = port.NoopMetricRecorder{}
+	}
 	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
-		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, clock: deps.Clock}, nil
+		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, clock: deps.Clock, logger: logger, metrics: metrics}, nil
 }
 
 func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error) {
@@ -162,7 +175,14 @@ func (s *Service) Status(ctx context.Context, jobID, actor string, conversationK
 	if err != nil || job == nil {
 		return job, err
 	}
-	if job.Actor != actor || job.ConversationKey != conversationKey {
+	actorMatch := job.Actor == actor
+	conversationMatch := job.ConversationKey == conversationKey
+	s.metrics.AddCounter(domain.MetricExternalAgentStatusAuthorizationTotal, 1, port.MetricLabels{
+		"actor_match":        strconv.FormatBool(actorMatch),
+		"conversation_match": strconv.FormatBool(conversationMatch),
+	})
+	if !actorMatch || !conversationMatch {
+		s.logger.Warn("external-agent job authorization mismatch", "job_id", job.ID, "actor_match", actorMatch, "conversation_match", conversationMatch)
 		return nil, errors.New("external-agent job operation is not authorized")
 	}
 	return job, nil
