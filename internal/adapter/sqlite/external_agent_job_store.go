@@ -26,6 +26,7 @@ var _ port.ArtifactReferenceChecker = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobReconciler = (*ExternalAgentJobStore)(nil)
 
 var ErrNotificationStateConflict = port.ErrNotificationStateConflict
+var ErrNotificationClaimConflict = port.ErrNotificationClaimConflict
 
 const (
 	notificationRetryBaseDelay = time.Second
@@ -142,7 +143,7 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 		FinishedAt: fromUnix(finishedAt),
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT status_revision, kind, publish_state,
-		attempts, last_error_code, next_attempt_at, recovered_slack_ts,
+		attempts, length(lease_owner) > 0, lease_expiry, last_error_code, next_attempt_at, recovered_slack_ts,
 		delivery_mode, upload_state, length(slack_file_id) > 0
 		FROM external_agent_job_notifications WHERE job_id = ?
 		ORDER BY status_revision ASC, kind ASC`, jobID)
@@ -153,13 +154,15 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	for rows.Next() {
 		var delivery domain.ExternalAgentJobDeliveryInspection
 		var kind, publishState, errorCode, deliveryMode, uploadState, recoveredTS string
-		var nextAttemptAt int64
+		var leaseOwnerPresent, leaseExpiry, nextAttemptAt int64
 		var filePresent int
-		if err := rows.Scan(&delivery.StatusRevision, &kind, &publishState, &delivery.Attempts, &errorCode, &nextAttemptAt, &recoveredTS, &deliveryMode, &uploadState, &filePresent); err != nil {
+		if err := rows.Scan(&delivery.StatusRevision, &kind, &publishState, &delivery.Attempts, &leaseOwnerPresent, &leaseExpiry, &errorCode, &nextAttemptAt, &recoveredTS, &deliveryMode, &uploadState, &filePresent); err != nil {
 			return nil, fmt.Errorf("scan external-agent job delivery inspection: %w", err)
 		}
 		delivery.NotificationKind = safeAdminNotificationKind(kind)
 		delivery.PublishState = safeAdminPublishState(publishState)
+		delivery.LeaseOwnerPresent = leaseOwnerPresent != 0
+		delivery.LeaseExpiry = fromUnix(leaseExpiry)
 		delivery.LastErrorCode = safeAdminErrorCode(errorCode)
 		delivery.NextAttemptAt = fromUnix(nextAttemptAt)
 		delivery.RecoveredSlackTS = safeAdminSlackTimestamp(recoveredTS)
@@ -640,7 +643,7 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		return nil, fmt.Errorf("claim notification: %w", err)
 	}
 	if affected, _ := changed.RowsAffected(); affected != 1 {
-		return nil, nil
+		return nil, port.ErrNotificationClaimConflict
 	}
 	notification, err := loadNotification(ctx, tx, jobID, revision, kind)
 	if err != nil {

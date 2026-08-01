@@ -1,9 +1,11 @@
 package integration_test
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
@@ -14,6 +16,7 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -100,9 +103,22 @@ func TestDetachedJobCompletionPublishesDurableSlackDelivery(t *testing.T) {
 
 	client := slackapi.New("xoxb-local-test", slackapi.OptionAPIURL(server.URL+"/"))
 	publisher := slackadapter.NewPublisher(client, time.Second, integrationLogger{}, false)
-	notificationPublisher := slackadapter.NewJobNotificationPublisher(publisher, nil)
+	artifacts, err := fsartifact.New(filepath.Join(t.TempDir(), "artifacts"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+	}, externalagent.Dependencies{Store: jobs, Runtime: &integrationJobRuntime{}, Artifacts: artifacts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := slackadapter.NewHistoryReader(client, "B12345678", time.Second, integrationLogger{}, false)
+	uploader := slackadapter.NewGeneratedFileUploader(client, time.Second)
+	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(publisher, history, uploader, artifacts, jobs, client, false)
 	worker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute}, externalagent.NotificationDependencies{
-		Store: jobs, Publisher: notificationPublisher,
+		Store: jobs, Publisher: notificationPublisher, HostCompleter: service,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -157,6 +173,14 @@ func (integrationLogger) Error(string, ...any) {}
 
 var _ port.Logger = integrationLogger{}
 
+type integrationJobRuntime struct{}
+
+func (*integrationJobRuntime) Run(context.Context, domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+	return domain.AcpInvocationResult{}, context.Canceled
+}
+
+var _ port.ExternalAgentJobRuntime = (*integrationJobRuntime)(nil)
+
 func TestDetachedJobNotificationRetriesHTTPFailureAndReclaimsExpiredPublishing(t *testing.T) {
 	var (
 		mu    sync.Mutex
@@ -207,11 +231,22 @@ func TestDetachedJobNotificationRetriesHTTPFailureAndReclaimsExpiredPublishing(t
 	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, integrationMarkdownResult(job.ID, "retry result"), "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	artifacts, err := fsartifact.New(filepath.Join(t.TempDir(), "artifacts"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := slackapi.New("xoxb-local-test", slackapi.OptionAPIURL(server.URL+"/"))
 	publisher := slackadapter.NewPublisher(client, time.Second, integrationLogger{}, false)
 	history := slackadapter.NewHistoryReader(client, "B12345678", time.Second, integrationLogger{}, false)
-	notificationPublisher := slackadapter.NewJobNotificationPublisher(publisher, history)
-	worker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute, RetryBase: time.Hour, RetryMax: time.Hour}, externalagent.NotificationDependencies{Store: jobs, Publisher: notificationPublisher})
+	service, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+	}, externalagent.Dependencies{Store: jobs, Runtime: &integrationJobRuntime{}, Artifacts: artifacts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(publisher, history, slackadapter.NewGeneratedFileUploader(client, time.Second), artifacts, jobs, client, false)
+	worker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute, RetryBase: time.Hour, RetryMax: time.Hour}, externalagent.NotificationDependencies{Store: jobs, Publisher: notificationPublisher, HostCompleter: service})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -287,9 +322,23 @@ func TestDetachedJobNotificationPublishesMultipartMarkdownFromOutbox(t *testing.
 	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, integrationMarkdownResult(job.ID, content), "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	artifacts, err := fsartifact.New(filepath.Join(t.TempDir(), "artifacts"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
 	client := slackapi.New("xoxb-local-test", slackapi.OptionAPIURL(server.URL+"/"))
 	publisher := slackadapter.NewPublisher(client, time.Second, integrationLogger{}, false)
-	worker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute}, externalagent.NotificationDependencies{Store: jobs, Publisher: slackadapter.NewJobNotificationPublisher(publisher, nil)})
+	service, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+	}, externalagent.Dependencies{Store: jobs, Runtime: &integrationJobRuntime{}, Artifacts: artifacts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	history := slackadapter.NewHistoryReader(client, "B12345678", time.Second, integrationLogger{}, false)
+	worker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute}, externalagent.NotificationDependencies{
+		Store: jobs, Publisher: slackadapter.NewDurableJobNotificationPublisher(publisher, history, slackadapter.NewGeneratedFileUploader(client, time.Second), artifacts, jobs, client, false), HostCompleter: service,
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -304,6 +353,213 @@ func TestDetachedJobNotificationPublishesMultipartMarkdownFromOutbox(t *testing.
 	defer mu.Unlock()
 	if requests != 2 {
 		t.Fatalf("multipart Slack posts = %d, want 2", requests)
+	}
+}
+
+func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
+	content := "complete file-mode result after worker restarts"
+	var (
+		mu              sync.Mutex
+		uploaded        []byte
+		completeCalls   int
+		postCalls       int
+		completeVisible bool
+		failComplete    = true
+		failPost        = true
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		switch request.URL.Path {
+		case "/files.getUploadURLExternal":
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(response, `{"ok":true,"file_id":"F123","upload_url":"http://%s/upload"}`, request.Host)
+		case "/upload":
+			if err := request.ParseMultipartForm(1024 * 1024); err != nil {
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			file, _, err := request.FormFile("file")
+			if err != nil {
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			data, readErr := io.ReadAll(file)
+			_ = file.Close()
+			if readErr != nil {
+				response.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			mu.Lock()
+			uploaded = append([]byte(nil), data...)
+			mu.Unlock()
+			_, _ = response.Write([]byte("ok"))
+		case "/files.completeUploadExternal":
+			mu.Lock()
+			completeCalls++
+			shouldFail := failComplete
+			if shouldFail {
+				failComplete = false
+			} else {
+				completeVisible = true
+			}
+			mu.Unlock()
+			if shouldFail {
+				response.WriteHeader(http.StatusInternalServerError)
+				_, _ = response.Write([]byte(`{"ok":false,"error":"transient provider failure"}`))
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"ok":true,"files":[{"id":"F123","title":"OpenCode result job_file_integration"}]}`))
+		case "/files.info":
+			mu.Lock()
+			visible := completeVisible
+			mu.Unlock()
+			channels := "[]"
+			if visible {
+				channels = `["D12345678"]`
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(response, `{"ok":true,"file":{"id":"F123","name":"opencode-job_file_integration.md","size":%d,"user":"B12345678","channels":%s}}`, len(content), channels)
+		case "/conversations.replies":
+			mu.Lock()
+			visible := completeVisible
+			mu.Unlock()
+			response.Header().Set("Content-Type", "application/json")
+			if visible {
+				_, _ = response.Write([]byte(`{"ok":true,"messages":[{"type":"message","user":"B12345678","ts":"1710000000.000010","files":[{"id":"F123"}]}]}`))
+			} else {
+				_, _ = response.Write([]byte(`{"ok":true,"messages":[]}`))
+			}
+		case "/conversations.history":
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = response.Write([]byte(`{"ok":true,"messages":[]}`))
+		case "/chat.postMessage":
+			mu.Lock()
+			postCalls++
+			shouldFail := failPost
+			if shouldFail {
+				failPost = false
+			}
+			attempt := postCalls
+			mu.Unlock()
+			if shouldFail {
+				response.WriteHeader(http.StatusInternalServerError)
+				_, _ = response.Write([]byte(`{"ok":false,"error":"transient provider failure"}`))
+				return
+			}
+			response.Header().Set("Content-Type", "application/json")
+			_, _ = fmt.Fprintf(response, `{"ok":true,"channel":"D12345678","ts":"1710000000.00000%d"}`, attempt)
+		default:
+			response.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(server.Close)
+
+	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := adaptersqlite.NewExternalAgentJobStore(store)
+	artifacts, err := fsartifact.New(filepath.Join(t.TempDir(), "artifacts"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := integrationDetachedJob("job_file_integration", time.Now().UTC().Add(-time.Minute))
+	artifact, err := artifacts.Put(t.Context(), job.ID+"-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create job = %v, err=%v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), job.CreatedAt, "execution-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim job = %#v, err=%v", claimed, err)
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
+	result := &domain.AcpInvocationResult{
+		Text: "", ResultSHA256: digest, ResultBytes: int64(len(content)), ArtifactRef: artifact.Reference,
+		DeliveryMode: domain.JobResultDeliveryFile, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
+		DeliveryArtifactRef: artifact.Reference, DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len(content)), DeliveryMaxMarkdownParts: 6,
+	}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", job.CreatedAt.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	service, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+	}, externalagent.Dependencies{Store: jobs, Runtime: &integrationJobRuntime{}, Artifacts: artifacts})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newWorker := func() *externalagent.NotificationWorker {
+		client := slackapi.New("xoxb-local-test", slackapi.OptionAPIURL(server.URL+"/"))
+		publisher := slackadapter.NewPublisher(client, time.Millisecond, integrationLogger{}, false)
+		history := slackadapter.NewHistoryReader(client, "B12345678", time.Second, integrationLogger{}, false)
+		uploader := slackadapter.NewGeneratedFileUploader(client, time.Second)
+		notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(publisher, history, uploader, artifacts, jobs, client, false)
+		worker, workerErr := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute}, externalagent.NotificationDependencies{
+			Store: jobs, Publisher: notificationPublisher, HostCompleter: service,
+		})
+		if workerErr != nil {
+			t.Fatal(workerErr)
+		}
+		return worker
+	}
+	makeDue := func() {
+		t.Helper()
+		if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications SET next_attempt_at = ? WHERE job_id = ?`, time.Now().UTC().UnixNano(), job.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := newWorker().ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err := jobs.InspectJob(t.Context(), job.ID)
+	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
+		t.Fatalf("after bytes stage inspection = %#v, err=%v", inspection, err)
+	}
+	firstDelivery := inspection.Deliveries[0]
+	if firstDelivery.PublishState != domain.NotificationPending || firstDelivery.UploadState != domain.JobResultUploadBytesUploaded || !firstDelivery.SlackFileIDPresent || firstDelivery.LastErrorCode != "result_file_completion_failed" {
+		t.Fatalf("after bytes stage delivery = %#v", firstDelivery)
+	}
+	makeDue()
+
+	if err := newWorker().ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err = jobs.InspectJob(t.Context(), job.ID)
+	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
+		t.Fatalf("after completed stage inspection = %#v, err=%v", inspection, err)
+	}
+	secondDelivery := inspection.Deliveries[0]
+	if secondDelivery.PublishState != domain.NotificationPending || secondDelivery.UploadState != domain.JobResultUploadCompleted || secondDelivery.LastErrorCode != "notification_publish_ambiguous" {
+		t.Fatalf("after completed stage delivery = %#v", secondDelivery)
+	}
+	makeDue()
+
+	if err := newWorker().ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err = jobs.InspectJob(t.Context(), job.ID)
+	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
+		t.Fatalf("final inspection = %#v, err=%v", inspection, err)
+	}
+	finalDelivery := inspection.Deliveries[0]
+	if finalDelivery.PublishState != domain.NotificationPublished || finalDelivery.UploadState != domain.JobResultUploadCompleted || !finalDelivery.SlackFileIDPresent || finalDelivery.RecoveredSlackTS == "" {
+		t.Fatalf("final file delivery = %#v", finalDelivery)
+	}
+	mu.Lock()
+	gotUploaded := append([]byte(nil), uploaded...)
+	gotCompleteCalls, gotPostCalls := completeCalls, postCalls
+	mu.Unlock()
+	if string(gotUploaded) != content || gotCompleteCalls != 2 || gotPostCalls != 2 {
+		t.Fatalf("Slack file flow uploaded=%q complete_calls=%d post_calls=%d", gotUploaded, gotCompleteCalls, gotPostCalls)
+	}
+	if after, err := jobs.ClaimNextNotification(t.Context(), time.Now().UTC().Add(time.Hour), "after-worker", time.Minute); err != nil || after != nil {
+		t.Fatalf("published delivery was claimable: %#v, err=%v", after, err)
 	}
 }
 
