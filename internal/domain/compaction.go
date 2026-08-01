@@ -225,19 +225,20 @@ func ClassifyConversationTurns(contents []Content, options ...TurnClassification
 		return nil, 0, errors.New("history has no plain user input")
 	}
 	turns = append(turns, newTurn(int64(len(turns)+1), contents[start:], false))
-	if err := ValidateContentProtocol(contents, false); err != nil {
+	if err := ValidateContentProtocol(contents, ProtocolValidationOptions{AllowConfirmationLifecycle: true}); err != nil {
+		return nil, 0, err
+	}
+	ledger, err := scanContentProtocol(contents, ProtocolValidationOptions{AllowConfirmationLifecycle: true})
+	if err != nil {
 		return nil, 0, err
 	}
 
 	callIndexes := make(map[string]int)
-	responded := make(map[string]bool)
 	for index, content := range contents {
 		for _, part := range content.Parts {
 			switch {
 			case part.FunctionCall != nil:
 				callIndexes[part.FunctionCall.ID] = index
-			case part.FunctionResponse != nil:
-				responded[part.FunctionResponse.ID] = true
 			}
 		}
 	}
@@ -246,13 +247,15 @@ func ClassifyConversationTurns(contents []Content, options ...TurnClassification
 	for id := range opts.OpenInvocationIDs {
 		openIDs[id] = struct{}{}
 	}
-	for id, index := range callIndexes {
-		if responded[id] {
+	for id, call := range ledger.calls {
+		if !protocolCallOpen(call, ledger) {
 			continue
 		}
 		openIDs[id] = struct{}{}
-		if invocationStart := invocationStartAt(contents, index); invocationStart < activeStart {
-			activeStart = invocationStart
+		if index, ok := callIndexes[id]; ok {
+			if invocationStart := invocationStartAt(contents, index); invocationStart < activeStart {
+				activeStart = invocationStart
+			}
 		}
 	}
 	for id := range opts.OpenInvocationIDs {
@@ -303,69 +306,6 @@ func newTurn(ordinal int64, contents []Content, closed bool) ConversationTurn {
 	}
 	turn.CharCount, _ = ContentCost(turn.Contents)
 	return turn
-}
-
-// ValidateContentProtocol validates function-call ordering. ADK confirmation
-// flows may emit a placeholder response before the confirmation wrapper and a
-// terminal response after the decision.
-func ValidateContentProtocol(contents []Content, requireComplete bool) error {
-	calls := make(map[string]string)
-	responses := make(map[string]int)
-	confirmationWrappers := make(map[string]string)
-	for index, content := range contents {
-		for _, part := range content.Parts {
-			switch {
-			case part.FunctionCall != nil:
-				call := part.FunctionCall
-				if strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
-					return fmt.Errorf("invalid function call at content %d", index)
-				}
-				if _, exists := calls[call.ID]; exists {
-					return fmt.Errorf("duplicate function call %q", call.ID)
-				}
-				calls[call.ID] = call.Name
-				if call.Name == ConfirmationFunctionName {
-					originalID, originalName, ok := confirmationOriginalCall(call)
-					if !ok || calls[originalID] != originalName || responses[originalID] != 1 {
-						return fmt.Errorf("invalid confirmation call %q", call.ID)
-					}
-					if _, exists := confirmationWrappers[originalID]; exists {
-						return fmt.Errorf("duplicate confirmation for function call %q", originalID)
-					}
-					confirmationWrappers[originalID] = call.ID
-				}
-			case part.FunctionResponse != nil:
-				response := part.FunctionResponse
-				if strings.TrimSpace(response.ID) == "" || strings.TrimSpace(response.Name) == "" {
-					return fmt.Errorf("invalid function response at content %d", index)
-				}
-				name, exists := calls[response.ID]
-				if !exists || name != response.Name {
-					return fmt.Errorf("function response %q has no matching call", response.ID)
-				}
-				if responses[response.ID] > 0 {
-					wrapperID, confirmed := confirmationWrappers[response.ID]
-					if !confirmed || responses[response.ID] != 1 || responses[wrapperID] != 1 {
-						return fmt.Errorf("function response %q has no matching call", response.ID)
-					}
-				}
-				responses[response.ID]++
-			}
-		}
-	}
-	if requireComplete {
-		for id := range calls {
-			if responses[id] == 0 {
-				return fmt.Errorf("function call %q has no response in completed turn", id)
-			}
-		}
-		for originalID := range confirmationWrappers {
-			if responses[originalID] != 2 {
-				return fmt.Errorf("function call %q has no terminal response after confirmation", originalID)
-			}
-		}
-	}
-	return nil
 }
 
 func confirmationOriginalCall(call *FunctionCall) (string, string, bool) {
