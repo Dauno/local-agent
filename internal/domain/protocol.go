@@ -322,6 +322,11 @@ func scanContentProtocol(contents []Content, options ProtocolValidationOptions) 
 				fmt.Sprintf("unsupported content role %q", content.Role),
 			)
 		}
+		if options.RequireProviderReadyOrder {
+			if err := validateOpenAIContent(content, contentIndex); err != nil {
+				return ledger, err
+			}
+		}
 		openAtContentStart := ledger.openCallCount() > 0
 		for partIndex, part := range content.Parts {
 			if part.FunctionCall != nil && part.FunctionResponse != nil {
@@ -423,6 +428,98 @@ func scanContentProtocol(contents []Content, options ProtocolValidationOptions) 
 		}
 	}
 	return ledger, nil
+}
+
+// validateOpenAIContent mirrors the content-level constraints enforced by the
+// OpenAI-compatible adapter. It runs only for the provider-ready preflight;
+// structural validation remains provider-neutral when that option is off.
+func validateOpenAIContent(content Content, contentIndex int) error {
+	callCount := 0
+	responseCount := 0
+	imageCount := 0
+	textCount := 0
+	var text strings.Builder
+
+	for _, part := range content.Parts {
+		switch {
+		case part.FunctionCall != nil:
+			callCount++
+		case part.FunctionResponse != nil:
+			responseCount++
+		case len(part.StructuredJSON) > 0:
+			if !isOpenAIImagePart(part.StructuredJSON) {
+				return protocolValidationError(
+					ProtocolRuleProviderReadyOrder, contentIndex, -1,
+					"content contains a structured part unsupported by the OpenAI-compatible serializer",
+				)
+			}
+			imageCount++
+		default:
+			textCount++
+			text.WriteString(part.Text)
+		}
+	}
+
+	if callCount > 0 && content.Role != ContentRoleModel {
+		return protocolValidationError(
+			ProtocolRuleProviderReadyOrder, contentIndex, -1,
+			fmt.Sprintf("function calls require model role, got %q", content.Role),
+		)
+	}
+	if responseCount > 0 && content.Role != ContentRoleUser {
+		return protocolValidationError(
+			ProtocolRuleProviderReadyOrder, contentIndex, -1,
+			fmt.Sprintf("function responses require user role, got %q", content.Role),
+		)
+	}
+	if imageCount > 0 && content.Role != ContentRoleUser {
+		return protocolValidationError(
+			ProtocolRuleProviderReadyOrder, contentIndex, -1,
+			fmt.Sprintf("image content requires user role, got %q", content.Role),
+		)
+	}
+	if callCount > 0 && responseCount > 0 {
+		return protocolValidationError(
+			ProtocolRuleProviderReadyOrder, contentIndex, -1,
+			"content cannot mix function calls and responses",
+		)
+	}
+	if imageCount > 0 && (callCount > 0 || responseCount > 0) {
+		return protocolValidationError(
+			ProtocolRuleProviderReadyOrder, contentIndex, -1,
+			"content cannot mix images with function calls or responses",
+		)
+	}
+	if responseCount > 0 && textCount > 0 {
+		return protocolValidationError(
+			ProtocolRuleProviderReadyOrder, contentIndex, -1,
+			"function responses require a user-role content with no text",
+		)
+	}
+	if callCount == 0 && responseCount == 0 && imageCount == 0 && strings.TrimSpace(text.String()) == "" {
+		return protocolValidationError(
+			ProtocolRuleProviderReadyOrder, contentIndex, -1,
+			"content must have non-empty text",
+		)
+	}
+	return nil
+}
+
+func isOpenAIImagePart(raw []byte) bool {
+	var part struct {
+		InlineData *struct {
+			MIMEType string `json:"mimeType"`
+		} `json:"inlineData"`
+	}
+	if err := json.Unmarshal(raw, &part); err != nil || part.InlineData == nil {
+		return false
+	}
+	switch strings.ToLower(part.InlineData.MIMEType) {
+	case "image/png", "image/jpeg", "image/webp", "image/gif":
+		return true
+	default:
+		return false
+	}
 }
 
 func isConfirmationPlaceholder(response *FunctionResponse) bool {

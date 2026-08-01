@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 )
@@ -253,6 +254,88 @@ func TestProtocolProviderReadyOrderIsSeparateFromStructuralValidation(t *testing
 	var validationErr *ProtocolValidationError
 	if !errors.As(err, &validationErr) || validationErr.Rule != ProtocolRuleProviderReadyOrder {
 		t.Fatalf("provider-order error = %v", err)
+	}
+}
+
+func TestProtocolProviderReadyOrderMatchesOpenAIContentConstraints(t *testing.T) {
+	responsePart := ContentPart{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "lookup"}}
+	options := ProtocolValidationOptions{
+		RequireComplete:            true,
+		AllowConfirmationLifecycle: true,
+		RequireProviderReadyOrder:  true,
+	}
+	tests := []struct {
+		name     string
+		contents []Content
+		wantRule ProtocolValidationRule
+	}{
+		{
+			name:     "function call requires model role",
+			contents: []Content{protocolCallContent(ContentRoleUser, "call-1", "lookup")},
+			wantRule: ProtocolRuleProviderReadyOrder,
+		},
+		{
+			name:     "function response requires user role",
+			contents: []Content{{Role: ContentRoleModel, Parts: []ContentPart{responsePart}}},
+			wantRule: ProtocolRuleProviderReadyOrder,
+		},
+		{
+			name: "function responses cannot share content with text",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
+				{Role: ContentRoleUser, Parts: []ContentPart{responsePart, {Text: "extra"}}},
+			},
+			wantRule: ProtocolRuleProviderReadyOrder,
+		},
+		{
+			name:     "unsupported structured part",
+			contents: []Content{{Role: ContentRoleUser, Parts: []ContentPart{{StructuredJSON: json.RawMessage(`{"fileData":{"mimeType":"text/plain"}}`)}}}},
+			wantRule: ProtocolRuleProviderReadyOrder,
+		},
+		{
+			name:     "image requires user role",
+			contents: []Content{{Role: ContentRoleModel, Parts: []ContentPart{{StructuredJSON: json.RawMessage(`{"inlineData":{"mimeType":"image/png"}}`)}}}},
+			wantRule: ProtocolRuleProviderReadyOrder,
+		},
+		{
+			name:     "unsupported content role",
+			contents: []Content{{Role: ContentRole("tool"), Parts: []ContentPart{{Text: "invalid"}}}},
+			wantRule: ProtocolRuleContentRole,
+		},
+		{
+			name: "duplicate response remains rejected",
+			contents: []Content{
+				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
+				protocolResponse("call-1", "lookup", nil),
+				protocolResponse("call-1", "lookup", nil),
+			},
+			wantRule: ProtocolRuleDuplicateResponse,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := ValidateContentProtocol(test.contents, options)
+			var validationErr *ProtocolValidationError
+			if !errors.As(err, &validationErr) {
+				t.Fatalf("validation error = %v, want ProtocolValidationError", err)
+			}
+			if validationErr.Rule != test.wantRule {
+				t.Fatalf("validation rule = %q, want %q", validationErr.Rule, test.wantRule)
+			}
+		})
+	}
+
+	valid := []Content{
+		protocolText(ContentRoleUser, "lookup"),
+		{Role: ContentRoleModel, Parts: []ContentPart{{Text: "I will look up the value."}, {FunctionCall: &FunctionCall{ID: "call-1", Name: "lookup"}}}},
+		protocolResponse("call-1", "lookup", nil),
+	}
+	if err := ValidateContentProtocol(valid, options); err != nil {
+		t.Fatalf("model call with text rejected: %v", err)
+	}
+	image := []Content{{Role: ContentRoleUser, Parts: []ContentPart{{StructuredJSON: json.RawMessage(`{"inlineData":{"mimeType":"image/png","data":"aW1hZ2U="}}`)}}}}
+	if err := ValidateContentProtocol(image, options); err != nil {
+		t.Fatalf("supported image rejected: %v", err)
 	}
 }
 

@@ -45,22 +45,30 @@ type scriptedModelStep struct {
 	responses []*model.LLMResponse
 }
 
+type scriptedProtocolRequest struct {
+	contentCount    int
+	texts           []string
+	functionCallIDs []string
+}
+
 type scriptedProtocolLLM struct {
 	mu       sync.Mutex
 	steps    []scriptedModelStep
 	step     int
 	calls    int
 	partials int
+	requests []scriptedProtocolRequest
 }
 
 func (m *scriptedProtocolLLM) Name() string { return "adk-protocol-scripted-model" }
 
-func (m *scriptedProtocolLLM) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+func (m *scriptedProtocolLLM) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.mu.Lock()
 		index := m.step
 		m.step++
 		m.calls++
+		m.requests = append(m.requests, snapshotProtocolRequest(request))
 		m.mu.Unlock()
 		if index >= len(m.steps) {
 			yield(nil, fmt.Errorf("scripted model exhausted at call %d", index+1))
@@ -89,6 +97,44 @@ func (m *scriptedProtocolLLM) partialCount() int {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.partials
+}
+
+func (m *scriptedProtocolLLM) requestSnapshots() []scriptedProtocolRequest {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	result := make([]scriptedProtocolRequest, len(m.requests))
+	for index, request := range m.requests {
+		result[index] = scriptedProtocolRequest{
+			contentCount:    request.contentCount,
+			texts:           append([]string(nil), request.texts...),
+			functionCallIDs: append([]string(nil), request.functionCallIDs...),
+		}
+	}
+	return result
+}
+
+func snapshotProtocolRequest(request *model.LLMRequest) scriptedProtocolRequest {
+	if request == nil {
+		return scriptedProtocolRequest{}
+	}
+	snapshot := scriptedProtocolRequest{contentCount: len(request.Contents)}
+	for _, content := range request.Contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part == nil {
+				continue
+			}
+			if part.Text != "" {
+				snapshot.texts = append(snapshot.texts, part.Text)
+			}
+			if part.FunctionCall != nil {
+				snapshot.functionCallIDs = append(snapshot.functionCallIDs, part.FunctionCall.ID)
+			}
+		}
+	}
+	return snapshot
 }
 
 type protocolToolArgs struct {
@@ -229,26 +275,54 @@ func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
 		// The retry makes the orphaned call part of the retained active suffix.
 		// FR-11 and section 7.3 require structural acceptance here; completeness
 		// belongs to the later provider-readiness/preflight boundary.
-		activeContents := []domain.Content{
-			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect the project"}}},
-			{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{
-				ID: callID, Name: "inspect_project", Args: map[string]any{"value": "crash-boundary"},
-			}}}},
-			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "retry after restart"}}},
-		}
 		compiler := contextcompiler.New(nil, protocolTokenCounter{})
-		result, err := compiler.Compile(t.Context(), domain.CompileRequest{
-			Contents:          activeContents,
-			ModelBudget:       domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000},
-			OpenInvocationIDs: map[string]struct{}{callID: {}},
+		recoveryModel := &scriptedProtocolLLM{steps: []scriptedModelStep{{responses: []*model.LLMResponse{
+			protocolTextResponse("recovery response"),
+		}}}}
+		recoveryRuntime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
+			AgentName:       "Protocol Contract Agent",
+			Instruction:     "Use the registered contract tools when requested.",
+			Model:           recoveryModel,
+			SessionService:  reopenedService,
+			ContextCompiler: compiler,
+			ContextBudget:   domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000},
+			StaticTools:     []tool.Tool{newProtocolTool(t, "inspect_project", false, nil)},
+			ProviderFamily:  domain.ProviderFamilyOpenAICompatible,
 		})
 		if err != nil {
 			_ = reopened.Close()
-			t.Fatalf("active suffix rejected by context compiler: %v", err)
+			t.Fatal(err)
 		}
-		if len(result.Contents) != len(activeContents) {
+		turn, err := recoveryRuntime.Run(t.Context(), protocolRequest(key, "retry after restart"))
+		if err != nil {
 			_ = reopened.Close()
-			t.Fatalf("active projection contents = %d, want %d", len(result.Contents), len(activeContents))
+			t.Fatalf("recovery turn failed: %v", err)
+		}
+		if turn.Text != "recovery response" {
+			_ = reopened.Close()
+			t.Fatalf("recovery turn text = %q, want %q", turn.Text, "recovery response")
+		}
+		if recoveryModel.callCount() != 1 {
+			_ = reopened.Close()
+			t.Fatalf("recovery model calls = %d, want one real model call", recoveryModel.callCount())
+		}
+		requests := recoveryModel.requestSnapshots()
+		if len(requests) != 1 || requests[0].contentCount != 3 {
+			_ = reopened.Close()
+			t.Fatalf("recovery model request snapshots = %#v, want one request with orphaned history plus retry", requests)
+		}
+		if !containsString(requests[0].functionCallIDs, callID) || !containsString(requests[0].texts, "retry after restart") {
+			_ = reopened.Close()
+			t.Fatalf("recovery model request = %#v, want orphaned call and new retry", requests[0])
+		}
+		afterRestart := readProtocolEvents(t, reopenedService, key)
+		if len(afterRestart) != len(beforeRestart)+2 {
+			_ = reopened.Close()
+			t.Fatalf("events after real recovery turn = %d, want %d", len(afterRestart), len(beforeRestart)+2)
+		}
+		if !eventHasText(afterRestart[len(afterRestart)-2], "retry after restart") || !eventHasText(afterRestart[len(afterRestart)-1], "recovery response") {
+			_ = reopened.Close()
+			t.Fatalf("recovery events = %#v, want new user event followed by model response", afterRestart[len(afterRestart)-2:])
 		}
 		if err := reopened.Close(); err != nil {
 			t.Fatal(err)
@@ -514,6 +588,7 @@ func TestADKProtocolFixtureContract(t *testing.T) {
 		t.Run(string(scenario), func(t *testing.T) {
 			fixture := captureProtocolFixture(t, scenario)
 			assertProtocolFixture(t, fixture)
+			fixtureDigest := assertProtocolFixtureProtocol(t, fixture)
 			path := filepath.Join("testdata", "adk-protocol", string(scenario)+".json")
 			actual, err := json.MarshalIndent(fixture, "", "  ")
 			if err != nil {
@@ -534,6 +609,15 @@ func TestADKProtocolFixtureContract(t *testing.T) {
 			}
 			if !bytes.Equal(actual, want) {
 				t.Fatalf("fixture drift in %s; regenerate with -update-adk-protocol-fixtures", path)
+			}
+			var stored protocolFixture
+			if err := json.Unmarshal(want, &stored); err != nil {
+				t.Fatalf("decode fixture %s: %v", path, err)
+			}
+			assertProtocolFixture(t, stored)
+			storedDigest := assertProtocolFixtureProtocol(t, stored)
+			if storedDigest != fixtureDigest {
+				t.Fatalf("fixture protocol digest changed across serialization: generated %q, stored %q", fixtureDigest, storedDigest)
 			}
 		})
 	}
@@ -770,6 +854,62 @@ func assertProtocolFixture(t *testing.T, fixture protocolFixture) {
 	}
 }
 
+func assertProtocolFixtureProtocol(t *testing.T, fixture protocolFixture) string {
+	t.Helper()
+	contents := protocolFixtureContents(t, fixture)
+	options := domain.ProtocolValidationOptions{
+		RequireComplete:            true,
+		AllowConfirmationLifecycle: true,
+		RequireProviderReadyOrder:  true,
+	}
+	frontier, err := domain.ScanProtocolFrontier(contents, options)
+	if err != nil {
+		t.Fatalf("fixture protocol scan: %v", err)
+	}
+	if frontier.Status != domain.ProtocolReady || frontier.OpenCallCount != 0 {
+		t.Fatalf("fixture protocol frontier = %#v, want ready with no open calls", frontier)
+	}
+	if err := domain.ValidateContentProtocol(contents, options); err != nil {
+		t.Fatalf("fixture protocol validation: %v", err)
+	}
+	digest := domain.ProtocolDigest(contents)
+	cloned := make([]domain.Content, len(contents))
+	for index, content := range contents {
+		cloned[index] = content.Clone()
+	}
+	if digest == "" || digest != domain.ContentProtocolDigest(contents) || digest != domain.ProtocolDigest(cloned) {
+		t.Fatalf("fixture protocol digest = %q, want stable content digest", digest)
+	}
+	return digest
+}
+
+func protocolFixtureContents(t *testing.T, fixture protocolFixture) []domain.Content {
+	t.Helper()
+	contents := make([]domain.Content, len(fixture.Events))
+	for eventIndex, event := range fixture.Events {
+		contents[eventIndex] = domain.Content{Role: domain.ContentRole(event.Role), Parts: make([]domain.ContentPart, len(event.Parts))}
+		for partIndex, part := range event.Parts {
+			switch part.Kind {
+			case "text":
+				contents[eventIndex].Parts[partIndex].Text = part.Text
+			case "function_call":
+				contents[eventIndex].Parts[partIndex].FunctionCall = &domain.FunctionCall{ID: part.ID, Name: part.Name, Args: part.Args}
+			case "function_response":
+				response := &domain.FunctionResponse{ID: part.ID, Name: part.Name, Response: part.Response}
+				if part.WillContinue != nil {
+					value := *part.WillContinue
+					response.WillContinue = &value
+				}
+				contents[eventIndex].Parts[partIndex].FunctionResponse = response
+			case "empty":
+			default:
+				t.Fatalf("fixture event %d part %d has unsupported kind %q", eventIndex, partIndex, part.Kind)
+			}
+		}
+	}
+	return contents
+}
+
 func assertCallResponsePair(t *testing.T, fixture protocolFixture, id, name string) {
 	t.Helper()
 	call := findFixturePart(t, fixture, "function_call", id)
@@ -826,6 +966,27 @@ func eventHasFunctionResponse(event *session.Event, id string) bool {
 	}
 	for _, part := range event.Content.Parts {
 		if part != nil && part.FunctionResponse != nil && part.FunctionResponse.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func eventHasText(event *session.Event, text string) bool {
+	if event == nil || event.Content == nil {
+		return false
+	}
+	for _, part := range event.Content.Parts {
+		if part != nil && part.Text == text {
+			return true
+		}
+	}
+	return false
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
 			return true
 		}
 	}
