@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -227,6 +228,7 @@ func TestJobsInspectPrintsOnlySafeDeliveryFields(t *testing.T) {
 				StatusRevision: 4, NotificationKind: domain.JobNotificationTerminal,
 				DeliveryMode: domain.JobResultDeliveryFile, PublishState: domain.NotificationPublished,
 				Attempts: 2, LastErrorCode: "notification_publish_ambiguous",
+				LeaseOwner:        "worker-secret",
 				LeaseOwnerPresent: true, LeaseExpiry: time.Date(2026, 8, 1, 12, 1, 0, 0, time.UTC),
 				RecoveredSlackTS: "1710000000.000001", UploadState: domain.JobResultUploadCompleted,
 				SlackFileIDPresent: true,
@@ -242,10 +244,14 @@ func TestJobsInspectPrintsOnlySafeDeliveryFields(t *testing.T) {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
 	text := output.String()
-	for _, expected := range []string{"status: completed", "status_revision: 4", "delivery_revision: 4", "delivery_mode: file", "notification_kind: terminal", "publish_state: published", "attempts: 2", "lease_owner_present: true", "lease_expiry: 2026-08-01T12:01:00Z", "last_error_code: notification_publish_ambiguous", "upload_state: completed", "recovered_slack_ts: 1710000000.000001"} {
+	for _, expected := range []string{"status: completed", "status_revision: 4", "delivery_revision: 4", "delivery_mode: file", "notification_kind: terminal", "publish_state: published", "attempts: 2", "lease_owner: worker-secret", "lease_owner_present: true", "lease_expiry: 2026-08-01T12:01:00Z", "last_error_code: notification_publish_ambiguous", "upload_state: completed", "recovered_slack_ts: 1710000000.000001"} {
 		if !strings.Contains(text, expected) {
 			t.Fatalf("output missing %q: %s", expected, text)
 		}
+	}
+	encoded, err := json.Marshal(backend.view)
+	if err != nil || !strings.Contains(string(encoded), `"lease_owner":"worker-secret"`) {
+		t.Fatalf("JSON inspection missing lease owner: %s (err=%v)", encoded, err)
 	}
 	for _, forbidden := range []string{"task", "result text", "artifact", "U123", "slack:T"} {
 		if strings.Contains(strings.ToLower(text), strings.ToLower(forbidden)) {

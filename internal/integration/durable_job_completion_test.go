@@ -361,15 +361,20 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 	var (
 		mu              sync.Mutex
 		uploaded        []byte
+		uploadURLCalls  int
+		uploadCalls     int
 		completeCalls   int
 		postCalls       int
 		completeVisible bool
-		failComplete    = true
-		failPost        = true
+		statusTS        string
+		statusMetadata  map[string]any
 	)
 	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		switch request.URL.Path {
 		case "/files.getUploadURLExternal":
+			mu.Lock()
+			uploadURLCalls++
+			mu.Unlock()
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(response, `{"ok":true,"file_id":"F123","upload_url":"http://%s/upload"}`, request.Host)
 		case "/upload":
@@ -389,24 +394,15 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 				return
 			}
 			mu.Lock()
+			uploadCalls++
 			uploaded = append([]byte(nil), data...)
 			mu.Unlock()
 			_, _ = response.Write([]byte("ok"))
 		case "/files.completeUploadExternal":
 			mu.Lock()
 			completeCalls++
-			shouldFail := failComplete
-			if shouldFail {
-				failComplete = false
-			} else {
-				completeVisible = true
-			}
+			completeVisible = true
 			mu.Unlock()
-			if shouldFail {
-				response.WriteHeader(http.StatusInternalServerError)
-				_, _ = response.Write([]byte(`{"ok":false,"error":"transient provider failure"}`))
-				return
-			}
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = response.Write([]byte(`{"ok":true,"files":[{"id":"F123","title":"OpenCode result job_file_integration"}]}`))
 		case "/files.info":
@@ -419,33 +415,32 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 			}
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(response, `{"ok":true,"file":{"id":"F123","name":"opencode-job_file_integration.md","size":%d,"user":"B12345678","channels":%s}}`, len(content), channels)
-		case "/conversations.replies":
+		case "/conversations.replies", "/conversations.history":
 			mu.Lock()
-			visible := completeVisible
+			gotStatusTS := statusTS
+			gotStatusMetadata := statusMetadata
 			mu.Unlock()
 			response.Header().Set("Content-Type", "application/json")
-			if visible {
-				_, _ = response.Write([]byte(`{"ok":true,"messages":[{"type":"message","user":"B12345678","ts":"1710000000.000010","files":[{"id":"F123"}]}]}`))
-			} else {
-				_, _ = response.Write([]byte(`{"ok":true,"messages":[]}`))
+			messages := make([]map[string]any, 0, 1)
+			if gotStatusTS != "" {
+				messages = append(messages, map[string]any{
+					"type": "message", "user": "B12345678", "ts": gotStatusTS,
+					"metadata": gotStatusMetadata,
+				})
 			}
-		case "/conversations.history":
-			response.Header().Set("Content-Type", "application/json")
-			_, _ = response.Write([]byte(`{"ok":true,"messages":[]}`))
+			_ = json.NewEncoder(response).Encode(map[string]any{"ok": true, "messages": messages})
 		case "/chat.postMessage":
-			mu.Lock()
-			postCalls++
-			shouldFail := failPost
-			if shouldFail {
-				failPost = false
-			}
-			attempt := postCalls
-			mu.Unlock()
-			if shouldFail {
-				response.WriteHeader(http.StatusInternalServerError)
-				_, _ = response.Write([]byte(`{"ok":false,"error":"transient provider failure"}`))
+			var metadata map[string]any
+			if err := json.Unmarshal([]byte(request.FormValue("metadata")), &metadata); err != nil {
+				response.WriteHeader(http.StatusBadRequest)
 				return
 			}
+			mu.Lock()
+			postCalls++
+			attempt := postCalls
+			statusTS = fmt.Sprintf("1710000000.00000%d", attempt)
+			statusMetadata = metadata
+			mu.Unlock()
 			response.Header().Set("Content-Type", "application/json")
 			_, _ = fmt.Fprintf(response, `{"ok":true,"channel":"D12345678","ts":"1710000000.00000%d"}`, attempt)
 		default:
@@ -454,13 +449,16 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 
-	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+	database := filepath.Join(t.TempDir(), "jobs.db")
+	artifactDirectory := filepath.Join(t.TempDir(), "artifacts")
+	store, err := adaptersqlite.Initialize(t.Context(), database)
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
+	initialStore := store
+	t.Cleanup(func() { _ = initialStore.Close() })
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
-	artifacts, err := fsartifact.New(filepath.Join(t.TempDir(), "artifacts"), 1<<20)
+	artifacts, err := fsartifact.New(artifactDirectory, 1<<20)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,79 +484,87 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	service, err := externalagent.New(externalagent.Config{
-		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
-		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
-	}, externalagent.Dependencies{Store: jobs, Runtime: &integrationJobRuntime{}, Artifacts: artifacts})
-	if err != nil {
-		t.Fatal(err)
-	}
-	newWorker := func() *externalagent.NotificationWorker {
+	newWorker := func(jobStore *adaptersqlite.ExternalAgentJobStore, artifactStore *fsartifact.Store) *externalagent.NotificationWorker {
+		service, serviceErr := externalagent.New(externalagent.Config{
+			DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+			PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+		}, externalagent.Dependencies{Store: jobStore, Runtime: &integrationJobRuntime{}, Artifacts: artifactStore})
+		if serviceErr != nil {
+			t.Fatal(serviceErr)
+		}
 		client := slackapi.New("xoxb-local-test", slackapi.OptionAPIURL(server.URL+"/"))
 		publisher := slackadapter.NewPublisher(client, time.Millisecond, integrationLogger{}, false)
 		history := slackadapter.NewHistoryReader(client, "B12345678", time.Second, integrationLogger{}, false)
 		uploader := slackadapter.NewGeneratedFileUploader(client, time.Second)
-		notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(publisher, history, uploader, artifacts, jobs, client, false)
+		notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(publisher, history, uploader, artifactStore, jobStore, client, false)
 		worker, workerErr := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute}, externalagent.NotificationDependencies{
-			Store: jobs, Publisher: notificationPublisher, HostCompleter: service,
+			Store: jobStore, Publisher: notificationPublisher, HostCompleter: service,
 		})
 		if workerErr != nil {
 			t.Fatal(workerErr)
 		}
 		return worker
 	}
-	makeDue := func() {
-		t.Helper()
-		if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications SET next_attempt_at = ? WHERE job_id = ?`, time.Now().UTC().UnixNano(), job.ID); err != nil {
-			t.Fatal(err)
-		}
+	if _, err := store.DB().ExecContext(t.Context(), `CREATE TRIGGER reject_notification_publish
+		BEFORE UPDATE OF publish_state ON external_agent_job_notifications
+		WHEN NEW.publish_state = 'published'
+		BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
 	}
 
-	if err := newWorker().ProcessOne(t.Context()); err != nil {
-		t.Fatal(err)
+	if err := newWorker(jobs, artifacts).ProcessOne(t.Context()); err == nil {
+		t.Fatal("first worker unexpectedly completed after publication CAS was blocked")
 	}
 	inspection, err := jobs.InspectJob(t.Context(), job.ID)
 	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
 		t.Fatalf("after bytes stage inspection = %#v, err=%v", inspection, err)
 	}
 	firstDelivery := inspection.Deliveries[0]
-	if firstDelivery.PublishState != domain.NotificationPending || firstDelivery.UploadState != domain.JobResultUploadBytesUploaded || !firstDelivery.SlackFileIDPresent || firstDelivery.LastErrorCode != "result_file_completion_failed" {
-		t.Fatalf("after bytes stage delivery = %#v", firstDelivery)
+	if firstDelivery.PublishState != domain.NotificationPublishing || firstDelivery.UploadState != domain.JobResultUploadCompleted || !firstDelivery.SlackFileIDPresent {
+		t.Fatalf("after interrupted publication delivery = %#v", firstDelivery)
 	}
-	makeDue()
-
-	if err := newWorker().ProcessOne(t.Context()); err != nil {
+	if _, err := store.DB().ExecContext(t.Context(), `DROP TRIGGER reject_notification_publish`); err != nil {
 		t.Fatal(err)
 	}
-	inspection, err = jobs.InspectJob(t.Context(), job.ID)
-	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
-		t.Fatalf("after completed stage inspection = %#v, err=%v", inspection, err)
-	}
-	secondDelivery := inspection.Deliveries[0]
-	if secondDelivery.PublishState != domain.NotificationPending || secondDelivery.UploadState != domain.JobResultUploadCompleted || secondDelivery.LastErrorCode != "notification_publish_ambiguous" {
-		t.Fatalf("after completed stage delivery = %#v", secondDelivery)
-	}
-	makeDue()
-
-	if err := newWorker().ProcessOne(t.Context()); err != nil {
+	restartAt := time.Now().UTC()
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications
+		SET lease_expiry = ?, next_attempt_at = ? WHERE job_id = ?`, restartAt.Add(-time.Second).UnixNano(), restartAt.UnixNano(), job.ID); err != nil {
 		t.Fatal(err)
 	}
-	inspection, err = jobs.InspectJob(t.Context(), job.ID)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = adaptersqlite.Initialize(t.Context(), database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	restartedJobs := adaptersqlite.NewExternalAgentJobStore(store)
+	restartedArtifacts, err := fsartifact.New(artifactDirectory, 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := newWorker(restartedJobs, restartedArtifacts).ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	inspection, err = restartedJobs.InspectJob(t.Context(), job.ID)
 	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
 		t.Fatalf("final inspection = %#v, err=%v", inspection, err)
 	}
 	finalDelivery := inspection.Deliveries[0]
-	if finalDelivery.PublishState != domain.NotificationPublished || finalDelivery.UploadState != domain.JobResultUploadCompleted || !finalDelivery.SlackFileIDPresent || finalDelivery.RecoveredSlackTS == "" {
+	if finalDelivery.PublishState != domain.NotificationPublished || finalDelivery.UploadState != domain.JobResultUploadCompleted || !finalDelivery.SlackFileIDPresent || finalDelivery.RecoveredSlackTS != statusTS {
 		t.Fatalf("final file delivery = %#v", finalDelivery)
 	}
 	mu.Lock()
 	gotUploaded := append([]byte(nil), uploaded...)
+	gotUploadURLCalls, gotUploadCalls := uploadURLCalls, uploadCalls
 	gotCompleteCalls, gotPostCalls := completeCalls, postCalls
 	mu.Unlock()
-	if string(gotUploaded) != content || gotCompleteCalls != 2 || gotPostCalls != 2 {
-		t.Fatalf("Slack file flow uploaded=%q complete_calls=%d post_calls=%d", gotUploaded, gotCompleteCalls, gotPostCalls)
+	if string(gotUploaded) != content || gotUploadURLCalls != 1 || gotUploadCalls != 1 || gotCompleteCalls != 1 || gotPostCalls != 1 {
+		t.Fatalf("Slack file flow uploaded=%q upload_url_calls=%d upload_calls=%d complete_calls=%d post_calls=%d", gotUploaded, gotUploadURLCalls, gotUploadCalls, gotCompleteCalls, gotPostCalls)
 	}
-	if after, err := jobs.ClaimNextNotification(t.Context(), time.Now().UTC().Add(time.Hour), "after-worker", time.Minute); err != nil || after != nil {
+	if after, err := restartedJobs.ClaimNextNotification(t.Context(), time.Now().UTC().Add(time.Hour), "after-worker", time.Minute); err != nil || after != nil {
 		t.Fatalf("published delivery was claimable: %#v, err=%v", after, err)
 	}
 }
