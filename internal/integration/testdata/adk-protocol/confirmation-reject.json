@@ -1,0 +1,135 @@
+{
+  "schema": "adk-protocol-ledger/v1",
+  "adk": "google.golang.org/adk/v2@v2.0.0",
+  "scenario": "confirmation-reject",
+  "events": [
+    {
+      "ordinal": 0,
+      "role": "user",
+      "author": "user",
+      "partial": false,
+      "turn_complete": false,
+      "parts": [
+        {
+          "kind": "text",
+          "text": "run confirmation-reject"
+        }
+      ]
+    },
+    {
+      "ordinal": 1,
+      "role": "model",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": true,
+      "parts": [
+        {
+          "kind": "function_call",
+          "id": "call_confirmation_001",
+          "name": "confirmation_tool",
+          "args": {
+            "value": "confirmation-reject"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 2,
+      "role": "user",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": false,
+      "skip_summarization": true,
+      "parts": [
+        {
+          "kind": "function_response",
+          "id": "call_confirmation_001",
+          "name": "confirmation_tool",
+          "response": {
+            "error": "error tool \"confirmation_tool\" requires confirmation, please approve or reject"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 3,
+      "role": "model",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": false,
+      "long_running_tool_ids": [
+        "wrapper_confirmation_001"
+      ],
+      "parts": [
+        {
+          "kind": "function_call",
+          "id": "wrapper_confirmation_001",
+          "name": "adk_request_confirmation",
+          "args": {
+            "originalFunctionCall": {
+              "args": {
+                "value": "confirmation-reject"
+              },
+              "id": "call_confirmation_001",
+              "name": "confirmation_tool"
+            },
+            "toolConfirmation": {
+              "confirmed": false,
+              "hint": "Please approve or reject the tool call confirmation_tool() by responding with a FunctionResponse with an expected ToolConfirmation payload.",
+              "payload": null
+            }
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 4,
+      "role": "user",
+      "author": "user",
+      "partial": false,
+      "turn_complete": false,
+      "parts": [
+        {
+          "kind": "function_response",
+          "id": "wrapper_confirmation_001",
+          "name": "adk_request_confirmation",
+          "response": {
+            "confirmed": false,
+            "payload": {}
+          },
+          "will_continue": false
+        }
+      ]
+    },
+    {
+      "ordinal": 5,
+      "role": "user",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": false,
+      "parts": [
+        {
+          "kind": "function_response",
+          "id": "call_confirmation_001",
+          "name": "confirmation_tool",
+          "response": {
+            "error": "error tool \"confirmation_tool\" call is rejected"
+          }
+        }
+      ]
+    },
+    {
+      "ordinal": 6,
+      "role": "model",
+      "author": "local_agent",
+      "partial": false,
+      "turn_complete": true,
+      "parts": [
+        {
+          "kind": "text",
+          "text": "confirmation complete: confirmation-reject"
+        }
+      ]
+    }
+  ]
+}
