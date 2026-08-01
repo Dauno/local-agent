@@ -3,6 +3,7 @@ package externalagent
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -28,16 +29,25 @@ type Dependencies struct {
 	Store     port.ExternalAgentJobStore
 	Runtime   port.ExternalAgentJobRuntime
 	Publisher port.ExternalAgentJobPublisher
-	Clock     port.Clock
+	Artifacts port.ResultArtifactStore
+	// MaxResultBytes bounds host-completion reads. The artifact adapter applies
+	// its own bound as a second, independent check.
+	MaxResultBytes int64
+	Clock          port.Clock
 }
 
 type Service struct {
-	cfg       Config
-	store     port.ExternalAgentJobStore
-	runtime   port.ExternalAgentJobRuntime
-	publisher port.ExternalAgentJobPublisher
-	clock     port.Clock
+	cfg            Config
+	store          port.ExternalAgentJobStore
+	runtime        port.ExternalAgentJobRuntime
+	publisher      port.ExternalAgentJobPublisher
+	artifacts      port.ResultArtifactStore
+	maxResultBytes int64
+	clock          port.Clock
 }
+
+var _ port.ExternalAgentJobReader = (*Service)(nil)
+var _ port.ExternalAgentJobHostCompleter = (*Service)(nil)
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
 	if cfg.DefaultTimeout <= 0 || cfg.MaxTimeout < cfg.DefaultTimeout || cfg.LeaseTTL <= 0 || cfg.PollInterval <= 0 || cfg.Concurrency <= 0 || cfg.MaxAttempts <= 0 {
@@ -49,7 +59,11 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.Clock == nil {
 		deps.Clock = systemClock{}
 	}
-	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher, clock: deps.Clock}, nil
+	if deps.MaxResultBytes <= 0 || deps.MaxResultBytes > domain.MaxExternalAgentResultBytes {
+		deps.MaxResultBytes = domain.MaxExternalAgentResultBytes
+	}
+	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
+		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, clock: deps.Clock}, nil
 }
 
 func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error) {
@@ -141,6 +155,9 @@ func (s *Service) Cancel(ctx context.Context, jobID, actor string) (*domain.Exte
 }
 
 func (s *Service) Status(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error) {
+	if strings.TrimSpace(jobID) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(string(conversationKey)) == "" {
+		return nil, errors.New("external-agent job operation binding is required")
+	}
 	job, err := s.store.GetJob(ctx, jobID)
 	if err != nil || job == nil {
 		return job, err
@@ -149,6 +166,65 @@ func (s *Service) Status(ctx context.Context, jobID, actor string, conversationK
 		return nil, errors.New("external-agent job operation is not authorized")
 	}
 	return job, nil
+}
+
+// ReadResult returns the complete sanitized result for an authorized,
+// completed job. It re-verifies inline bytes as well as private artifact reads
+// so a stale or tampered database row cannot turn into a successful delivery.
+func (s *Service) ReadResult(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.ExternalAgentJobResult, error) {
+	job, err := s.Status(ctx, jobID, actor, conversationKey)
+	if err != nil {
+		return domain.ExternalAgentJobResult{}, err
+	}
+	if job == nil {
+		return domain.ExternalAgentJobResult{}, errors.New("external-agent job was not found")
+	}
+	if job.Status != domain.JobCompleted {
+		return domain.ExternalAgentJobResult{}, fmt.Errorf("external-agent job is not completed: %s", job.Status)
+	}
+
+	content := []byte(job.ResultSummary)
+	mode := domain.JobResultDeliveryMarkdown
+	if job.ResultArtifact != "" {
+		if s.artifacts == nil {
+			return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+		}
+		maxBytes := s.maxResultBytes
+		if job.ResultBytes > 0 && job.ResultBytes < maxBytes {
+			maxBytes = job.ResultBytes
+		}
+		content, err = s.artifacts.Get(ctx, job.ID+"-delivery", job.ResultArtifact, job.ResultSHA256, maxBytes)
+		if err != nil {
+			return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+		}
+		mode = domain.JobResultDeliveryFile
+	}
+	if len(content) == 0 || int64(len(content)) > s.maxResultBytes {
+		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+	}
+	if job.ResultBytes <= 0 || int64(len(content)) != job.ResultBytes {
+		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+	}
+	digest := sha256.Sum256(content)
+	contentSHA := fmt.Sprintf("%x", digest)
+	if job.ResultSHA256 != "" && !strings.EqualFold(job.ResultSHA256, contentSHA) {
+		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+	}
+	return domain.ExternalAgentJobResult{
+		JobID: job.ID, StatusRevision: job.StatusRevision, Text: string(content),
+		ContentSHA256: contentSHA, ContentBytes: int64(len(content)), DeliveryMode: mode,
+	}, nil
+}
+
+// HostCompletionTurn is the non-privileged completion phase for a detached
+// invocation. It is deliberately deterministic: it reads the already
+// materialized result and never starts ACP or requests confirmation.
+func (s *Service) HostCompletionTurn(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (port.AgentTurn, error) {
+	result, err := s.ReadResult(ctx, jobID, actor, conversationKey)
+	if err != nil {
+		return port.AgentTurn{}, err
+	}
+	return port.AgentTurn{Text: result.Text}, nil
 }
 
 func (s *Service) CancelForConversation(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error) {

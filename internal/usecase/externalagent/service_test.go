@@ -2,6 +2,9 @@ package externalagent
 
 import (
 	"context"
+	"crypto/sha256"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -216,6 +219,106 @@ func TestNonRetryableACPErrorPreservesCode(t *testing.T) {
 	if runtime.calls != 1 || finished.ErrorCode != string(domain.ACPErrorConfigDrift) {
 		t.Fatalf("calls = %d, error code = %q", runtime.calls, finished.ErrorCode)
 	}
+}
+
+func TestHostCompletionReadsOnlyAuthorizedCompleteResult(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	content := "complete sanitized result"
+	digest := sha256.Sum256([]byte(content))
+	job := testRequest(domain.JobDetached)
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	created, err := service.Start(context.Background(), job)
+	if err != nil || created == nil {
+		t.Fatalf("start = %#v, err = %v", created, err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.Transition(t.Context(), created.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{
+		Text: content, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ReadResult(t.Context(), created.ID, job.Actor, job.ConversationKey)
+	if err != nil || result.Text != content || result.ContentSHA256 != fmt.Sprintf("%x", digest) {
+		t.Fatalf("result = %#v, err = %v", result, err)
+	}
+	if _, err := service.ReadResult(t.Context(), created.ID, "U99999999", job.ConversationKey); err == nil {
+		t.Fatal("wrong actor read the job result")
+	}
+	if _, err := service.ReadResult(t.Context(), created.ID, job.Actor, "slack:T12345678:dm:D99999999"); err == nil {
+		t.Fatal("wrong conversation read the job result")
+	}
+	turn, err := service.HostCompletionTurn(t.Context(), created.ID, job.Actor, job.ConversationKey)
+	if err != nil || turn.Text != content || turn.PendingConfirmation != nil {
+		t.Fatalf("completion turn = %#v, err = %v", turn, err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_jobs SET result_bytes = result_bytes + 1 WHERE job_id = ?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReadResult(t.Context(), created.ID, job.Actor, job.ConversationKey); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
+		t.Fatalf("altered ResultBytes was accepted: %v", err)
+	}
+}
+
+func TestHostCompletionVerifiesPrivateArtifactDigest(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	content := "file result"
+	digest := sha256.Sum256([]byte(content))
+	request := testRequest(domain.JobDetached)
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: fakeResultArtifacts{data: []byte(content)}, MaxResultBytes: 1024})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{
+		DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job_" + job.ID[4:] + "-delivery.result", ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)),
+		DeliveryArtifactRef: "job_" + job.ID[4:] + "-delivery.result", DeliveryContentSHA256: fmt.Sprintf("%x", digest), DeliveryContentBytes: int64(len(content)), DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6,
+	}, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	result, err := service.ReadResult(t.Context(), job.ID, request.Actor, request.ConversationKey)
+	if err != nil || result.Text != content || result.DeliveryMode != domain.JobResultDeliveryFile {
+		t.Fatalf("artifact result = %#v, err = %v", result, err)
+	}
+}
+
+type fakeResultArtifacts struct{ data []byte }
+
+func (f fakeResultArtifacts) Put(context.Context, string, string) (domain.ResultArtifact, error) {
+	return domain.ResultArtifact{}, errors.New("not used")
+}
+
+func (f fakeResultArtifacts) Get(_ context.Context, _ string, _ string, expected string, max int64) ([]byte, error) {
+	if int64(len(f.data)) > max {
+		return nil, errors.New("overflow")
+	}
+	digest := sha256.Sum256(f.data)
+	if expected != fmt.Sprintf("%x", digest) {
+		return nil, errors.New("digest mismatch")
+	}
+	return append([]byte(nil), f.data...), nil
 }
 
 type fakeJobRuntime struct {

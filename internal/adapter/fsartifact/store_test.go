@@ -104,3 +104,45 @@ func TestResultArtifactStoreVerifiedReadBindsOwnerAndDigest(t *testing.T) {
 		t.Fatal("digest mismatch was accepted")
 	}
 }
+
+func TestResultArtifactStoreRejectsSymlinkNonRegularAndReadOverflow(t *testing.T) {
+	dir := t.TempDir()
+	store, err := fsartifact.New(dir, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := store.Put(context.Background(), "job_1-delivery", "safe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, artifact.Reference)
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "outside"), path); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(context.Background(), "job_1-delivery", artifact.Reference, artifact.SHA256, 1024); err == nil {
+		t.Fatal("symlink artifact was accepted")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(context.Background(), "job_1-delivery", artifact.Reference, artifact.SHA256, 1024); err == nil {
+		t.Fatal("non-regular artifact was accepted")
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	overflow := []byte("12345")
+	digest := sha256.Sum256(overflow)
+	if err := os.WriteFile(path, overflow, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Get(context.Background(), "job_1-delivery", artifact.Reference, fmt.Sprintf("%x", digest), 4); err == nil {
+		t.Fatal("artifact read exceeded the requested bound")
+	}
+}

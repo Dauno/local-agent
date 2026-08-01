@@ -13,6 +13,11 @@ import (
 
 const MaxExternalAgentTaskRunes = 200_000
 
+// MaxExternalAgentResultBytes is a final defensive bound for result reads made
+// through the host-completion path. Configured artifact bounds remain stricter
+// in normal composition.
+const MaxExternalAgentResultBytes = 256 * 1024 * 1024
+
 const (
 	JobNotificationTerminal = "terminal"
 	JobNotificationFailure  = "delivery_failure"
@@ -69,9 +74,16 @@ func (p ResultDeliveryPolicy) Validate() error {
 }
 
 type ExternalAgentJobNotification struct {
-	JobID               string
-	StatusRevision      int
-	Kind                string
+	JobID          string
+	StatusRevision int
+	Kind           string
+	// Actor and ConversationKey are loaded from the authoritative job row for
+	// host-owned completion. They are not part of the immutable delivery key.
+	Actor           string
+	ConversationKey ConversationKey
+	// HostResultText is ephemeral completion data. It is never written to the
+	// notification row or exposed through an ADK function response.
+	HostResultText      string
 	CanonicalMarkdown   string
 	ContentSHA256       string
 	RendererVersion     string
@@ -130,6 +142,7 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
+		Actor: job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: fmt.Sprintf("%x", digest),
 		RendererVersion: JobNotificationRenderer, Target: target,
 		PublishState: NotificationPending,
@@ -169,9 +182,9 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	if maxParts > 8 {
 		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown part policy is invalid")
 	}
-	contentDigest := result.DeliveryContentSHA256
+	contentDigest := strings.ToLower(result.DeliveryContentSHA256)
 	if contentDigest == "" {
-		contentDigest = result.ResultSHA256
+		contentDigest = strings.ToLower(result.ResultSHA256)
 	}
 	if contentDigest == "" {
 		digest := sha256.Sum256([]byte(result.Text))
@@ -189,6 +202,12 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	}
 	if _, err := hex.DecodeString(contentDigest); err != nil || len(contentDigest) != sha256.Size*2 {
 		return ExternalAgentJobNotification{}, errors.New("result delivery digest is invalid")
+	}
+	if mode == JobResultDeliveryMarkdown && result.Text != "" {
+		digest := sha256.Sum256([]byte(result.Text))
+		if contentDigest != fmt.Sprintf("%x", digest) || contentBytes != int64(len([]byte(result.Text))) {
+			return ExternalAgentJobNotification{}, errors.New("result delivery digest does not match complete Markdown content")
+		}
 	}
 	markdown := fmt.Sprintf("OpenCode job `%s` completed.", job.ID)
 	artifactRef := ""
@@ -224,6 +243,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
+		Actor: job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: contentDigest, RendererVersion: JobNotificationRenderer,
 		Target: target, PublishState: NotificationPending, DeliveryMode: mode, PolicyVersion: policyVersion,
 		ArtifactRef: artifactRef, ResultBytes: contentBytes, MaxMarkdownParts: maxParts,
@@ -374,6 +394,47 @@ type ExternalAgentJob struct {
 	StartedAt           time.Time
 	FinishedAt          time.Time
 	UpdatedAt           time.Time
+}
+
+// ExternalAgentJobStatusView is the host-owned, model-facing subset of a job.
+// It intentionally omits task text, provider configuration, actor identity,
+// and the persisted destination.
+type ExternalAgentJobStatusView struct {
+	JobID           string
+	Status          ExternalAgentJobStatus
+	StatusRevision  int
+	ResultAvailable bool
+	ResultSHA256    string
+	ResultBytes     int64
+	DeliveryMode    JobResultDeliveryMode
+	ErrorCode       string
+	FinishedAt      time.Time
+}
+
+// ExternalAgentJobResult is the complete sanitized result returned by the
+// host-completion path. Artifact references never cross this boundary.
+type ExternalAgentJobResult struct {
+	JobID          string
+	StatusRevision int
+	Text           string
+	ContentSHA256  string
+	ContentBytes   int64
+	DeliveryMode   JobResultDeliveryMode
+}
+
+func (j ExternalAgentJob) StatusView() ExternalAgentJobStatusView {
+	mode := JobResultDeliveryMode("")
+	if j.ResultArtifact != "" {
+		mode = JobResultDeliveryFile
+	} else if j.ResultSummary != "" {
+		mode = JobResultDeliveryMarkdown
+	}
+	return ExternalAgentJobStatusView{
+		JobID: j.ID, Status: j.Status, StatusRevision: j.StatusRevision,
+		ResultAvailable: j.Status == JobCompleted && (j.ResultSummary != "" || j.ResultArtifact != ""),
+		ResultSHA256:    j.ResultSHA256, ResultBytes: j.ResultBytes, DeliveryMode: mode,
+		ErrorCode: j.ErrorCode, FinishedAt: j.FinishedAt,
+	}
 }
 
 func (j ExternalAgentJob) Validate() error {

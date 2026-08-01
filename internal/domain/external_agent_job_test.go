@@ -97,3 +97,26 @@ func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing
 		t.Fatalf("file notification = %+v", file)
 	}
 }
+
+func TestResultDeliveryPolicyAcceptsConfiguredPartBoundsOnly(t *testing.T) {
+	for parts := 1; parts <= 8; parts++ {
+		policy := domain.ResultDeliveryPolicy{
+			MaxMarkdownParts: parts, MaxFileBytes: 1024, MaxInlineResultBytes: int64(parts * domain.SlackMarkdownChunkRunes), MaxResultArtifactBytes: 1024,
+		}
+		if err := policy.Validate(); err != nil {
+			t.Fatalf("parts=%d policy rejected at upper bound: %v", parts, err)
+		}
+	}
+	for _, policy := range []domain.ResultDeliveryPolicy{
+		{MaxMarkdownParts: 0, MaxFileBytes: 1, MaxInlineResultBytes: 1, MaxResultArtifactBytes: 1},
+		{MaxMarkdownParts: 9, MaxFileBytes: 1, MaxInlineResultBytes: 1, MaxResultArtifactBytes: 1},
+		{MaxMarkdownParts: 1, MaxFileBytes: 0, MaxInlineResultBytes: 1, MaxResultArtifactBytes: 1},
+		{MaxMarkdownParts: 1, MaxFileBytes: 1025, MaxInlineResultBytes: 1, MaxResultArtifactBytes: 1024},
+		{MaxMarkdownParts: 1, MaxFileBytes: 1, MaxInlineResultBytes: 0, MaxResultArtifactBytes: 1},
+		{MaxMarkdownParts: 1, MaxFileBytes: 1, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes + 1, MaxResultArtifactBytes: 1},
+	} {
+		if err := policy.Validate(); err == nil {
+			t.Fatalf("invalid policy was accepted: %+v", policy)
+		}
+	}
+}
