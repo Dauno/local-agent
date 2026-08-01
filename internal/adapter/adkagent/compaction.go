@@ -289,7 +289,10 @@ func validateSelectedTurns(turns []domain.ConversationTurn, active bool) error {
 }
 
 func validateProtocol(contents []domain.Content, active bool) error {
-	return domain.ValidateContentProtocol(contents, !active)
+	return domain.ValidateContentProtocol(contents, domain.ProtocolValidationOptions{
+		RequireComplete:            !active,
+		AllowConfirmationLifecycle: true,
+	})
 }
 
 func validateProjectedContents(contents []domain.Content) error {
