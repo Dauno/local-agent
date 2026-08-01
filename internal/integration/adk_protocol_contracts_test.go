@@ -179,83 +179,113 @@ func readProtocolEvents(t *testing.T, service session.Service, key domain.Conver
 	return events
 }
 
-// TestADKCrashBoundaryReproducesMissingResponse documents the Phase 0 bug.
-// The first runner persists the model call, then the test service simulates a
-// process stop before the tool response append. After reopen, the current
-// callback/compiler path admits the new user event and fails on the old call.
-// Phase 2 should invert this expectation: preflight must block before input
-// append with a typed completion-unknown result.
+// TestADKCrashBoundaryReproducesMissingResponse documents the Phase 0 crash
+// boundary and the TRD validation split. The first runner persists the model
+// call, then the test service simulates a process stop before the tool response
+// append. The orphaned call is intentionally accepted when it remains in the
+// active suffix. Under FR-11 and section 7.3, the provider-readiness/preflight
+// boundary added in Wave 2 / Phase 2 must stop that incomplete request before
+// it reaches the model; the compiler's active-suffix acceptance is intentional.
 func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
-	database := filepath.Join(t.TempDir(), "crash-boundary.db")
-	store, err := sqlite.Initialize(t.Context(), database)
-	if err != nil {
-		t.Fatal(err)
-	}
+	t.Run("orphaned call in ACTIVE suffix", func(t *testing.T) {
+		database := filepath.Join(t.TempDir(), "crash-boundary.db")
+		store, err := sqlite.Initialize(t.Context(), database)
+		if err != nil {
+			t.Fatal(err)
+		}
 
-	key := domain.ConversationKey("slack:T12345678:dm:DCRASH001")
-	callID := "call_crash_boundary_001"
-	scripted := &scriptedProtocolLLM{steps: []scriptedModelStep{{responses: []*model.LLMResponse{
-		protocolFunctionCallResponse(callID, "inspect_project", "crash-boundary"),
-	}}}}
-	crashingService := &crashBeforeToolResponseService{Service: sqlite.NewAdkSessionService(store)}
-	crashRuntime := newProtocolRuntime(t, crashingService, scripted, newProtocolTool(t, "inspect_project", false, nil))
-	if _, err := crashRuntime.Run(t.Context(), protocolRequest(key, "inspect the project")); err == nil {
-		t.Fatal("crash simulation unexpectedly completed")
-	}
+		key := domain.ConversationKey("slack:T12345678:dm:DCRASH001")
+		callID := "call_crash_boundary_001"
+		scripted := &scriptedProtocolLLM{steps: []scriptedModelStep{{responses: []*model.LLMResponse{
+			protocolFunctionCallResponse(callID, "inspect_project", "crash-boundary"),
+		}}}}
+		crashingService := &crashBeforeToolResponseService{Service: sqlite.NewAdkSessionService(store)}
+		crashRuntime := newProtocolRuntime(t, crashingService, scripted, newProtocolTool(t, "inspect_project", false, nil))
+		if _, err := crashRuntime.Run(t.Context(), protocolRequest(key, "inspect the project")); err == nil {
+			t.Fatal("crash simulation unexpectedly completed")
+		}
 
-	beforeRestart := readProtocolEvents(t, crashingService, key)
-	if len(beforeRestart) != 2 {
-		t.Fatalf("events before simulated restart = %d, want user plus model call", len(beforeRestart))
-	}
-	if !eventHasFunctionCall(beforeRestart[1], callID) || eventHasFunctionResponse(beforeRestart[1], callID) {
-		t.Fatalf("crash boundary ledger = %#v, want unmatched model function call", beforeRestart[1])
-	}
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
+		beforeRestart := readProtocolEvents(t, crashingService, key)
+		if len(beforeRestart) != 2 {
+			t.Fatalf("events before simulated restart = %d, want user plus model call", len(beforeRestart))
+		}
+		if !eventHasFunctionCall(beforeRestart[1], callID) || eventHasFunctionResponse(beforeRestart[1], callID) {
+			t.Fatalf("crash boundary ledger = %#v, want unmatched model function call", beforeRestart[1])
+		}
+		if err := store.Close(); err != nil {
+			t.Fatal(err)
+		}
 
-	reopened, err := sqlite.OpenExisting(t.Context(), database)
-	if err != nil {
-		t.Fatal(err)
-	}
-	reopenedService := sqlite.NewAdkSessionService(reopened)
-	recoveryModel := &scriptedProtocolLLM{steps: []scriptedModelStep{{responses: []*model.LLMResponse{
-		protocolTextResponse("unreachable recovery response"),
-	}}}}
-	compiler := contextcompiler.New(nil, protocolTokenCounter{})
-	recoveryRuntime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
-		AgentName:       "Protocol Contract Agent",
-		Instruction:     "Use the registered contract tools when requested.",
-		Model:           recoveryModel,
-		SessionService:  reopenedService,
-		ContextCompiler: compiler,
-		ContextBudget:   domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000},
-		ProviderFamily:  domain.ProviderFamilyOpenAICompatible,
+		reopened, err := sqlite.OpenExisting(t.Context(), database)
+		if err != nil {
+			t.Fatal(err)
+		}
+		reopenedService := sqlite.NewAdkSessionService(reopened)
+		if got := len(readProtocolEvents(t, reopenedService, key)); got != len(beforeRestart) {
+			_ = reopened.Close()
+			t.Fatalf("events after reopen = %d, want %d", got, len(beforeRestart))
+		}
+
+		// The retry makes the orphaned call part of the retained active suffix.
+		// FR-11 and section 7.3 require structural acceptance here; completeness
+		// belongs to the later provider-readiness/preflight boundary.
+		activeContents := []domain.Content{
+			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect the project"}}},
+			{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{
+				ID: callID, Name: "inspect_project", Args: map[string]any{"value": "crash-boundary"},
+			}}}},
+			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "retry after restart"}}},
+		}
+		compiler := contextcompiler.New(nil, protocolTokenCounter{})
+		result, err := compiler.Compile(t.Context(), domain.CompileRequest{
+			Contents:          activeContents,
+			ModelBudget:       domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000},
+			OpenInvocationIDs: map[string]struct{}{callID: {}},
+		})
+		if err != nil {
+			_ = reopened.Close()
+			t.Fatalf("active suffix rejected by context compiler: %v", err)
+		}
+		if len(result.Contents) != len(activeContents) {
+			_ = reopened.Close()
+			t.Fatalf("active projection contents = %d, want %d", len(result.Contents), len(activeContents))
+		}
+		if err := reopened.Close(); err != nil {
+			t.Fatal(err)
+		}
 	})
-	if err != nil {
-		_ = reopened.Close()
-		t.Fatal(err)
-	}
-	_, err = recoveryRuntime.Run(t.Context(), protocolRequest(key, "retry after restart"))
-	if err == nil {
-		_ = reopened.Close()
-		t.Fatal("reopened incomplete session unexpectedly accepted a new turn")
-	}
-	wantReason := fmt.Sprintf("function call %q has no response in completed turn", callID)
-	if !strings.Contains(err.Error(), wantReason) {
-		_ = reopened.Close()
-		t.Fatalf("reopened turn error = %v, want protocol reason containing %q", err, wantReason)
-	}
-	if recoveryModel.callCount() != 0 {
-		t.Fatalf("recovery model calls = %d, want callback failure before model contact", recoveryModel.callCount())
-	}
-	afterRetry := readProtocolEvents(t, reopenedService, key)
-	if len(afterRetry) != len(beforeRestart)+1 {
-		t.Fatalf("events after current buggy retry = %d, want %d; Phase 2 must prevent this append", len(afterRetry), len(beforeRestart)+1)
-	}
-	if err := reopened.Close(); err != nil {
-		t.Fatal(err)
-	}
+
+	t.Run("orphaned call in COMPLETED turn", func(t *testing.T) {
+		callID := "call_completed_turn_001"
+		completedTurn := []domain.Content{
+			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect the project"}}},
+			{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{
+				ID: callID, Name: "inspect_project", Args: map[string]any{"value": "completed-turn"},
+			}}}},
+		}
+
+		// This is the exported validator used by the compiler for its closed
+		// portion (flattenTurns(turns[:activeIdx])). A closed portion still
+		// requires every call to have a response.
+		err := domain.ValidateContentProtocol(completedTurn, domain.ProtocolValidationOptions{
+			RequireComplete:            true,
+			AllowConfirmationLifecycle: true,
+		})
+		if err == nil {
+			t.Fatal("completed turn with orphaned call unexpectedly passed validation")
+		}
+		var validationErr *domain.ProtocolValidationError
+		if !errors.As(err, &validationErr) {
+			t.Fatalf("completed turn error = %v, want ProtocolValidationError", err)
+		}
+		if validationErr.Rule != domain.ProtocolRuleIncompleteCall {
+			t.Fatalf("completed turn validation rule = %q, want %q", validationErr.Rule, domain.ProtocolRuleIncompleteCall)
+		}
+		wantReason := fmt.Sprintf("function call %q has no response in completed turn", callID)
+		if validationErr.Error() != wantReason {
+			t.Fatalf("completed turn error = %q, want exact reason %q", validationErr.Error(), wantReason)
+		}
+	})
 }
 
 // TestADKCallbackWarningDocumentsCurrentBehavior captures the pinned ADK
