@@ -106,7 +106,7 @@ func TestBuilderInteractionContextRejectsMismatchedConversationKind(t *testing.T
 
 func TestBuilderModalUpdatePreservesPrivateMetadata(t *testing.T) {
 	const metadata = `{"v":1,"actor_id":"U12345678","conversation_key":"slack:T12345678:dm:D12345678"}`
-	presenter := NewBuilderModalPresenter(nil)
+	presenter := NewBuilderModalPresenterWithProviders(testBuilderProviderProfiles())
 	callback := slackapi.InteractionCallback{
 		User: slackapi.User{ID: "U12345678"},
 		View: slackapi.View{
@@ -153,7 +153,11 @@ func (s *builderDraftStoreFake) Create(_ context.Context, draft *port.AgentDraft
 	s.created = draft
 	return nil
 }
-func (s *builderDraftStoreFake) Get(context.Context, string) (*port.AgentDraft, error) {
+
+func (s *builderDraftStoreFake) Get(_ context.Context, draftID string) (*port.AgentDraft, error) {
+	if s.draft != nil && s.draft.DraftID != draftID {
+		return nil, nil
+	}
 	return s.draft, nil
 }
 func (*builderDraftStoreFake) FindByNameAndDefinitionHash(context.Context, string, string) (*port.AgentDraft, error) {

@@ -68,8 +68,11 @@ type Listener struct {
 	logger             port.Logger
 	allowedUserIDs     []string
 	interactiveHandler func(context.Context, domain.ConfirmationInteractiveAction) error
+	responsePublisher  port.ResponsePublisher
 	builderPresenter   *BuilderModalPresenter
 	builderHandler     *BuilderSubmissionHandler
+	dispatcher         *InteractiveDispatcher
+	dispatcherErr      error
 }
 
 func NewListener(client *socketmode.Client, router Router, logger port.Logger) *Listener {
@@ -81,7 +84,9 @@ func NewListener(client *socketmode.Client, router Router, logger port.Logger) *
 }
 
 func newListener(client socketClient, router Router, logger port.Logger) *Listener {
-	return &Listener{client: client, router: router, logger: loggerOrDiscard(logger)}
+	listener := &Listener{client: client, router: router, logger: loggerOrDiscard(logger)}
+	listener.dispatcher, listener.dispatcherErr = listener.BuildInteractiveDispatcher()
+	return listener
 }
 
 func (l *Listener) SetInteractiveHandler(handler func(context.Context, domain.ConfirmationInteractiveAction) error) {
@@ -89,6 +94,15 @@ func (l *Listener) SetInteractiveHandler(handler func(context.Context, domain.Co
 		return
 	}
 	l.interactiveHandler = handler
+}
+
+// WithResponsePublisher configures deterministic responses for app-owned
+// interactive actions that must not enter the model flow.
+func (l *Listener) WithResponsePublisher(publisher port.ResponsePublisher) *Listener {
+	if l != nil {
+		l.responsePublisher = publisher
+	}
+	return l
 }
 
 // WithAllowedUserIDs configures the users allowed to open the builder modal.
@@ -113,6 +127,41 @@ func (l *Listener) WithBuilderHandler(h *BuilderSubmissionHandler) *Listener {
 		l.builderHandler = h
 	}
 	return l
+}
+
+// WithDispatcher replaces the listener's immutable dispatcher. It is useful
+// for composition and hermetic routing tests; the dispatcher itself cannot be
+// modified after construction.
+func (l *Listener) WithDispatcher(dispatcher *InteractiveDispatcher) *Listener {
+	if l != nil {
+		l.dispatcher = dispatcher
+		l.dispatcherErr = nil
+	}
+	return l
+}
+
+// BuildInteractiveDispatcher constructs the listener-owned registration tables
+// after composition has supplied its handlers and dependencies.
+func (l *Listener) BuildInteractiveDispatcher() (*InteractiveDispatcher, error) {
+	if l == nil {
+		return nil, errors.New("Slack listener is required for dispatcher construction")
+	}
+	return newListenerDispatcher(l)
+}
+
+// ValidateTemplateCatalog checks startup coverage before Listener.Run starts
+// receiving Socket Mode events.
+func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog) error {
+	if l == nil {
+		return errors.New("Slack listener is required for template validation")
+	}
+	if l.dispatcherErr != nil {
+		return fmt.Errorf("initialize Slack interactive dispatcher: %w", l.dispatcherErr)
+	}
+	if l.dispatcher == nil {
+		return errors.New("Slack interactive dispatcher is required")
+	}
+	return catalog.ValidateDispatcher(l.dispatcher)
 }
 
 // Run blocks until the context is canceled or the Socket Mode client stops.
@@ -191,166 +240,253 @@ func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event
 		return
 	}
 
-	if callback.Type == slack.InteractionTypeViewSubmission && callback.View.CallbackID == builderSubmitCallbackID {
-		if l.builderHandler == nil {
-			l.logger.Warn("builder submission handler not configured, ignoring builder submission")
-			if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-				l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-			}
-			return
-		}
-		response := l.builderHandler.HandleSubmission(ctx, callback)
-		if err := l.ackInteractive(ctx, *event.Request, response); err != nil {
-			l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-			if ctx.Err() != nil {
-				return
-			}
-		}
-		if response != nil {
-			return
-		}
-		handlers.Add(1)
-		go func() {
-			defer handlers.Done()
-			if err := l.builderHandler.PreviewAndPublish(ctx, callback); err != nil {
-				l.logger.Warn("builder preview processing failed", "error", err)
-			}
-		}()
+	switch callback.Type {
+	case slack.InteractionTypeViewSubmission:
+		l.handleViewSubmission(ctx, *event.Request, callback, handlers)
+	case slack.InteractionTypeBlockActions:
+		l.handleBlockActions(ctx, *event.Request, callback, handlers)
+	default:
+		l.ackUnsupportedInteractive(ctx, *event.Request, "event", string(callback.Type))
+	}
+}
+
+func (l *Listener) handleViewSubmission(ctx context.Context, request socketmode.Request, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
+	if l.dispatcherErr != nil || l.dispatcher == nil {
+		l.ackUnsupportedInteractive(ctx, request, "view", callback.View.CallbackID)
 		return
 	}
-
-	if callback.Type == slack.InteractionTypeBlockActions {
-		if callback.View.CallbackID == builderSubmitCallbackID && l.builderPresenter != nil {
-			for _, action := range callback.ActionCallback.BlockActions {
-				if action != nil && action.ActionID == "agent_type" {
-					if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-						l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-						if ctx.Err() != nil {
-							return
-						}
-					}
-					updater, ok := l.client.(viewUpdater)
-					if !ok {
-						l.logger.Error("Slack Socket Mode builder modal update failed", "error", "Slack view updater is not configured")
-						return
-					}
-					view := l.builderPresenter.BuildViewForCallback(callback)
-					if callback.View.ID == "" || callback.View.Hash == "" {
-						l.logger.Error("Slack Socket Mode builder modal update failed", "error", "view ID and hash are required")
-						return
-					}
-					if _, err := updater.UpdateViewContext(ctx, view, "", callback.View.Hash, callback.View.ID); err != nil {
-						l.logger.Error("Slack Socket Mode builder modal update failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-					}
-					return
-				}
-			}
-		}
-		for _, action := range callback.ActionCallback.BlockActions {
-			if action != nil && action.ActionID == builderInstallActionID {
-				if !domain.PlausibleUserID(callback.User.ID) || !domain.PlausibleTeamID(callback.Team.ID) || action.Value == "" {
-					l.logger.Warn("builder install action rejected because authorization context is incomplete")
-					if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-						l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-					}
-					return
-				}
-				if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-					l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-					if ctx.Err() != nil {
-						return
-					}
-				}
-				if l.builderHandler == nil {
-					l.logger.Warn("builder submission handler not configured, ignoring builder install action")
-					return
-				}
-				draftID := action.Value
-				handlers.Add(1)
-				go func() {
-					defer handlers.Done()
-					if err := l.builderHandler.HandleInstallRequest(ctx, callback, draftID); err != nil {
-						l.logger.Warn("builder install request processing failed", "error", err)
-					}
-				}()
-				return
-			}
-			if action == nil || action.ActionID != "local_agent.builder.open" {
-				continue
-			}
-			if callback.TriggerID == "" || !domain.PlausibleUserID(callback.User.ID) || !domain.PlausibleTeamID(callback.Team.ID) {
-				l.logger.Warn("builder modal action rejected because authorization context is incomplete")
-				if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-					l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-				}
-				return
-			}
-			metadata, _, contextErr := builderActionContext(callback, action.Value)
-			if contextErr != nil {
-				l.logger.Warn("builder modal action rejected because its conversation context is invalid", "error", contextErr)
-				if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-					l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-				}
-				return
-			}
-			if !l.isAllowedBuilderUser(callback.User.ID) {
-				l.logger.Warn("builder modal action rejected because the user is not an allowed administrator", "user", callback.User.ID)
-				if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-					l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-				}
-				return
-			}
-			if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-				l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
-				if ctx.Err() != nil {
-					return
-				}
-			}
-			if l.builderPresenter == nil {
-				l.logger.Warn("builder modal presenter not configured, ignoring builder action")
-				return
-			}
-			opener, ok := l.client.(viewOpener)
-			if !ok {
-				l.logger.Error("open builder modal failed", "error", "Slack view opener is not configured")
-				l.publishBuilderModalFallback(ctx, callback, handlers)
-				return
-			}
-			view := l.builderPresenter.BuildView()
-			view.PrivateMetadata = metadata
-			if _, err := opener.OpenViewContext(ctx, callback.TriggerID, view); err != nil {
-				l.logger.Error("open builder modal", "error", err)
-				l.publishBuilderModalFallback(ctx, callback, handlers)
-			}
-			return
-		}
+	result, err := l.dispatcher.HandleView(ctx, callback.View.CallbackID, callback)
+	if err != nil {
+		l.ackUnsupportedInteractive(ctx, request, "view", callback.View.CallbackID)
+		return
 	}
-
-	if err := l.ackInteractive(ctx, *event.Request, nil); err != nil {
-		l.logger.Error("Slack Socket Mode interactive acknowledgement failed", "envelope_id", event.Request.EnvelopeID, "error", err)
+	if err := l.ackInteractive(ctx, request, result.Response); err != nil {
+		l.logger.Error("Slack Socket Mode builder acknowledgement failed", "envelope_id", request.EnvelopeID, "error", err)
 		if ctx.Err() != nil {
 			return
 		}
 	}
-
-	action, ok := normalizeInteractiveAction(&callback)
-	if !ok {
-		l.logger.Debug("non-confirmation interactive action ignored", "action_id", callback.ActionID)
+	if result.Response != nil || result.Effect == nil {
 		return
 	}
-
-	if l.interactiveHandler == nil {
-		l.logger.Warn("interactive handler not configured, ignoring confirmation action")
-		return
-	}
-
 	handlers.Add(1)
 	go func() {
 		defer handlers.Done()
-		if err := l.interactiveHandler(ctx, action); err != nil {
-			l.logger.Warn("interactive handler returned error", "error", err)
+		if err := result.Effect(ctx); err != nil {
+			l.logger.Warn("builder preview processing failed", "error", err)
 		}
 	}()
+}
+
+func (l *Listener) handleBlockActions(ctx context.Context, request socketmode.Request, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
+	if l.dispatcherErr != nil || l.dispatcher == nil {
+		l.ackUnsupportedInteractive(ctx, request, "action", "")
+		return
+	}
+	if callback.View.CallbackID != "" && !l.dispatcher.HasView(callback.View.CallbackID) {
+		l.ackUnsupportedInteractive(ctx, request, "callback", callback.View.CallbackID)
+		return
+	}
+	actionID, found := l.dispatchActionID(callback)
+	if !found {
+		l.ackUnsupportedInteractive(ctx, request, "action", actionID)
+		return
+	}
+	if err := l.ackInteractive(ctx, request, nil); err != nil {
+		l.logger.Error("Slack Socket Mode interactive acknowledgement failed", "envelope_id", request.EnvelopeID, "error", err)
+		if ctx.Err() != nil {
+			return
+		}
+	}
+	handlers.Add(1)
+	go func() {
+		defer handlers.Done()
+		if err := l.dispatcher.HandleAction(ctx, actionID, callback); err != nil {
+			if errors.Is(err, ErrUnsupportedInteractive) {
+				l.logger.Warn("unsupported Slack interactive action ignored")
+				return
+			}
+			l.logger.Warn("Slack interactive action handler failed", "error", err)
+		}
+	}()
+}
+
+func (l *Listener) dispatchActionID(callback slack.InteractionCallback) (string, bool) {
+	if len(callback.ActionCallback.BlockActions) != 1 || callback.ActionCallback.BlockActions[0] == nil {
+		return "", false
+	}
+	actionID := callback.ActionCallback.BlockActions[0].ActionID
+	if actionID == "" || !l.dispatcher.HasAction(actionID) {
+		return actionID, false
+	}
+	return actionID, true
+}
+
+func (l *Listener) handleBuilderSubmission(ctx context.Context, callback slack.InteractionCallback) (ViewDispatchResult, error) {
+	if l.builderHandler == nil {
+		l.logger.Warn("builder submission handler not configured, ignoring builder submission")
+		return ViewDispatchResult{}, nil
+	}
+	response := l.builderHandler.HandleSubmission(ctx, callback)
+	if response != nil {
+		return ViewDispatchResult{Response: response}, nil
+	}
+	return ViewDispatchResult{
+		Effect: func(effectCtx context.Context) error {
+			return l.builderHandler.PreviewAndPublish(effectCtx, callback)
+		},
+	}, nil
+}
+
+func (l *Listener) handleBuilderTypeAction(ctx context.Context, callback slack.InteractionCallback) error {
+	if callback.View.CallbackID != builderSubmitCallbackID || l.builderPresenter == nil {
+		return nil
+	}
+	updater, ok := l.client.(viewUpdater)
+	if !ok {
+		l.logger.Error("Slack Socket Mode builder modal update failed", "error", "Slack view updater is not configured")
+		return nil
+	}
+	view, err := l.builderPresenter.BuildViewForCallbackResult(callback)
+	if err != nil {
+		return fmt.Errorf("render builder modal update: %w", err)
+	}
+	if callback.View.ID == "" || callback.View.Hash == "" {
+		l.logger.Error("Slack Socket Mode builder modal update failed", "error", "view ID and hash are required")
+		return nil
+	}
+	if _, err := updater.UpdateViewContext(ctx, view, "", callback.View.Hash, callback.View.ID); err != nil {
+		l.logger.Error("Slack Socket Mode builder modal update failed", "error", err)
+	}
+	return nil
+}
+
+func (l *Listener) handleBuilderInstallAction(ctx context.Context, callback slack.InteractionCallback) error {
+	draftID, _ := blockActionValue(callback, builderInstallActionID)
+	if !domain.PlausibleUserID(callback.User.ID) || !domain.PlausibleTeamID(callback.Team.ID) || draftID == "" {
+		l.logger.Warn("builder install action rejected because authorization context is incomplete")
+		return nil
+	}
+	if l.builderHandler == nil {
+		l.logger.Warn("builder submission handler not configured, ignoring builder install action")
+		return nil
+	}
+	if err := l.builderHandler.HandleInstallRequest(ctx, callback, draftID); err != nil {
+		l.logger.Warn("builder install request processing failed", "error", err)
+	}
+	return nil
+}
+
+func (l *Listener) handleBuilderOpenAction(ctx context.Context, callback slack.InteractionCallback) error {
+	if callback.TriggerID == "" || !domain.PlausibleUserID(callback.User.ID) || !domain.PlausibleTeamID(callback.Team.ID) {
+		l.logger.Warn("builder modal action rejected because authorization context is incomplete")
+		return nil
+	}
+	metadata, _, contextErr := builderActionContext(callback, blockActionValueOrEmpty(callback, "local_agent.builder.open"))
+	if contextErr != nil {
+		l.logger.Warn("builder modal action rejected because its conversation context is invalid", "error", contextErr)
+		return nil
+	}
+	if !l.isAllowedBuilderUser(callback.User.ID) {
+		l.logger.Warn("builder modal action rejected because the user is not an allowed administrator", "user", callback.User.ID)
+		return nil
+	}
+	if l.builderPresenter == nil {
+		l.logger.Warn("builder modal presenter not configured, ignoring builder action")
+		return nil
+	}
+	opener, ok := l.client.(viewOpener)
+	if !ok {
+		l.logger.Error("open builder modal failed", "error", "Slack view opener is not configured")
+		l.publishBuilderModalFallback(ctx, callback, nil)
+		return nil
+	}
+	view, err := l.builderPresenter.BuildViewResult()
+	if err != nil {
+		l.logger.Error("render builder modal", "error", err)
+		l.publishBuilderModalFallback(ctx, callback, nil)
+		return nil
+	}
+	view.PrivateMetadata = metadata
+	if _, err := opener.OpenViewContext(ctx, callback.TriggerID, view); err != nil {
+		l.logger.Error("open builder modal", "error", err)
+		l.publishBuilderModalFallback(ctx, callback, nil)
+	}
+	return nil
+}
+
+func (l *Listener) handleConfirmationAction(ctx context.Context, callback slack.InteractionCallback) error {
+	if len(callback.ActionCallback.BlockActions) != 1 || callback.ActionCallback.BlockActions[0] == nil {
+		return ErrMalformedInteractive
+	}
+	action, ok := normalizeInteractiveAction(&callback)
+	if !ok {
+		return ErrMalformedInteractive
+	}
+	if l.interactiveHandler == nil {
+		l.logger.Warn("interactive handler not configured, ignoring confirmation action")
+		return nil
+	}
+	if err := l.interactiveHandler(ctx, action); err != nil {
+		l.logger.Warn("interactive handler returned error", "error", err)
+	}
+	return nil
+}
+
+func (l *Listener) handleOnboardingDescribeAction(ctx context.Context, callback slack.InteractionCallback) error {
+	if !domain.PlausibleUserID(callback.User.ID) || !domain.PlausibleTeamID(callback.Team.ID) {
+		l.logger.Warn("onboarding describe action rejected because authorization context is incomplete")
+		return nil
+	}
+	if l.responsePublisher == nil {
+		l.logger.Warn("onboarding describe action ignored because response publisher is not configured")
+		return nil
+	}
+	_, target, err := builderActionContext(callback, blockActionValueOrEmpty(callback, "local_agent.onboarding.describe"))
+	if err != nil {
+		l.logger.Warn("onboarding describe action rejected because its conversation context is invalid", "error", err)
+		return nil
+	}
+	if _, err := l.responsePublisher.Publish(ctx, target, onboardingDescribePrompt); err != nil {
+		return fmt.Errorf("publish onboarding describe guidance: %w", err)
+	}
+	return nil
+}
+
+func blockActionValue(callback slack.InteractionCallback, actionID string) (string, bool) {
+	for _, action := range callback.ActionCallback.BlockActions {
+		if action != nil && action.ActionID == actionID {
+			return action.Value, true
+		}
+	}
+	return "", false
+}
+
+func blockActionValueOrEmpty(callback slack.InteractionCallback, actionID string) string {
+	value, _ := blockActionValue(callback, actionID)
+	return value
+}
+
+func (l *Listener) ackUnsupportedInteractive(ctx context.Context, request socketmode.Request, kind, id string) {
+	if err := l.ackInteractive(ctx, request, nil); err != nil {
+		l.logger.Error("Slack Socket Mode interactive acknowledgement failed", "envelope_id", request.EnvelopeID, "error", err)
+	}
+	l.logger.Warn("unsupported Slack interactive interaction ignored", "kind", kind, "id", boundedInteractiveID(id))
+}
+
+func boundedInteractiveID(id string) string {
+	if id == "" {
+		return "<empty>"
+	}
+	if len(id) > maxRendererIDLength {
+		return "<oversized>"
+	}
+	for _, r := range id {
+		if r < 0x21 || r > 0x7e {
+			return "<invalid>"
+		}
+	}
+	return id
 }
 
 func (l *Listener) isAllowedBuilderUser(userID string) bool {
@@ -376,6 +512,12 @@ func (l *Listener) ackInteractive(ctx context.Context, request socketmode.Reques
 
 func (l *Listener) publishBuilderModalFallback(ctx context.Context, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
 	if l.builderHandler == nil {
+		return
+	}
+	if handlers == nil {
+		if err := l.builderHandler.publishModalFallback(ctx, callback); err != nil {
+			l.logger.Warn("builder modal fallback failed", "error", err)
+		}
 		return
 	}
 	handlers.Add(1)

@@ -81,6 +81,8 @@ type ConfirmationPublisher struct {
 	botUserID string
 	timeout   time.Duration
 	logger    port.Logger
+	renderer  *TemplateRenderer
+	renderErr error
 }
 
 func NewConfirmationPublisher(client *slackapi.Client, botUserID string, timeout time.Duration, logger port.Logger) *ConfirmationPublisher {
@@ -92,8 +94,10 @@ func NewConfirmationPublisher(client *slackapi.Client, botUserID string, timeout
 }
 
 func newConfirmationPublisher(client confirmationBlockClient, botUserID string, timeout time.Duration, logger port.Logger) *ConfirmationPublisher {
+	renderer, renderErr := NewEmbeddedTemplateRenderer()
 	return &ConfirmationPublisher{
 		client: client, botUserID: botUserID, timeout: timeout, logger: loggerOrDiscard(logger),
+		renderer: renderer, renderErr: renderErr,
 	}
 }
 
@@ -105,9 +109,14 @@ func (p *ConfirmationPublisher) PublishConfirmation(ctx context.Context, deliver
 		return port.ConfirmationPublishedResult{}, errors.New("Slack channel is required for confirmation publishing")
 	}
 
-	blocks := renderConfirmationBlocks(delivery)
+	fallbackText, blocks, err := compileConfirmationMessage(p.renderer, delivery)
+	if err != nil {
+		if p.renderErr != nil {
+			err = p.renderErr
+		}
+		return port.ConfirmationPublishedResult{}, fmt.Errorf("render confirmation template: %w", err)
+	}
 	metadata := confirmationMetadata(delivery)
-	fallbackText := confirmationFallbackText(delivery)
 
 	callCtx := ctx
 	cancel := func() {}
@@ -237,31 +246,25 @@ func (p *ConfirmationPublisher) UpdateConfirmation(ctx context.Context, delivery
 }
 
 func renderConfirmationBlocks(delivery port.ConfirmationDelivery) []slackapi.Block {
-	wrapperCallID := delivery.WrapperCallID
-	summary := delivery.Summary
-	originalCallID := delivery.OriginalCallID
-	expiry := delivery.Expiry
-
-	headerText := slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf(":lock: %s", neutralizeUnsafeControls(summary)), false, false)
-	header := slackapi.NewSectionBlock(headerText, nil, nil)
-
-	detailFields := []*slackapi.TextBlockObject{
-		slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Call ID:*\n`%s`", originalCallID), false, false),
-		slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Expires:*\n%s UTC", expiry.UTC().Format("15:04")), false, false),
+	renderer, err := NewEmbeddedTemplateRenderer()
+	if err != nil {
+		return nil
 	}
-	detail := slackapi.NewSectionBlock(nil, detailFields, nil)
+	_, blocks, err := compileConfirmationMessage(renderer, delivery)
+	if err != nil {
+		return nil
+	}
+	return blocks
+}
 
-	approveText := slackapi.NewTextBlockObject("plain_text", "Approve", false, false)
-	approveBtn := slackapi.NewButtonBlockElement(approveActionID, wrapperCallID, approveText).
-		WithStyle(slackapi.StylePrimary)
-
-	rejectText := slackapi.NewTextBlockObject("plain_text", "Reject", false, false)
-	rejectBtn := slackapi.NewButtonBlockElement(rejectActionID, wrapperCallID, rejectText).
-		WithStyle(slackapi.StyleDanger)
-
-	actions := slackapi.NewActionBlock("confirmation_buttons", approveBtn, rejectBtn)
-
-	return []slackapi.Block{header, detail, actions}
+func compileConfirmationMessage(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
+	return renderer.CompileMessageWithFallback("confirmation_message", TemplateContext{Values: map[string]string{
+		"summary":          fmt.Sprintf(":lock: %s", neutralizeUnsafeControls(delivery.Summary)),
+		"original_call_id": fmt.Sprintf("*Call ID:*\n`%s`", delivery.OriginalCallID),
+		"expires_at":       fmt.Sprintf("*Expires:*\n%s UTC", delivery.Expiry.UTC().Format("15:04")),
+		"wrapper_call_id":  delivery.WrapperCallID,
+		"fallback_text":    confirmationFallbackText(delivery),
+	}})
 }
 
 func confirmationContentDigest(delivery port.ConfirmationDelivery) string {
