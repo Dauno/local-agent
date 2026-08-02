@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 func TestStandardProgressLifecycleAndWaitingLookup(t *testing.T) {
@@ -57,6 +58,81 @@ func TestSuggestedPromptsAreClaimedOncePerWorkspaceUser(t *testing.T) {
 	}
 	if err := store.MarkSuggestedPromptsPublished(ctx, id, "1700000001.000001", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestOnboardingClaimSurvivesRestartAndRecoversAfterLease(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	first := time.Unix(1700000000, 0).UTC()
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1700000000.000001")
+
+	claim, state, err := store.ClaimOnboarding(ctx, "T12345678", "U12345678", key, first)
+	if err != nil || state != port.OnboardingClaimed || claim.ClaimToken == "" {
+		t.Fatalf("first claim=%#v state=%q err=%v", claim, state, err)
+	}
+	if _, state, err := store.ClaimOnboarding(ctx, "T12345678", "U12345678", key, first.Add(time.Second)); err != nil || state != port.OnboardingInFlight {
+		t.Fatalf("active claim state=%q err=%v", state, err)
+	}
+
+	newKey := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1700000002.000001")
+	retry, state, err := store.ClaimOnboarding(ctx, "T12345678", "U12345678", newKey, first.Add(onboardingClaimLease+time.Second))
+	if err != nil || state != port.OnboardingClaimed || retry.ClaimToken == claim.ClaimToken {
+		t.Fatalf("recovered claim=%#v state=%q err=%v", retry, state, err)
+	}
+	if retry.ConversationKey != key {
+		t.Fatalf("recovered conversation=%q, want original %q", retry.ConversationKey, key)
+	}
+	if err := store.MarkOnboardingPublished(ctx, claim, "1700000001.000001", first.Add(onboardingClaimLease+2*time.Second)); err == nil {
+		t.Fatal("stale onboarding claim was accepted")
+	}
+	if err := store.MarkOnboardingPublished(ctx, retry, "1700000001.000001", first.Add(onboardingClaimLease+2*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if _, state, err := store.ClaimOnboarding(ctx, "T12345678", "U12345678", key, first.Add(onboardingClaimLease+3*time.Second)); err != nil || state != port.OnboardingAlreadyPublished {
+		t.Fatalf("published state=%q err=%v", state, err)
+	}
+}
+
+func TestOnboardingDoesNotCompeteWithAnExistingSuggestedPromptClaim(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	now := time.Unix(1700000000, 0).UTC()
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1700000000.000001")
+	if _, claimed, err := store.ClaimSuggestedPrompts(ctx, "T12345678", "U12345678", key, now); err != nil || !claimed {
+		t.Fatalf("suggested prompt claim=%v err=%v", claimed, err)
+	}
+	_, state, err := store.ClaimOnboarding(ctx, "T12345678", "U12345678", key, now)
+	if err != nil || state != port.OnboardingUnavailable {
+		t.Fatalf("onboarding state=%q err=%v", state, err)
+	}
+}
+
+func TestBuilderLauncherClaimRecoversAndUsesCompareAndSwapPublication(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	now := time.Unix(1700000000, 0).UTC()
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+
+	claim, state, err := store.ClaimBuilderLauncher(ctx, "launcher-1", key, now)
+	if err != nil || state != port.BuilderLauncherClaimed || claim.ClaimToken == "" {
+		t.Fatalf("first claim=%#v state=%q err=%v", claim, state, err)
+	}
+	if _, state, err := store.ClaimBuilderLauncher(ctx, "launcher-1", key, now.Add(time.Second)); err != nil || state != port.BuilderLauncherInFlight {
+		t.Fatalf("active claim state=%q err=%v", state, err)
+	}
+	retry, state, err := store.ClaimBuilderLauncher(ctx, "launcher-1", key, now.Add(onboardingClaimLease+time.Second))
+	if err != nil || state != port.BuilderLauncherClaimed || retry.ClaimToken == claim.ClaimToken {
+		t.Fatalf("retry claim=%#v state=%q err=%v", retry, state, err)
+	}
+	if err := store.MarkBuilderLauncherPublished(ctx, claim, "1700000001.000001", now); err == nil {
+		t.Fatal("stale builder launcher claim was accepted")
+	}
+	if err := store.MarkBuilderLauncherPublished(ctx, retry, "1700000001.000001", now); err != nil {
+		t.Fatal(err)
+	}
+	if _, state, err := store.ClaimBuilderLauncher(ctx, "launcher-1", key, now.Add(time.Hour)); err != nil || state != port.BuilderLauncherAlreadyPublished {
+		t.Fatalf("published state=%q err=%v", state, err)
 	}
 }
 

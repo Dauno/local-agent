@@ -92,6 +92,55 @@ func TestSuggestedPromptsNeutralizeSlackControls(t *testing.T) {
 	}
 }
 
+type fakeOnboardingBlockClient struct {
+	fakeStandardMessageClient
+	postedBlocks []slackapi.Block
+	postedTarget domain.ReplyTarget
+	postedMeta   slackapi.SlackMetadata
+}
+
+func (c *fakeOnboardingBlockClient) PostBlocks(_ context.Context, channelID, _ string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
+	c.postedBlocks = blocks
+	c.postedTarget = domain.ReplyTarget{ChannelID: channelID, ThreadTS: threadTS}
+	c.postedMeta = metadata
+	return "1700000001.000010", nil
+}
+
+func TestOnboardingPublisherUsesTypedTemplateAndRecoveryMetadata(t *testing.T) {
+	client := &fakeOnboardingBlockClient{}
+	renderer := mustEmbeddedRenderer(t)
+	publisher := &StandardPublisher{client: client, blockClient: client, botUserID: "U00000001", renderer: renderer}
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1700000000.000001")
+	request := port.OnboardingPublishRequest{
+		DeliveryID: "standard_onboarding:T12345678:U00000001", Actor: "U00000001", ConversationKey: key,
+		SuggestedPrompts: []string{"Analiza <@U99999999>"},
+	}
+	target := domain.ReplyTarget{ChannelID: "D00000001", ThreadTS: "1700000000.000001"}
+	if _, err := publisher.PublishOnboarding(t.Context(), target, request); err != nil {
+		t.Fatal(err)
+	}
+	if len(client.postedBlocks) != 4 || client.postedTarget != target || client.postedMeta.EventType != onboardingMetadataEventType {
+		t.Fatalf("blocks=%d target=%#v metadata=%#v", len(client.postedBlocks), client.postedTarget, client.postedMeta)
+	}
+	if client.postedMeta.EventPayload["delivery_id"] != request.DeliveryID {
+		t.Fatalf("metadata=%#v", client.postedMeta)
+	}
+	promptBlock := client.postedBlocks[3].(*slackapi.SectionBlock)
+	if strings.Contains(promptBlock.Text.Text, "<@U99999999>") {
+		t.Fatalf("unsafe onboarding prompt = %q", promptBlock.Text.Text)
+	}
+
+	client.messages = []slackapi.Message{{Msg: slackapi.Msg{User: "U00000001", Timestamp: "1700000001.000010", Metadata: client.postedMeta}}}
+	recovered, found, err := publisher.RecoverOnboarding(t.Context(), target, request.DeliveryID)
+	if err != nil || !found || recovered.LastMessageTS != "1700000001.000010" {
+		t.Fatalf("recovered=%#v found=%v err=%v", recovered, found, err)
+	}
+	client.messages = append(client.messages, client.messages[0])
+	if _, _, err := publisher.RecoverOnboarding(t.Context(), target, request.DeliveryID); err == nil {
+		t.Fatal("duplicate onboarding metadata was accepted")
+	}
+}
+
 func TestIncrementalPublisherEnforcesObservedLimitAndCanonicalFinalMetadata(t *testing.T) {
 	client := &fakeStandardMessageClient{}
 	publisher := &StandardPublisher{client: client, botUserID: "U00000001"}

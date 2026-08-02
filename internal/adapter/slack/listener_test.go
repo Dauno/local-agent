@@ -183,7 +183,7 @@ func TestListenerRejectsMissingDependencies(t *testing.T) {
 
 func TestListenerACKsBlockActionBeforeUpdatingBuilderView(t *testing.T) {
 	client := &fakeViewSocketClient{fakeSocketClient: newFakeSocketClient(), updates: make(chan viewUpdate, 1)}
-	listener := newListener(client, NewRouter(testBot), nil).WithBuilderPresenter(NewBuilderModalPresenter(nil))
+	listener := newListener(client, NewRouter(testBot), nil).WithBuilderPresenter(NewBuilderModalPresenterWithProviders(testBuilderProviderProfiles()))
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
