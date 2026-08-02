@@ -180,3 +180,26 @@ func TestValidateAttachmentModelRejectsAgentCLI(t *testing.T) {
 		t.Fatalf("openai_compatible attachment should remain supported: %v", err)
 	}
 }
+
+func TestValidateTranscriptionModelRequiresOpenAICompatibleCapabilities(t *testing.T) {
+	t.Parallel()
+
+	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeAgentCLI}}); err == nil || !strings.Contains(err.Error(), "openai_compatible") {
+		t.Fatalf("agent_cli transcription validation = %v", err)
+	}
+	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeACP}}); err == nil || !strings.Contains(err.Error(), "openai_compatible") {
+		t.Fatalf("ACP transcription validation = %v", err)
+	}
+	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible}, Model: "stt"}); err == nil || !strings.Contains(err.Error(), "context_window_tokens") {
+		t.Fatalf("incomplete transcription capabilities = %v", err)
+	}
+	valid := &agentdef.ResolvedModel{
+		Provider:            agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible},
+		Model:               "stt",
+		ContextWindowTokens: 4096,
+		CounterStrategy:     "byte_bound",
+	}
+	if err := validateTranscriptionModel(valid); err != nil {
+		t.Fatalf("valid transcription model = %v", err)
+	}
+}

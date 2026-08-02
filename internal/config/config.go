@@ -175,8 +175,10 @@ type SlackStandardAgentConfig struct {
 }
 
 type SlackFilesConfig struct {
-	MaxBytesPerFile   int `yaml:"max_bytes_per_file"`
-	MaxProcessedChars int `yaml:"max_processed_chars"`
+	MaxBytesPerFile             int    `yaml:"max_bytes_per_file"`
+	MaxProcessedChars           int    `yaml:"max_processed_chars"`
+	TranscriptionProfile        string `yaml:"transcription_profile"`
+	TranscriptionTimeoutSeconds int    `yaml:"transcription_timeout_seconds"`
 }
 
 type SlackContextConfig struct {
@@ -293,8 +295,9 @@ func Default() Config {
 				ConversationCacheTTLMinutes: 15,
 			},
 			Files: SlackFilesConfig{
-				MaxBytesPerFile:   5 * 1024 * 1024,
-				MaxProcessedChars: 20_000,
+				MaxBytesPerFile:             5 * 1024 * 1024,
+				MaxProcessedChars:           20_000,
+				TranscriptionTimeoutSeconds: 120,
 			},
 		},
 		Memory: MemoryConfig{

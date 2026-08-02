@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"time"
 
 	"google.golang.org/adk/v2/model"
@@ -104,6 +105,19 @@ func handshakeSelectedAgentCLI(ctx context.Context, resolved *agentdef.ResolvedM
 func validateAttachmentModel(resolved *agentdef.ResolvedModel) error {
 	if resolved != nil && resolved.IsAgentCLI() {
 		return errors.New("attachment_analyzer cannot use an agent_cli provider because image processing requires the ADK load_artifacts tool; select an openai_compatible profile")
+	}
+	return nil
+}
+
+func validateTranscriptionModel(resolved *agentdef.ResolvedModel) error {
+	if resolved == nil {
+		return errors.New("slack.files.transcription_profile resolved to no model")
+	}
+	if resolved.Type() != agentdef.ProviderTypeOpenAICompatible {
+		return fmt.Errorf("slack.files.transcription_profile requires an %s provider for ADK load_artifacts; got %s", agentdef.ProviderTypeOpenAICompatible, resolved.Type())
+	}
+	if problems := agentdef.ValidateProfileCapability(resolved); len(problems) > 0 {
+		return fmt.Errorf("validate transcription model capability: %s", strings.Join(problems, "; "))
 	}
 	return nil
 }

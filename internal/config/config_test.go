@@ -75,7 +75,10 @@ func TestDefaultMatchesPRD(t *testing.T) {
 				ProfileCacheTTLMinutes:      60,
 				ConversationCacheTTLMinutes: 15,
 			},
-			Files: config.SlackFilesConfig{MaxBytesPerFile: 5 * 1024 * 1024, MaxProcessedChars: 20_000},
+			Files: config.SlackFilesConfig{
+				MaxBytesPerFile: 5 * 1024 * 1024, MaxProcessedChars: 20_000,
+				TranscriptionTimeoutSeconds: 120,
+			},
 		},
 		Memory: config.MemoryConfig{
 			Enabled:               false,
@@ -247,9 +250,11 @@ slack:
     timeout_seconds: 5
     profile_cache_ttl_minutes: 60
     conversation_cache_ttl_minutes: 15
-  files:
+	files:
     max_bytes_per_file: 5242880
     max_processed_chars: 20000
+    transcription_profile: ""
+    transcription_timeout_seconds: 120
 memory:
   enabled: false
   directory: ""
@@ -325,6 +330,8 @@ slack:
   files:
     max_bytes_per_file: 1048576
     max_processed_chars: 4096
+    transcription_profile: openai/stt
+    transcription_timeout_seconds: 45
 `))
 	if err != nil {
 		t.Fatalf("Parse() error: %v", err)
@@ -345,8 +352,27 @@ slack:
 	if cfg.Slack.AllowedUserIDs == nil || len(cfg.Slack.AllowedUserIDs) != 0 {
 		t.Fatalf("allowed_user_ids should normalize to an empty slice: %#v", cfg.Slack.AllowedUserIDs)
 	}
-	if cfg.Slack.Files.MaxBytesPerFile != 1048576 || cfg.Slack.Files.MaxProcessedChars != 4096 {
+	if cfg.Slack.Files.MaxBytesPerFile != 1048576 || cfg.Slack.Files.MaxProcessedChars != 4096 || cfg.Slack.Files.TranscriptionProfile != "openai/stt" || cfg.Slack.Files.TranscriptionTimeoutSeconds != 45 {
 		t.Fatalf("slack.files overrides not decoded: %#v", cfg.Slack.Files)
+	}
+}
+
+func TestTranscriptionConfigRoundTrip(t *testing.T) {
+	t.Parallel()
+
+	want := config.Default()
+	want.Slack.Files.TranscriptionProfile = "openai/stt"
+	want.Slack.Files.TranscriptionTimeoutSeconds = 45
+	data, err := config.Marshal(want)
+	if err != nil {
+		t.Fatalf("Marshal() error: %v", err)
+	}
+	got, err := config.Parse(data)
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if got.Slack.Files.TranscriptionProfile != want.Slack.Files.TranscriptionProfile || got.Slack.Files.TranscriptionTimeoutSeconds != want.Slack.Files.TranscriptionTimeoutSeconds {
+		t.Fatalf("transcription config round trip = %#v, want %#v", got.Slack.Files, want.Slack.Files)
 	}
 }
 
@@ -462,6 +488,8 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 	cfg.Slack.AllowedChannelIDs = []string{"D12345678"}
 	cfg.Slack.Files.MaxBytesPerFile = 5*1024*1024 + 1
 	cfg.Slack.Files.MaxProcessedChars = 20_001
+	cfg.Slack.Files.TranscriptionProfile = "invalid-profile"
+	cfg.Slack.Files.TranscriptionTimeoutSeconds = 0
 
 	err := cfg.Validate()
 	var validation *config.ValidationError
@@ -487,6 +515,8 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 		"slack.allowed_channel_ids[0]",
 		"slack.files.max_bytes_per_file",
 		"slack.files.max_processed_chars",
+		"slack.files.transcription_profile",
+		"slack.files.transcription_timeout_seconds",
 	} {
 		if !validation.Has(field) {
 			t.Errorf("validation did not report %s: %v", field, err)
