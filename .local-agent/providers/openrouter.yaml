@@ -1,0 +1,10 @@
+name: openrouter
+type: openai_compatible
+base_url: https://openrouter.ai/api/v1
+api_key_env: OPENROUTER_API_KEY
+profiles:
+    qwen-vision:
+        model: qwen/qwen3-vl-32b-instruct
+        context_window_tokens: 131072
+        token_counter:
+          strategy: byte_bound
