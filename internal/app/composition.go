@@ -79,6 +79,7 @@ type runtimeModels struct {
 	curatorDef          *agentdef.AgentDef
 	attachmentDef       *agentdef.AgentDef
 	attachmentModel     model.LLM
+	transcriptionModel  model.LLM
 	apiKey              string
 	botToken            string
 	appToken            string
@@ -303,6 +304,19 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		prepared.attachmentModel, _, err = newModelForResolved(ctx, attachmentResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
 		if err != nil {
 			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build attachment analyzer model client: %w", err))
+		}
+	}
+	if profile := strings.TrimSpace(cfg.Slack.Files.TranscriptionProfile); profile != "" {
+		transcriptionResolved, err := defs.ResolveModel(profile)
+		if err != nil {
+			return runtimeModels{}, fmt.Errorf("resolve transcription profile %q: %w", profile, err)
+		}
+		if err := validateTranscriptionModel(transcriptionResolved); err != nil {
+			return runtimeModels{}, err
+		}
+		prepared.transcriptionModel, _, err = newModelForResolved(ctx, transcriptionResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
+		if err != nil {
+			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build transcription model client: %w", err))
 		}
 	}
 	prepared.agentName = prepared.rootDef.Name
