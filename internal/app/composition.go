@@ -79,6 +79,7 @@ type runtimeModels struct {
 	curatorDef          *agentdef.AgentDef
 	attachmentDef       *agentdef.AgentDef
 	attachmentModel     model.LLM
+	transcriptionModel  model.LLM
 	apiKey              string
 	botToken            string
 	appToken            string
@@ -305,6 +306,19 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build attachment analyzer model client: %w", err))
 		}
 	}
+	if profile := strings.TrimSpace(cfg.Slack.Files.TranscriptionProfile); profile != "" {
+		transcriptionResolved, err := defs.ResolveModel(profile)
+		if err != nil {
+			return runtimeModels{}, fmt.Errorf("resolve transcription profile %q: %w", profile, err)
+		}
+		if err := validateTranscriptionModel(transcriptionResolved); err != nil {
+			return runtimeModels{}, err
+		}
+		prepared.transcriptionModel, _, err = newModelForResolved(ctx, transcriptionResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
+		if err != nil {
+			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build transcription model client: %w", err))
+		}
+	}
 	prepared.agentName = prepared.rootDef.Name
 
 	if prepared.rootModel == nil {
@@ -427,7 +441,8 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 			attachmentTimeout = time.Duration(models.attachmentDef.TimeoutSeconds) * time.Second
 		}
 	}
-	attachmentProc := adkartifact.NewProcessor(artifactSvc, models.attachmentModel, attachmentInstruction, attachmentTimeout, modelCalls)
+	transcriptionTimeout := time.Duration(cfg.Slack.Files.TranscriptionTimeoutSeconds) * time.Second
+	attachmentProc := adkartifact.NewProcessorWithTranscription(artifactSvc, models.attachmentModel, attachmentInstruction, attachmentTimeout, models.transcriptionModel, transcriptionTimeout, modelCalls)
 	if err := store.ReconcileAssistantExchanges(ctx, history); err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("reconcile assistant exchanges: %w", err))
 	}
