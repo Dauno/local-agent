@@ -2,6 +2,7 @@ package adkartifact
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"strings"
 	"testing"
@@ -21,6 +22,62 @@ func (testModelLimiter) TryAcquire() (func(), bool) { return func() {}, true }
 type visualTestModel struct {
 	calls    int
 	sawImage bool
+}
+
+type audioTestModel struct {
+	calls    int
+	sawAudio bool
+}
+
+func (*audioTestModel) Name() string { return "audio-test" }
+
+func (m *audioTestModel) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.calls++
+		for _, content := range request.Contents {
+			for _, part := range content.Parts {
+				if part != nil && part.InlineData != nil && IsAudioMIME(part.InlineData.MIMEType) {
+					m.sawAudio = true
+				}
+			}
+		}
+		if !m.sawAudio {
+			yield(&model.LLMResponse{Content: &genai.Content{
+				Role: genai.RoleModel,
+				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "load-audio", Name: "load_artifacts", Args: map[string]any{"artifact_names": []string{"meeting.wav"}},
+				}}},
+			}, FinishReason: genai.FinishReasonStop}, nil)
+			return
+		}
+		yield(&model.LLMResponse{
+			Content:      genai.NewContentFromText("meeting transcript", genai.RoleModel),
+			FinishReason: genai.FinishReasonStop, TurnComplete: true,
+		}, nil)
+	}
+}
+
+type rejectingModelLimiter struct{}
+
+func (rejectingModelLimiter) TryAcquire() (func(), bool) { return func() {}, false }
+
+type trackingModelLimiter struct {
+	released bool
+}
+
+func (m *trackingModelLimiter) TryAcquire() (func(), bool) {
+	return func() { m.released = true }, true
+}
+
+type blockingAudioModel struct{}
+
+func (blockingAudioModel) Name() string { return "blocking-audio-test" }
+
+func (blockingAudioModel) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		<-ctx.Done()
+		yield(nil, ctx.Err())
+	}
 }
 
 func (*visualTestModel) Name() string { return "visual-test" }
@@ -77,6 +134,8 @@ func TestProcessorRejectsInvalidTextAndUnconfiguredImages(t *testing.T) {
 		{name: "invalid UTF-8", file: port.LoadedAttachment{ID: "F1", Name: "bad.txt", MIMEType: "text/plain", Data: []byte{0xff}}, want: "valid UTF-8"},
 		{name: "NUL", file: port.LoadedAttachment{ID: "F2", Name: "bad.go", MIMEType: "text/plain", Data: []byte{'x', 0}}, want: "NUL"},
 		{name: "image without analyzer", file: port.LoadedAttachment{ID: "F3", Name: "image.png", MIMEType: "image/png", Data: []byte("png")}, want: "not configured"},
+		{name: "audio without transcription profile", file: port.LoadedAttachment{ID: "F4", Name: "meeting.mp3", MIMEType: "audio/mpeg", Data: []byte("mp3")}, want: "transcription_profile"},
+		{name: "audio extension without audio MIME", file: port.LoadedAttachment{ID: "F5", Name: "meeting.mp3", MIMEType: "application/octet-stream", Data: []byte("mp3")}, want: "unsupported file type"},
 	}
 	for index, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -85,6 +144,22 @@ func TestProcessorRejectsInvalidTextAndUnconfiguredImages(t *testing.T) {
 				t.Fatalf("Process() error = %v, want containing %q", err, tt.want)
 			}
 		})
+	}
+}
+
+func TestIsAudioMIMEUsesExplicitCaseInsensitiveAllowlist(t *testing.T) {
+	for _, mimeType := range []string{
+		"audio/mpeg", "audio/mp3", "audio/x-mpeg", "audio/x-mp3", "audio/wav", "audio/x-wav", "audio/wave",
+		"audio/ogg", "audio/opus", "audio/mp4", "audio/m4a", "audio/x-m4a", "audio/webm", "audio/aac", "audio/flac",
+	} {
+		if !IsAudioMIME(strings.ToUpper(mimeType)) {
+			t.Errorf("IsAudioMIME(%q) = false, want true", mimeType)
+		}
+	}
+	for _, mimeType := range []string{"audio/x-ms-wma", "audio/3gpp", "image/png", "text/plain", "application/octet-stream", ""} {
+		if IsAudioMIME(mimeType) {
+			t.Errorf("IsAudioMIME(%q) = true, want false", mimeType)
+		}
 	}
 }
 
@@ -105,5 +180,55 @@ func TestProcessorLoadsImageArtifactThroughADK(t *testing.T) {
 	}
 	if got.MIMEType != "image-description" || got.Text != "a terminal screenshot" {
 		t.Fatalf("processed image = %#v", got)
+	}
+}
+
+func TestProcessorLoadsAudioArtifactThroughADK(t *testing.T) {
+	audio := &audioTestModel{}
+	limiter := &trackingModelLimiter{}
+	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, audio, time.Second, limiter)
+	got, err := processor.Process(t.Context(), port.AttachmentRequest{
+		ProcessingID: "event-4:0",
+		Attachment: port.LoadedAttachment{
+			ID: "F4", Name: "meeting.wav", MIMEType: "audio/wav", Data: []byte("wav"),
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if audio.calls != 2 || !audio.sawAudio {
+		t.Fatalf("audio calls=%d sawAudio=%t", audio.calls, audio.sawAudio)
+	}
+	if got.Name != "meeting.wav" || got.MIMEType != "audio-transcript" || got.Text != "meeting transcript" {
+		t.Fatalf("processed audio = %#v", got)
+	}
+	if !limiter.released {
+		t.Fatal("audio model limiter permit was not released")
+	}
+}
+
+func TestProcessorAudioHonorsSharedModelLimiter(t *testing.T) {
+	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, &audioTestModel{}, time.Second, rejectingModelLimiter{})
+	_, err := processor.Process(t.Context(), port.AttachmentRequest{
+		ProcessingID: "event-5:0",
+		Attachment: port.LoadedAttachment{
+			ID: "F5", Name: "meeting.mp3", MIMEType: "audio/mpeg", Data: []byte("mp3"),
+		},
+	})
+	if !errors.Is(err, port.ErrModelCallLimitReached) {
+		t.Fatalf("audio limiter error = %v", err)
+	}
+}
+
+func TestProcessorAudioHonorsConfiguredTimeout(t *testing.T) {
+	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, blockingAudioModel{}, 5*time.Millisecond, testModelLimiter{})
+	_, err := processor.Process(t.Context(), port.AttachmentRequest{
+		ProcessingID: "event-6:0",
+		Attachment: port.LoadedAttachment{
+			ID: "F6", Name: "meeting.wav", MIMEType: "audio/wav", Data: []byte("wav"),
+		},
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("audio timeout error = %v", err)
 	}
 }
