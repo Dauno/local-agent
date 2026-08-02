@@ -441,7 +441,8 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 			attachmentTimeout = time.Duration(models.attachmentDef.TimeoutSeconds) * time.Second
 		}
 	}
-	attachmentProc := adkartifact.NewProcessor(artifactSvc, models.attachmentModel, attachmentInstruction, attachmentTimeout, modelCalls)
+	transcriptionTimeout := time.Duration(cfg.Slack.Files.TranscriptionTimeoutSeconds) * time.Second
+	attachmentProc := adkartifact.NewProcessorWithTranscription(artifactSvc, models.attachmentModel, attachmentInstruction, attachmentTimeout, models.transcriptionModel, transcriptionTimeout, modelCalls)
 	if err := store.ReconcileAssistantExchanges(ctx, history); err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("reconcile assistant exchanges: %w", err))
 	}
