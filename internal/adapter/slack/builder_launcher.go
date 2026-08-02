@@ -2,8 +2,9 @@ package slack
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sync"
+	"time"
 
 	slackapi "github.com/slack-go/slack"
 
@@ -13,14 +14,44 @@ import (
 
 // builderLauncherPublisher implements port.BuilderLauncherPublisher.
 type builderLauncherPublisher struct {
-	client    *slackapi.Client
-	publisher port.ResponsePublisher
-	logger    port.Logger
-	delivered sync.Map // map[string]bool for idempotency
+	client         blockPostClient
+	recoveryClient standardMessageClient
+	store          port.BuilderLauncherDeliveryStore
+	botUserID      string
+	publisher      port.ResponsePublisher
+	logger         port.Logger
+	renderer       *TemplateRenderer
+	renderErr      error
 }
 
 func NewBuilderLauncherPublisher(client *slackapi.Client, publisher port.ResponsePublisher, logger port.Logger) port.BuilderLauncherPublisher {
-	return &builderLauncherPublisher{client: client, publisher: publisher, logger: loggerOrDiscard(logger)}
+	var poster blockPostClient
+	if client != nil {
+		poster = sdkBlockPostClient{client: client}
+	}
+	return newBuilderLauncherPublisher(poster, publisher, logger)
+}
+
+func newBuilderLauncherPublisher(client blockPostClient, publisher port.ResponsePublisher, logger port.Logger) *builderLauncherPublisher {
+	return newBuilderLauncherPublisherWithDependencies(client, nil, nil, "", publisher, logger)
+}
+
+func NewBuilderLauncherPublisherWithStore(client *slackapi.Client, publisher port.ResponsePublisher, logger port.Logger, store port.BuilderLauncherDeliveryStore, botUserID string) port.BuilderLauncherPublisher {
+	var poster blockPostClient
+	var recovery standardMessageClient
+	if client != nil {
+		poster = sdkBlockPostClient{client: client}
+		recovery = sdkStandardMessageClient{client: client}
+	}
+	return newBuilderLauncherPublisherWithDependencies(poster, recovery, store, botUserID, publisher, logger)
+}
+
+func newBuilderLauncherPublisherWithDependencies(client blockPostClient, recovery standardMessageClient, store port.BuilderLauncherDeliveryStore, botUserID string, publisher port.ResponsePublisher, logger port.Logger) *builderLauncherPublisher {
+	renderer, renderErr := NewEmbeddedTemplateRenderer()
+	return &builderLauncherPublisher{
+		client: client, recoveryClient: recovery, store: store, botUserID: botUserID,
+		publisher: publisher, logger: loggerOrDiscard(logger), renderer: renderer, renderErr: renderErr,
+	}
 }
 
 func (p *builderLauncherPublisher) PublishBuilderLauncher(ctx context.Context, req port.BuilderLauncherRequest) error {
@@ -38,35 +69,107 @@ func (p *builderLauncherPublisher) PublishBuilderLauncher(ctx context.Context, r
 	if p == nil || p.client == nil {
 		return fmt.Errorf("Slack client is required")
 	}
-	if req.IdempotencyKey != "" {
-		if _, loaded := p.delivered.LoadOrStore(req.IdempotencyKey, true); loaded {
-			p.logger.Debug("builder launcher already published for this idempotency key")
+	var claim port.BuilderLauncherDeliveryClaim
+	if p.store != nil {
+		if req.IdempotencyKey == "" {
+			return errors.New("builder launcher idempotency key is required")
+		}
+		claim, state, claimErr := p.store.ClaimBuilderLauncher(ctx, req.IdempotencyKey, req.ConversationKey, time.Now().UTC())
+		if claimErr != nil {
+			return claimErr
+		}
+		switch state {
+		case port.BuilderLauncherAlreadyPublished, port.BuilderLauncherInFlight:
 			return nil
+		case port.BuilderLauncherClaimed:
+		default:
+			return errors.New("builder launcher claim state is unsupported")
+		}
+		if p.recoveryClient == nil {
+			return errors.New("builder launcher recovery client is required")
+		}
+		recovered, found, recoverErr := p.recover(ctx, target, req.IdempotencyKey)
+		if recoverErr != nil {
+			return recoverErr
+		}
+		if found {
+			return p.store.MarkBuilderLauncherPublished(ctx, claim, recovered.LastMessageTS, time.Now().UTC())
 		}
 	}
-
-	blocks := []slackapi.Block{
-		slackapi.NewSectionBlock(
-			slackapi.NewTextBlockObject("mrkdwn", "¿Quieres crear un nuevo agente? Completa el formulario a continuación.", false, false),
-			nil, nil,
-		),
-		slackapi.NewActionBlock("builder_launcher",
-			slackapi.NewButtonBlockElement(
-				"local_agent.builder.open",
-				metadata,
-				slackapi.NewTextBlockObject("plain_text", "Abrir formulario", false, false),
-			).WithStyle(slackapi.StylePrimary),
-		),
+	fallbackText, blocks, err := compileOnboardingMessage(p.renderer, metadata, nil)
+	if err != nil {
+		if p.renderErr != nil {
+			err = p.renderErr
+		}
+		return fmt.Errorf("render onboarding template: %w", err)
 	}
+	messageMetadata := slackapi.SlackMetadata{}
+	if p.store != nil {
+		messageMetadata = builderLauncherMetadata(req.IdempotencyKey)
+	}
+	timestamp, err := p.client.PostBlocks(ctx, target.ChannelID, fallbackText, blocks, messageMetadata, target.ThreadTS)
+	if err != nil {
+		return err
+	}
+	if timestamp == "" {
+		return errors.New("Slack published builder launcher without a message timestamp")
+	}
+	if p.store != nil {
+		if err := p.store.MarkBuilderLauncherPublished(ctx, claim, timestamp, time.Now().UTC()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
-	_, _, err = p.client.PostMessageContext(ctx, target.ChannelID,
-		slackapi.MsgOptionText("Abrir formulario para crear un nuevo agente", false),
-		slackapi.MsgOptionBlocks(blocks...),
-		slackapi.MsgOptionDisableLinkUnfurl(),
-		slackapi.MsgOptionDisableMediaUnfurl(),
-		slackapi.MsgOptionTS(target.ThreadTS),
-	)
-	return err
+const builderLauncherMetadataEventType = "local_agent_builder_launcher"
+
+func builderLauncherMetadata(deliveryID string) slackapi.SlackMetadata {
+	return slackapi.SlackMetadata{EventType: builderLauncherMetadataEventType, EventPayload: map[string]any{"delivery_id": deliveryID}}
+}
+
+func (p *builderLauncherPublisher) recover(ctx context.Context, target domain.ReplyTarget, deliveryID string) (port.PublishedResponse, bool, error) {
+	messages, hasMore, err := p.recoveryClient.StandardMessages(ctx, target.ChannelID, target.ThreadTS, progressRecoveryLimit)
+	if err != nil {
+		return port.PublishedResponse{}, false, fmt.Errorf("recover Slack builder launcher: %w", err)
+	}
+	if hasMore {
+		return port.PublishedResponse{}, false, errors.New("recover Slack builder launcher: bounded history is incomplete")
+	}
+	var match string
+	for _, message := range messages {
+		if p.botUserID != "" && message.User != p.botUserID {
+			continue
+		}
+		if message.Metadata.EventType != builderLauncherMetadataEventType {
+			continue
+		}
+		candidate, _ := message.Metadata.EventPayload["delivery_id"].(string)
+		if candidate != deliveryID {
+			continue
+		}
+		if match != "" {
+			return port.PublishedResponse{}, false, errors.New("recover Slack builder launcher: duplicate delivery metadata")
+		}
+		match = message.Timestamp
+	}
+	return port.PublishedResponse{LastMessageTS: match}, match != "", nil
+}
+
+const (
+	onboardingIntroText      = "Puedo analizar proyectos, revisar errores, resumir contexto y ayudarte a crear agentes."
+	onboardingDescribePrompt = "Describe lo que necesitas en un mensaje y trabajamos sobre ello."
+)
+
+func compileOnboardingMessage(renderer *TemplateRenderer, builderContext string, prompts []string) (string, []slackapi.Block, error) {
+	return renderer.CompileMessageWithFallback("onboarding_message", TemplateContext{
+		Values: map[string]string{
+			"builder_context": builderContext,
+			"intro":           onboardingIntroText,
+			"describe_prompt": onboardingDescribePrompt,
+		},
+		SuggestedPrompts: prompts,
+	})
 }
 
 var _ port.BuilderLauncherPublisher = (*builderLauncherPublisher)(nil)

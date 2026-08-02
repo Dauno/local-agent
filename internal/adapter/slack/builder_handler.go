@@ -142,7 +142,14 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 		}
 		return nil
 	}
-	text := builderPreviewMarkdown(draftInput, preview.AgentDef, preview.YAML, preview.SHA256)
+	renderer, err := NewEmbeddedTemplateRenderer()
+	if err != nil {
+		return fmt.Errorf("initialize agent preview template renderer: %w", err)
+	}
+	text, _, err := compileBuilderPreviewMessage(renderer, draftInput, preview.AgentDef, preview.YAML, preview.SHA256, draftID)
+	if err != nil {
+		return fmt.Errorf("render agent preview template: %w", err)
+	}
 	if _, err := h.publisher.Publish(ctx, target, text); err != nil {
 		return fmt.Errorf("publish agent preview: %w", err)
 	}
@@ -459,19 +466,26 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 	if p == nil || p.client == nil {
 		return errors.New("Slack posting client is required")
 	}
+	renderer, err := NewEmbeddedTemplateRenderer()
+	if err != nil {
+		return fmt.Errorf("initialize agent preview template renderer: %w", err)
+	}
+	fallbackText, blocks, err := compileBuilderPreviewMessage(renderer, draft, definition, yaml, sha256, draftID)
+	if err != nil {
+		return fmt.Errorf("render agent preview template: %w", err)
+	}
 	poster, ok := p.client.(builderBlockPoster)
 	if !ok {
-		_, err := p.Publish(ctx, target, builderPreviewMarkdown(draft, definition, yaml, sha256))
+		_, err := p.Publish(ctx, target, fallbackText)
 		return err
 	}
-	blocks := renderBuilderPreviewBlocks(draft, definition, yaml, sha256, draftID)
 	callCtx := ctx
 	cancel := func() {}
 	if p.timeout > 0 {
 		callCtx, cancel = context.WithTimeout(ctx, p.timeout)
 	}
 	defer cancel()
-	timestamp, err := poster.PostBlocks(callCtx, target.ChannelID, builderPreviewMarkdown(draft, definition, yaml, sha256), blocks, slackapi.SlackMetadata{}, target.ThreadTS)
+	timestamp, err := poster.PostBlocks(callCtx, target.ChannelID, fallbackText, blocks, slackapi.SlackMetadata{}, target.ThreadTS)
 	if err != nil {
 		return err
 	}
@@ -482,26 +496,61 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 }
 
 func renderBuilderPreviewBlocks(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) []slackapi.Block {
-	blocks := []slackapi.Block{
-		slackapi.NewSectionBlock(
-			slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Previsualizacion del agente `%s`*", neutralizeUnsafeControls(draft.Name)), false, false),
-			nil,
-			nil,
-		),
+	renderer, err := NewEmbeddedTemplateRenderer()
+	if err != nil {
+		return nil
 	}
-	metadata := fmt.Sprintf("*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`", definition.AgentClass, neutralizeUnsafeControls(draft.ProviderProfile), definition.ExecutionMode, previewTimeout(definition.TimeoutSec))
-	blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", metadata, false, false), nil, nil))
-	code := "```yaml\n" + neutralizeUnsafeControls(yaml) + "\n```"
-	for _, part := range splitBuilderBlockText(code, builderBlockTextLimit) {
-		blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", part, false, false), nil, nil))
+	_, blocks, err := compileBuilderPreviewMessage(renderer, draft, definition, yaml, sha256, draftID)
+	if err != nil {
+		return nil
 	}
-	blocks = append(blocks,
-		slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*SHA-256:* `%s`", sha256), false, false), nil, nil),
-		slackapi.NewActionBlock("builder_preview_actions",
-			slackapi.NewButtonBlockElement(builderInstallActionID, draftID, slackapi.NewTextBlockObject("plain_text", "Solicitar instalación", false, false)),
-		),
-	)
 	return blocks
+}
+
+func compileBuilderPreviewMessage(renderer *TemplateRenderer, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) (string, []slackapi.Block, error) {
+	code := "```yaml\n" + neutralizeUnsafeControls(yaml) + "\n```"
+	values := builderPreviewTemplateValues(draft, definition, yaml, sha256, draftID)
+	parts := splitBuilderBlockText(code, builderBlockTextLimit)
+	return compileMessageWithParts(renderer, "agent_preview", values, parts)
+}
+
+func compileMessageWithParts(renderer *TemplateRenderer, templateName string, values map[string]string, parts []string) (string, []slackapi.Block, error) {
+	return compileMessageContext(renderer, templateName, TemplateContext{Values: values, PreviewYAMLParts: parts})
+}
+
+func compileMessageContext(renderer *TemplateRenderer, templateName string, context TemplateContext) (string, []slackapi.Block, error) {
+	fallback, blocks, err := renderer.CompileMessageWithFallback(templateName, context)
+	if err != nil {
+		return "", nil, err
+	}
+	return fallback, blocks, nil
+}
+
+func builderPreviewTemplateValues(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) map[string]string {
+	metadata := fmt.Sprintf("*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`", definition.AgentClass, neutralizeUnsafeControls(draft.ProviderProfile), definition.ExecutionMode, previewTimeout(definition.TimeoutSec))
+	return map[string]string{
+		"name":             fmt.Sprintf("*Previsualizacion del agente `%s`*", neutralizeUnsafeControls(draft.Name)),
+		"agent_class":      metadata,
+		"provider_profile": neutralizeUnsafeControls(draft.ProviderProfile),
+		"execution_mode":   definition.ExecutionMode,
+		"timeout":          previewTimeout(definition.TimeoutSec),
+		"sha256":           fmt.Sprintf("*SHA-256:* `%s`", sha256),
+		"draft_id":         draftID,
+		"fallback_text":    builderPreviewFallbackText(draft, definition, yaml, sha256),
+	}
+}
+
+func builderPreviewFallbackText(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256 string) string {
+	full := builderPreviewMarkdown(draft, definition, yaml, sha256)
+	if utf8.RuneCountInString(full) <= maxFallbackText {
+		return full
+	}
+	profile := draft.ProviderProfile
+	if profile == "" {
+		profile = draft.Model
+	}
+	return fmt.Sprintf("*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\nEl YAML completo se muestra en los bloques del mensaje.\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
+		neutralizeUnsafeControls(draft.Name), definition.AgentClass, neutralizeUnsafeControls(profile), definition.ExecutionMode, previewTimeout(definition.TimeoutSec), sha256)
 }
 
 func previewTimeout(seconds int) string {

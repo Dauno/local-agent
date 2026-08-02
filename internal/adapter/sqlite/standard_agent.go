@@ -2,9 +2,12 @@ package sqlite
 
 import (
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -12,6 +15,9 @@ import (
 )
 
 var _ port.StandardExperienceStore = (*Store)(nil)
+var _ port.OnboardingDeliveryStore = (*Store)(nil)
+
+const onboardingClaimLease = 2 * time.Minute
 
 func (s *Store) CreateProgress(ctx context.Context, operation domain.ProgressOperation) error {
 	_, err := s.db.ExecContext(ctx, `
@@ -132,6 +138,108 @@ func (s *Store) MarkSuggestedPromptsPublished(ctx context.Context, deliveryID, m
 		return fmt.Errorf("mark standard suggested prompts published: %w", err)
 	}
 	return nil
+}
+
+func (s *Store) ClaimOnboarding(ctx context.Context, teamID, userID string, key domain.ConversationKey, createdAt time.Time) (port.OnboardingDeliveryClaim, port.OnboardingDeliveryState, error) {
+	if strings.TrimSpace(teamID) == "" || strings.TrimSpace(userID) == "" || strings.TrimSpace(string(key)) == "" {
+		return port.OnboardingDeliveryClaim{}, port.OnboardingUnavailable, errors.New("onboarding claim identity is required")
+	}
+	claimToken, err := newOnboardingClaimToken()
+	if err != nil {
+		return port.OnboardingDeliveryClaim{}, port.OnboardingUnavailable, err
+	}
+	deliveryID := "standard_onboarding:" + teamID + ":" + userID
+	now := createdAt.UTC()
+	leaseUntil := now.Add(onboardingClaimLease).UnixNano()
+	result, err := s.db.ExecContext(ctx, `
+		INSERT INTO standard_prompt_deliveries
+			(id, team_id, user_id, conversation_key, delivery_kind, claim_token, lease_until, attempt, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'onboarding', ?, ?, 1, ?, ?)
+		ON CONFLICT (team_id, user_id) DO NOTHING`, deliveryID, teamID, userID, string(key), claimToken, leaseUntil, now.UnixNano(), now.UnixNano())
+	if err != nil {
+		return port.OnboardingDeliveryClaim{}, port.OnboardingUnavailable, fmt.Errorf("claim onboarding delivery: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return port.OnboardingDeliveryClaim{}, port.OnboardingUnavailable, fmt.Errorf("inspect onboarding delivery claim: %w", err)
+	}
+	if changed == 1 {
+		return port.OnboardingDeliveryClaim{DeliveryID: deliveryID, ClaimToken: claimToken, ConversationKey: key}, port.OnboardingClaimed, nil
+	}
+
+	var existingID, existingKey, existingToken, kind, status string
+	var existingLease int64
+	if err := s.db.QueryRowContext(ctx, `
+		SELECT id, conversation_key, delivery_kind, status, claim_token, lease_until
+		FROM standard_prompt_deliveries WHERE team_id = ? AND user_id = ?`, teamID, userID).
+		Scan(&existingID, &existingKey, &kind, &status, &existingToken, &existingLease); err != nil {
+		return port.OnboardingDeliveryClaim{}, port.OnboardingUnavailable, fmt.Errorf("read onboarding delivery claim: %w", err)
+	}
+	existing := port.OnboardingDeliveryClaim{DeliveryID: existingID, ClaimToken: existingToken, ConversationKey: domain.ConversationKey(existingKey)}
+	if kind != "onboarding" {
+		return existing, port.OnboardingUnavailable, nil
+	}
+	if status == "published" {
+		return existing, port.OnboardingAlreadyPublished, nil
+	}
+	if status != "prepared" {
+		return existing, port.OnboardingUnavailable, nil
+	}
+	if existingLease > now.UnixNano() {
+		return existing, port.OnboardingInFlight, nil
+	}
+
+	result, err = s.db.ExecContext(ctx, `
+		UPDATE standard_prompt_deliveries
+		SET claim_token = ?, lease_until = ?, attempt = attempt + 1, updated_at = ?
+		WHERE id = ? AND delivery_kind = 'onboarding' AND status = 'prepared' AND lease_until <= ?`, claimToken, leaseUntil, now.UnixNano(), existingID, now.UnixNano())
+	if err != nil {
+		return existing, port.OnboardingUnavailable, fmt.Errorf("renew onboarding delivery claim: %w", err)
+	}
+	changed, err = result.RowsAffected()
+	if err != nil {
+		return existing, port.OnboardingUnavailable, fmt.Errorf("inspect onboarding delivery renewal: %w", err)
+	}
+	if changed == 1 {
+		return port.OnboardingDeliveryClaim{DeliveryID: existingID, ClaimToken: claimToken, ConversationKey: domain.ConversationKey(existingKey)}, port.OnboardingClaimed, nil
+	}
+	return existing, port.OnboardingInFlight, nil
+}
+
+func (s *Store) MarkOnboardingPublished(ctx context.Context, claim port.OnboardingDeliveryClaim, messageTS string, updatedAt time.Time) error {
+	if strings.TrimSpace(claim.DeliveryID) == "" || strings.TrimSpace(claim.ClaimToken) == "" || strings.TrimSpace(messageTS) == "" {
+		return errors.New("onboarding publication identity is required")
+	}
+	result, err := s.db.ExecContext(ctx, `
+		UPDATE standard_prompt_deliveries
+		SET status = 'published', message_ts = ?, claim_token = '', lease_until = 0, updated_at = ?
+		WHERE id = ? AND delivery_kind = 'onboarding' AND status = 'prepared' AND claim_token = ?`, messageTS, updatedAt.UTC().UnixNano(), claim.DeliveryID, claim.ClaimToken)
+	if err != nil {
+		return fmt.Errorf("mark onboarding published: %w", err)
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("inspect onboarding publication: %w", err)
+	}
+	if changed == 1 {
+		return nil
+	}
+	var status, existingTS string
+	if err := s.db.QueryRowContext(ctx, `SELECT status, message_ts FROM standard_prompt_deliveries WHERE id = ?`, claim.DeliveryID).Scan(&status, &existingTS); err != nil {
+		return fmt.Errorf("read onboarding publication: %w", err)
+	}
+	if status == "published" && existingTS == messageTS {
+		return nil
+	}
+	return errors.New("onboarding publication claim is stale or conflicts with persisted message")
+}
+
+func newOnboardingClaimToken() (string, error) {
+	data := make([]byte, 16)
+	if _, err := rand.Read(data); err != nil {
+		return "", fmt.Errorf("generate onboarding claim token: %w", err)
+	}
+	return hex.EncodeToString(data), nil
 }
 
 func (s *Store) PrepareIncremental(ctx context.Context, operation domain.IncrementalOperation) error {

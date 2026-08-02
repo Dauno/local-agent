@@ -601,7 +601,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		}
 		if infra.publisher != nil && infra.api != nil {
 			factory = factory.WithBuilderLauncher(
-				slackadapter.NewBuilderLauncherPublisher(infra.api, infra.publisher, models.logger),
+				slackadapter.NewBuilderLauncherPublisherWithStore(infra.api, infra.publisher, models.logger, infra.store, infra.auth.UserID),
 			)
 		}
 		toolFactory = factory
@@ -708,7 +708,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		RetainMessages: cfg.Context.RetainMessagesPerConversation, MaxConcurrentCalls: cfg.Runtime.MaxConcurrentModelCalls,
 		ModelTimeout: time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second, BusyMessage: cfg.Runtime.BusyMessage, ModelErrorMessage: cfg.Runtime.ModelErrorMessage, UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 		ProgressEnabled: cfg.Slack.StandardAgent.ProgressEnabled, PromptsEnabled: cfg.Slack.StandardAgent.PromptsEnabled, SuggestedPrompts: cfg.Slack.StandardAgent.SuggestedPrompts, StreamingEnabled: cfg.Slack.StandardAgent.StreamingEnabled, UpdateInterval: time.Duration(cfg.Slack.StandardAgent.UpdateIntervalSeconds) * time.Second, StreamingCarryRunes: models.redactor.StreamingCarryRunes(),
-	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler})
+	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler})
 	if err != nil {
 		return nil, err
 	}
@@ -798,9 +798,24 @@ func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup,
 		if len(allowedProfiles) > 0 {
 			draftStore := adaptersqlite.NewAgentDraftStore(infra.store)
 			presenter := slackadapter.NewBuilderModalPresenterWithProviders(allowedProfiles)
+			if err := presenter.InitializationError(); err != nil {
+				return models.redactor.Error(fmt.Errorf("initialize builder modal template renderer: %w", err))
+			}
 			handler := slackadapter.NewBuilderSubmissionHandler(draftStore, composition.agentBuilderSvc, setup.defs, infra.publisher)
 			listener = listener.WithBuilderPresenter(presenter).WithBuilderHandler(handler)
 		}
+	}
+	dispatcher, dispatcherErr := listener.BuildInteractiveDispatcher()
+	if dispatcherErr != nil {
+		return models.redactor.Error(fmt.Errorf("initialize Slack interactive dispatcher: %w", dispatcherErr))
+	}
+	listener = listener.WithDispatcher(dispatcher)
+	catalog, catalogErr := slackadapter.EmbeddedTemplateCatalog()
+	if catalogErr != nil {
+		return models.redactor.Error(fmt.Errorf("validate embedded Slack UI templates: %w", catalogErr))
+	}
+	if err := listener.ValidateTemplateCatalog(catalog); err != nil {
+		return models.redactor.Error(fmt.Errorf("validate Slack interactive dispatcher: %w", err))
 	}
 	modelName := cfg.Model.Name
 	if models.rootDef != nil {
@@ -815,6 +830,7 @@ func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup,
 	} else {
 		models.logger.Info("declarative agent definitions loaded", "providers", len(setup.defs.Providers), "agents", len(setup.defs.Agents))
 	}
+	listener = listener.WithResponsePublisher(infra.publisher)
 	listener.SetInteractiveHandler(func(ictx context.Context, action domain.ConfirmationInteractiveAction) error {
 		return composition.service.HandleConfirmationInteractive(ictx, action)
 	})

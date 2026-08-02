@@ -572,7 +572,11 @@ func (f *Factory) publishBuilderLauncherTool(actor string, key domain.Conversati
 			if f.builderLauncher == nil {
 				return nil, fmt.Errorf("builder launcher not available")
 			}
-			idempotencyInput := fmt.Sprintf("%s:%s:%d", actor, key, time.Now().UTC().UnixNano())
+			callID := strings.TrimSpace(ctx.FunctionCallID())
+			if callID == "" {
+				return nil, fmt.Errorf("builder launcher function call ID is required")
+			}
+			idempotencyInput := fmt.Sprintf("%s:%s:%s", actor, key, callID)
 			idempotencyKey := fmt.Sprintf("%x", sha256.Sum256([]byte(idempotencyInput)))
 			if err := f.builderLauncher.PublishBuilderLauncher(ctx, port.BuilderLauncherRequest{
 				Actor:           actor,

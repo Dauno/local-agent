@@ -60,8 +60,10 @@ type Dependencies struct {
 	MaxAttachmentBytes    int64
 	MaxAttachmentChars    int
 	StandardStore         port.StandardExperienceStore
+	OnboardingStore       port.OnboardingDeliveryStore
 	ProgressPublisher     port.ProgressPublisher
 	PromptPublisher       port.SuggestedPromptPublisher
+	OnboardingPublisher   port.OnboardingPublisher
 	StreamingRuntime      port.StreamingAgentRuntime
 	IncrementalPublisher  port.IncrementalPublisher
 	SummaryScheduler      port.SummaryScheduler
@@ -102,8 +104,10 @@ type Service struct {
 	maxAttachmentBytes    int64
 	maxAttachmentChars    int
 	standardStore         port.StandardExperienceStore
+	onboardingStore       port.OnboardingDeliveryStore
 	progressPublisher     port.ProgressPublisher
 	promptPublisher       port.SuggestedPromptPublisher
+	onboardingPublisher   port.OnboardingPublisher
 	streamingRuntime      port.StreamingAgentRuntime
 	incrementalPublisher  port.IncrementalPublisher
 	summaryScheduler      port.SummaryScheduler
@@ -194,8 +198,10 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		maxAttachmentBytes:   deps.MaxAttachmentBytes,
 		maxAttachmentChars:   deps.MaxAttachmentChars,
 		standardStore:        deps.StandardStore,
+		onboardingStore:      deps.OnboardingStore,
 		progressPublisher:    deps.ProgressPublisher,
 		promptPublisher:      deps.PromptPublisher,
+		onboardingPublisher:  deps.OnboardingPublisher,
 		streamingRuntime:     deps.StreamingRuntime,
 		incrementalPublisher: deps.IncrementalPublisher,
 		summaryScheduler:     deps.SummaryScheduler,
@@ -215,6 +221,15 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 		return "", fmt.Errorf("claim Slack invocation: %w", err)
 	}
 	if !claimed {
+		if authorization.Allowed && isIsolatedGreeting(invocation) {
+			key, keyErr := invocation.ConversationKey()
+			if keyErr != nil {
+				return "", keyErr
+			}
+			if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
+				return outcome, nil
+			}
+		}
 		s.logger.Debug("duplicate Slack invocation ignored", "event_id", invocation.EventID)
 		return OutcomeDuplicate, nil
 	}
@@ -238,6 +253,9 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	key, err := invocation.ConversationKey()
 	if err != nil {
 		return "", err
+	}
+	if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
+		return outcome, nil
 	}
 	s.presentSuggestedPrompts(ctx, invocation, key)
 
@@ -445,6 +463,85 @@ func (s *Service) presentSuggestedPrompts(ctx context.Context, invocation domain
 	if err := s.standardStore.MarkSuggestedPromptsPublished(ctx, deliveryID, published.LastMessageTS, s.clock.Now().UTC()); err != nil {
 		s.logger.Warn("suggested prompt publication marking failed", "conversation_key", key, "error", err)
 	}
+}
+
+func (s *Service) handleOnboarding(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey) (Outcome, bool) {
+	if !s.cfg.PromptsEnabled || s.onboardingStore == nil || s.onboardingPublisher == nil || !isIsolatedGreeting(invocation) {
+		return "", false
+	}
+	claim, state, err := s.onboardingStore.ClaimOnboarding(ctx, invocation.TeamID, invocation.UserID, key, s.clock.Now().UTC())
+	if err != nil {
+		s.logger.Warn("onboarding claim failed", "conversation_key", key, "error", err)
+		return OutcomePublishFailed, true
+	}
+	recoverOnly := false
+	switch state {
+	case port.OnboardingAlreadyPublished:
+		return OutcomeDuplicate, true
+	case port.OnboardingInFlight:
+		recoverOnly = true
+	case port.OnboardingUnavailable:
+		return "", false
+	case port.OnboardingClaimed:
+	default:
+		return OutcomePublishFailed, true
+	}
+	if claim.ConversationKey == "" {
+		s.logger.Warn("onboarding claim has no durable conversation", "conversation_key", key)
+		return OutcomePublishFailed, true
+	}
+	target, err := domain.ConversationReplyTarget(claim.ConversationKey)
+	if err != nil {
+		s.logger.Warn("onboarding durable conversation is invalid", "conversation_key", key, "error", err)
+		return OutcomePublishFailed, true
+	}
+
+	recovered, found, err := s.onboardingPublisher.RecoverOnboarding(ctx, target, claim.DeliveryID)
+	if err != nil {
+		s.logger.Warn("onboarding recovery failed", "conversation_key", key, "error", err)
+		return OutcomePublishFailed, true
+	}
+	if found {
+		if err := s.onboardingStore.MarkOnboardingPublished(ctx, claim, recovered.LastMessageTS, s.clock.Now().UTC()); err != nil {
+			s.logger.Warn("onboarding recovery marking failed", "conversation_key", key, "error", err)
+			return OutcomePublishFailed, true
+		}
+		return OutcomeResponded, true
+	}
+	if recoverOnly {
+		return OutcomeDuplicate, true
+	}
+
+	published, err := s.onboardingPublisher.PublishOnboarding(ctx, target, port.OnboardingPublishRequest{
+		DeliveryID:       claim.DeliveryID,
+		Actor:            invocation.UserID,
+		ConversationKey:  claim.ConversationKey,
+		SuggestedPrompts: append([]string(nil), s.cfg.SuggestedPrompts...),
+	})
+	if err != nil {
+		s.logger.Warn("onboarding publish failed", "conversation_key", key, "error", err)
+		return OutcomePublishFailed, true
+	}
+	if published.LastMessageTS == "" {
+		s.logger.Warn("onboarding publisher returned no timestamp", "conversation_key", key)
+		return OutcomePublishFailed, true
+	}
+	if err := s.onboardingStore.MarkOnboardingPublished(ctx, claim, published.LastMessageTS, s.clock.Now().UTC()); err != nil {
+		s.logger.Warn("onboarding publication marking failed", "conversation_key", key, "error", err)
+		return OutcomePublishFailed, true
+	}
+	return OutcomeResponded, true
+}
+
+func isIsolatedGreeting(invocation domain.Invocation) bool {
+	if invocation.ChannelKind != domain.ChannelDM || invocation.Trigger != domain.TriggerDirectMessage ||
+		!invocation.ThreadedDM || invocation.ThreadTS != "" || len(invocation.Attachments) != 0 {
+		return false
+	}
+	normalized := strings.ToLower(strings.TrimFunc(invocation.Text, func(r rune) bool {
+		return unicode.IsSpace(r) || unicode.IsPunct(r)
+	}))
+	return normalized == "hola"
 }
 
 func (s *Service) beginProgress(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey) *domain.ProgressOperation {
