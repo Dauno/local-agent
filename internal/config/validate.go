@@ -201,6 +201,12 @@ func Validate(cfg Config) error {
 	} else if cfg.Slack.Files.MaxProcessedChars > maxFileChars {
 		add("slack.files.max_processed_chars", fmt.Sprintf("must not exceed %d", maxFileChars))
 	}
+	if cfg.Slack.Files.TranscriptionProfile != "" && !validProviderProfileReference(cfg.Slack.Files.TranscriptionProfile) {
+		add("slack.files.transcription_profile", "must use provider/profile syntax without whitespace")
+	}
+	if cfg.Slack.Files.TranscriptionTimeoutSeconds <= 0 {
+		add("slack.files.transcription_timeout_seconds", "must be greater than zero")
+	}
 
 	if cfg.Slack.Context.Enabled {
 		if cfg.Slack.Context.MaxChars <= 0 {
@@ -316,6 +322,14 @@ func Validate(cfg Config) error {
 		return &ValidationError{Fields: problems}
 	}
 	return nil
+}
+
+func validProviderProfileReference(value string) bool {
+	if strings.Count(value, "/") != 1 || strings.ContainsAny(value, " \t\r\n\x00") {
+		return false
+	}
+	parts := strings.SplitN(value, "/", 2)
+	return parts[0] != "" && parts[1] != ""
 }
 
 func validateModelBudget(problems *[]FieldError, cfg ModelBudgetConfig) {

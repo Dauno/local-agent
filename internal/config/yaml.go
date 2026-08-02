@@ -98,6 +98,8 @@ var configSchema = []schemaField{
 		{name: "files", children: []schemaField{
 			{name: "max_bytes_per_file"},
 			{name: "max_processed_chars"},
+			{name: "transcription_profile"},
+			{name: "transcription_timeout_seconds"},
 		}},
 	}},
 	{name: "memory", children: []schemaField{
