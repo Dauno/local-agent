@@ -1,0 +1,113 @@
+{
+  "name": "builder_modal",
+  "schema_version": 1,
+  "surface": "modal",
+  "payload": {
+    "type": "modal",
+    "title": {"type": "plain_text", "text": "Crear nuevo agente", "emoji": false},
+    "submit": {"type": "plain_text", "text": "Previsualizar", "emoji": false},
+    "close": {"type": "plain_text", "text": "Cancelar", "emoji": false},
+    "callback_id": "local_agent.builder.submit",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "Completa los campos para definir un nuevo agente."}
+      },
+      {
+        "type": "input",
+        "block_id": "name",
+        "label": {"type": "plain_text", "text": "Nombre", "emoji": false},
+        "hint": {"type": "plain_text", "text": "3-64 caracteres, solo minusculas, numeros, _ y -", "emoji": false},
+        "element": {
+          "type": "plain_text_input",
+          "action_id": "name",
+          "placeholder": {"type": "plain_text", "text": "incident_analyst", "emoji": false},
+          "initial_value": "{{value.name}}"
+        }
+      },
+      {
+        "type": "input",
+        "block_id": "agent_type",
+        "label": {"type": "plain_text", "text": "Tipo", "emoji": false},
+        "element": {
+          "type": "static_select",
+          "placeholder": {"type": "plain_text", "text": "Elige un tipo", "emoji": false},
+          "action_id": "agent_type",
+          "options": [
+            {"text": {"type": "plain_text", "text": "LLM", "emoji": false}, "value": "llm"},
+            {"text": {"type": "plain_text", "text": "ACP", "emoji": false}, "value": "acp"}
+          ],
+          "initial_option": "{{value.agent_type}}"
+        },
+        "dispatch_action": true
+      },
+      {
+        "type": "input",
+        "block_id": "description",
+        "label": {"type": "plain_text", "text": "Descripcion", "emoji": false},
+        "element": {
+          "type": "plain_text_input",
+          "action_id": "description",
+          "placeholder": {"type": "plain_text", "text": "Breve descripcion del proposito del agente", "emoji": false},
+          "max_length": 500,
+          "initial_value": "{{value.description}}"
+        }
+      },
+      {
+        "type": "input",
+        "block_id": "instruction",
+        "label": {"type": "plain_text", "text": "Instruccion", "emoji": false},
+        "element": {
+          "type": "plain_text_input",
+          "action_id": "instruction",
+          "placeholder": {"type": "plain_text", "text": "Instruccion completa del agente...", "emoji": false},
+          "multiline": true,
+          "max_length": 3000,
+          "initial_value": "{{value.instruction}}"
+        }
+      },
+      {
+        "type": "input",
+        "block_id": "model",
+        "label": {"type": "plain_text", "text": "Modelo", "emoji": false},
+        "element": {
+          "type": "static_select",
+          "placeholder": {"type": "plain_text", "text": "Elige un modelo", "emoji": false},
+          "action_id": "model",
+          "options": "{{options.model}}",
+          "initial_option": "{{value.model}}"
+        }
+      },
+      {
+        "$if": "is_acp",
+        "type": "input",
+        "block_id": "execution_mode",
+        "label": {"type": "plain_text", "text": "Ejecucion", "emoji": false},
+        "element": {
+          "type": "static_select",
+          "placeholder": {"type": "plain_text", "text": "Elige la ejecucion", "emoji": false},
+          "action_id": "execution_mode",
+          "options": [
+            {"text": {"type": "plain_text", "text": "foreground", "emoji": false}, "value": "foreground"},
+            {"text": {"type": "plain_text", "text": "durable_job", "emoji": false}, "value": "durable_job"}
+          ],
+          "initial_option": "{{value.execution_mode}}"
+        }
+      },
+      {
+        "$if": "is_acp",
+        "type": "input",
+        "block_id": "timeout_seconds",
+        "label": {"type": "plain_text", "text": "Timeout (segundos)", "emoji": false},
+        "hint": {"type": "plain_text", "text": "Maximo 86400", "emoji": false},
+        "element": {
+          "type": "plain_text_input",
+          "action_id": "timeout_seconds",
+          "placeholder": {"type": "plain_text", "text": "7200", "emoji": false},
+          "initial_value": "{{value.timeout_seconds}}",
+          "max_length": 5
+        }
+      }
+    ]
+  }
+}

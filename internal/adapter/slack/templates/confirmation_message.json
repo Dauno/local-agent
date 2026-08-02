@@ -1,0 +1,41 @@
+{
+  "name": "confirmation_message",
+  "schema_version": 1,
+  "surface": "message",
+  "payload": {
+    "fallback_text": "{{value.fallback_text}}",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "{{value.summary}}"}
+      },
+      {
+        "type": "section",
+        "fields": [
+          {"type": "mrkdwn", "text": "{{value.original_call_id}}"},
+          {"type": "mrkdwn", "text": "{{value.expires_at}}"}
+        ]
+      },
+      {
+        "type": "actions",
+        "block_id": "confirmation_buttons",
+        "elements": [
+          {
+            "type": "button",
+            "action_id": "local_agent.confirm.approve",
+            "value": "{{value.wrapper_call_id}}",
+            "text": {"type": "plain_text", "text": "Approve", "emoji": false},
+            "style": "primary"
+          },
+          {
+            "type": "button",
+            "action_id": "local_agent.confirm.reject",
+            "value": "{{value.wrapper_call_id}}",
+            "text": {"type": "plain_text", "text": "Reject", "emoji": false},
+            "style": "danger"
+          }
+        ]
+      }
+    ]
+  }
+}

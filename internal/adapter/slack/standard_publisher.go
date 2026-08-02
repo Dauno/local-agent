@@ -16,6 +16,7 @@ import (
 const (
 	progressMetadataEventType    = "local_agent_progress"
 	promptMetadataEventType      = "local_agent_suggested_prompts"
+	onboardingMetadataEventType  = "local_agent_onboarding"
 	incrementalMetadataEventType = "local_agent_incremental"
 	progressRecoveryLimit        = 100
 	standardIncrementalRenderer  = "standard_incremental_v1"
@@ -68,17 +69,23 @@ func (c sdkStandardMessageClient) StandardMessages(ctx context.Context, channelI
 }
 
 type StandardPublisher struct {
-	client    standardMessageClient
-	botUserID string
-	timeout   time.Duration
+	client      standardMessageClient
+	blockClient blockPostClient
+	botUserID   string
+	timeout     time.Duration
+	renderer    *TemplateRenderer
+	renderErr   error
 }
 
 func NewStandardPublisher(client *slackapi.Client, botUserID string, timeout time.Duration) *StandardPublisher {
 	var standard standardMessageClient
+	var blocks blockPostClient
 	if client != nil {
 		standard = sdkStandardMessageClient{client: client}
+		blocks = sdkBlockPostClient{client: client}
 	}
-	return &StandardPublisher{client: standard, botUserID: botUserID, timeout: timeout}
+	renderer, renderErr := NewEmbeddedTemplateRenderer()
+	return &StandardPublisher{client: standard, blockClient: blocks, botUserID: botUserID, timeout: timeout, renderer: renderer, renderErr: renderErr}
 }
 
 func (p *StandardPublisher) PublishProgress(ctx context.Context, target domain.ReplyTarget, operation domain.ProgressOperation) (port.PublishedResponse, error) {
@@ -166,6 +173,96 @@ func (p *StandardPublisher) PublishSuggestedPrompts(ctx context.Context, target 
 	return port.PublishedResponse{LastMessageTS: timestamp}, nil
 }
 
+func (p *StandardPublisher) PublishOnboarding(ctx context.Context, target domain.ReplyTarget, request port.OnboardingPublishRequest) (port.PublishedResponse, error) {
+	if p == nil || p.blockClient == nil {
+		return port.PublishedResponse{}, errors.New("Slack onboarding publisher is required")
+	}
+	if target.ChannelID == "" || request.DeliveryID == "" || !domain.PlausibleUserID(request.Actor) {
+		return port.PublishedResponse{}, errors.New("Slack onboarding identity is required")
+	}
+	if err := validateOnboardingPrompts(request.SuggestedPrompts); err != nil {
+		return port.PublishedResponse{}, err
+	}
+	if p.renderErr != nil || p.renderer == nil {
+		if p.renderErr != nil {
+			return port.PublishedResponse{}, fmt.Errorf("initialize onboarding template renderer: %w", p.renderErr)
+		}
+		return port.PublishedResponse{}, errors.New("onboarding template renderer is required")
+	}
+	builderContext, err := encodeBuilderInteractionContext(request.Actor, request.ConversationKey)
+	if err != nil {
+		return port.PublishedResponse{}, fmt.Errorf("encode onboarding interaction context: %w", err)
+	}
+	prompts := make([]string, len(request.SuggestedPrompts))
+	for index, prompt := range request.SuggestedPrompts {
+		prompts[index] = neutralizeUnsafeControls(prompt)
+	}
+	fallback, blocks, err := compileOnboardingMessage(p.renderer, builderContext, prompts)
+	if err != nil {
+		return port.PublishedResponse{}, fmt.Errorf("render onboarding message: %w", err)
+	}
+	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	defer cancel()
+	timestamp, err := p.blockClient.PostBlocks(callCtx, target.ChannelID, fallback, blocks, onboardingMetadata(request.DeliveryID), target.ThreadTS)
+	if err != nil {
+		return port.PublishedResponse{}, fmt.Errorf("publish Slack onboarding: %w", err)
+	}
+	if timestamp == "" {
+		return port.PublishedResponse{}, errors.New("Slack onboarding publisher returned no timestamp")
+	}
+	return port.PublishedResponse{LastMessageTS: timestamp}, nil
+}
+
+func (p *StandardPublisher) RecoverOnboarding(ctx context.Context, target domain.ReplyTarget, deliveryID string) (port.PublishedResponse, bool, error) {
+	if p == nil || p.client == nil {
+		return port.PublishedResponse{}, false, errors.New("Slack onboarding recovery client is required")
+	}
+	if target.ChannelID == "" || deliveryID == "" {
+		return port.PublishedResponse{}, false, errors.New("Slack onboarding recovery identity is required")
+	}
+	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	defer cancel()
+	messages, hasMore, err := p.client.StandardMessages(callCtx, target.ChannelID, target.ThreadTS, progressRecoveryLimit)
+	if err != nil {
+		return port.PublishedResponse{}, false, fmt.Errorf("recover Slack onboarding: %w", err)
+	}
+	if hasMore {
+		return port.PublishedResponse{}, false, errors.New("recover Slack onboarding: bounded history is incomplete")
+	}
+	metadata := onboardingMetadata(deliveryID)
+	var match string
+	for _, message := range messages {
+		if message.User != p.botUserID || message.Metadata.EventType != metadata.EventType {
+			continue
+		}
+		candidate, _ := message.Metadata.EventPayload["delivery_id"].(string)
+		if candidate != deliveryID {
+			continue
+		}
+		if match != "" {
+			return port.PublishedResponse{}, false, errors.New("recover Slack onboarding: duplicate delivery metadata")
+		}
+		match = message.Timestamp
+	}
+	return port.PublishedResponse{LastMessageTS: match}, match != "", nil
+}
+
+func onboardingMetadata(deliveryID string) slackapi.SlackMetadata {
+	return slackapi.SlackMetadata{EventType: onboardingMetadataEventType, EventPayload: map[string]any{"delivery_id": deliveryID}}
+}
+
+func validateOnboardingPrompts(prompts []string) error {
+	if len(prompts) > 5 {
+		return errors.New("Slack onboarding supports at most five suggested prompts")
+	}
+	for index, prompt := range prompts {
+		if strings.TrimSpace(prompt) == "" || strings.ContainsAny(prompt, "\r\n\x00") || len([]rune(prompt)) > 200 {
+			return fmt.Errorf("Slack onboarding prompt %d is invalid", index)
+		}
+	}
+	return nil
+}
+
 func (p *StandardPublisher) validateProgress(operation domain.ProgressOperation) error {
 	if p == nil || p.client == nil {
 		return errors.New("Slack standard publisher is required")
@@ -212,6 +309,7 @@ func standardTimeout(ctx context.Context, timeout time.Duration) (context.Contex
 
 var _ port.ProgressPublisher = (*StandardPublisher)(nil)
 var _ port.SuggestedPromptPublisher = (*StandardPublisher)(nil)
+var _ port.OnboardingPublisher = (*StandardPublisher)(nil)
 var _ port.IncrementalPublisher = (*StandardPublisher)(nil)
 
 func (*StandardPublisher) ValidateIncrementalText(text string) error {

@@ -355,21 +355,23 @@ func TestNonBlockActionInteractiveIgnored(t *testing.T) {
 }
 
 type fakeConfirmationBlockClient struct {
-	mu            sync.Mutex
-	postedChans   []string
-	postedBlocks  [][]slackapi.Block
-	updatedChans  []string
-	updatedTS     []string
-	updatedBlocks [][]slackapi.Block
-	fallbackTexts []string
-	messages      []slackapi.Message
-	hasMore       bool
-	postErr       error
-	updateErr     error
-	historyErr    error
+	mu             sync.Mutex
+	postedChans    []string
+	postedBlocks   [][]slackapi.Block
+	updatedChans   []string
+	updatedTS      []string
+	updatedBlocks  [][]slackapi.Block
+	fallbackTexts  []string
+	postedMetadata []slackapi.SlackMetadata
+	postedThreads  []string
+	messages       []slackapi.Message
+	hasMore        bool
+	postErr        error
+	updateErr      error
+	historyErr     error
 }
 
-func (c *fakeConfirmationBlockClient) PostBlocks(_ context.Context, channelID, fallbackText string, blocks []slackapi.Block, _ slackapi.SlackMetadata, _ string) (string, error) {
+func (c *fakeConfirmationBlockClient) PostBlocks(_ context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.postErr != nil {
@@ -378,6 +380,8 @@ func (c *fakeConfirmationBlockClient) PostBlocks(_ context.Context, channelID, f
 	c.postedChans = append(c.postedChans, channelID)
 	c.postedBlocks = append(c.postedBlocks, blocks)
 	c.fallbackTexts = append(c.fallbackTexts, fallbackText)
+	c.postedMetadata = append(c.postedMetadata, metadata)
+	c.postedThreads = append(c.postedThreads, threadTS)
 	return fmt.Sprintf("172000000%d.000001", len(c.postedChans)), nil
 }
 
@@ -408,7 +412,7 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc",
 		ChannelID: "C12345678", Summary: "Write file",
 		CorrelationID: "confirmation:wrapper-abc",
-		Expiry:        time.Now().Add(15 * time.Minute),
+		Expiry:        time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
 
 	result, err := pub.PublishConfirmation(context.Background(), delivery)
@@ -421,8 +425,43 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 	if len(client.postedChans) != 1 || client.postedChans[0] != "C12345678" {
 		t.Errorf("posted channel = %v, want [C12345678]", client.postedChans)
 	}
-	if len(client.fallbackTexts) != 1 || !strings.Contains(client.fallbackTexts[0], "Write file") {
+	if len(client.fallbackTexts) != 1 || client.fallbackTexts[0] != confirmationFallbackText(delivery) {
 		t.Fatalf("accessible fallback = %q", client.fallbackTexts)
+	}
+	if client.postedThreads[0] != delivery.ThreadTS {
+		t.Fatalf("posted thread = %q, want %q", client.postedThreads[0], delivery.ThreadTS)
+	}
+	if len(client.postedMetadata) != 1 || client.postedMetadata[0].EventType != confirmationMetadataEventType {
+		t.Fatalf("posted metadata = %#v", client.postedMetadata)
+	}
+	if client.postedMetadata[0].EventPayload["correlation_id"] != delivery.CorrelationID ||
+		client.postedMetadata[0].EventPayload["render_mode"] != confirmationRenderMode ||
+		client.postedMetadata[0].EventPayload["content_sha256"] != confirmationContentDigest(delivery) {
+		t.Fatalf("posted metadata payload = %#v", client.postedMetadata[0].EventPayload)
+	}
+	blocks := client.postedBlocks[0]
+	if len(blocks) != 3 {
+		t.Fatalf("confirmation blocks = %d, want 3", len(blocks))
+	}
+	header := blocks[0].(*slackapi.SectionBlock)
+	if header.Text == nil || header.Text.Text != ":lock: Write file" {
+		t.Fatalf("confirmation header = %#v", header.Text)
+	}
+	details := blocks[1].(*slackapi.SectionBlock)
+	if len(details.Fields) != 2 || details.Fields[0].Text != "*Call ID:*\n`orig-abc`" || details.Fields[1].Text != "*Expires:*\n15:30 UTC" {
+		t.Fatalf("confirmation details = %#v", details.Fields)
+	}
+	actions := blocks[2].(*slackapi.ActionBlock)
+	if actions.BlockID != "confirmation_buttons" || len(actions.Elements.ElementSet) != 2 {
+		t.Fatalf("confirmation actions = %#v", actions)
+	}
+	approve := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
+	reject := actions.Elements.ElementSet[1].(*slackapi.ButtonBlockElement)
+	if approve.ActionID != approveActionID || approve.Value != delivery.WrapperCallID || approve.Style != slackapi.StylePrimary || approve.Text.Text != "Approve" {
+		t.Fatalf("approve button = %#v", approve)
+	}
+	if reject.ActionID != rejectActionID || reject.Value != delivery.WrapperCallID || reject.Style != slackapi.StyleDanger || reject.Text.Text != "Reject" {
+		t.Fatalf("reject button = %#v", reject)
 	}
 }
 

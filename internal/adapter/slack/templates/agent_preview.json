@@ -1,0 +1,35 @@
+{
+  "name": "agent_preview",
+  "schema_version": 1,
+  "surface": "message",
+  "payload": {
+    "fallback_text": "{{value.fallback_text}}",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "{{value.name}}"}
+      },
+      {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "{{value.agent_class}}"}
+      },
+      "{{options.preview_yaml_parts}}",
+      {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "{{value.sha256}}"}
+      },
+      {
+        "type": "actions",
+        "block_id": "builder_preview_actions",
+        "elements": [
+          {
+            "type": "button",
+            "action_id": "local_agent.builder.request_install",
+            "value": "{{value.draft_id}}",
+            "text": {"type": "plain_text", "text": "Solicitar instalación", "emoji": false}
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -978,6 +978,35 @@ func TestHandleInteractiveConfirmationBindsPublishedMessageAndPublishesResult(t 
 	}
 }
 
+func TestHandleInteractiveConfirmationRejectsAndReplaysSafely(t *testing.T) {
+	delivery := richConfirmationDelivery(t)
+	confirmations := &fakeConfirmationStore{delivery: &delivery}
+	runtime := &fakeRuntime{resumeTurn: port.AgentTurn{Text: "rejected"}}
+	publisher := &fakePublisher{}
+	richPublisher := &fakeConfirmationPublisher{}
+	service := newTestServiceWithConfirmations(t, &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}, runtime, &fakeHistory{}, publisher, confirmations, nil)
+	service.confirmationPublisher = richPublisher
+	action := richConfirmationAction(delivery)
+	action.Approved = false
+
+	if err := service.HandleConfirmationInteractive(t.Context(), action); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.resumeCalls != 1 || runtime.resumeDecision.Approved || delivery.Status != port.ConfirmationRejected {
+		t.Fatalf("rejection decision = %#v, status = %q, resume calls = %d", runtime.resumeDecision, delivery.Status, runtime.resumeCalls)
+	}
+	if len(richPublisher.updated) != 1 || richPublisher.updated[0].Status != port.ConfirmationRejected {
+		t.Fatalf("rejection terminal updates = %#v", richPublisher.updated)
+	}
+
+	if err := service.HandleConfirmationInteractive(t.Context(), action); err == nil {
+		t.Fatal("replayed rejection returned nil")
+	}
+	if runtime.resumeCalls != 1 {
+		t.Fatalf("replayed rejection resumed %d times", runtime.resumeCalls)
+	}
+}
+
 func TestHandleInteractiveConfirmationRejectsSpoofedMessage(t *testing.T) {
 	delivery := richConfirmationDelivery(t)
 	confirmations := &fakeConfirmationStore{delivery: &delivery}

@@ -28,6 +28,15 @@ type stubExternalJobReader struct {
 	result domain.ExternalAgentJobResult
 }
 
+type recordingBuilderLauncher struct {
+	requests []port.BuilderLauncherRequest
+}
+
+func (p *recordingBuilderLauncher) PublishBuilderLauncher(_ context.Context, req port.BuilderLauncherRequest) error {
+	p.requests = append(p.requests, req)
+	return nil
+}
+
 func (r stubExternalJobReader) Status(context.Context, string, string, domain.ConversationKey) (*domain.ExternalAgentJob, error) {
 	return r.job, nil
 }
@@ -200,6 +209,44 @@ func TestFactoryWithoutSandboxExposesOnlyConversationTools(t *testing.T) {
 	}
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool without sandbox, got %d", len(tools))
+	}
+}
+
+func TestBuilderLauncherUsesStableFunctionCallIdentity(t *testing.T) {
+	publisher := &recordingBuilderLauncher{}
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithBuilderLauncher(publisher)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var launcher runnableFunctionTool
+	for _, raw := range tools {
+		candidate, ok := raw.(runnableFunctionTool)
+		if ok && candidate.Name() == "publish_builder_launcher" {
+			launcher = candidate
+			break
+		}
+	}
+	if launcher == nil {
+		t.Fatal("publish_builder_launcher tool was not registered")
+	}
+	for range 2 {
+		if _, err := launcher.Run(&stubToolContext{callID: "call-builder-1"}, map[string]any{}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(publisher.requests) != 2 || publisher.requests[0].IdempotencyKey == "" || publisher.requests[0].IdempotencyKey != publisher.requests[1].IdempotencyKey {
+		t.Fatalf("requests=%#v", publisher.requests)
+	}
+	if _, err := launcher.Run(&stubToolContext{callID: "call-builder-2"}, map[string]any{}); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.requests[2].IdempotencyKey == publisher.requests[0].IdempotencyKey {
+		t.Fatal("different function calls reused a builder launcher idempotency key")
+	}
+	if _, err := launcher.Run(&stubToolContext{}, map[string]any{}); err == nil {
+		t.Fatal("builder launcher accepted an empty function call ID")
 	}
 }
 
