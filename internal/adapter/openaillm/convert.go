@@ -70,6 +70,7 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 	var functionCalls []*genai.FunctionCall
 	var functionResponses []*genai.FunctionResponse
 	var imageParts []*genai.Part
+	var audioParts []*genai.Part
 	var orderedContentParts []*genai.Part
 
 	for _, part := range content.Parts {
@@ -84,6 +85,9 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 		case part.InlineData != nil:
 			if supportedImageMIME(part.InlineData.MIMEType) {
 				imageParts = append(imageParts, part)
+				orderedContentParts = append(orderedContentParts, part)
+			} else if supportedAudioMIME(part.InlineData.MIMEType) {
+				audioParts = append(audioParts, part)
 				orderedContentParts = append(orderedContentParts, part)
 			} else {
 				return nil, ErrUnsupportedPart
@@ -102,6 +106,12 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 	}
 	if len(imageParts) > 0 && (len(functionCalls) > 0 || len(functionResponses) > 0) {
 		return nil, errors.New("content cannot mix images with function calls or responses")
+	}
+	if len(audioParts) > 0 && (len(functionCalls) > 0 || len(functionResponses) > 0) {
+		return nil, errors.New("content cannot mix audio with function calls or responses")
+	}
+	if len(imageParts) > 0 && len(audioParts) > 0 {
+		return nil, errors.New("content cannot mix images and audio")
 	}
 	if len(functionCalls) > 0 {
 		if content.Role != genai.RoleModel {
@@ -155,8 +165,9 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 
 	text := strings.Join(texts, "")
 	hasImages := len(imageParts) > 0
+	hasAudio := len(audioParts) > 0
 
-	if !hasImages {
+	if !hasImages && !hasAudio {
 		if strings.TrimSpace(text) == "" {
 			return nil, errors.New("content must have non-empty text")
 		}
@@ -170,17 +181,31 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 		}
 	}
 
-	// Image content parts: build multipart user message.
+	// Image and audio content parts: build a multipart user message.
 	if content.Role != genai.RoleUser && content.Role != "" {
-		return nil, fmt.Errorf("image content requires user role, got %q", content.Role)
+		if hasImages && !hasAudio {
+			return nil, fmt.Errorf("image content requires user role, got %q", content.Role)
+		}
+		return nil, fmt.Errorf("media content requires user role, got %q", content.Role)
 	}
 
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(orderedContentParts))
 	for _, part := range orderedContentParts {
 		if part.InlineData != nil {
-			dataURL := "data:" + part.InlineData.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(part.InlineData.Data)
-			parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
-				URL: dataURL,
+			if supportedImageMIME(part.InlineData.MIMEType) {
+				dataURL := "data:" + part.InlineData.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(part.InlineData.Data)
+				parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+					URL: dataURL,
+				}))
+				continue
+			}
+			format, ok := audioFormat(part.InlineData.MIMEType)
+			if !ok {
+				return nil, fmt.Errorf("audio MIME type %q is not supported by Chat Completions input_audio", part.InlineData.MIMEType)
+			}
+			parts = append(parts, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
+				Data:   base64.StdEncoding.EncodeToString(part.InlineData.Data),
+				Format: format,
 			}))
 			continue
 		}
@@ -189,18 +214,34 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 		}
 	}
 	if len(parts) == 0 {
-		return nil, errors.New("image content has no text or images")
+		return nil, errors.New("media content has no text or media")
 	}
 
 	return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(parts)}, nil
 }
 
 func supportedImageMIME(mimeType string) bool {
-	switch strings.ToLower(mimeType) {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
 	case "image/png", "image/jpeg", "image/webp", "image/gif":
 		return true
 	default:
 		return false
+	}
+}
+
+func supportedAudioMIME(mimeType string) bool {
+	_, ok := audioFormat(mimeType)
+	return ok
+}
+
+func audioFormat(mimeType string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "audio/mpeg", "audio/mp3", "audio/x-mpeg", "audio/x-mp3":
+		return "mp3", true
+	case "audio/wav", "audio/x-wav", "audio/wave":
+		return "wav", true
+	default:
+		return "", false
 	}
 }
 
