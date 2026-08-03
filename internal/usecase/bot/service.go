@@ -1011,11 +1011,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 			if !first || s.runtime == nil {
 				continue
 			}
-			if _, err := s.runtime.Resume(ctx, domain.ConfirmationDecision{
-				WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
-				ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
-				Approved: false, Payload: map[string]any{"expired": true},
-			}); err != nil {
+			if err := s.resumeExpiredConfirmation(ctx, delivery); err != nil {
 				return fmt.Errorf("close expired confirmation %s in ADK: %w", delivery.WrapperCallID, err)
 			}
 			if s.confirmationPublisher != nil && delivery.RendererMode == confirmationRendererMode {
@@ -1172,6 +1168,24 @@ func (s *Service) HandleConfirmation(ctx context.Context, invocation domain.Invo
 	return s.handleConfirmationCore(ctx, invocation, wrapperCallID, approved, nil)
 }
 
+// resumeExpiredConfirmation is used only before the normal confirmation
+// resume path acquires the conversation coordinator. Normal resumes already
+// hold the same coordinator and must not acquire it again.
+func (s *Service) resumeExpiredConfirmation(ctx context.Context, delivery port.ConfirmationDelivery) error {
+	release, acquired := s.limiter.TryAcquire(string(delivery.ConversationKey))
+	if !acquired {
+		return errors.New("conversation already has an active root turn")
+	}
+	defer release()
+
+	_, err := s.runtime.Resume(ctx, domain.ConfirmationDecision{
+		WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
+		ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
+		Approved: false, Payload: map[string]any{"expired": true},
+	})
+	return err
+}
+
 // handleConfirmationCore is shared by text commands and interactive button clicks.
 // interactive is non-nil when the decision came from a Block Kit button.
 func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.Invocation, wrapperCallID string, approved bool, interactive *domain.ConfirmationInteractiveAction) Outcome {
@@ -1271,11 +1285,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 			return OutcomeModelFailed
 		}
 		if firstExpiry && s.runtime != nil {
-			_, resumeErr := s.runtime.Resume(ctx, domain.ConfirmationDecision{
-				WrapperCallID: wrapperCallID, OriginalCallID: delivery.OriginalCallID,
-				ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
-				Approved: false, Payload: map[string]any{"expired": true},
-			})
+			resumeErr := s.resumeExpiredConfirmation(ctx, *delivery)
 			if resumeErr != nil {
 				s.logger.Error("expired confirmation ADK terminal response failed", "wrapper_call_id", wrapperCallID, "error", resumeErr)
 				return OutcomeModelFailed

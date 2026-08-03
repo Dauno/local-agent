@@ -134,6 +134,60 @@ func (f *blockingCompletionFinder) FindPublishedAssistantExchange(context.Contex
 	return "", false, nil
 }
 
+type blockingResumeRuntime struct {
+	started   chan struct{}
+	release   chan struct{}
+	startOnce sync.Once
+	mu        sync.Mutex
+	resumes   int
+}
+
+func (r *blockingResumeRuntime) Run(context.Context, port.AgentRequest) (port.AgentTurn, error) {
+	return port.AgentTurn{}, nil
+}
+
+func (r *blockingResumeRuntime) Resume(ctx context.Context, _ domain.ConfirmationDecision) (port.AgentTurn, error) {
+	r.mu.Lock()
+	r.resumes++
+	r.mu.Unlock()
+	r.startOnce.Do(func() { close(r.started) })
+	select {
+	case <-r.release:
+		return port.AgentTurn{Text: "expired confirmation closed"}, nil
+	case <-ctx.Done():
+		return port.AgentTurn{}, ctx.Err()
+	}
+}
+
+func (r *blockingResumeRuntime) resumeCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.resumes
+}
+
+type expiredConfirmationStore struct {
+	fakeConfirmationStore
+	expired []port.ConfirmationDelivery
+}
+
+func (s *expiredConfirmationStore) ExpireDelivery(_ context.Context, wrapperCallID string, _ time.Time) (bool, error) {
+	for index := range s.expired {
+		if s.expired[index].WrapperCallID == wrapperCallID {
+			s.expired[index].Status = port.ConfirmationExpired
+			return true, nil
+		}
+	}
+	if s.delivery != nil && s.delivery.WrapperCallID == wrapperCallID {
+		s.delivery.Status = port.ConfirmationExpired
+		return true, nil
+	}
+	return false, nil
+}
+
+func (s *expiredConfirmationStore) ListExpired(context.Context, time.Time) ([]port.ConfirmationDelivery, error) {
+	return append([]port.ConfirmationDelivery(nil), s.expired...), nil
+}
+
 func (f *fakeCompletionFinder) FindPublishedAssistantExchange(_ context.Context, _ port.AssistantExchangeIntent) (string, bool, error) {
 	f.calls++
 	return f.timestamp, f.found, nil
@@ -423,6 +477,131 @@ func TestReconcileResponsePreparedUsesConversationCoordinator(t *testing.T) {
 	}
 	if runtime, ok := service.runtime.(*fakeRuntime); !ok || runtime.runCalls != 0 {
 		t.Fatal("human turn crossed coordinator while reconciliation was active")
+	}
+}
+
+func TestExpiredConfirmationResumeSharesConversationCoordinatorWithReconciliation(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activation.State = domain.ActivationResponsePrepared
+	activation.ResponseBody = "prepared response"
+	activation.ResponseSHA256 = sha256Hex(activation.ResponseBody)
+	activation.ExchangeIntentID = "intent-1"
+	activation.CorrelationID = "corr-1"
+	activationStore := &fakeActivationStore{activation: activation}
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "expired-wrapper", OriginalCallID: "original", SessionID: "adk:" + string(activation.ConversationKey),
+		Actor: activation.Actor, ConversationKey: activation.ConversationKey, Status: port.ConfirmationPublished,
+		Expiry: now.Add(-time.Minute),
+	}
+	confirmations := &expiredConfirmationStore{fakeConfirmationStore: fakeConfirmationStore{delivery: &delivery}}
+	runtime := &blockingResumeRuntime{started: make(chan struct{}), release: make(chan struct{})}
+	publisher := &fakePublisher{}
+	service := completionService(t, activationStore, &fakeRuntime{}, publisher)
+	service.runtime = runtime
+	service.confirmationStore = confirmations
+	service.clock = fakeClock{now: now}
+
+	expiredDone := make(chan Outcome, 1)
+	go func() {
+		expiredDone <- service.HandleConfirmation(t.Context(), botInvocation(), delivery.WrapperCallID, true)
+	}()
+	select {
+	case <-runtime.started:
+	case <-time.After(time.Second):
+		t.Fatal("expired confirmation did not reach Resume")
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- service.ReconcileJobCompletion(t.Context(), activation) }()
+	select {
+	case err := <-reconcileDone:
+		if got := activationErrorCode(t, err); got != "conversation_busy" {
+			t.Fatalf("concurrent reconciliation error code = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconciliation waited instead of respecting the conversation coordinator")
+	}
+	if got := runtime.resumeCount(); got != 1 {
+		t.Fatalf("resume calls while coordinator held = %d", got)
+	}
+	if len(publisher.calls) != 0 {
+		t.Fatalf("reconciliation published while expired resume was active: %#v", publisher.calls)
+	}
+
+	close(runtime.release)
+	if outcome := <-expiredDone; outcome != OutcomeIgnoredFollowup {
+		t.Fatalf("expired confirmation outcome = %q", outcome)
+	}
+	if len(publisher.calls) != 1 || publisher.calls[0].text != "This confirmation has expired." {
+		t.Fatalf("expired confirmation publication = %#v", publisher.calls)
+	}
+
+	service.exchange = &fakeExchangeWriter{}
+	service.exchangeFinder = &fakeCompletionFinder{found: false}
+	if err := service.ReconcileJobCompletion(t.Context(), activation); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.resumeCount() != 1 || len(publisher.calls) != 2 || publisher.calls[1].text != activation.ResponseBody {
+		t.Fatalf("serialized response publication = resumes:%d calls:%#v", runtime.resumeCount(), publisher.calls)
+	}
+}
+
+func TestStartupExpiredConfirmationResumeSharesConversationCoordinatorWithReconciliation(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activation.State = domain.ActivationResponsePrepared
+	activation.ResponseBody = "prepared response"
+	activation.ResponseSHA256 = sha256Hex(activation.ResponseBody)
+	activation.ExchangeIntentID = "intent-1"
+	activation.CorrelationID = "corr-1"
+	activationStore := &fakeActivationStore{activation: activation}
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "startup-expired-wrapper", OriginalCallID: "original", SessionID: "adk:" + string(activation.ConversationKey),
+		Actor: activation.Actor, ConversationKey: activation.ConversationKey, Status: port.ConfirmationPublished,
+		Expiry: now.Add(-time.Minute),
+	}
+	confirmations := &expiredConfirmationStore{expired: []port.ConfirmationDelivery{delivery}}
+	runtime := &blockingResumeRuntime{started: make(chan struct{}), release: make(chan struct{})}
+	service := completionService(t, activationStore, &fakeRuntime{}, &fakePublisher{})
+	service.runtime = runtime
+	service.confirmationStore = confirmations
+	service.clock = fakeClock{now: now}
+
+	startupDone := make(chan error, 1)
+	go func() { startupDone <- service.ReconcileConfirmations(t.Context(), nil) }()
+	select {
+	case <-runtime.started:
+	case <-time.After(time.Second):
+		t.Fatal("startup expiry did not reach Resume")
+	}
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- service.ReconcileJobCompletion(t.Context(), activation) }()
+	select {
+	case err := <-reconcileDone:
+		if got := activationErrorCode(t, err); got != "conversation_busy" {
+			t.Fatalf("concurrent startup reconciliation error code = %q", got)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("reconciliation waited instead of respecting the conversation coordinator")
+	}
+	if got := runtime.resumeCount(); got != 1 {
+		t.Fatalf("startup resume calls while coordinator held = %d", got)
+	}
+
+	close(runtime.release)
+	if err := <-startupDone; err != nil {
+		t.Fatal(err)
+	}
+
+	service.exchange = &fakeExchangeWriter{}
+	service.exchangeFinder = &fakeCompletionFinder{found: false}
+	if err := service.ReconcileJobCompletion(t.Context(), activation); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.resumeCount() != 1 {
+		t.Fatalf("startup expiry replayed Resume: %d", runtime.resumeCount())
 	}
 }
 
