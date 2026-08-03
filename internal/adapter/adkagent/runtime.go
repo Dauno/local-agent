@@ -119,6 +119,7 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 			instruction += " You may use only the registered function tools when they are relevant. Their arguments and results remain subject to application policy."
 		}
 	}
+	instruction = instructionForOrigin(instruction, ephemeral.origin)
 
 	agentCfg := llmagent.Config{
 		Name:              technicalName,
@@ -165,11 +166,16 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	if current.Role != domain.RoleUser {
 		return port.AgentTurn{}, fmt.Errorf("%w: final message must have user role", ErrInvalidHistory)
 	}
+	origin, err := resolveTurnOrigin(req, current)
+	if err != nil {
+		return port.AgentTurn{}, err
+	}
+	turnCtx := port.WithAgentTurnContext(ctx, port.AgentTurnContext{ConversationKey: req.ConversationKey, Origin: origin})
 
 	sessionID := adkSessionID(req.ConversationKey)
 
 	// Ensure session exists (idempotent).
-	_, err := r.ensureSession(ctx, sessionID)
+	_, err = r.ensureSession(turnCtx, sessionID)
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("ensure ADK session: %w", err)
 	}
@@ -177,11 +183,13 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	// Preload ephemeral context (memory + Slack data) into the current
 	// model call via before-model callback. They must not become durable events.
 	ephemeralCtx := buildBeforeModelContext(req)
+	ephemeralCtx.actor = origin.Actor
+	ephemeralCtx.origin = origin
 
 	// Build tools for this turn.
 	tools := append([]tool.Tool(nil), r.staticTools...)
 	if r.toolFactory != nil {
-		rawTools, toolErr := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
+		rawTools, toolErr := r.toolFactory.ToolsForInvocation(origin.Actor, req.ConversationKey)
 		if toolErr != nil {
 			return port.AgentTurn{}, fmt.Errorf("build invocation tools: %w", toolErr)
 		}
@@ -191,6 +199,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 			}
 		}
 	}
+	tools = toolsForOrigin(tools, origin)
 
 	agent, err := r.buildAgent(tools, ephemeralCtx)
 	if err != nil {
@@ -200,7 +209,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	adkRunner, err := runner.New(runner.Config{
 		AppName:        applicationName,
 		Agent:          agent,
-		SessionService: r.sessionService,
+		SessionService: newTurnSessionService(r.sessionService, origin),
 	})
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("create runner: %w", err)
@@ -208,12 +217,12 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 
 	input := genai.NewContentFromText(current.Content, genai.RoleUser)
 
-	turn, err := runTurn(ctx, adkRunner, input, sessionID, current.UserID, req.ConversationKey)
+	turn, err := runTurn(turnCtx, adkRunner, input, sessionID, origin.Actor, req.ConversationKey)
 	if err != nil {
 		return port.AgentTurn{}, err
 	}
 	if turn.PendingConfirmation == nil {
-		r.updateContinuity(ctx, sessionID, current.Content, turn.Text, true)
+		r.updateContinuity(ctx, sessionID, current.Content, turn.Text, origin.Kind != port.AgentTurnOriginJobCompletion)
 	}
 	return turn, nil
 }
@@ -244,14 +253,23 @@ func (r *Runtime) Stream(ctx context.Context, req port.AgentRequest, yield func(
 		terminalError(fmt.Errorf("%w: final message must have user role", ErrInvalidHistory))
 		return
 	}
+	origin, err := resolveTurnOrigin(req, current)
+	if err != nil {
+		terminalError(err)
+		return
+	}
+	turnCtx := port.WithAgentTurnContext(ctx, port.AgentTurnContext{ConversationKey: req.ConversationKey, Origin: origin})
 	sessionID := adkSessionID(req.ConversationKey)
-	if _, err := r.ensureSession(ctx, sessionID); err != nil {
+	if _, err := r.ensureSession(turnCtx, sessionID); err != nil {
 		terminalError(fmt.Errorf("ensure ADK session: %w", err))
 		return
 	}
+	ephemeralCtx := buildBeforeModelContext(req)
+	ephemeralCtx.actor = origin.Actor
+	ephemeralCtx.origin = origin
 	tools := append([]tool.Tool(nil), r.staticTools...)
 	if r.toolFactory != nil {
-		rawTools, err := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
+		rawTools, err := r.toolFactory.ToolsForInvocation(origin.Actor, req.ConversationKey)
 		if err != nil {
 			terminalError(fmt.Errorf("build invocation tools: %w", err))
 			return
@@ -262,23 +280,24 @@ func (r *Runtime) Stream(ctx context.Context, req port.AgentRequest, yield func(
 			}
 		}
 	}
-	agent, err := r.buildAgent(tools, buildBeforeModelContext(req))
+	tools = toolsForOrigin(tools, origin)
+	agent, err := r.buildAgent(tools, ephemeralCtx)
 	if err != nil {
 		terminalError(fmt.Errorf("build agent: %w", err))
 		return
 	}
-	adkRunner, err := runner.New(runner.Config{AppName: applicationName, Agent: agent, SessionService: r.sessionService})
+	adkRunner, err := runner.New(runner.Config{AppName: applicationName, Agent: agent, SessionService: newTurnSessionService(r.sessionService, origin)})
 	if err != nil {
 		terminalError(fmt.Errorf("create runner: %w", err))
 		return
 	}
 	wrappedYield := func(event port.AgentStreamEvent) bool {
 		if event.Kind == port.AgentStreamCompleted && event.Turn != nil && event.Turn.PendingConfirmation == nil {
-			r.updateContinuity(ctx, sessionID, current.Content, event.Turn.Text, true)
+			r.updateContinuity(ctx, sessionID, current.Content, event.Turn.Text, origin.Kind != port.AgentTurnOriginJobCompletion)
 		}
 		return yield(event)
 	}
-	runStreamingTurn(ctx, adkRunner, genai.NewContentFromText(current.Content, genai.RoleUser), sessionID, current.UserID, req.ConversationKey, wrappedYield)
+	runStreamingTurn(turnCtx, adkRunner, genai.NewContentFromText(current.Content, genai.RoleUser), sessionID, origin.Actor, req.ConversationKey, wrappedYield)
 }
 
 func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, finalText string, updateObjective bool) {
@@ -689,6 +708,7 @@ type beforeModelData struct {
 	memory  []domain.MemorySnippet
 	context domain.AgentContext
 	actor   string
+	origin  port.AgentTurnOrigin
 }
 
 func buildBeforeModelContext(req port.AgentRequest) beforeModelData {

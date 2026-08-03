@@ -2,16 +2,88 @@ package port
 
 import (
 	"context"
+	"errors"
+	"strings"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 // --- Structured agent runtime (replaces Agent.Respond for tool-aware turns) ---
 
+// AgentTurnOriginKind identifies who or what started a root turn. The ADK
+// technical user role is deliberately not used as this provenance field.
+type AgentTurnOriginKind string
+
+const (
+	AgentTurnOriginUser          AgentTurnOriginKind = "user"
+	AgentTurnOriginJobCompletion AgentTurnOriginKind = "job_completion"
+
+	// Event metadata keys are host-owned and must not be taken from model output.
+	AgentTurnOriginMetadataKey       = "local_agent_turn_origin"
+	AgentTurnActivationIDMetadataKey = "local_agent_activation_id"
+)
+
+// AgentTurnOrigin carries trusted host provenance for one root turn. Actor is
+// the original job actor for job-completion turns, never a Slack event actor
+// supplied later in the pipeline.
+type AgentTurnOrigin struct {
+	Kind         AgentTurnOriginKind
+	Actor        string
+	ActivationID string
+}
+
+func (o AgentTurnOrigin) Validate() error {
+	switch o.Kind {
+	case AgentTurnOriginUser:
+		if o.ActivationID != "" {
+			return errors.New("user turn origin cannot carry an activation ID")
+		}
+	case AgentTurnOriginJobCompletion:
+		if strings.TrimSpace(o.Actor) == "" {
+			return errors.New("job-completion turn origin requires an actor")
+		}
+		if strings.TrimSpace(o.ActivationID) == "" {
+			return errors.New("job-completion turn origin requires an activation ID")
+		}
+	default:
+		return errors.New("agent turn origin kind is required")
+	}
+	if strings.ContainsAny(o.Actor, "\x00\r\n") || strings.ContainsAny(o.ActivationID, "\x00\r\n") {
+		return errors.New("agent turn origin contains control characters")
+	}
+	return nil
+}
+
+// AgentTurnContext is exposed through context.Context to ADK callbacks and
+// tools. It is not serialized into the model prompt; durable event metadata is
+// added separately by the runtime's session-service wrapper.
+type AgentTurnContext struct {
+	ConversationKey domain.ConversationKey
+	Origin          AgentTurnOrigin
+}
+
+type agentTurnContextKey struct{}
+
+func WithAgentTurnContext(ctx context.Context, turn AgentTurnContext) context.Context {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithValue(ctx, agentTurnContextKey{}, turn)
+}
+
+func AgentTurnContextFromContext(ctx context.Context) (AgentTurnContext, bool) {
+	if ctx == nil {
+		return AgentTurnContext{}, false
+	}
+	turn, ok := ctx.Value(agentTurnContextKey{}).(AgentTurnContext)
+	return turn, ok
+}
+
 // AgentRequest bundles conversation history, recalled memory, and enriched
 // context into one model call. Future facts stay out of the bot use case.
 type AgentRequest struct {
 	ConversationKey domain.ConversationKey
+	Origin          AgentTurnOrigin
 	Messages        []domain.Message
 	Memory          []domain.MemorySnippet
 	Context         domain.AgentContext
