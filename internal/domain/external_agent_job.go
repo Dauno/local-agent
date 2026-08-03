@@ -77,6 +77,10 @@ type ExternalAgentJobNotification struct {
 	JobID          string
 	StatusRevision int
 	Kind           string
+	// TerminalStatus and PublishedAt are immutable snapshots used to create an
+	// internal activation. Legacy rows intentionally leave both unset.
+	TerminalStatus ExternalAgentJobStatus
+	PublishedAt    time.Time
 	// Actor and ConversationKey are loaded from the authoritative job row for
 	// host-owned completion. They are not part of the immutable delivery key.
 	Actor           string
@@ -104,6 +108,139 @@ type ExternalAgentJobNotification struct {
 	MaxMarkdownParts    int
 	UploadState         JobResultUploadState
 	SlackFileID         string
+}
+
+type ExternalAgentJobActivationState string
+
+const (
+	ActivationPending           ExternalAgentJobActivationState = "pending"
+	ActivationProcessing        ExternalAgentJobActivationState = "processing"
+	ActivationModelStarted      ExternalAgentJobActivationState = "model_started"
+	ActivationResponsePrepared  ExternalAgentJobActivationState = "response_prepared"
+	ActivationCompleted         ExternalAgentJobActivationState = "completed"
+	ActivationCompletionUnknown ExternalAgentJobActivationState = "completion_unknown"
+	ActivationFailed            ExternalAgentJobActivationState = "failed"
+
+	// Job-prefixed aliases mirror the existing external-agent job constants.
+	JobActivationPending           = ActivationPending
+	JobActivationProcessing        = ActivationProcessing
+	JobActivationModelStarted      = ActivationModelStarted
+	JobActivationResponsePrepared  = ActivationResponsePrepared
+	JobActivationCompleted         = ActivationCompleted
+	JobActivationCompletionUnknown = ActivationCompletionUnknown
+	JobActivationFailed            = ActivationFailed
+)
+
+// ExternalAgentJobActivation is the durable host-originated root-turn outbox
+// entry. Its identity and binding are copied from SQLite notification/job rows;
+// callers must not replace them with values received from Slack or a model.
+type ExternalAgentJobActivation struct {
+	ActivationID       string
+	JobID              string
+	StatusRevision     int
+	Kind               string
+	TerminalStatus     ExternalAgentJobStatus
+	NotificationSHA256 string
+	Actor              string
+	TeamID             string
+	ConversationKey    ConversationKey
+	OriginalCallID     string
+	DeliveryMode       JobResultDeliveryMode
+	ContentBytes       int64
+	SlackMessageTS     string
+	PublishedAt        time.Time
+	State              ExternalAgentJobActivationState
+	Attempt            int
+	LeaseOwner         string
+	LeaseExpiry        time.Time
+	NextAttemptAt      time.Time
+	LastErrorCode      string
+	ResponseBody       string
+	ResponseSHA256     string
+	ExchangeIntentID   string
+	CorrelationID      string
+	ResponseSlackTS    string
+	CreatedAt          time.Time
+	UpdatedAt          time.Time
+}
+
+func ExternalAgentJobActivationID(jobID string, statusRevision int, kind string) string {
+	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", jobID, statusRevision, kind)))
+	return "activation_" + hex.EncodeToString(digest[:])
+}
+
+func (a ExternalAgentJobActivation) Validate() error {
+	if a.ActivationID == "" || a.JobID == "" || a.Kind == "" {
+		return errors.New("external-agent activation identity is incomplete")
+	}
+	if a.StatusRevision < 0 || a.Attempt < 0 || a.ContentBytes < 0 {
+		return errors.New("external-agent activation counters are invalid")
+	}
+	if !validActivationTerminalStatus(a.TerminalStatus) {
+		return fmt.Errorf("invalid external-agent activation terminal status %q", a.TerminalStatus)
+	}
+	if len(a.NotificationSHA256) != sha256.Size*2 {
+		return errors.New("external-agent activation notification digest is invalid")
+	}
+	if _, err := hex.DecodeString(a.NotificationSHA256); err != nil {
+		return errors.New("external-agent activation notification digest is invalid")
+	}
+	if a.DeliveryMode != JobResultDeliveryMarkdown && a.DeliveryMode != JobResultDeliveryFile {
+		return fmt.Errorf("invalid external-agent activation delivery mode %q", a.DeliveryMode)
+	}
+	if !validActivationState(a.State) {
+		return fmt.Errorf("invalid external-agent activation state %q", a.State)
+	}
+	return nil
+}
+
+func (a *ExternalAgentJobActivation) Transition(next ExternalAgentJobActivationState) error {
+	if a == nil {
+		return errors.New("external-agent activation is nil")
+	}
+	if !validActivationTransition(a.State, next) {
+		return fmt.Errorf("illegal external-agent activation transition %q -> %q", a.State, next)
+	}
+	a.State = next
+	return nil
+}
+
+func validActivationState(state ExternalAgentJobActivationState) bool {
+	switch state {
+	case ActivationPending, ActivationProcessing, ActivationModelStarted,
+		ActivationResponsePrepared, ActivationCompleted, ActivationCompletionUnknown,
+		ActivationFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func validActivationTransition(from, to ExternalAgentJobActivationState) bool {
+	if from == to {
+		return from == ActivationResponsePrepared
+	}
+	switch from {
+	case ActivationPending:
+		return to == ActivationProcessing
+	case ActivationProcessing:
+		return to == ActivationPending || to == ActivationModelStarted || to == ActivationFailed
+	case ActivationModelStarted:
+		return to == ActivationResponsePrepared || to == ActivationCompletionUnknown
+	case ActivationResponsePrepared:
+		return to == ActivationCompleted || to == ActivationFailed
+	default:
+		return false
+	}
+}
+
+func validActivationTerminalStatus(status ExternalAgentJobStatus) bool {
+	switch status {
+	case JobCompleted, JobFailed, JobCancelled, JobCompletionUnknown, JobAbandoned:
+		return true
+	default:
+		return false
+	}
 }
 
 // ExternalAgentJobNotificationHealth is a read-only aggregate of the durable
@@ -189,7 +326,8 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
-		Actor: job.Actor, ConversationKey: job.ConversationKey,
+		TerminalStatus: job.Status,
+		Actor:          job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: fmt.Sprintf("%x", digest),
 		RendererVersion: JobNotificationRenderer, Target: target,
 		PublishState: NotificationPending,
@@ -290,7 +428,8 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
-		Actor: job.Actor, ConversationKey: job.ConversationKey,
+		TerminalStatus: job.Status,
+		Actor:          job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: contentDigest, RendererVersion: JobNotificationRenderer,
 		Target: target, PublishState: NotificationPending, DeliveryMode: mode, PolicyVersion: policyVersion,
 		ArtifactRef: artifactRef, ResultBytes: contentBytes, MaxMarkdownParts: maxParts,

@@ -160,6 +160,74 @@ func TestOpenExistingUpgradesV21ToV26AndPreservesLegacyNotification(t *testing.T
 	}
 }
 
+func TestOpenExistingUpgradesV28WithoutBackfillingActivations(t *testing.T) {
+	ctx := context.Background()
+	path, raw := createSchemaAtVersion(t, 28)
+	if _, err := raw.ExecContext(ctx, `INSERT INTO conversations (
+		conversation_key, team_id, channel_id, channel_kind, root_ts, last_ts, created_at, updated_at)
+		VALUES ('slack:T12345678:dm:D12345678', 'T12345678', 'D12345678', 'dm', '', '1', 1, 1)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(ctx, `INSERT INTO messages (
+		conversation_key, role, content, user_id, external_ts, created_at)
+		VALUES ('slack:T12345678:dm:D12345678', 'user', 'human', 'U12345678', '1', 1),
+		('slack:T12345678:dm:D12345678', 'assistant', 'assistant', '', '2', 2)`); err != nil {
+		t.Fatal(err)
+	}
+	seedLegacyExternalAgentNotification(t, raw)
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != 29 {
+		t.Fatalf("upgraded schema version = %d, want 29", version)
+	}
+	rows, err := store.db.QueryContext(ctx, `SELECT role, source FROM messages ORDER BY id`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var sources []string
+	for rows.Next() {
+		var role, source string
+		if err := rows.Scan(&role, &source); err != nil {
+			t.Fatal(err)
+		}
+		sources = append(sources, role+":"+source)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(sources, []string{"user:human", "assistant:assistant"}) {
+		t.Fatalf("message sources = %v", sources)
+	}
+	var terminalStatus string
+	var publishedAt int64
+	if err := store.db.QueryRowContext(ctx, `SELECT terminal_status, published_at
+		FROM external_agent_job_notifications WHERE job_id = 'migration-job'`).Scan(&terminalStatus, &publishedAt); err != nil {
+		t.Fatal(err)
+	}
+	if terminalStatus != "" || publishedAt != 0 {
+		t.Fatalf("historical notification snapshot = %q/%d", terminalStatus, publishedAt)
+	}
+	var activationCount int
+	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_activations`).Scan(&activationCount); err != nil {
+		t.Fatal(err)
+	}
+	if activationCount != 0 {
+		t.Fatalf("historical activation count = %d", activationCount)
+	}
+}
+
 func TestOpenExistingUpgradesV25ToV26PreservesLegacyRowsAndAddsEvidenceTriggers(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 25)

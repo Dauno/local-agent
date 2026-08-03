@@ -122,9 +122,9 @@ func (s *Store) RecentMessages(
 		return []domain.Message{}, nil
 	}
 	rows, err := s.db.QueryContext(ctx, `
-		SELECT role, content, user_id, external_ts, created_at
+		SELECT role, source, content, user_id, external_ts, created_at
 		FROM (
-			SELECT id, role, content, user_id, external_ts, created_at
+			SELECT id, role, source, content, user_id, external_ts, created_at
 			FROM messages
 			WHERE conversation_key = ?
 			ORDER BY created_at DESC, id DESC
@@ -145,6 +145,7 @@ func (s *Store) RecentMessages(
 		)
 		if err := rows.Scan(
 			&role,
+			&message.Source,
 			&message.Content,
 			&message.UserID,
 			&message.ExternalTS,
@@ -452,7 +453,7 @@ func loadAssistantExchangeIntent(ctx context.Context, queryer interface {
 }
 
 func (i assistantExchangeIntent) assistantMessage() domain.Message {
-	return domain.Message{Role: domain.RoleAssistant, Content: i.AssistantContent, ExternalTS: i.AssistantExternalTS, CreatedAt: i.AssistantCreatedAt}
+	return domain.Message{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant, Content: i.AssistantContent, ExternalTS: i.AssistantExternalTS, CreatedAt: i.AssistantCreatedAt}
 }
 
 func (i assistantExchangeIntent) metadata() domain.ConversationMetadata {
@@ -522,8 +523,12 @@ func appendMessageTx(ctx context.Context, tx *sql.Tx, metadata domain.Conversati
 	if retain <= 0 {
 		return errors.New("message retention must be positive")
 	}
+	message = message.WithInferredSource()
 	if message.Role != domain.RoleUser && message.Role != domain.RoleAssistant {
 		return fmt.Errorf("unsupported conversation role %q", message.Role)
+	}
+	if err := message.Validate(); err != nil {
+		return err
 	}
 
 	createdNanos := message.CreatedAt.UnixNano()
@@ -564,9 +569,9 @@ func appendMessageTx(ctx context.Context, tx *sql.Tx, metadata domain.Conversati
 
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO messages (
-			conversation_key, role, content, user_id, external_ts, created_at
-		) VALUES (?, ?, ?, ?, ?, ?)`,
-		string(metadata.Key), string(message.Role), message.Content,
+			conversation_key, role, source, content, user_id, external_ts, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		string(metadata.Key), string(message.Role), string(message.Source), message.Content,
 		message.UserID, message.ExternalTS, createdNanos,
 	); err != nil {
 		return fmt.Errorf("insert conversation message: %w", err)
@@ -592,10 +597,10 @@ func sourceExchangeTx(ctx context.Context, tx *sql.Tx, key domain.ConversationKe
 	var role string
 	var createdNanos int64
 	err := tx.QueryRowContext(ctx, `
-		SELECT role, content, user_id, external_ts, created_at
+		SELECT role, source, content, user_id, external_ts, created_at
 		FROM messages WHERE conversation_key = ? AND role = 'user'
 		ORDER BY created_at DESC, id DESC LIMIT 1`, string(key),
-	).Scan(&role, &user.Content, &user.UserID, &user.ExternalTS, &createdNanos)
+	).Scan(&role, &user.Source, &user.Content, &user.UserID, &user.ExternalTS, &createdNanos)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errors.New("assistant exchange has no persisted user source")
 	}
@@ -650,8 +655,8 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("inspect SQLite schema version: %w", err)
 	}
-	if version < 22 {
-		return fmt.Errorf("external-agent result delivery requires SQLite schema v22, found v%d", version)
+	if version < 29 {
+		return fmt.Errorf("external-agent job activation requires SQLite schema v29, found v%d", version)
 	}
 	var name string
 	if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_agent_job_notifications'`).Scan(&name); err != nil {
@@ -662,11 +667,17 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	}
 	var columns int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('external_agent_job_notifications')
-		WHERE name IN ('delivery_mode', 'policy_version', 'artifact_ref', 'result_bytes', 'max_markdown_parts', 'upload_state', 'slack_file_id')`).Scan(&columns); err != nil {
+		WHERE name IN ('delivery_mode', 'policy_version', 'artifact_ref', 'result_bytes', 'max_markdown_parts', 'upload_state', 'slack_file_id', 'terminal_status', 'published_at')`).Scan(&columns); err != nil {
 		return fmt.Errorf("inspect external-agent result delivery fields: %w", err)
 	}
-	if columns != 7 {
+	if columns != 9 {
 		return errors.New("external-agent result delivery fields are incomplete")
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_agent_job_activations'`).Scan(&name); err != nil {
+		return fmt.Errorf("inspect external-agent activation outbox: %w", err)
+	}
+	if name != "external_agent_job_activations" {
+		return errors.New("external-agent activation outbox is missing")
 	}
 	health, err := NewExternalAgentJobStore(s).NotificationHealth(ctx, time.Now().UTC(), 5*time.Minute)
 	if err != nil {
