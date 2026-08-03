@@ -34,29 +34,35 @@ type Dependencies struct {
 	// MaxResultBytes bounds host-completion reads. The artifact adapter applies
 	// its own bound as a second, independent check.
 	MaxResultBytes int64
-	Clock          port.Clock
-	Logger         port.Logger
-	Metrics        port.MetricRecorder
+	// MaxResultChunkBytes bounds each host-completion read. A zero value uses
+	// the same 16 KiB default as recoverable result readers.
+	MaxResultChunkBytes int64
+	Clock               port.Clock
+	Logger              port.Logger
+	Metrics             port.MetricRecorder
 }
 
 type Service struct {
-	cfg            Config
-	store          port.ExternalAgentJobStore
-	runtime        port.ExternalAgentJobRuntime
-	publisher      port.ExternalAgentJobPublisher
-	artifacts      port.ResultArtifactStore
-	maxResultBytes int64
-	clock          port.Clock
-	logger         port.Logger
-	metrics        port.MetricRecorder
-	stopClaims     chan struct{}
-	stopOnce       sync.Once
-	admissionMu    sync.RWMutex
-	stopped        chan struct{}
+	cfg                 Config
+	store               port.ExternalAgentJobStore
+	runtime             port.ExternalAgentJobRuntime
+	publisher           port.ExternalAgentJobPublisher
+	artifacts           port.ResultArtifactStore
+	maxResultBytes      int64
+	maxResultChunkBytes int64
+	clock               port.Clock
+	logger              port.Logger
+	metrics             port.MetricRecorder
+	stopClaims          chan struct{}
+	stopOnce            sync.Once
+	admissionMu         sync.RWMutex
+	stopped             chan struct{}
 }
 
 var _ port.ExternalAgentJobReader = (*Service)(nil)
 var _ port.ExternalAgentJobHostCompleter = (*Service)(nil)
+
+const defaultResultChunkBytes int64 = 16 * 1024
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
 	if cfg.DefaultTimeout <= 0 || cfg.MaxTimeout < cfg.DefaultTimeout || cfg.LeaseTTL <= 0 || cfg.PollInterval <= 0 || cfg.Concurrency <= 0 || cfg.MaxAttempts <= 0 {
@@ -71,6 +77,12 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.MaxResultBytes <= 0 || deps.MaxResultBytes > domain.MaxExternalAgentResultBytes {
 		deps.MaxResultBytes = domain.MaxExternalAgentResultBytes
 	}
+	if deps.MaxResultChunkBytes <= 0 || deps.MaxResultChunkBytes > deps.MaxResultBytes {
+		deps.MaxResultChunkBytes = defaultResultChunkBytes
+		if deps.MaxResultChunkBytes > deps.MaxResultBytes {
+			deps.MaxResultChunkBytes = deps.MaxResultBytes
+		}
+	}
 	logger := deps.Logger
 	if logger == nil {
 		logger = noopLogger{}
@@ -80,7 +92,8 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		metrics = port.NoopMetricRecorder{}
 	}
 	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
-		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, clock: deps.Clock, logger: logger, metrics: metrics,
+		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, maxResultChunkBytes: deps.MaxResultChunkBytes,
+		clock: deps.Clock, logger: logger, metrics: metrics,
 		stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
 }
 
@@ -239,6 +252,110 @@ func (s *Service) ReadResult(ctx context.Context, jobID, actor string, conversat
 		JobID: job.ID, StatusRevision: job.StatusRevision, Text: string(content),
 		ContentSHA256: contentSHA, ContentBytes: int64(len(content)), DeliveryMode: mode,
 	}, nil
+}
+
+// ReadResultChunk exposes only one verified UTF-8 range of a completed job.
+// Status performs the actor/conversation check before the artifact owner is
+// derived from the authoritative job row.
+func (s *Service) ReadResultChunk(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
+	job, err := s.Status(ctx, jobID, actor, conversationKey)
+	if err != nil {
+		return domain.ResultChunk{}, err
+	}
+	if job == nil {
+		return domain.ResultChunk{}, errors.New("external-agent job was not found")
+	}
+	if job.Status != domain.JobCompleted {
+		return domain.ResultChunk{}, fmt.Errorf("external-agent job is not completed: %s", job.Status)
+	}
+	maxBytes = s.resultChunkMax(maxBytes)
+	if job.ResultArtifact != "" {
+		if s.artifacts == nil {
+			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		}
+		verified, ok := s.artifacts.(port.ResultArtifactChunkReader)
+		if !ok {
+			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		}
+		if job.ResultBytes <= 0 || job.ResultBytes > s.maxResultBytes {
+			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		}
+		chunk, err := verified.ReadChunk(ctx, domain.ResultArtifactChunkRequest{
+			OwnerID:        job.ID + "-delivery",
+			Reference:      job.ResultArtifact,
+			ExpectedBytes:  job.ResultBytes,
+			ExpectedSHA256: job.ResultSHA256,
+			OffsetBytes:    offsetBytes,
+			MaxBytes:       maxBytes,
+		})
+		if err != nil {
+			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		}
+		return chunk, nil
+	}
+	if job.ResultSummary == "" {
+		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+	}
+	return readInlineResultChunk(job.ResultSummary, job.ResultBytes, job.ResultSHA256, offsetBytes, maxBytes)
+}
+
+func (s *Service) resultChunkMax(requested int64) int64 {
+	if requested <= 0 || requested > s.maxResultChunkBytes {
+		return s.maxResultChunkBytes
+	}
+	return requested
+}
+
+func readInlineResultChunk(content string, expectedBytes int64, expectedSHA256 string, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
+	data := []byte(content)
+	if expectedBytes <= 0 || int64(len(data)) != expectedBytes || !utf8.Valid(data) || strings.TrimSpace(expectedSHA256) == "" {
+		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+	}
+	digest := sha256.Sum256(data)
+	actualSHA256 := fmt.Sprintf("%x", digest)
+	if !strings.EqualFold(actualSHA256, expectedSHA256) {
+		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+	}
+	if offsetBytes < 0 || offsetBytes > expectedBytes {
+		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+	}
+	if offsetBytes == expectedBytes {
+		return domain.ResultChunk{OffsetBytes: offsetBytes, NextOffsetBytes: offsetBytes, EOF: true, SHA256: actualSHA256}, nil
+	}
+	if !utf8.RuneStart(data[offsetBytes]) {
+		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+	}
+	end := offsetBytes + maxBytes
+	if end < offsetBytes || end > expectedBytes {
+		end = expectedBytes
+	}
+	completeBytes := completeUTF8Prefix(data[offsetBytes:end])
+	if completeBytes == 0 {
+		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+	}
+	nextOffset := offsetBytes + int64(completeBytes)
+	return domain.ResultChunk{
+		Content:         string(data[offsetBytes:nextOffset]),
+		OffsetBytes:     offsetBytes,
+		NextOffsetBytes: nextOffset,
+		EOF:             nextOffset == expectedBytes,
+		SHA256:          actualSHA256,
+	}, nil
+}
+
+func completeUTF8Prefix(data []byte) int {
+	position := 0
+	for position < len(data) {
+		if !utf8.FullRune(data[position:]) {
+			break
+		}
+		runeValue, size := utf8.DecodeRune(data[position:])
+		if runeValue == utf8.RuneError && size == 1 {
+			return 0
+		}
+		position += size
+	}
+	return position
 }
 
 // HostCompletionTurn is the non-privileged completion phase for a detached

@@ -167,7 +167,11 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		if err != nil {
 			return nil, fmt.Errorf("build read_job_result tool: %w", err)
 		}
-		tools = append(tools, statusTool, resultTool)
+		chunkTool, err := f.readJobResultChunkTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_job_result_chunk tool: %w", err)
+		}
+		tools = append(tools, statusTool, resultTool, chunkTool)
 		if f.externalReconciler != nil {
 			reconcileTool, err := f.reconcileJobTool(actor, key)
 			if err != nil {
@@ -906,6 +910,40 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 			ResultAvailable: true,
 			ContentSHA256:   result.ContentSHA256, ContentBytes: result.ContentBytes,
 			DeliveryMode: string(result.DeliveryMode),
+		}, nil
+	})
+}
+
+type readJobResultChunkArgs struct {
+	JobID       string `json:"job_id" jsonschema:"durable ACP job ID returned when the job was accepted"`
+	OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"server-provided UTF-8 continuation offset"`
+	MaxBytes    int64  `json:"max_bytes,omitempty" jsonschema:"maximum bytes requested for this bounded chunk"`
+}
+
+type readJobResultChunkResult struct {
+	Content         string `json:"content"`
+	OffsetBytes     int64  `json:"offset_bytes"`
+	NextOffsetBytes int64  `json:"next_offset_bytes"`
+	EOF             bool   `json:"eof"`
+	SHA256          string `json:"sha256"`
+}
+
+func (f *Factory) readJobResultChunkTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	reader := f.externalJobs
+	return functiontool.New(functiontool.Config{
+		Name:        "read_job_result_chunk",
+		Description: "Reads one bounded, verified UTF-8 chunk from a completed ACP durable job in this Slack conversation. Read-only; the complete file-mode artifact is never placed in the tool response.",
+	}, func(ctx agent.Context, args readJobResultChunkArgs) (readJobResultChunkResult, error) {
+		if strings.TrimSpace(args.JobID) == "" {
+			return readJobResultChunkResult{}, errors.New("job_id is required")
+		}
+		chunk, err := reader.ReadResultChunk(ctx, args.JobID, actor, key, args.OffsetBytes, args.MaxBytes)
+		if err != nil {
+			return readJobResultChunkResult{}, err
+		}
+		return readJobResultChunkResult{
+			Content: chunk.Content, OffsetBytes: chunk.OffsetBytes, NextOffsetBytes: chunk.NextOffsetBytes,
+			EOF: chunk.EOF, SHA256: chunk.SHA256,
 		}, nil
 	})
 }

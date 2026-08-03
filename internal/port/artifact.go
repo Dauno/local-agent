@@ -116,6 +116,12 @@ type ResultArtifactStore interface {
 // sites where a verified read, rather than only a write, is required.
 type VerifiedResultArtifactStore = ResultArtifactStore
 
+// ResultArtifactChunkReader provides bounded, paginated reads in addition to
+// the complete verified read exposed by ResultArtifactStore.
+type ResultArtifactChunkReader interface {
+	ReadChunk(ctx context.Context, req domain.ResultArtifactChunkRequest) (domain.ResultChunk, error)
+}
+
 // ArtifactReferenceChecker lets retention skip files still needed by an
 // unpublished durable delivery.
 type ArtifactReferenceChecker interface {

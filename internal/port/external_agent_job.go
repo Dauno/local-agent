@@ -186,6 +186,7 @@ type ExternalAgentJobStarter interface {
 type ExternalAgentJobReader interface {
 	Status(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error)
 	ReadResult(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.ExternalAgentJobResult, error)
+	ReadResultChunk(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, offsetBytes, maxBytes int64) (domain.ResultChunk, error)
 }
 
 // ExternalAgentJobHostCompleter is the deterministic response phase after a
