@@ -28,11 +28,85 @@ func (a *Application) Run(ctx context.Context) error {
 			models.logger.Error("database close failed", "error", closeErr)
 		}
 	}()
-	composition, err := a.composeRuntime(ctx, setup, models, infra)
+	runtimeCtx, runtimeCancel := context.WithCancel(context.WithoutCancel(ctx))
+	defer runtimeCancel()
+	composition, err := a.composeRuntime(runtimeCtx, setup, models, infra)
 	if err != nil {
 		return err
 	}
-	return a.startSlackRuntime(ctx, setup, models, infra, composition)
+	intakeCtx, stopIntake := context.WithCancel(context.Background())
+	defer stopIntake()
+	slackDone := make(chan error, 1)
+	go func() {
+		slackDone <- a.startSlackRuntime(intakeCtx, runtimeCtx, setup, models, infra, composition)
+	}()
+	interrupted := false
+	var runErr error
+	select {
+	case runErr = <-slackDone:
+	case <-ctx.Done():
+		interrupted = true
+	}
+	if composition != nil {
+		beforeStats, beforeStatsErr := composition.ExternalShutdownStats(context.Background())
+		composition.StopExternalAdmission()
+		stopIntake()
+		if interrupted {
+			grace := time.Duration(setup.cfg.Runtime.ShutdownGraceSeconds) * time.Second
+			waitDone := make(chan error, 1)
+			go func() { waitDone <- composition.WaitExternal(context.Background()) }()
+			timer := time.NewTimer(grace)
+			select {
+			case waitErr := <-waitDone:
+				if waitErr != nil {
+					models.logger.Warn("external-agent shutdown drain failed", "error", waitErr)
+				}
+			case <-timer.C:
+				models.logger.Warn("external-agent shutdown grace expired")
+			case <-a.forceShutdown:
+				models.logger.Warn("external-agent shutdown drain bypassed")
+			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+		}
+		runtimeCancel()
+		waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
+		if waitErr := composition.WaitExternal(waitCtx); waitErr != nil {
+			models.logger.Warn("external-agent shutdown did not settle", "error", waitErr)
+		}
+		if waitErr := composition.WaitNotification(waitCtx); waitErr != nil {
+			models.logger.Warn("external-agent notification shutdown did not settle", "error", waitErr)
+		}
+		cancelWait()
+		afterStats, afterStatsErr := composition.ExternalShutdownStats(context.Background())
+		if beforeStatsErr == nil && afterStatsErr == nil {
+			drained := beforeStats.Running - afterStats.Running
+			if drained < 0 {
+				drained = 0
+			}
+			ambiguous := afterStats.CompletionUnknown - beforeStats.CompletionUnknown
+			if ambiguous < 0 {
+				ambiguous = 0
+			}
+			models.logger.Info("external-agent shutdown", "queued", afterStats.Queued, "running", afterStats.Running, "drained", drained, "ambiguous", ambiguous)
+		}
+	}
+	if composition == nil {
+		stopIntake()
+		runtimeCancel()
+	}
+	if interrupted {
+		select {
+		case runErr = <-slackDone:
+		case <-time.After(5 * time.Second):
+			models.logger.Warn("Slack shutdown did not settle")
+		}
+	}
+	return runErr
 }
 
 func requiredSlackTokens(botToken, appToken string) error {

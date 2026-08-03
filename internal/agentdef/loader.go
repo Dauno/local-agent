@@ -901,6 +901,9 @@ func validateBaseURL(value string) error {
 	if parsed.Fragment != "" {
 		return fmt.Errorf("base_url must not contain a fragment")
 	}
+	if strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/chat/completions") {
+		return fmt.Errorf("base_url must be an API root, not a concrete /chat/completions operation URL")
+	}
 	return nil
 }
 

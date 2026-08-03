@@ -24,6 +24,8 @@ var _ port.ExternalAgentJobAdminStore = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobDeliveryStore = (*ExternalAgentJobStore)(nil)
 var _ port.ArtifactReferenceChecker = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobReconciler = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobExpectedReconciler = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobShutdownStore = (*ExternalAgentJobStore)(nil)
 
 var ErrNotificationStateConflict = port.ErrNotificationStateConflict
 var ErrNotificationClaimConflict = port.ErrNotificationClaimConflict
@@ -302,8 +304,8 @@ func (s *ExternalAgentJobStore) RenewLease(ctx context.Context, jobID, owner str
 		return errors.New("invalid external-agent lease renewal")
 	}
 	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_jobs SET lease_expiry = ?, heartbeat_at = ?, updated_at = ?
-		WHERE job_id = ? AND lease_owner = ? AND attempt = ? AND status IN (?, ?) AND lease_expiry > ?`,
-		now.Add(leaseTTL).UnixNano(), now.UnixNano(), now.UnixNano(), jobID, owner, attempt, domain.JobRunning, domain.JobCancelRequested, now.UnixNano())
+		WHERE job_id = ? AND lease_owner = ? AND attempt = ? AND status IN (?, ?, ?) AND lease_expiry > ?`,
+		now.Add(leaseTTL).UnixNano(), now.UnixNano(), now.UnixNano(), jobID, owner, attempt, domain.JobRunning, domain.JobCancelRequested, domain.JobReconciling, now.UnixNano())
 	if err != nil {
 		return fmt.Errorf("renew external-agent job lease: %w", err)
 	}
@@ -405,6 +407,14 @@ func (s *ExternalAgentJobStore) RequestCancellation(ctx context.Context, jobID, 
 }
 
 func (s *ExternalAgentJobStore) BeginReconciliation(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error) {
+	return s.beginReconciliation(ctx, jobID, actor, conversationKey, -1, now, owner, leaseTTL)
+}
+
+func (s *ExternalAgentJobStore) BeginReconciliationExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error) {
+	return s.beginReconciliation(ctx, jobID, actor, conversationKey, expectedRevision, now, owner, leaseTTL)
+}
+
+func (s *ExternalAgentJobStore) beginReconciliation(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error) {
 	if strings.TrimSpace(owner) == "" || leaseTTL <= 0 {
 		return nil, errors.New("reconciliation lease owner and positive TTL are required")
 	}
@@ -423,8 +433,15 @@ func (s *ExternalAgentJobStore) BeginReconciliation(ctx context.Context, jobID, 
 	if job.Status != domain.JobCompletionUnknown {
 		return nil, errors.New("external-agent job is not awaiting reconciliation")
 	}
+	if expectedRevision >= 0 && job.StatusRevision != expectedRevision {
+		return nil, port.ErrExternalAgentJobRevisionConflict
+	}
 	leaseExpiry := now.Add(leaseTTL)
-	result, err := tx.ExecContext(ctx, `UPDATE external_agent_jobs SET status = ?, attempt = attempt + 1, lease_owner = ?, lease_expiry = ?, heartbeat_at = ?, status_revision = status_revision + 1, updated_at = ? WHERE job_id = ? AND status = ? AND status_revision = ?`, domain.JobReconciling, owner, leaseExpiry.UnixNano(), now.UnixNano(), now.UnixNano(), jobID, domain.JobCompletionUnknown, job.StatusRevision)
+	compareRevision := job.StatusRevision
+	if expectedRevision >= 0 {
+		compareRevision = expectedRevision
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE external_agent_jobs SET status = ?, attempt = attempt + 1, lease_owner = ?, lease_expiry = ?, heartbeat_at = ?, status_revision = status_revision + 1, updated_at = ? WHERE job_id = ? AND status = ? AND status_revision = ?`, domain.JobReconciling, owner, leaseExpiry.UnixNano(), now.UnixNano(), now.UnixNano(), jobID, domain.JobCompletionUnknown, compareRevision)
 	if err != nil {
 		return nil, err
 	}
@@ -506,7 +523,7 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 }
 
 func (s *ExternalAgentJobStore) ListExpiredRunning(ctx context.Context, now time.Time) ([]domain.ExternalAgentJob, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM external_agent_jobs WHERE status IN (?, ?) AND lease_expiry > 0 AND lease_expiry <= ? ORDER BY updated_at ASC`, domain.JobRunning, domain.JobCancelRequested, now.UnixNano())
+	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM external_agent_jobs WHERE status IN (?, ?, ?) AND lease_expiry > 0 AND lease_expiry <= ? ORDER BY updated_at ASC`, domain.JobRunning, domain.JobCancelRequested, domain.JobReconciling, now.UnixNano())
 	if err != nil {
 		return nil, err
 	}
@@ -520,6 +537,33 @@ func (s *ExternalAgentJobStore) ListExpiredRunning(ctx context.Context, now time
 		jobs = append(jobs, job)
 	}
 	return jobs, rows.Err()
+}
+
+func (s *ExternalAgentJobStore) ShutdownStats(ctx context.Context) (domain.ExternalAgentJobShutdownStats, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM external_agent_jobs WHERE status IN (?, ?, ?, ?) GROUP BY status`, domain.JobQueued, domain.JobRunning, domain.JobReconciling, domain.JobCompletionUnknown)
+	if err != nil {
+		return domain.ExternalAgentJobShutdownStats{}, err
+	}
+	defer rows.Close()
+	var stats domain.ExternalAgentJobShutdownStats
+	for rows.Next() {
+		var status domain.ExternalAgentJobStatus
+		var count int
+		if err := rows.Scan(&status, &count); err != nil {
+			return domain.ExternalAgentJobShutdownStats{}, err
+		}
+		switch status {
+		case domain.JobQueued:
+			stats.Queued = count
+		case domain.JobRunning:
+			stats.Running = count
+		case domain.JobReconciling:
+			stats.Reconciling = count
+		case domain.JobCompletionUnknown:
+			stats.CompletionUnknown = count
+		}
+	}
+	return stats, rows.Err()
 }
 
 func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string, attempt, statusRevision int, now time.Time, next domain.ExternalAgentJobStatus, errorCode string) error {
@@ -536,8 +580,8 @@ func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string
 	}
 	defer func() { _ = tx.Rollback() }()
 	query := `UPDATE external_agent_jobs SET status = ?, error_code = ?, status_revision = status_revision + 1, finished_at = ?, lease_owner = '', lease_expiry = 0, heartbeat_at = 0, updated_at = ?
-		WHERE job_id = ? AND attempt = ? AND status_revision = ? AND status IN (?, ?) AND lease_expiry > 0 AND lease_expiry <= ?`
-	args := []any{next, errorCode, finished, now.UnixNano(), jobID, attempt, statusRevision, domain.JobRunning, domain.JobCancelRequested, now.UnixNano()}
+		WHERE job_id = ? AND attempt = ? AND status_revision = ? AND status IN (?, ?, ?) AND lease_expiry > 0 AND lease_expiry <= ?`
+	args := []any{next, errorCode, finished, now.UnixNano(), jobID, attempt, statusRevision, domain.JobRunning, domain.JobCancelRequested, domain.JobReconciling, now.UnixNano()}
 	if next == domain.JobQueued {
 		query += ` AND timeout_at > ?`
 		args = append(args, now.UnixNano())

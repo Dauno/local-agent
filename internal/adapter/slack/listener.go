@@ -167,14 +167,23 @@ func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog) error {
 // Run blocks until the context is canceled or the Socket Mode client stops.
 // Context cancellation is a normal shutdown and returns nil.
 func (l *Listener) Run(ctx context.Context, handler func(context.Context, domain.Invocation)) error {
+	return l.RunWithHandlerContext(ctx, ctx, handler)
+}
+
+// RunWithHandlerContext stops Socket Mode intake with intakeCtx while allowing
+// already admitted handlers to remain alive under handlerCtx during drain.
+func (l *Listener) RunWithHandlerContext(intakeCtx, handlerCtx context.Context, handler func(context.Context, domain.Invocation)) error {
 	if l == nil || l.client == nil {
 		return errors.New("Socket Mode client is required")
 	}
 	if handler == nil {
 		return errors.New("Slack invocation handler is required")
 	}
+	if intakeCtx == nil || handlerCtx == nil {
+		return errors.New("Slack intake and handler contexts are required")
+	}
 
-	runCtx, cancel := context.WithCancel(ctx)
+	runCtx, cancel := context.WithCancel(intakeCtx)
 	defer cancel()
 
 	runResult := make(chan error, 1)
@@ -187,11 +196,11 @@ func (l *Listener) Run(ctx context.Context, handler func(context.Context, domain
 
 	for {
 		select {
-		case <-ctx.Done():
+		case <-intakeCtx.Done():
 			cancel()
 			waitHandlers()
 			err := <-runResult
-			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, ctx.Err()) {
+			if err == nil || errors.Is(err, context.Canceled) || errors.Is(err, intakeCtx.Err()) {
 				return nil
 			}
 			return fmt.Errorf("run Slack Socket Mode client: %w", err)
@@ -199,7 +208,7 @@ func (l *Listener) Run(ctx context.Context, handler func(context.Context, domain
 		case err := <-runResult:
 			cancel()
 			waitHandlers()
-			if err == nil || (ctx.Err() != nil && errors.Is(err, context.Canceled)) {
+			if err == nil || (intakeCtx.Err() != nil && errors.Is(err, context.Canceled)) {
 				return nil
 			}
 			return fmt.Errorf("run Slack Socket Mode client: %w", err)
@@ -217,15 +226,15 @@ func (l *Listener) Run(ctx context.Context, handler func(context.Context, domain
 
 			switch event.Type {
 			case socketmode.EventTypeInteractive:
-				l.handleInteractive(runCtx, event, &handlers)
+				l.handleInteractive(runCtx, handlerCtx, event, &handlers)
 			case socketmode.EventTypeEventsAPI:
-				l.handleEventsAPI(runCtx, event, &handlers, handler)
+				l.handleEventsAPI(runCtx, handlerCtx, event, &handlers, handler)
 			}
 		}
 	}
 }
 
-func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event, handlers *sync.WaitGroup) {
+func (l *Listener) handleInteractive(ctx, handlerCtx context.Context, event socketmode.Event, handlers *sync.WaitGroup) {
 	if event.Request == nil {
 		l.logger.Warn("Slack interactive event ignored because its Socket Mode request is missing")
 		return
@@ -242,20 +251,20 @@ func (l *Listener) handleInteractive(ctx context.Context, event socketmode.Event
 
 	switch callback.Type {
 	case slack.InteractionTypeViewSubmission:
-		l.handleViewSubmission(ctx, *event.Request, callback, handlers)
+		l.handleViewSubmission(ctx, handlerCtx, *event.Request, callback, handlers)
 	case slack.InteractionTypeBlockActions:
-		l.handleBlockActions(ctx, *event.Request, callback, handlers)
+		l.handleBlockActions(ctx, handlerCtx, *event.Request, callback, handlers)
 	default:
 		l.ackUnsupportedInteractive(ctx, *event.Request, "event", string(callback.Type))
 	}
 }
 
-func (l *Listener) handleViewSubmission(ctx context.Context, request socketmode.Request, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
+func (l *Listener) handleViewSubmission(ctx, handlerCtx context.Context, request socketmode.Request, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
 	if l.dispatcherErr != nil || l.dispatcher == nil {
 		l.ackUnsupportedInteractive(ctx, request, "view", callback.View.CallbackID)
 		return
 	}
-	result, err := l.dispatcher.HandleView(ctx, callback.View.CallbackID, callback)
+	result, err := l.dispatcher.HandleView(handlerCtx, callback.View.CallbackID, callback)
 	if err != nil {
 		l.ackUnsupportedInteractive(ctx, request, "view", callback.View.CallbackID)
 		return
@@ -272,13 +281,13 @@ func (l *Listener) handleViewSubmission(ctx context.Context, request socketmode.
 	handlers.Add(1)
 	go func() {
 		defer handlers.Done()
-		if err := result.Effect(ctx); err != nil {
+		if err := result.Effect(handlerCtx); err != nil {
 			l.logger.Warn("builder preview processing failed", "error", err)
 		}
 	}()
 }
 
-func (l *Listener) handleBlockActions(ctx context.Context, request socketmode.Request, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
+func (l *Listener) handleBlockActions(ctx, handlerCtx context.Context, request socketmode.Request, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
 	if l.dispatcherErr != nil || l.dispatcher == nil {
 		l.ackUnsupportedInteractive(ctx, request, "action", "")
 		return
@@ -301,7 +310,7 @@ func (l *Listener) handleBlockActions(ctx context.Context, request socketmode.Re
 	handlers.Add(1)
 	go func() {
 		defer handlers.Done()
-		if err := l.dispatcher.HandleAction(ctx, actionID, callback); err != nil {
+		if err := l.dispatcher.HandleAction(handlerCtx, actionID, callback); err != nil {
 			if errors.Is(err, ErrUnsupportedInteractive) {
 				l.logger.Warn("unsupported Slack interactive action ignored")
 				return
@@ -529,7 +538,7 @@ func (l *Listener) publishBuilderModalFallback(ctx context.Context, callback sla
 	}()
 }
 
-func (l *Listener) handleEventsAPI(ctx context.Context, event socketmode.Event, handlers *sync.WaitGroup, handler func(context.Context, domain.Invocation)) {
+func (l *Listener) handleEventsAPI(ctx, handlerCtx context.Context, event socketmode.Event, handlers *sync.WaitGroup, handler func(context.Context, domain.Invocation)) {
 	if event.Request == nil {
 		l.logger.Warn("Slack event ignored because its Socket Mode request is missing")
 		return
@@ -556,6 +565,6 @@ func (l *Listener) handleEventsAPI(ctx context.Context, event socketmode.Event, 
 	handlers.Add(1)
 	go func() {
 		defer handlers.Done()
-		handler(ctx, invocation)
+		handler(handlerCtx, invocation)
 	}()
 }

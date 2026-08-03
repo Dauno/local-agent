@@ -43,6 +43,99 @@ func TestDetachedJobIsPersistedBeforeWorkerCompletesIt(t *testing.T) {
 	}
 }
 
+func TestStopAdmissionDrainsRunningJobWithoutClaimingQueuedWork(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "shutdown.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	runtime := &fakeJobRuntime{result: domain.AcpInvocationResult{Text: "drained", ResultBytes: 7}, block: make(chan struct{})}
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{Store: jobStore, Runtime: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.Start(t.Context(), testRequest(domain.JobDetached))
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondRequest := testRequest(domain.JobDetached)
+	secondRequest.OriginalCallID = "original-2"
+	second, err := service.Start(t.Context(), secondRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	go func() { service.Run(context.Background()); close(done) }()
+	waitForJob(t, jobStore, first.ID, domain.JobRunning)
+	service.StopAdmission()
+	close(runtime.block)
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("service did not stop after draining")
+	}
+	finished, err := jobStore.GetJob(t.Context(), first.ID)
+	if err != nil || finished == nil || finished.Status != domain.JobCompleted {
+		t.Fatalf("running job after drain = %#v, err=%v", finished, err)
+	}
+	queued, err := jobStore.GetJob(t.Context(), second.ID)
+	if err != nil || queued == nil || queued.Status != domain.JobQueued {
+		t.Fatalf("queued job after stop = %#v, err=%v", queued, err)
+	}
+}
+
+func TestReconciliationRenewsLeaseUntilCompletion(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "reconcile.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	renewed := make(chan struct{})
+	jobStore := &recordingJobStore{ExternalAgentJobStore: sqlite.NewExternalAgentJobStore(store), renewed: renewed}
+	runtime := &fakeRecoveryRuntime{wait: renewed, result: domain.AcpInvocationResult{Text: "done", ResultBytes: 4}}
+	clock := fixedClock{now: time.Now().UTC()}
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 30 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime, Clock: clock})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := createCompletionUnknownJob(t, service, jobStore)
+	if _, err := service.ReconcileExpected(t.Context(), job.ID, job.Actor, job.ConversationKey, job.StatusRevision); err != nil {
+		jobStore.mu.Lock()
+		renewErr := jobStore.lastRenewErr
+		jobStore.mu.Unlock()
+		t.Fatalf("reconcile: %v; renew: %v", err, renewErr)
+	}
+	completed, err := jobStore.GetJob(t.Context(), job.ID)
+	if err != nil || completed == nil || completed.Status != domain.JobCompleted {
+		t.Fatalf("completed job = %#v, err=%v", completed, err)
+	}
+}
+
+func TestExpiredReconciliationReturnsToCompletionUnknown(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "expired-reconcile.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeRecoveryRuntime{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := createCompletionUnknownJob(t, service, jobStore)
+	reconciling, err := jobStore.BeginReconciliationExpected(t.Context(), job.ID, job.Actor, job.ConversationKey, job.StatusRevision, time.Now().UTC(), "reconciler-test", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	service.recoverExpired(t.Context())
+	recovered, err := jobStore.GetJob(t.Context(), job.ID)
+	if err != nil || recovered == nil || recovered.Status != domain.JobCompletionUnknown || recovered.StatusRevision != reconciling.StatusRevision+1 {
+		t.Fatalf("recovered job = %#v, err=%v", recovered, err)
+	}
+}
+
 func TestRunningJobCancellationIsIdempotentBeforeSideEffects(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
@@ -384,6 +477,58 @@ type fakeJobRuntime struct {
 	errs   []error
 }
 
+type fakeRecoveryRuntime struct {
+	delay  time.Duration
+	wait   <-chan struct{}
+	result domain.AcpInvocationResult
+}
+
+type recordingJobStore struct {
+	*sqlite.ExternalAgentJobStore
+	renewed      chan struct{}
+	once         sync.Once
+	mu           sync.Mutex
+	lastRenewErr error
+}
+
+func (s *recordingJobStore) RenewLease(ctx context.Context, jobID, owner string, attempt int, now time.Time, ttl time.Duration) error {
+	if err := s.ExternalAgentJobStore.RenewLease(ctx, jobID, owner, attempt, now, ttl); err != nil {
+		s.mu.Lock()
+		s.lastRenewErr = err
+		s.mu.Unlock()
+		return err
+	}
+	s.once.Do(func() { close(s.renewed) })
+	return nil
+}
+
+type fixedClock struct{ now time.Time }
+
+func (c fixedClock) Now() time.Time { return c.now }
+
+func (r *fakeRecoveryRuntime) Run(context.Context, domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+	return domain.AcpInvocationResult{}, errors.New("not used")
+}
+
+func (r *fakeRecoveryRuntime) Reconcile(ctx context.Context, _ domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+	if r.wait != nil {
+		select {
+		case <-ctx.Done():
+			return domain.AcpInvocationResult{}, ctx.Err()
+		case <-r.wait:
+			return r.result, nil
+		}
+	}
+	timer := time.NewTimer(r.delay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return domain.AcpInvocationResult{}, ctx.Err()
+	case <-timer.C:
+		return r.result, nil
+	}
+}
+
 type fakeJobPublisher struct {
 	calls int
 }
@@ -416,6 +561,30 @@ func (r *fakeJobRuntime) Run(ctx context.Context, _ domain.ExternalAgentJob) (do
 
 func testRequest(mode domain.ExternalAgentJobMode) domain.ExternalAgentJobRequest {
 	return testRequestWithTimeout(mode, time.Minute)
+}
+
+func createCompletionUnknownJob(t *testing.T, service *Service, store port.ExternalAgentJobStore) *domain.ExternalAgentJob {
+	t.Helper()
+	job, err := service.Start(t.Context(), testRequest(domain.JobDetached))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claimed, err := store.ClaimNext(t.Context(), now, "worker-test", time.Second)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err=%v", claimed, err)
+	}
+	if err := store.AssignACPSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompletionUnknown, nil, "completion_unknown", now.Add(time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	unknown, err := store.GetJob(t.Context(), job.ID)
+	if err != nil || unknown == nil {
+		t.Fatalf("unknown job = %#v, err=%v", unknown, err)
+	}
+	return unknown
 }
 
 func testRequestWithTimeout(mode domain.ExternalAgentJobMode, timeout time.Duration) domain.ExternalAgentJobRequest {

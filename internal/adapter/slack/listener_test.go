@@ -62,6 +62,44 @@ func TestListenerAcknowledgesBeforeAsynchronousDispatchAndShutsDown(t *testing.T
 	}
 }
 
+func TestListenerStopsIntakeWithoutCancellingAdmittedHandler(t *testing.T) {
+	client := newFakeSocketClient()
+	listener := newListener(client, NewRouter(testBot), nil)
+	intakeCtx, stopIntake := context.WithCancel(context.Background())
+	handlerCtx, stopHandler := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	handled := make(chan struct{})
+	handlerFinished := make(chan struct{})
+	go func() {
+		done <- listener.RunWithHandlerContext(intakeCtx, handlerCtx, func(ctx context.Context, _ domain.Invocation) {
+			close(handled)
+			<-ctx.Done()
+			close(handlerFinished)
+		})
+	}()
+	client.events <- socketEvent("drain", directMessageEvent("drain me"))
+	select {
+	case <-handled:
+	case <-time.After(time.Second):
+		t.Fatal("handler was not admitted")
+	}
+	stopIntake()
+	select {
+	case <-handlerFinished:
+		t.Fatal("intake shutdown cancelled the admitted handler")
+	case <-time.After(30 * time.Millisecond):
+	}
+	stopHandler()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("listener did not settle after handler cancellation")
+	}
+}
+
 func TestListenerAcknowledgesIgnoredEventsWithoutDispatching(t *testing.T) {
 	t.Parallel()
 	client := newFakeSocketClient()

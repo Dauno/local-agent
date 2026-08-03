@@ -393,7 +393,7 @@ func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Contex
 	if modelErr != nil {
 		s.updateProgress(ctx, progress, domain.ProgressFailed)
 		s.logger.Error("model call failed", "conversation_key", key, "error", modelErr)
-		if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); err != nil {
+		if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.publicModelError(modelErr)); err != nil {
 			s.logger.Error("model error response failed", "conversation_key", key, "error", err)
 			return OutcomePublishFailed, nil
 		}
@@ -427,6 +427,26 @@ func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Contex
 		s.scheduleSummary(ctx, key)
 	}
 	return outcome, finalizeErr
+}
+
+func (s *Service) publicModelError(err error) string {
+	if errors.Is(err, domain.ErrIrreducibleContext) || strings.Contains(errorText(err), domain.ErrIrreducibleContext.Error()) {
+		return "No pude procesar este turno: el contexto activo superó el límite seguro incluso después de reducirlo. Reduce el alcance de la solicitud y vuelve a intentarlo."
+	}
+	if strings.Contains(errorText(err), "request_token_count_unavailable") {
+		return "No pude verificar temporalmente el tamaño de la solicitud. Intenta de nuevo cuando se recupere la contabilidad del modelo."
+	}
+	if strings.Contains(errorText(err), "completion_unknown") || strings.Contains(errorText(err), string(domain.ACPErrorSessionRecoveryUnsupported)) {
+		return "La finalización de una operación previa no pudo verificarse. Requiere recuperación operativa antes de continuar."
+	}
+	return s.cfg.ModelErrorMessage
+}
+
+func errorText(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 func (s *Service) scheduleSummary(ctx context.Context, key domain.ConversationKey) {

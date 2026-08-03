@@ -302,13 +302,11 @@ func readProtocolEvents(t *testing.T, service session.Service, key domain.Conver
 	return events
 }
 
-// TestADKCrashBoundaryReproducesMissingResponse documents the Phase 0 crash
-// boundary and the TRD validation split. The first runner persists the model
-// call, then the test service simulates a process stop before the tool response
-// append. The orphaned call is intentionally accepted when it remains in the
-// active suffix. Under FR-11 and section 7.3, the provider-readiness/preflight
-// boundary added in Wave 2 / Phase 2 must stop that incomplete request before
-// it reaches the model; the compiler's active-suffix acceptance is intentional.
+// TestADKCrashBoundaryReproducesMissingResponse documents the crash boundary
+// and the validation split. The first runner persists the model call, then the
+// test service simulates a process stop before the tool response append. The
+// orphaned call remains in the active suffix and is structurally admitted after
+// restart; completed turns still require complete protocol history.
 func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
 	t.Run("orphaned call in ACTIVE suffix", func(t *testing.T) {
 		database := filepath.Join(t.TempDir(), "crash-boundary.db")
@@ -439,10 +437,8 @@ func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
 	})
 }
 
-// TestADKCallbackWarningDocumentsCurrentBehavior captures the pinned ADK
-// callback wrapper warning caused by CompilerBeforeModelCallback calling
-// ctx.Session(). Phase 2 must remove the warning and this assertion must be
-// inverted to require its absence.
+// TestADKCallbackWarningDocumentsCurrentBehavior verifies that the callback
+// uses supported session-service access and does not call ctx.Session().
 func TestADKCallbackWarningDocumentsCurrentBehavior(t *testing.T) {
 	var output bytes.Buffer
 	logMu.Lock()
@@ -485,8 +481,8 @@ func TestADKCallbackWarningDocumentsCurrentBehavior(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(output.String(), "Session() is not supported for callback context") {
-		t.Fatalf("callback log = %q, want pinned ADK unsupported Session warning", output.String())
+	if strings.Contains(output.String(), "Session() is not supported for callback context") {
+		t.Fatalf("callback log = %q, contains unsupported Session warning", output.String())
 	}
 }
 
@@ -501,7 +497,7 @@ func (noOpProtocolCompiler) Compile(_ context.Context, request domain.CompileReq
 type protocolTokenCounter struct{}
 
 func (protocolTokenCounter) CountRequest(_ context.Context, _ port.ModelRequestEnvelope) (port.TokenCount, error) {
-	return port.TokenCount{Strategy: "contract"}, nil
+	return port.TokenCount{Tokens: 1, Strategy: "contract"}, nil
 }
 
 type crashBeforeToolResponseService struct {

@@ -18,8 +18,9 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeResultStore struct {
-	results map[string]string
-	nextRef int
+	results  map[string]string
+	nextRef  int
+	putCalls int
 }
 
 func newFakeResultStore() *fakeResultStore {
@@ -27,6 +28,7 @@ func newFakeResultStore() *fakeResultStore {
 }
 
 func (s *fakeResultStore) Put(_ context.Context, req port.PutResultRequest) (domain.RecoverableResult, error) {
+	s.putCalls++
 	s.nextRef++
 	ref := fmt.Sprintf("ref-%d", s.nextRef)
 	s.results[ref] = req.Content
@@ -37,6 +39,25 @@ func (s *fakeResultStore) Put(_ context.Context, req port.PutResultRequest) (dom
 		CodePoints: utf8.RuneCountInString(req.Content),
 		CreatedAt:  time.Now(),
 	}, nil
+}
+
+func TestCompilerMinimumDryRunFailsBeforeWrites(t *testing.T) {
+	store := newFakeResultStore()
+	counter := &sequenceTokenCounter{counts: []int{101, 101, 101}}
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file"}}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": readableText(500)}}}}},
+	}
+	_, err := New(store, counter).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ConversationKey: "minimum-dry-run", ModelBudget: domain.RequestBudget{HardTokens: 100, TargetTokens: 80},
+	})
+	if !errors.Is(err, domain.ErrIrreducibleContext) {
+		t.Fatalf("Compile() error = %v, want irreducible context", err)
+	}
+	if store.putCalls != 0 {
+		t.Fatalf("result-store writes = %d, want zero before minimum admission", store.putCalls)
+	}
 }
 
 func (s *fakeResultStore) ReadChunk(_ context.Context, req domain.ResultChunkRequest) (domain.ResultChunk, error) {
@@ -173,8 +194,8 @@ func TestCompilerRecountsContinuityAndExcerptsThenFailsClosed(t *testing.T) {
 					t.Fatalf("result = %#v, error = %v", result.Diagnostics, resultErr)
 				}
 			}
-			if counter.calls > 3 {
-				t.Fatalf("counter calls = %d, want at most 3", counter.calls)
+			if counter.calls > 4 {
+				t.Fatalf("counter calls = %d, want at most 4", counter.calls)
 			}
 		})
 	}
@@ -200,7 +221,7 @@ func TestCompilerIrreducibleResultExposesRecountMetrics(t *testing.T) {
 	if _, ok := recorder.find(domain.MetricModelRequestIrreducibleTotal); !ok {
 		t.Fatal("irreducible metric was not emitted")
 	}
-	if _, ok := recorder.find(domain.MetricContinuityCheckpointRenderTokens); !ok {
+	if _, ok := recorder.find(domain.MetricContinuityCheckpointRenderCodePoints); !ok {
 		t.Fatal("continuity render metric was not emitted")
 	}
 	if _, ok := recorder.find(domain.MetricContextCompileDuration); !ok {
@@ -231,6 +252,49 @@ func TestCompilerExternalizedTotalIsCounter(t *testing.T) {
 		if _, ok := recorder.find(name); !ok {
 			t.Errorf("metric %q was not emitted", name)
 		}
+	}
+}
+
+func TestCompilerReducesOptionalContextTowardTargetBeforeHardLimit(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{81, 70}}
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
+	}
+	result, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ExistingSummary: "summary",
+		ModelBudget: domain.RequestBudget{HardTokens: 100, TriggerTokens: 80, TargetTokens: 70},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Diagnostics.RequestTokensAfter != 70 || result.Diagnostics.ReductionStage != "optional" {
+		t.Fatalf("diagnostics = %#v", result.Diagnostics)
+	}
+	if len(result.Contents) != 1 || result.Contents[0].Parts[0].Text != "current request" {
+		t.Fatalf("contents = %#v", result.Contents)
+	}
+}
+
+func TestCompilerDoesNotExternalizeAfterOptionalContextReachesTarget(t *testing.T) {
+	store := newFakeResultStore()
+	counter := &sequenceTokenCounter{counts: []int{81, 65}}
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file"}}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": readableText(500)}}}}},
+	}
+	result, err := New(store, counter).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ModelBudget: domain.RequestBudget{HardTokens: 100, TriggerTokens: 80, TargetTokens: 70},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Diagnostics.RequestTokensAfter != 65 || result.Diagnostics.ResponsesExternalized != 0 || store.putCalls != 0 {
+		t.Fatalf("diagnostics=%#v writes=%d", result.Diagnostics, store.putCalls)
 	}
 }
 
@@ -1036,8 +1100,8 @@ func TestContinuityCapsuleInjectedWhenFits(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if result.Diagnostics.ContinuityTokens <= 0 {
-		t.Error("expected continuity tokens > 0 with capsule")
+	if result.Diagnostics.ContinuityCodePoints <= 0 || result.Diagnostics.ContinuityTokens != 0 {
+		t.Errorf("continuity diagnostics = %#v", result.Diagnostics)
 	}
 	foundCapsule := false
 	for _, c := range result.Contents {

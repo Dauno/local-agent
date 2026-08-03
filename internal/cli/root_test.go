@@ -40,7 +40,20 @@ type inspectionBackend struct {
 	view *domain.ExternalAgentJobInspection
 }
 
+type reconciliationBackend struct {
+	*fakeBackend
+	view     domain.ExternalAgentJobStatusView
+	calls    int
+	expected int
+}
+
 func (b *inspectionBackend) InspectJob(context.Context, string) (*domain.ExternalAgentJobInspection, error) {
+	return b.view, nil
+}
+
+func (b *reconciliationBackend) ReconcileJob(_ context.Context, _ string, expectedRevision int) (domain.ExternalAgentJobStatusView, error) {
+	b.calls++
+	b.expected = expectedRevision
 	return b.view, nil
 }
 
@@ -269,5 +282,29 @@ func TestJobsInspectMissingJobReturnsSafeResult(t *testing.T) {
 	}
 	if output.String() != "job: not found\n" || stderr.Len() != 0 {
 		t.Fatalf("safe missing output=%q stderr=%q", output.String(), stderr.String())
+	}
+}
+
+func TestJobsReconcileRequiresConfirmationAndRevision(t *testing.T) {
+	backend := &reconciliationBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5, ResultAvailable: true}}
+	var output, stderr bytes.Buffer
+	root, err := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Execute(t.Context(), root, []string{"jobs", "reconcile", "job_123", "--expect-revision", "4"}, &stderr); code != 1 || backend.calls != 0 {
+		t.Fatalf("missing confirmation exit=%d calls=%d stderr=%q", code, backend.calls, stderr.String())
+	}
+	output.Reset()
+	stderr.Reset()
+	root, err = NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Execute(t.Context(), root, []string{"jobs", "reconcile", "job_123", "--expect-revision", "4", "--confirm"}, &stderr); code != 0 {
+		t.Fatalf("confirmed exit=%d stderr=%q", code, stderr.String())
+	}
+	if backend.calls != 1 || backend.expected != 4 || !strings.Contains(output.String(), "status_revision: 5") || strings.Contains(output.String(), "task") {
+		t.Fatalf("reconcile output=%q calls=%d expected=%d", output.String(), backend.calls, backend.expected)
 	}
 }
