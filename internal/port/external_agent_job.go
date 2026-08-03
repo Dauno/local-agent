@@ -238,6 +238,13 @@ type ExternalAgentJobReader interface {
 	ReadResultChunk(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, offsetBytes, maxBytes int64) (domain.ResultChunk, error)
 }
 
+// ExternalAgentJobActivationReader reads a job only when its durable revision
+// and terminal status still match the activation that requested the read.
+type ExternalAgentJobActivationReader interface {
+	StatusAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus) (*domain.ExternalAgentJob, error)
+	ReadResultChunkAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus, offsetBytes, maxBytes int64) (domain.ResultChunk, error)
+}
+
 // ExternalAgentJobHostCompleter is the deterministic response phase after a
 // detached job has completed. It must not create a confirmation or rerun ACP.
 type ExternalAgentJobHostCompleter interface {

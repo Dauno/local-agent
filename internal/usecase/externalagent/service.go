@@ -60,6 +60,7 @@ type Service struct {
 }
 
 var _ port.ExternalAgentJobReader = (*Service)(nil)
+var _ port.ExternalAgentJobActivationReader = (*Service)(nil)
 var _ port.ExternalAgentJobHostCompleter = (*Service)(nil)
 
 const defaultResultChunkBytes int64 = 16 * 1024
@@ -206,6 +207,22 @@ func (s *Service) Status(ctx context.Context, jobID, actor string, conversationK
 	return job, nil
 }
 
+// StatusAtRevision returns the authorized job only when it still represents
+// the terminal snapshot captured by an activation.
+func (s *Service) StatusAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus) (*domain.ExternalAgentJob, error) {
+	job, err := s.Status(ctx, jobID, actor, conversationKey)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, errors.New("external-agent job was not found")
+	}
+	if job.StatusRevision != expectedRevision || job.Status != expectedStatus {
+		return nil, errors.New("external-agent job revision is no longer current")
+	}
+	return job, nil
+}
+
 // ReadResult returns the complete sanitized result for an authorized,
 // completed job. It re-verifies inline bytes as well as private artifact reads
 // so a stale or tampered database row cannot turn into a successful delivery.
@@ -265,10 +282,25 @@ func (s *Service) ReadResultChunk(ctx context.Context, jobID, actor string, conv
 	if job == nil {
 		return domain.ResultChunk{}, errors.New("external-agent job was not found")
 	}
+	return s.readResultChunkForJob(ctx, job, offsetBytes, maxBytes)
+}
+
+// ReadResultChunkAtRevision refuses to read a later reconciliation revision
+// through an older activation. The check and the read use the same job
+// snapshot, so callers cannot mix revision N identity with revision N+2 data.
+func (s *Service) ReadResultChunkAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
+	job, err := s.StatusAtRevision(ctx, jobID, actor, conversationKey, expectedRevision, expectedStatus)
+	if err != nil {
+		return domain.ResultChunk{}, err
+	}
+	return s.readResultChunkForJob(ctx, job, offsetBytes, maxBytes)
+}
+
+func (s *Service) readResultChunkForJob(ctx context.Context, job *domain.ExternalAgentJob, offsetBytes, requestedMaxBytes int64) (domain.ResultChunk, error) {
 	if job.Status != domain.JobCompleted {
 		return domain.ResultChunk{}, fmt.Errorf("external-agent job is not completed: %s", job.Status)
 	}
-	maxBytes = s.resultChunkMax(maxBytes)
+	maxBytes := s.resultChunkMax(requestedMaxBytes)
 	if job.ResultArtifact != "" {
 		if s.artifacts == nil {
 			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
