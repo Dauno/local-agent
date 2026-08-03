@@ -19,6 +19,13 @@ type AgentToolFactory interface {
 	ToolsForInvocation(actor string, key domain.ConversationKey) ([]any, error)
 }
 
+// ActivationAgentToolFactory builds the exact host-only tool scope for one
+// durable activation. Implementations must not compose child agents or
+// workflow tools in this method.
+type ActivationAgentToolFactory interface {
+	ToolsForActivation(actor string, key domain.ConversationKey, activation domain.ExternalAgentJobActivation) ([]any, error)
+}
+
 // ContextEnricher resolves a bounded, structured view of the invoking Slack
 // user and conversation before a primary model call. Slack API failures and
 // missing scopes must never prevent a normal response.

@@ -74,7 +74,7 @@ func TestRealCLISetupDoctorManifestAndVersion(t *testing.T) {
 	if code := cli.Execute(t.Context(), command, []string{"doctor"}, &stderr); code != 0 {
 		t.Fatalf("doctor exit=%d stderr=%s output=%s", code, stderr.String(), output.String())
 	}
-	if !strings.Contains(output.String(), "PASS configuration") || !strings.Contains(output.String(), "PASS SQLite") {
+	if !strings.Contains(output.String(), "PASS configuration") || !strings.Contains(output.String(), "PASS SQLite") || !strings.Contains(output.String(), "PASS external-agent activations") {
 		t.Fatalf("doctor output=%s", output.String())
 	}
 

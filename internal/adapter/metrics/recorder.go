@@ -31,6 +31,8 @@ var allowedLabelKeys = map[string]struct{}{
 	"actor_match":        {},
 	"conversation_match": {},
 	"query_id":           {},
+	"activation_outcome": {},
+	"terminal_status":    {},
 }
 
 type key struct {

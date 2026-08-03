@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
@@ -277,6 +278,16 @@ func (jobStoreChecker) CheckExternalAgentJobs(ctx context.Context, path string) 
 	}
 	defer store.Close()
 	return store.CheckExternalAgentJobStore(ctx)
+}
+
+func (jobStoreChecker) CheckExternalAgentActivationHealth(ctx context.Context, path string) (domain.ExternalAgentJobActivationHealth, error) {
+	store, err := adaptersqlite.OpenExisting(ctx, path)
+	if err != nil {
+		return domain.ExternalAgentJobActivationHealth{}, err
+	}
+	defer store.Close()
+	jobs := adaptersqlite.NewExternalAgentJobStore(store)
+	return jobs.ActivationHealth(ctx, time.Now().UTC(), 5*time.Minute)
 }
 
 func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {

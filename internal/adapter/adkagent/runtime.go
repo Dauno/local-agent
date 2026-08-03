@@ -66,6 +66,7 @@ type Runtime struct {
 }
 
 var _ port.AgentRuntime = (*Runtime)(nil)
+var _ port.AgentActivationRecovery = (*Runtime)(nil)
 var _ port.StreamingAgentRuntime = (*Runtime)(nil)
 
 // NewRuntime creates an ADK-backed agent runtime.
@@ -119,6 +120,7 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 			instruction += " You may use only the registered function tools when they are relevant. Their arguments and results remain subject to application policy."
 		}
 	}
+	instruction = instructionForOrigin(instruction, ephemeral.origin)
 
 	agentCfg := llmagent.Config{
 		Name:              technicalName,
@@ -150,6 +152,49 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 	return llmagent.New(agentCfg)
 }
 
+func (r *Runtime) toolsForInvocation(origin port.AgentTurnOrigin, key domain.ConversationKey, activation *domain.ExternalAgentJobActivation) ([]tool.Tool, error) {
+	if origin.Kind == port.AgentTurnOriginJobCompletion {
+		if r.toolFactory == nil {
+			return nil, nil
+		}
+		if activation == nil || activation.ActivationID != origin.ActivationID || activation.Actor != origin.Actor || activation.ConversationKey != key {
+			return nil, errors.New("job-completion activation binding is incomplete")
+		}
+		factory, ok := r.toolFactory.(port.ActivationAgentToolFactory)
+		if !ok {
+			return nil, errors.New("job-completion host-only tool factory is unavailable")
+		}
+		rawTools, err := factory.ToolsForActivation(origin.Actor, key, *activation)
+		if err != nil {
+			return nil, err
+		}
+		tools := make([]tool.Tool, 0, len(rawTools))
+		for index, raw := range rawTools {
+			candidate, ok := raw.(tool.Tool)
+			if !ok || candidate == nil {
+				return nil, fmt.Errorf("activation tool %d is not an ADK tool: %T", index, raw)
+			}
+			tools = append(tools, candidate)
+		}
+		return tools, nil
+	}
+
+	tools := append([]tool.Tool(nil), r.staticTools...)
+	if r.toolFactory == nil {
+		return tools, nil
+	}
+	rawTools, err := r.toolFactory.ToolsForInvocation(origin.Actor, key)
+	if err != nil {
+		return nil, err
+	}
+	for _, raw := range rawTools {
+		if candidate, ok := raw.(tool.Tool); ok {
+			tools = append(tools, candidate)
+		}
+	}
+	return tools, nil
+}
+
 // Run executes one agent turn against the durable session.
 func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTurn, error) {
 	if strings.TrimSpace(string(req.ConversationKey)) == "" {
@@ -165,11 +210,16 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	if current.Role != domain.RoleUser {
 		return port.AgentTurn{}, fmt.Errorf("%w: final message must have user role", ErrInvalidHistory)
 	}
+	origin, err := resolveTurnOrigin(req, current)
+	if err != nil {
+		return port.AgentTurn{}, err
+	}
+	turnCtx := port.WithAgentTurnContext(ctx, port.AgentTurnContext{ConversationKey: req.ConversationKey, Origin: origin})
 
 	sessionID := adkSessionID(req.ConversationKey)
 
 	// Ensure session exists (idempotent).
-	_, err := r.ensureSession(ctx, sessionID)
+	_, err = r.ensureSession(turnCtx, sessionID)
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("ensure ADK session: %w", err)
 	}
@@ -177,19 +227,14 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	// Preload ephemeral context (memory + Slack data) into the current
 	// model call via before-model callback. They must not become durable events.
 	ephemeralCtx := buildBeforeModelContext(req)
+	ephemeralCtx.actor = origin.Actor
+	ephemeralCtx.origin = origin
 
-	// Build tools for this turn.
-	tools := append([]tool.Tool(nil), r.staticTools...)
-	if r.toolFactory != nil {
-		rawTools, toolErr := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
-		if toolErr != nil {
-			return port.AgentTurn{}, fmt.Errorf("build invocation tools: %w", toolErr)
-		}
-		for _, raw := range rawTools {
-			if t, ok := raw.(tool.Tool); ok {
-				tools = append(tools, t)
-			}
-		}
+	// Build tools for this turn. Host-originated turns use a dedicated factory;
+	// they never filter the general factory by a potentially colliding name.
+	tools, toolErr := r.toolsForInvocation(origin, req.ConversationKey, req.Activation)
+	if toolErr != nil {
+		return port.AgentTurn{}, fmt.Errorf("build invocation tools: %w", toolErr)
 	}
 
 	agent, err := r.buildAgent(tools, ephemeralCtx)
@@ -200,7 +245,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	adkRunner, err := runner.New(runner.Config{
 		AppName:        applicationName,
 		Agent:          agent,
-		SessionService: r.sessionService,
+		SessionService: newTurnSessionService(r.sessionService, origin),
 	})
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("create runner: %w", err)
@@ -208,12 +253,12 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 
 	input := genai.NewContentFromText(current.Content, genai.RoleUser)
 
-	turn, err := runTurn(ctx, adkRunner, input, sessionID, current.UserID, req.ConversationKey)
+	turn, err := runTurn(turnCtx, adkRunner, input, sessionID, origin.Actor, req.ConversationKey)
 	if err != nil {
 		return port.AgentTurn{}, err
 	}
 	if turn.PendingConfirmation == nil {
-		r.updateContinuity(ctx, sessionID, current.Content, turn.Text, true)
+		r.updateContinuity(ctx, sessionID, current.Content, turn.Text, origin.Kind != port.AgentTurnOriginJobCompletion)
 	}
 	return turn, nil
 }
@@ -244,41 +289,42 @@ func (r *Runtime) Stream(ctx context.Context, req port.AgentRequest, yield func(
 		terminalError(fmt.Errorf("%w: final message must have user role", ErrInvalidHistory))
 		return
 	}
+	origin, err := resolveTurnOrigin(req, current)
+	if err != nil {
+		terminalError(err)
+		return
+	}
+	turnCtx := port.WithAgentTurnContext(ctx, port.AgentTurnContext{ConversationKey: req.ConversationKey, Origin: origin})
 	sessionID := adkSessionID(req.ConversationKey)
-	if _, err := r.ensureSession(ctx, sessionID); err != nil {
+	if _, err := r.ensureSession(turnCtx, sessionID); err != nil {
 		terminalError(fmt.Errorf("ensure ADK session: %w", err))
 		return
 	}
-	tools := append([]tool.Tool(nil), r.staticTools...)
-	if r.toolFactory != nil {
-		rawTools, err := r.toolFactory.ToolsForInvocation(current.UserID, req.ConversationKey)
-		if err != nil {
-			terminalError(fmt.Errorf("build invocation tools: %w", err))
-			return
-		}
-		for _, raw := range rawTools {
-			if t, ok := raw.(tool.Tool); ok {
-				tools = append(tools, t)
-			}
-		}
+	ephemeralCtx := buildBeforeModelContext(req)
+	ephemeralCtx.actor = origin.Actor
+	ephemeralCtx.origin = origin
+	tools, toolErr := r.toolsForInvocation(origin, req.ConversationKey, req.Activation)
+	if toolErr != nil {
+		terminalError(fmt.Errorf("build invocation tools: %w", toolErr))
+		return
 	}
-	agent, err := r.buildAgent(tools, buildBeforeModelContext(req))
+	agent, err := r.buildAgent(tools, ephemeralCtx)
 	if err != nil {
 		terminalError(fmt.Errorf("build agent: %w", err))
 		return
 	}
-	adkRunner, err := runner.New(runner.Config{AppName: applicationName, Agent: agent, SessionService: r.sessionService})
+	adkRunner, err := runner.New(runner.Config{AppName: applicationName, Agent: agent, SessionService: newTurnSessionService(r.sessionService, origin)})
 	if err != nil {
 		terminalError(fmt.Errorf("create runner: %w", err))
 		return
 	}
 	wrappedYield := func(event port.AgentStreamEvent) bool {
 		if event.Kind == port.AgentStreamCompleted && event.Turn != nil && event.Turn.PendingConfirmation == nil {
-			r.updateContinuity(ctx, sessionID, current.Content, event.Turn.Text, true)
+			r.updateContinuity(ctx, sessionID, current.Content, event.Turn.Text, origin.Kind != port.AgentTurnOriginJobCompletion)
 		}
 		return yield(event)
 	}
-	runStreamingTurn(ctx, adkRunner, genai.NewContentFromText(current.Content, genai.RoleUser), sessionID, current.UserID, req.ConversationKey, wrappedYield)
+	runStreamingTurn(turnCtx, adkRunner, genai.NewContentFromText(current.Content, genai.RoleUser), sessionID, origin.Actor, req.ConversationKey, wrappedYield)
 }
 
 func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, finalText string, updateObjective bool) {
@@ -487,6 +533,60 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 	return turn, nil
 }
 
+// RecoverActivation inspects only durable ADK events tagged with the supplied
+// activation. It intentionally does not construct a runner or call the model.
+func (r *Runtime) RecoverActivation(ctx context.Context, conversationKey domain.ConversationKey, activationID string) (port.AgentTurn, bool, error) {
+	if r == nil || r.sessionService == nil || strings.TrimSpace(string(conversationKey)) == "" || strings.TrimSpace(activationID) == "" {
+		return port.AgentTurn{}, false, errors.New("activation recovery identity is required")
+	}
+	loaded, err := r.sessionService.Get(ctx, &session.GetRequest{
+		AppName: applicationName, UserID: ephemeralUserID, SessionID: adkSessionID(conversationKey),
+	})
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "not found") {
+			return port.AgentTurn{}, false, nil
+		}
+		return port.AgentTurn{}, false, fmt.Errorf("load durable activation session: %w", err)
+	}
+	if loaded == nil || loaded.Session == nil {
+		return port.AgentTurn{}, false, nil
+	}
+	if err := r.checkProviderFamily(loaded.Session); err != nil {
+		return port.AgentTurn{}, false, err
+	}
+	events := loaded.Session.Events()
+	if events == nil {
+		return port.AgentTurn{}, false, nil
+	}
+	var recovered string
+	for index := 0; index < events.Len(); index++ {
+		event := events.At(index)
+		if event == nil || event.CustomMetadata == nil || event.Content == nil {
+			continue
+		}
+		if event.CustomMetadata[port.AgentTurnOriginMetadataKey] != string(port.AgentTurnOriginJobCompletion) || event.CustomMetadata[port.AgentTurnActivationIDMetadataKey] != activationID {
+			continue
+		}
+		if event.Content.Role != genai.RoleModel || event.Partial || !event.IsFinalResponse() {
+			continue
+		}
+		text, textErr := eventText(event.Content)
+		if textErr != nil || strings.TrimSpace(text) == "" {
+			continue
+		}
+		if recovered != "" {
+			// Multiple finals cannot prove which response belongs to the
+			// activation, so fail closed and let the caller mark it unknown.
+			return port.AgentTurn{}, false, nil
+		}
+		recovered = strings.TrimSpace(text)
+	}
+	if recovered == "" {
+		return port.AgentTurn{}, false, nil
+	}
+	return port.AgentTurn{Text: recovered}, true, nil
+}
+
 func boolPointer(value bool) *bool { return &value }
 
 func (r *Runtime) ensureSession(ctx context.Context, sessionID string) (session.Session, error) {
@@ -689,6 +789,7 @@ type beforeModelData struct {
 	memory  []domain.MemorySnippet
 	context domain.AgentContext
 	actor   string
+	origin  port.AgentTurnOrigin
 }
 
 func buildBeforeModelContext(req port.AgentRequest) beforeModelData {

@@ -206,6 +206,7 @@ type fakeBaseFactory struct {
 }
 
 var _ port.AgentToolFactory = (*fakeBaseFactory)(nil)
+var _ port.ActivationAgentToolFactory = (*fakeBaseFactory)(nil)
 
 func (f *fakeBaseFactory) ToolsForInvocation(actor string, key domain.ConversationKey) ([]any, error) {
 	if f.err != nil {
@@ -251,6 +252,22 @@ func (f *fakeBaseFactory) ToolsForInvocation(actor string, key domain.Conversati
 		result = append(result, createCanvas)
 	}
 	return result, nil
+}
+
+func (*fakeBaseFactory) ToolsForActivation(string, domain.ConversationKey, domain.ExternalAgentJobActivation) ([]any, error) {
+	status, err := functiontool.New(functiontool.Config{Name: "job_status"}, func(agent.Context, struct{}) (map[string]any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	chunk, err := functiontool.New(functiontool.Config{Name: "read_job_result_chunk"}, func(agent.Context, struct{}) (map[string]any, error) {
+		return nil, nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	return []any{status, chunk}, nil
 }
 
 // exploringChildModel drives a two-step child trajectory: call read_file, then
@@ -356,6 +373,24 @@ func TestCompositeFactoryReturnsAgentToolsPlusDirectTools(t *testing.T) {
 	}
 	if base.lastActor != "U777" || base.lastKey != domain.ConversationKey("slack:T1:dm:D1") {
 		t.Fatalf("base factory received actor %q key %q", base.lastActor, base.lastKey)
+	}
+}
+
+func TestCompositeActivationScopeExcludesCollidingChildAgent(t *testing.T) {
+	factory := newCompositeAgentToolFactory(&fakeBaseFactory{}, []preparedAgentTool{
+		{definition: agentdef.AgentDef{Name: "read_job_result_chunk"}, model: &exploringChildModel{}},
+	}, nil, "Global policy.")
+	activation := domain.ExternalAgentJobActivation{
+		ActivationID: "activation-1", JobID: "job-1", StatusRevision: 1,
+		TerminalStatus: domain.JobCompleted, Actor: "U777", ConversationKey: "slack:T1:dm:D1",
+	}
+	raw, err := factory.ToolsForActivation(activation.Actor, activation.ConversationKey, activation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := toolNames(t, raw)
+	if strings.Join(names, ",") != "job_status,read_job_result_chunk" {
+		t.Fatalf("activation tools = %v", names)
 	}
 }
 

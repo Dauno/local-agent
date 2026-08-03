@@ -3,6 +3,7 @@ package fsartifact
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -12,12 +13,15 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 var ownerPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$`)
+
+const artifactChunkMaxBytes int64 = 16 * 1024
 
 type Store struct {
 	dir        string
@@ -160,6 +164,183 @@ func (s *Store) Get(ctx context.Context, ownerID, reference, expectedSHA256 stri
 	return data, nil
 }
 
+// ReadChunk verifies the complete artifact while retaining only one bounded
+// UTF-8 range in memory. The owner and reference are intentionally checked
+// together so an artifact cannot be read through another job's binding.
+func (s *Store) ReadChunk(ctx context.Context, req domain.ResultArtifactChunkRequest) (domain.ResultChunk, error) {
+	if err := ctx.Err(); err != nil {
+		return domain.ResultChunk{}, err
+	}
+	if err := s.Check(ctx); err != nil {
+		return domain.ResultChunk{}, err
+	}
+	if s == nil || s.dir == "" || s.maxBytes <= 0 {
+		return domain.ResultChunk{}, errors.New("artifact store is not configured")
+	}
+	if !ownerPattern.MatchString(req.OwnerID) || req.Reference != req.OwnerID+".result" || filepath.Base(req.Reference) != req.Reference {
+		return domain.ResultChunk{}, errors.New("result artifact reference is invalid")
+	}
+	if req.ExpectedBytes < 0 || req.ExpectedBytes > s.maxBytes {
+		return domain.ResultChunk{}, errors.New("result artifact size is invalid")
+	}
+	if len(req.ExpectedSHA256) != sha256.Size*2 {
+		return domain.ResultChunk{}, errors.New("result artifact digest is invalid")
+	}
+	if _, err := hex.DecodeString(req.ExpectedSHA256); err != nil {
+		return domain.ResultChunk{}, errors.New("result artifact digest is invalid")
+	}
+	if req.OffsetBytes < 0 || req.OffsetBytes > req.ExpectedBytes {
+		return domain.ResultChunk{}, errors.New("result artifact offset is invalid")
+	}
+	maxBytes := req.MaxBytes
+	if maxBytes <= 0 || maxBytes > artifactChunkMaxBytes {
+		maxBytes = artifactChunkMaxBytes
+	}
+	if maxBytes > s.maxBytes {
+		maxBytes = s.maxBytes
+	}
+	if maxBytes <= 0 {
+		return domain.ResultChunk{}, errors.New("result artifact read bound is invalid")
+	}
+
+	path := filepath.Join(s.dir, req.Reference)
+	info, err := os.Lstat(path)
+	if err != nil {
+		return domain.ResultChunk{}, errors.New("inspect result artifact failed")
+	}
+	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return domain.ResultChunk{}, errors.New("result artifact is not a regular application-owned file")
+	}
+	if info.Size() != req.ExpectedBytes {
+		return domain.ResultChunk{}, errors.New("result artifact size mismatch")
+	}
+
+	file, err := os.Open(path)
+	if err != nil {
+		return domain.ResultChunk{}, errors.New("open result artifact failed")
+	}
+	defer file.Close()
+	openedInfo, err := file.Stat()
+	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
+		return domain.ResultChunk{}, errors.New("result artifact changed during open")
+	}
+
+	requestedEnd := req.OffsetBytes + maxBytes
+	if requestedEnd < req.OffsetBytes || requestedEnd > req.ExpectedBytes {
+		requestedEnd = req.ExpectedBytes
+	}
+	chunk := make([]byte, 0, requestedEnd-req.OffsetBytes)
+	digest := sha256.New()
+	buffer := make([]byte, 32*1024)
+	var pending []byte
+	var total int64
+	for {
+		if err := ctx.Err(); err != nil {
+			return domain.ResultChunk{}, err
+		}
+		read, readErr := file.Read(buffer)
+		if read > 0 {
+			data := buffer[:read]
+			if total+int64(read) > req.ExpectedBytes {
+				return domain.ResultChunk{}, errors.New("result artifact grew during read")
+			}
+			if err := consumeUTF8(data, &pending); err != nil {
+				return domain.ResultChunk{}, err
+			}
+			if _, err := digest.Write(data); err != nil {
+				return domain.ResultChunk{}, errors.New("hash result artifact failed")
+			}
+			blockStart := total
+			blockEnd := total + int64(read)
+			copyStart := maxInt64(blockStart, req.OffsetBytes)
+			copyEnd := minInt64(blockEnd, requestedEnd)
+			if copyStart < copyEnd {
+				chunk = append(chunk, data[copyStart-blockStart:copyEnd-blockStart]...)
+			}
+			total = blockEnd
+		}
+		if readErr == io.EOF {
+			break
+		}
+		if readErr != nil {
+			return domain.ResultChunk{}, fmt.Errorf("read result artifact: %w", readErr)
+		}
+	}
+	if total != req.ExpectedBytes || len(pending) != 0 {
+		return domain.ResultChunk{}, errors.New("result artifact size or UTF-8 validation failed")
+	}
+	actualSHA256 := hex.EncodeToString(digest.Sum(nil))
+	if !strings.EqualFold(actualSHA256, req.ExpectedSHA256) {
+		return domain.ResultChunk{}, errors.New("result artifact digest mismatch")
+	}
+	if req.OffsetBytes == req.ExpectedBytes {
+		return domain.ResultChunk{OffsetBytes: req.OffsetBytes, NextOffsetBytes: req.OffsetBytes, EOF: true, SHA256: actualSHA256}, nil
+	}
+	if len(chunk) == 0 || !utf8.RuneStart(chunk[0]) {
+		return domain.ResultChunk{}, errors.New("result artifact offset is not a UTF-8 boundary")
+	}
+	completeBytes, err := completeUTF8Prefix(chunk)
+	if err != nil {
+		return domain.ResultChunk{}, err
+	}
+	if completeBytes == 0 {
+		return domain.ResultChunk{}, errors.New("result artifact read bound is smaller than one UTF-8 character")
+	}
+	chunk = chunk[:completeBytes]
+	nextOffset := req.OffsetBytes + int64(len(chunk))
+	return domain.ResultChunk{
+		Content:         string(chunk),
+		OffsetBytes:     req.OffsetBytes,
+		NextOffsetBytes: nextOffset,
+		EOF:             nextOffset == req.ExpectedBytes,
+		SHA256:          actualSHA256,
+	}, nil
+}
+
+func consumeUTF8(data []byte, pending *[]byte) error {
+	for _, value := range data {
+		*pending = append(*pending, value)
+		if !utf8.FullRune(*pending) {
+			continue
+		}
+		runeValue, size := utf8.DecodeRune(*pending)
+		if runeValue == utf8.RuneError && size == 1 {
+			return errors.New("result artifact is not valid UTF-8")
+		}
+		*pending = (*pending)[:0]
+	}
+	return nil
+}
+
+func completeUTF8Prefix(data []byte) (int, error) {
+	position := 0
+	for position < len(data) {
+		if !utf8.FullRune(data[position:]) {
+			break
+		}
+		runeValue, size := utf8.DecodeRune(data[position:])
+		if runeValue == utf8.RuneError && size == 1 {
+			return 0, errors.New("result artifact is not valid UTF-8")
+		}
+		position += size
+	}
+	return position, nil
+}
+
+func minInt64(left, right int64) int64 {
+	if left < right {
+		return left
+	}
+	return right
+}
+
+func maxInt64(left, right int64) int64 {
+	if left > right {
+		return left
+	}
+	return right
+}
+
 func (s *Store) SetReferenceChecker(checker port.ArtifactReferenceChecker) {
 	if s != nil {
 		s.references = checker
@@ -250,3 +431,5 @@ func (s *Store) String() string {
 	}
 	return s.dir + ":" + strconv.FormatInt(s.maxBytes, 10)
 }
+
+var _ port.ResultArtifactChunkReader = (*Store)(nil)

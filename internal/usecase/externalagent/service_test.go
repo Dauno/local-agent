@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -449,6 +451,107 @@ func TestHostCompletionVerifiesPrivateArtifactDigest(t *testing.T) {
 	result, err := service.ReadResult(t.Context(), job.ID, request.Actor, request.ConversationKey)
 	if err != nil || result.Text != content || result.DeliveryMode != domain.JobResultDeliveryFile {
 		t.Fatalf("artifact result = %#v, err = %v", result, err)
+	}
+}
+
+func TestReadResultChunkPaginatesMarkdownAndBindsJobActor(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+		Store: jobStore, Runtime: &fakeJobRuntime{}, MaxResultChunkBytes: 4,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "a🔥bc"
+	digest := sha256.Sum256([]byte(content))
+	request := testRequest(domain.JobDetached)
+	job, err := service.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{
+		Text: content, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	first, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, 0, 2)
+	if err != nil || first.Content != "a" || first.NextOffsetBytes != 1 || first.EOF {
+		t.Fatalf("first chunk = %#v, err = %v", first, err)
+	}
+	second, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, first.NextOffsetBytes, 4)
+	if err != nil || second.Content != "🔥" || second.NextOffsetBytes != 5 || second.EOF {
+		t.Fatalf("second chunk = %#v, err = %v", second, err)
+	}
+	third, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, second.NextOffsetBytes, 4)
+	if err != nil || third.Content != "bc" || !third.EOF || third.SHA256 != fmt.Sprintf("%x", digest) {
+		t.Fatalf("third chunk = %#v, err = %v", third, err)
+	}
+	if _, err := service.ReadResultChunk(t.Context(), job.ID, "U-other", request.ConversationKey, 0, 4); err == nil {
+		t.Fatal("wrong actor read Markdown result chunk")
+	}
+	if _, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, "slack:T12345678:dm:D99999999", 0, 4); err == nil {
+		t.Fatal("wrong conversation read Markdown result chunk")
+	}
+}
+
+func TestReadResultChunkStreamsAndReverifiesFileModeArtifact(t *testing.T) {
+	stateDir := t.TempDir()
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(stateDir, "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	artifacts, err := fsartifact.New(filepath.Join(stateDir, "artifacts"), 256*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+		Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: artifacts, MaxResultBytes: 256 * 1024, MaxResultChunkBytes: 5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequest(domain.JobDetached)
+	job, err := service.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "file🔥result"
+	artifact, err := artifacts.Put(t.Context(), job.ID+"-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{
+		DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes,
+	}, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	chunk, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, 0, 5)
+	if err != nil || chunk.Content != "file" || chunk.NextOffsetBytes != 4 || chunk.EOF {
+		t.Fatalf("file chunk = %#v, err = %v", chunk, err)
+	}
+	if _, err := service.ReadResultChunk(t.Context(), job.ID, "U-other", request.ConversationKey, 0, 5); err == nil {
+		t.Fatal("wrong actor read file-mode result chunk")
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "artifacts", artifact.Reference), []byte("file🔥tamper"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, 0, 5); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
+		t.Fatalf("tampered file-mode artifact error = %v", err)
 	}
 }
 

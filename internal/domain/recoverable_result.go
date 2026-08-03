@@ -22,6 +22,18 @@ type ResultChunkRequest struct {
 	MaxBytes        int
 }
 
+// ResultArtifactChunkRequest describes one verified read from a private
+// external-agent artifact. The adapter verifies the complete artifact before
+// returning only the requested UTF-8 range.
+type ResultArtifactChunkRequest struct {
+	OwnerID        string
+	Reference      string
+	ExpectedBytes  int64
+	ExpectedSHA256 string
+	OffsetBytes    int64
+	MaxBytes       int64
+}
+
 type ResultChunk struct {
 	Content         string
 	OffsetBytes     int64

@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 func TestResultArtifactStoreWritesPrivateAtomicArtifact(t *testing.T) {
@@ -144,5 +145,85 @@ func TestResultArtifactStoreRejectsSymlinkNonRegularAndReadOverflow(t *testing.T
 	}
 	if _, err := store.Get(context.Background(), "job_1-delivery", artifact.Reference, fmt.Sprintf("%x", digest), 4); err == nil {
 		t.Fatal("artifact read exceeded the requested bound")
+	}
+}
+
+func TestResultArtifactStoreReadsVerifiedUTF8Chunks(t *testing.T) {
+	store, err := fsartifact.New(t.TempDir(), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const content = "a🔥bc"
+	artifact, err := store.Put(t.Context(), "job_chunk-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(offset, max int64) domain.ResultChunk {
+		t.Helper()
+		chunk, err := store.ReadChunk(t.Context(), domain.ResultArtifactChunkRequest{
+			OwnerID: "job_chunk-delivery", Reference: artifact.Reference, ExpectedBytes: artifact.Bytes,
+			ExpectedSHA256: artifact.SHA256, OffsetBytes: offset, MaxBytes: max,
+		})
+		if err != nil {
+			t.Fatalf("read chunk at %d: %v", offset, err)
+		}
+		return chunk
+	}
+	first := read(0, 2)
+	if first.Content != "a" || first.OffsetBytes != 0 || first.NextOffsetBytes != 1 || first.EOF || first.SHA256 != artifact.SHA256 {
+		t.Fatalf("first chunk = %#v", first)
+	}
+	second := read(first.NextOffsetBytes, 4)
+	if second.Content != "🔥" || second.NextOffsetBytes != 5 || second.EOF {
+		t.Fatalf("second chunk = %#v", second)
+	}
+	third := read(second.NextOffsetBytes, 4)
+	if third.Content != "bc" || third.NextOffsetBytes != artifact.Bytes || !third.EOF {
+		t.Fatalf("third chunk = %#v", third)
+	}
+}
+
+func TestResultArtifactStoreRejectsChunkBindingAndTampering(t *testing.T) {
+	dir := t.TempDir()
+	store, err := fsartifact.New(dir, 256*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := strings.Repeat("x", 128*1024)
+	artifact, err := store.Put(t.Context(), "job_large-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := domain.ResultArtifactChunkRequest{
+		OwnerID: "job_large-delivery", Reference: artifact.Reference, ExpectedBytes: artifact.Bytes,
+		ExpectedSHA256: artifact.SHA256, OffsetBytes: 0, MaxBytes: 32,
+	}
+	chunk, err := store.ReadChunk(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(chunk.Content) != 32 || len(chunk.Content) >= len(content) || chunk.NextOffsetBytes != 32 {
+		t.Fatalf("large artifact chunk = %#v, content length = %d", chunk, len(chunk.Content))
+	}
+	request.OwnerID = "other-job-delivery"
+	if _, err := store.ReadChunk(t.Context(), request); err == nil {
+		t.Fatal("wrong artifact owner was accepted")
+	}
+	request.OwnerID = "job_large-delivery"
+	request.ExpectedBytes++
+	if _, err := store.ReadChunk(t.Context(), request); err == nil {
+		t.Fatal("wrong artifact size was accepted")
+	}
+	request.ExpectedBytes = artifact.Bytes
+	request.ExpectedSHA256 = strings.Repeat("0", 64)
+	if _, err := store.ReadChunk(t.Context(), request); err == nil {
+		t.Fatal("wrong artifact digest was accepted")
+	}
+	if err := os.WriteFile(filepath.Join(dir, artifact.Reference), []byte(strings.Repeat("y", len(content))), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	request.ExpectedSHA256 = artifact.SHA256
+	if _, err := store.ReadChunk(t.Context(), request); err == nil {
+		t.Fatal("tampered artifact was accepted")
 	}
 }
