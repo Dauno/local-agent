@@ -204,8 +204,8 @@ started. The agent can discover registered names, list one directory at a time,
 and read bounded UTF-8 text files. It cannot execute commands or modify files.
 
 The filesystem boundary rejects absolute and parent-traversal paths, access
-outside registered roots, and unsafe symlinks. `.env`, `.local-agent`, and
-`.git` are unavailable at every depth; similarly named paths such as
+outside registered roots, and unsafe symlinks. `.env` and `.git` are unavailable
+at every depth; `.local-agent` and similarly named paths such as
 `.env.example`, `.gitignore`, and `.github` remain available. Source files can
 still contain embedded secrets, so register only projects whose source may be
 sent to the configured model endpoint.

@@ -443,6 +443,24 @@ func TestReadRangeRejectsRestrictedSegments(t *testing.T) {
 	}
 }
 
+func TestReadRangeAcceptsLocalAgentSegments(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Mkdir(filepath.Join(root, ".local-agent"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(root, ".local-agent"), "config.yaml", "state: local\n")
+	reader := NewReader(root, 4096, 4096, 1<<20)
+	result, err := reader.ReadRange(context.Background(), domain.SourceRangeRequest{
+		Project: "test", Path: ".local-agent/config.yaml", StartLine: 1, MaxLines: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Content != "state: local\n" {
+		t.Fatalf("content = %q", result.Content)
+	}
+}
+
 func TestReadRange_MaxFileBytesCap(t *testing.T) {
 	root := t.TempDir()
 	writeFile(t, root, "large.txt", "line1\nline2\nline3\nline4\nline5\n")

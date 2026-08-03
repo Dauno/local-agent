@@ -271,7 +271,7 @@ func validateRelativePath(path string) error {
 }
 
 func isRestrictedSegment(seg string) bool {
-	return seg == ".env" || seg == ".local-agent" || seg == ".git"
+	return seg == ".env" || seg == ".git"
 }
 
 type systemClock struct{}

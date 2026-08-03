@@ -274,7 +274,7 @@ func anyRestrictedSegment(path string) bool {
 }
 
 func isRestrictedSegment(seg string) bool {
-	return seg == ".env" || seg == ".local-agent" || seg == ".git"
+	return seg == ".env" || seg == ".git"
 }
 
 func textPrefix(data []byte, maxBytes int) ([]byte, bool, bool) {

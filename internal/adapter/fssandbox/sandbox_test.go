@@ -215,8 +215,8 @@ func TestListDirectoryHiddenRestrictedEntries(t *testing.T) {
 		t.Fatal(err)
 	}
 	lines := splitLines(result.Output)
-	forbidden := map[string]bool{".git": true, ".env": true, ".local-agent": true}
-	allowed := map[string]bool{"visible.txt": true, ".env.example": true, ".gitignore": true, ".github/": true}
+	forbidden := map[string]bool{".git": true, ".env": true}
+	allowed := map[string]bool{"visible.txt": true, ".env.example": true, ".gitignore": true, ".github/": true, ".local-agent/": true}
 	for _, line := range lines {
 		if forbidden[line] {
 			t.Fatalf("restricted entry %q should not appear in listing", line)

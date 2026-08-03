@@ -1,6 +1,6 @@
 agent_class: AcpAgent
 name: improve_agent
-runtime: opencode/sol-high
+runtime: opencode/sol-worker
 execution_mode: durable_job
 timeout_seconds: 7200
 description: |
