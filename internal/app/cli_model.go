@@ -114,10 +114,16 @@ func validateTranscriptionModel(resolved *agentdef.ResolvedModel) error {
 		return errors.New("slack.files.transcription_profile resolved to no model")
 	}
 	if resolved.Type() != agentdef.ProviderTypeOpenAICompatible {
-		return fmt.Errorf("slack.files.transcription_profile requires an %s provider for ADK load_artifacts; got %s", agentdef.ProviderTypeOpenAICompatible, resolved.Type())
+		return fmt.Errorf("slack.files.transcription_profile requires an %s provider; got %s", agentdef.ProviderTypeOpenAICompatible, resolved.Type())
 	}
-	if problems := agentdef.ValidateProfileCapability(resolved); len(problems) > 0 {
-		return fmt.Errorf("validate transcription model capability: %s", strings.Join(problems, "; "))
+	if strings.TrimSpace(resolved.Model) == "" {
+		return errors.New("slack.files.transcription_profile requires a model")
+	}
+	if strings.TrimSpace(resolved.BaseURL) == "" {
+		return errors.New("slack.files.transcription_profile requires a base URL")
+	}
+	if strings.TrimSpace(resolved.APIKeyEnv) == "" {
+		return errors.New("slack.files.transcription_profile requires an API-key environment variable")
 	}
 	return nil
 }

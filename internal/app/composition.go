@@ -33,6 +33,7 @@ import (
 	metricsadapter "github.com/Dauno/slack-local-agent/internal/adapter/metrics"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
+	"github.com/Dauno/slack-local-agent/internal/adapter/openaistt"
 	"github.com/Dauno/slack-local-agent/internal/adapter/opencodemanager"
 	"github.com/Dauno/slack-local-agent/internal/adapter/rangedreader"
 	"github.com/Dauno/slack-local-agent/internal/adapter/recoverableresult"
@@ -79,7 +80,7 @@ type runtimeModels struct {
 	curatorDef          *agentdef.AgentDef
 	attachmentDef       *agentdef.AgentDef
 	attachmentModel     model.LLM
-	transcriptionModel  model.LLM
+	transcriber         port.AudioTranscriber
 	apiKey              string
 	botToken            string
 	appToken            string
@@ -314,9 +315,18 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		if err := validateTranscriptionModel(transcriptionResolved); err != nil {
 			return runtimeModels{}, err
 		}
-		prepared.transcriptionModel, _, err = newModelForResolved(ctx, transcriptionResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
+		apiKey := values[transcriptionResolved.APIKeyEnv]
+		if strings.TrimSpace(apiKey) == "" {
+			return runtimeModels{}, fmt.Errorf("%s is not configured for transcription profile %q", transcriptionResolved.APIKeyEnv, profile)
+		}
+		prepared.transcriber, err = openaistt.New(openaistt.Config{
+			BaseURL: transcriptionResolved.BaseURL,
+			APIKey:  apiKey,
+			Model:   transcriptionResolved.Model,
+			Headers: transcriptionResolved.Headers,
+		})
 		if err != nil {
-			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build transcription model client: %w", err))
+			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build transcription client: %w", err))
 		}
 	}
 	prepared.agentName = prepared.rootDef.Name
@@ -442,7 +452,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 		}
 	}
 	transcriptionTimeout := time.Duration(cfg.Slack.Files.TranscriptionTimeoutSeconds) * time.Second
-	attachmentProc := adkartifact.NewProcessorWithTranscription(artifactSvc, models.attachmentModel, attachmentInstruction, attachmentTimeout, models.transcriptionModel, transcriptionTimeout, modelCalls)
+	attachmentProc := adkartifact.NewProcessorWithTranscription(artifactSvc, models.attachmentModel, attachmentInstruction, attachmentTimeout, models.transcriber, transcriptionTimeout, modelCalls)
 	if err := store.ReconcileAssistantExchanges(ctx, history); err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("reconcile assistant exchanges: %w", err))
 	}
