@@ -8,3 +8,8 @@ profiles:
         context_window_tokens: 131072
         token_counter:
           strategy: byte_bound
+    stt:
+        model: openai/gpt-4o-mini-transcribe
+        context_window_tokens: 131072
+        token_counter:
+          strategy: byte_bound

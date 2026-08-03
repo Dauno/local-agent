@@ -3,16 +3,29 @@ package adkagent
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 func CompilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.RequestBudget, continuity port.ContinuityStore, summaries port.SummaryStore, actor string) llmagent.BeforeModelCallback {
+	return compilerBeforeModelCallback(compiler, budget, continuity, summaries, nil, domain.ContextCompactionSettings{}, actor)
+}
+
+// CompilerBeforeModelCallbackWithSnapshot is the production callback. ADK's
+// callback wrapper deliberately does not expose Session(); durable metadata is
+// loaded through the supported session service instead.
+func CompilerBeforeModelCallbackWithSnapshot(compiler port.ContextCompiler, budget domain.RequestBudget, continuity port.ContinuityStore, summaries port.SummaryStore, sessions session.Service, compaction domain.ContextCompactionSettings, actor string) llmagent.BeforeModelCallback {
+	return compilerBeforeModelCallback(compiler, budget, continuity, summaries, sessions, compaction, actor)
+}
+
+func compilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.RequestBudget, continuity port.ContinuityStore, summaries port.SummaryStore, sessions session.Service, compaction domain.ContextCompactionSettings, actor string) llmagent.BeforeModelCallback {
 	return func(ctx agent.Context, request *model.LLMRequest) (*model.LLMResponse, error) {
 		if request == nil || compiler == nil {
 			return nil, errors.New("ADK context compiler and request are required")
@@ -44,31 +57,26 @@ func CompilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.Re
 				summary = record.SanitizedText
 			}
 		}
-		openInvocationIDs := make(map[string]struct{})
+		openInvocationIDs := visibleOpenInvocationIDs(contents)
 		var sessionRevision int64
-		if ctx != nil && ctx.Session() != nil && ctx.Session().Events() != nil {
-			events := ctx.Session().Events()
-			sessionRevision = int64(events.Len())
-			if revisioned, ok := ctx.Session().(interface{ Revision() int64 }); ok {
-				sessionRevision = revisioned.Revision()
+		if ctx != nil && sessions != nil {
+			loaded, snapshotErr := sessions.Get(ctx, &session.GetRequest{AppName: ctx.AppName(), UserID: ctx.UserID(), SessionID: ctx.SessionID()})
+			if snapshotErr != nil || loaded == nil || loaded.Session == nil {
+				if snapshotErr == nil {
+					snapshotErr = errors.New("session snapshot is empty")
+				}
+				return nil, fmt.Errorf("ADK context snapshot unavailable: %w", snapshotErr)
 			}
-			for event := range events.All() {
-				for _, id := range event.LongRunningToolIDs {
-					if id != "" {
-						openInvocationIDs[id] = struct{}{}
-					}
-				}
-				if event.Content != nil {
-					for _, part := range event.Content.Parts {
-						if part != nil && part.FunctionResponse != nil {
-							delete(openInvocationIDs, part.FunctionResponse.ID)
-						}
-					}
-				}
+			events := loaded.Session.Events()
+			if events != nil {
+				sessionRevision = int64(events.Len())
+			}
+			if revisioned, ok := loaded.Session.(interface{ Revision() int64 }); ok {
+				sessionRevision = revisioned.Revision()
 			}
 		}
 		result, err := compiler.Compile(ctx, domain.CompileRequest{Contents: contents, Continuity: capsule,
-			ExistingSummary: summary, ModelBudget: budget, FixedRequestTokens: fixed, Actor: actor,
+			ExistingSummary: summary, Compaction: compaction, ModelBudget: budget, FixedRequestTokens: fixed, Actor: actor,
 			ConversationKey: conversationKeyFromSession(ctx), SessionRevision: sessionRevision,
 			OpenInvocationIDs: openInvocationIDs})
 		if err != nil {
@@ -77,4 +85,19 @@ func CompilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.Re
 		request.Contents, err = fromDomainContents(result.Contents)
 		return nil, err
 	}
+}
+
+func visibleOpenInvocationIDs(contents []domain.Content) map[string]struct{} {
+	open := make(map[string]struct{})
+	for _, content := range contents {
+		for _, part := range content.Parts {
+			switch {
+			case part.FunctionCall != nil && part.FunctionCall.ID != "":
+				open[part.FunctionCall.ID] = struct{}{}
+			case part.FunctionResponse != nil:
+				delete(open, part.FunctionResponse.ID)
+			}
+		}
+	}
+	return open
 }

@@ -16,8 +16,9 @@ import (
 )
 
 const (
-	SlackBotTokenKey = "SLACK_BOT_TOKEN"
-	SlackAppTokenKey = "SLACK_APP_TOKEN"
+	SlackBotTokenKey                    = "SLACK_BOT_TOKEN"
+	SlackAppTokenKey                    = "SLACK_APP_TOKEN"
+	defaultAuxiliaryModelTimeoutSeconds = 120
 )
 
 type SecretResolver interface {
@@ -58,6 +59,10 @@ type LiveChecker interface {
 	CheckSlackExports(ctx context.Context, botToken string) error
 	CheckModel(ctx context.Context, model config.ModelConfig, apiKey string) error
 	CheckResolvedModel(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error
+}
+
+type AttachmentLiveChecker interface {
+	CheckAttachmentAnalyzer(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error
 }
 
 // CLIProviderCheck is the typed result of one offline agent_cli provider
@@ -654,6 +659,34 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			} else {
 				report.pass("model endpoint", "minimal non-streaming Chat Completions request passed")
 			}
+		}
+	}
+	for _, selected := range selectedModels {
+		if selected.resolved == nil || selected.resolved.Type() != agentdef.ProviderTypeOpenAICompatible || selected.agent == "root_agent" {
+			continue
+		}
+		key := selected.resolved.APIKeyEnv
+		if !validSecrets[key] {
+			continue
+		}
+		selectedCtx, selectedCancel := checkTimeout(ctx, defaultAuxiliaryModelTimeoutSeconds)
+		var selectedErr error
+		name := "model endpoint (" + selected.agent + ")"
+		if selected.agent == "attachment_analyzer" {
+			checker, ok := s.deps.Live.(AttachmentLiveChecker)
+			if !ok {
+				selectedErr = errors.New("attachment analyzer live checker is unavailable")
+			} else {
+				selectedErr = checker.CheckAttachmentAnalyzer(selectedCtx, selected.resolved, values[key])
+			}
+		} else {
+			selectedErr = s.deps.Live.CheckResolvedModel(selectedCtx, selected.resolved, values[key])
+		}
+		selectedCancel()
+		if selectedErr != nil {
+			report.fail(name, redactor.String(selectedErr.Error()), "Verify the selected auxiliary model endpoint, API key, and tool capability.", false)
+		} else {
+			report.pass(name, "selected auxiliary model live check passed")
 		}
 	}
 	return report

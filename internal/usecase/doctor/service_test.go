@@ -36,8 +36,8 @@ type failingDatabase struct{ err error }
 func (d failingDatabase) CheckDatabase(context.Context, string) error { return d.err }
 
 type fakeLive struct {
-	bot, app, context, canvas, exports, model int
-	modelAPIKey                               string
+	bot, app, context, canvas, exports, model, attachment int
+	modelAPIKey                                           string
 }
 
 type fakeCLI struct {
@@ -83,6 +83,12 @@ func (f *fakeLive) CheckModel(context.Context, config.ModelConfig, string) error
 
 func (f *fakeLive) CheckResolvedModel(_ context.Context, _ *agentdef.ResolvedModel, apiKey string) error {
 	f.model++
+	f.modelAPIKey = apiKey
+	return nil
+}
+
+func (f *fakeLive) CheckAttachmentAnalyzer(_ context.Context, _ *agentdef.ResolvedModel, apiKey string) error {
+	f.attachment++
 	f.modelAPIKey = apiKey
 	return nil
 }
@@ -418,6 +424,54 @@ func TestLiveDoctorAuthenticatesWithRetainedShimIdentity(t *testing.T) {
 	}
 	if len(cli.authShims) != 1 || cli.authShims[0] != "codex" {
 		t.Fatalf("authentication did not receive retained mapper identity: %v", cli.authShims)
+	}
+}
+
+func TestLiveDoctorChecksOpenAIAttachmentWithAgentCLIRoot(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorCLIDefinitions(t, stateDir, false)
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "vision.yaml"), []byte(`
+name: vision
+type: openai_compatible
+base_url: https://example.com/v1
+api_key_env: VISION_API_KEY
+profiles:
+  analyzer:
+    model: vision/model
+    context_window_tokens: 128000
+    token_counter:
+      strategy: byte_bound
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "attachment_analyzer.yaml"), []byte(`
+agent_class: LlmAgent
+name: attachment_analyzer
+model: vision/analyzer
+instruction: inspect image
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps, _, live := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Sandbox.Enabled = true
+		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
+		return cfg, nil
+	}
+	deps.Secrets = fakeSecrets{values: map[string]string{
+		"VISION_API_KEY": "vision-secret", SlackBotTokenKey: "xoxb-secret-token", SlackAppTokenKey: "xapp-secret-token",
+	}}
+	deps.CLI = &fakeCLI{}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), true)
+	if report.ExitCode() != 0 || live.attachment != 1 || live.modelAPIKey != "vision-secret" {
+		t.Fatalf("report=%#v live=%#v", report.Results, live)
 	}
 }
 

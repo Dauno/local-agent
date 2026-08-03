@@ -477,8 +477,42 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 }
 
 type runtimeComposition struct {
-	service         *botusecase.Service
-	agentBuilderSvc port.AgentBuilderService
+	service            *botusecase.Service
+	agentBuilderSvc    port.AgentBuilderService
+	externalJobService *externalagentusecase.Service
+	notificationDone   chan struct{}
+}
+
+func (c *runtimeComposition) StopExternalAdmission() {
+	if c != nil && c.externalJobService != nil {
+		c.externalJobService.StopAdmission()
+	}
+}
+
+func (c *runtimeComposition) WaitExternal(ctx context.Context) error {
+	if c == nil || c.externalJobService == nil {
+		return nil
+	}
+	return c.externalJobService.WaitStopped(ctx)
+}
+
+func (c *runtimeComposition) ExternalShutdownStats(ctx context.Context) (domain.ExternalAgentJobShutdownStats, error) {
+	if c == nil || c.externalJobService == nil {
+		return domain.ExternalAgentJobShutdownStats{}, nil
+	}
+	return c.externalJobService.ShutdownStats(ctx)
+}
+
+func (c *runtimeComposition) WaitNotification(ctx context.Context) error {
+	if c == nil || c.notificationDone == nil {
+		return nil
+	}
+	select {
+	case <-c.notificationDone:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (*runtimeComposition, error) {
@@ -492,6 +526,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var compositeFactory *compositeAgentToolFactory
 	var externalJobService *externalagentusecase.Service
 	var notificationWorker *externalagentusecase.NotificationWorker
+	var notificationDone chan struct{}
 	var summaryScheduler port.SummaryScheduler
 	var continuityStore port.ContinuityStore
 	var resultStore *recoverableresult.Store
@@ -645,7 +680,11 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			go externalJobService.Run(ctx)
 		}
 		if notificationWorker != nil {
-			go notificationWorker.Run(ctx)
+			notificationDone = make(chan struct{})
+			go func() {
+				defer close(notificationDone)
+				notificationWorker.Run(ctx)
+			}()
 		}
 		if setup.defs != nil {
 			if provider, exists := setup.defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
@@ -687,6 +726,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var projector port.ContextProjector
 	var compiler port.ContextCompiler
 	var contextBudget domain.RequestBudget
+	var contextCompaction domain.ContextCompactionSettings
 	if !models.rootIsAgentCLI && features != nil && features.ModelBudgetEnabled {
 		contextBudget, err = domain.NewRequestBudget(models.contextWindowTokens, domain.RequestBudgetPolicy{MaxRequestPercent: cfg.Context.ModelBudget.MaxRequestPercent})
 		if err != nil {
@@ -699,20 +739,27 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		if compaction == nil {
 			return nil, errors.New("context.adk_compaction is required for durable model runtime")
 		}
-		projector, err = adkagent.NewProjector(adkagent.CompactionConfig{
+		contextCompaction = domain.ContextCompactionSettings{
 			Enabled: compaction.Enabled, MaxHistoryChars: compaction.MaxHistoryChars,
 			RecentTurns: compaction.RecentTurns, SummaryEnabled: compaction.SummaryEnabled,
 			SummaryMaxChars: compaction.SummaryMaxChars,
-		})
-		if err != nil {
-			return nil, models.redactor.Error(fmt.Errorf("initialize ADK context projector: %w", err))
 		}
-		if concrete, ok := projector.(*adkagent.Projector); ok {
-			concrete.SetSummaryStore(infra.store)
-			concrete.SetLogger(models.logger)
+		if compiler == nil {
+			projector, err = adkagent.NewProjector(adkagent.CompactionConfig{
+				Enabled: compaction.Enabled, MaxHistoryChars: compaction.MaxHistoryChars,
+				RecentTurns: compaction.RecentTurns, SummaryEnabled: compaction.SummaryEnabled,
+				SummaryMaxChars: compaction.SummaryMaxChars,
+			})
+			if err != nil {
+				return nil, models.redactor.Error(fmt.Errorf("initialize ADK context projector: %w", err))
+			}
+			if concrete, ok := projector.(*adkagent.Projector); ok {
+				concrete.SetSummaryStore(infra.store)
+				concrete.SetLogger(models.logger)
+			}
 		}
 	}
-	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContinuityStore: continuityStore, SummaryStore: infra.store, Metrics: models.metrics, ProviderFamily: models.rootFamily})
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContextCompaction: contextCompaction, ContinuityStore: continuityStore, SummaryStore: infra.store, Metrics: models.metrics, ProviderFamily: models.rootFamily})
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}
@@ -742,7 +789,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			return nil, err
 		}
 	}
-	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc}, nil
+	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationDone: notificationDone}, nil
 }
 
 func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service) error {
@@ -785,7 +832,7 @@ func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup
 	return nil
 }
 
-func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, composition *runtimeComposition) error {
+func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, composition *runtimeComposition) error {
 	cfg := setup.cfg
 	socket := socketmode.New(infra.api, socketmode.OptionLog(infra.sdkLog))
 	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(infra.auth.UserID, cfg.Slack.StandardAgent.ThreadedDM), models.logger).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs)
@@ -849,7 +896,7 @@ func (a *Application) startSlackRuntime(ctx context.Context, setup runtimeSetup,
 	listener.SetInteractiveHandler(func(ictx context.Context, action domain.ConfirmationInteractiveAction) error {
 		return composition.service.HandleConfirmationInteractive(ictx, action)
 	})
-	err := listener.Run(ctx, func(eventCtx context.Context, invocation domain.Invocation) {
+	err := listener.RunWithHandlerContext(intakeCtx, handlerCtx, func(eventCtx context.Context, invocation domain.Invocation) {
 		if _, handleErr := composition.service.Handle(eventCtx, invocation); handleErr != nil {
 			models.logger.Error("Slack invocation processing failed", "event_id", invocation.EventID, "error", handleErr)
 		}

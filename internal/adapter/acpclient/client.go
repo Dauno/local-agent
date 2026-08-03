@@ -264,7 +264,14 @@ func (c *Client) reconcile(ctx context.Context, req domain.AcpInvocationRequest,
 			return domain.AcpInvocationResult{}, err
 		}
 	}
-	result, err := c.prompt(proc, sessionID, recoveryPrompt, domain.ACPPermissionRejectOnce, req.ConfigOptions, req.JobID, nil, nil)
+	permission := req.PermissionOptionKind
+	if permission == "" {
+		permission = domain.ACPPermissionRejectOnce
+	}
+	if permission != domain.ACPPermissionRejectOnce && permission != domain.ACPPermissionAllowOnce {
+		return domain.AcpInvocationResult{}, errors.New("ACP recovery permission policy is invalid")
+	}
+	result, err := c.prompt(proc, sessionID, recoveryPrompt, permission, req.ConfigOptions, req.JobID, nil, nil)
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
 	}

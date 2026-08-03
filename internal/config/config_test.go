@@ -43,6 +43,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			ModelTimeoutSeconds:     0,
 			SlackAPITimeoutSeconds:  30,
 			MaxConcurrentModelCalls: 4,
+			ShutdownGraceSeconds:    30,
 			BusyMessage:             "El bot está ocupado procesando otras solicitudes. Intenta de nuevo en unos minutos.",
 			ModelErrorMessage:       "No pude completar la respuesta por un error del modelo. Intenta de nuevo.",
 		},
@@ -99,7 +100,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 		Canvases:         config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:          config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
 		OpenCode:         config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
-		ACP:              config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
+		ACP:              config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
 		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
 	}
 
@@ -215,6 +216,7 @@ runtime:
   model_timeout_seconds: 0
   slack_api_timeout_seconds: 30
   max_concurrent_model_calls: 4
+  shutdown_grace_seconds: 30
   busy_message: El bot está ocupado procesando otras solicitudes. Intenta de nuevo en unos minutos.
   model_error_message: No pude completar la respuesta por un error del modelo. Intenta de nuevo.
 model:
@@ -296,6 +298,7 @@ acp:
    default_job_timeout_seconds: 7200
    max_job_timeout_seconds: 86400
    idle_timeout_seconds: 0
+   reconciliation_timeout_seconds: 1800
    worker_concurrency: 1
    artifact_retention_days: 30
    delivery:
@@ -478,7 +481,9 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 	cfg.Runtime.ModelTimeoutSeconds = -1
 	cfg.Runtime.SlackAPITimeoutSeconds = -1
 	cfg.Runtime.MaxConcurrentModelCalls = 0
-	cfg.Model.BaseURL = "ftp://example.com"
+	cfg.Runtime.ShutdownGraceSeconds = 0
+	cfg.Model.BaseURL = "https://example.com/v1/chat/completions"
+	cfg.ACP.ReconciliationTimeoutSeconds = 0
 	cfg.Model.APIKeyEnv = "NOT-AN-ENV"
 	cfg.Model.ReasoningEffort = "maximum"
 	cfg.Model.Headers = map[string]string{"Bad Header": "line\nbreak"}
@@ -504,7 +509,9 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 		"runtime.model_timeout_seconds",
 		"runtime.slack_api_timeout_seconds",
 		"runtime.max_concurrent_model_calls",
+		"runtime.shutdown_grace_seconds",
 		"model.base_url",
+		"acp.reconciliation_timeout_seconds",
 		"model.api_key_env",
 		"model.reasoning_effort",
 		`model.headers["Bad Header"]`,

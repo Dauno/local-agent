@@ -15,13 +15,21 @@ const (
 
 // Context compiler metrics.
 const (
-	MetricContextProtectedTokens       = "context_protected_tokens"
-	MetricContextContinuityTokens      = "context_continuity_tokens"
-	MetricContextRecentTurnsRetained   = "context_recent_turns_retained"
-	MetricContextResponsesExternalized = "context_responses_externalized_total"
-	MetricContextTokensRemoved         = "context_tokens_removed"
-	MetricContextCompileDuration       = "context_compile_duration_seconds"
-	MetricContextRecountPasses         = "context_recount_passes"
+	MetricContextProtectedTokens           = "context_protected_tokens"
+	MetricContextContinuityTokens          = "context_continuity_tokens"
+	MetricContextRecentTurnsRetained       = "context_recent_turns_retained"
+	MetricContextResponsesExternalized     = "context_responses_externalized_total"
+	MetricContextTokensRemoved             = "context_tokens_removed"
+	MetricContextCompileDuration           = "context_compile_duration_seconds"
+	MetricContextRecountPasses             = "context_recount_passes"
+	MetricContextCountBeforeReduction      = "context_count_before_reduction"
+	MetricContextCountAfterReduction       = "context_count_after_reduction"
+	MetricContextLateExternalization       = "context_late_externalization_total"
+	MetricContextLateExternalized          = "context_late_externalized_responses"
+	MetricContextMinimumRequestTokens      = "context_minimum_request_tokens"
+	MetricContextProtectedCodePoints       = "context_protected_code_points"
+	MetricContextContinuityCodePoints      = "context_continuity_code_points"
+	MetricContextResponseCodePointsRemoved = "context_response_code_points_removed"
 )
 
 // Recoverable results metrics.
@@ -42,6 +50,7 @@ const (
 	MetricContinuityCheckpointValidationFailure = "continuity_checkpoint_validation_failure_total"
 	MetricContinuityCheckpointFallbackTotal     = "continuity_checkpoint_fallback_total"
 	MetricContinuityCheckpointRenderTokens      = "continuity_checkpoint_render_tokens"
+	MetricContinuityCheckpointRenderCodePoints  = "continuity_checkpoint_render_code_points"
 )
 
 // Code intelligence metrics.

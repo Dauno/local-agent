@@ -41,6 +41,7 @@ type Factory struct {
 	agentWriter        port.AgentDefinitionWriter
 	draftStore         port.AgentDraftStore
 	externalJobs       port.ExternalAgentJobReader
+	externalReconciler port.ExternalAgentJobReconciliationService
 	allowedUserIDs     []string
 	recoverableResults port.RecoverableResultStore
 	codeReaders        map[string]port.CodeReader
@@ -114,14 +115,19 @@ func (f *Factory) WithExternalAgentJobs(reader port.ExternalAgentJobReader) *Fac
 	}
 	if reader == nil {
 		f.externalJobs = nil
+		f.externalReconciler = nil
 		return f
 	}
 	value := reflect.ValueOf(reader)
 	if (value.Kind() == reflect.Pointer || value.Kind() == reflect.Interface || value.Kind() == reflect.Map || value.Kind() == reflect.Slice || value.Kind() == reflect.Func) && value.IsNil() {
 		f.externalJobs = nil
+		f.externalReconciler = nil
 		return f
 	}
 	f.externalJobs = reader
+	if reconciler, ok := reader.(port.ExternalAgentJobReconciliationService); ok {
+		f.externalReconciler = reconciler
+	}
 	return f
 }
 
@@ -162,6 +168,13 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 			return nil, fmt.Errorf("build read_job_result tool: %w", err)
 		}
 		tools = append(tools, statusTool, resultTool)
+		if f.externalReconciler != nil {
+			reconcileTool, err := f.reconcileJobTool(actor, key)
+			if err != nil {
+				return nil, fmt.Errorf("build reconcile_job tool: %w", err)
+			}
+			tools = append(tools, reconcileTool)
+		}
 	}
 	if f.recoverableResults != nil {
 		readResult, err := f.readResultChunkTool(actor, key)
@@ -894,6 +907,46 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 			ContentSHA256:   result.ContentSHA256, ContentBytes: result.ContentBytes,
 			DeliveryMode: string(result.DeliveryMode),
 		}, nil
+	})
+}
+
+type reconcileJobArgs struct {
+	JobID            string `json:"job_id" jsonschema:"durable ACP job ID"`
+	ExpectedRevision int    `json:"expected_revision" jsonschema:"status revision returned by job_status"`
+}
+
+type reconcileJobResult struct {
+	JobID           string `json:"job_id"`
+	Status          string `json:"status"`
+	StatusRevision  int    `json:"status_revision"`
+	ResultAvailable bool   `json:"result_available"`
+	ErrorCode       string `json:"error_code,omitempty"`
+}
+
+func (f *Factory) reconcileJobTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	return functiontool.New(functiontool.Config{
+		Name:                "reconcile_job",
+		Description:         "Reconciles one completion_unknown ACP job after inspecting existing provider state. Never replays the original task. Requires confirmation.",
+		RequireConfirmation: true,
+	}, func(ctx agent.Context, args reconcileJobArgs) (reconcileJobResult, error) {
+		if strings.TrimSpace(args.JobID) == "" {
+			return reconcileJobResult{}, errors.New("job_id is required")
+		}
+		if args.ExpectedRevision < 0 {
+			return reconcileJobResult{}, errors.New("expected_revision is required")
+		}
+		if _, err := f.externalReconciler.ReconcileExpected(ctx, args.JobID, actor, key, args.ExpectedRevision); err != nil {
+			return reconcileJobResult{}, err
+		}
+		job, err := f.externalJobs.Status(ctx, args.JobID, actor, key)
+		if err != nil {
+			return reconcileJobResult{}, err
+		}
+		if job == nil {
+			return reconcileJobResult{}, errors.New("external-agent job was not found")
+		}
+		status := job.StatusView()
+		return reconcileJobResult{JobID: status.JobID, Status: string(status.Status), StatusRevision: status.StatusRevision, ResultAvailable: status.ResultAvailable, ErrorCode: status.ErrorCode}, nil
 	})
 }
 

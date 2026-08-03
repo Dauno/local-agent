@@ -71,16 +71,17 @@ type LSPRouteConfig struct {
 }
 
 type ACPConfig struct {
-	MaxFrameBytes            int               `yaml:"max_frame_bytes"`
-	MaxInlineResultBytes     int               `yaml:"max_inline_result_bytes"`
-	MaxResultArtifactBytes   int               `yaml:"max_result_artifact_bytes"`
-	StderrTailBytes          int               `yaml:"stderr_tail_bytes"`
-	DefaultJobTimeoutSeconds int               `yaml:"default_job_timeout_seconds"`
-	MaxJobTimeoutSeconds     int               `yaml:"max_job_timeout_seconds"`
-	IdleTimeoutSeconds       int               `yaml:"idle_timeout_seconds"`
-	WorkerConcurrency        int               `yaml:"worker_concurrency"`
-	ArtifactRetentionDays    int               `yaml:"artifact_retention_days"`
-	Delivery                 ACPDeliveryConfig `yaml:"delivery"`
+	MaxFrameBytes                int               `yaml:"max_frame_bytes"`
+	MaxInlineResultBytes         int               `yaml:"max_inline_result_bytes"`
+	MaxResultArtifactBytes       int               `yaml:"max_result_artifact_bytes"`
+	StderrTailBytes              int               `yaml:"stderr_tail_bytes"`
+	DefaultJobTimeoutSeconds     int               `yaml:"default_job_timeout_seconds"`
+	MaxJobTimeoutSeconds         int               `yaml:"max_job_timeout_seconds"`
+	IdleTimeoutSeconds           int               `yaml:"idle_timeout_seconds"`
+	ReconciliationTimeoutSeconds int               `yaml:"reconciliation_timeout_seconds"`
+	WorkerConcurrency            int               `yaml:"worker_concurrency"`
+	ArtifactRetentionDays        int               `yaml:"artifact_retention_days"`
+	Delivery                     ACPDeliveryConfig `yaml:"delivery"`
 }
 
 type ACPDeliveryConfig struct {
@@ -137,6 +138,7 @@ type RuntimeConfig struct {
 	ModelTimeoutSeconds     int    `yaml:"model_timeout_seconds"`
 	SlackAPITimeoutSeconds  int    `yaml:"slack_api_timeout_seconds"`
 	MaxConcurrentModelCalls int    `yaml:"max_concurrent_model_calls"`
+	ShutdownGraceSeconds    int    `yaml:"shutdown_grace_seconds"`
 	BusyMessage             string `yaml:"busy_message"`
 	ModelErrorMessage       string `yaml:"model_error_message"`
 }
@@ -259,6 +261,7 @@ func Default() Config {
 			ModelTimeoutSeconds:     0,
 			SlackAPITimeoutSeconds:  30,
 			MaxConcurrentModelCalls: 4,
+			ShutdownGraceSeconds:    30,
 			BusyMessage:             DefaultBusyMessage,
 			ModelErrorMessage:       DefaultModelErrorMessage,
 		},
@@ -323,9 +326,10 @@ func Default() Config {
 			MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024,
 			MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024,
 			DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400,
-			WorkerConcurrency:     1,
-			ArtifactRetentionDays: 30,
-			Delivery:              ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
+			ReconciliationTimeoutSeconds: 1800,
+			WorkerConcurrency:            1,
+			ArtifactRetentionDays:        30,
+			Delivery:                     ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
 		},
 		CodeIntelligence: &CodeIntelligenceConfig{
 			Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10,

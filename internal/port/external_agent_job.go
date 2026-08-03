@@ -10,6 +10,7 @@ import (
 
 var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
 var ErrNotificationClaimConflict = ErrNotificationStateConflict
+var ErrExternalAgentJobRevisionConflict = errors.New("external-agent job status revision conflict")
 
 // ExternalAgentJobStore is the durable source of truth for external-agent
 // execution. Implementations must bind lease operations to owner and attempt.
@@ -91,6 +92,23 @@ type ExternalAgentJobDeliveryStore interface {
 
 type ExternalAgentJobReconciler interface {
 	BeginReconciliation(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error)
+}
+
+// ExternalAgentJobExpectedReconciler is the optional revision-aware form used
+// by operator and Slack entry points. Production stores implement the CAS in
+// the same transaction as the reconciling transition.
+type ExternalAgentJobExpectedReconciler interface {
+	BeginReconciliationExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error)
+}
+
+type ExternalAgentJobShutdownStore interface {
+	ShutdownStats(ctx context.Context) (domain.ExternalAgentJobShutdownStats, error)
+}
+
+// ExternalAgentJobReconciliationService is the shared confirmed operation for
+// CLI and invocation-scoped Slack tools.
+type ExternalAgentJobReconciliationService interface {
+	ReconcileExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int) (domain.AcpInvocationResult, error)
 }
 
 type JobNotificationPublisher interface {

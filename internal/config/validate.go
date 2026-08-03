@@ -136,6 +136,9 @@ func Validate(cfg Config) error {
 	if cfg.Runtime.MaxConcurrentModelCalls <= 0 {
 		add("runtime.max_concurrent_model_calls", "must be greater than zero")
 	}
+	if cfg.Runtime.ShutdownGraceSeconds <= 0 || cfg.Runtime.ShutdownGraceSeconds > 3600 {
+		add("runtime.shutdown_grace_seconds", "must be between 1 and 3600")
+	}
 	requireText("runtime.busy_message", cfg.Runtime.BusyMessage)
 	requireText("runtime.model_error_message", cfg.Runtime.ModelErrorMessage)
 
@@ -444,6 +447,11 @@ func validateACP(problems *[]FieldError, cfg ACPConfig) {
 	} else if cfg.DefaultJobTimeoutSeconds > cfg.MaxJobTimeoutSeconds {
 		addConfigProblem(problems, "acp.default_job_timeout_seconds", "must not exceed acp.max_job_timeout_seconds")
 	}
+	if cfg.ReconciliationTimeoutSeconds <= 0 {
+		addConfigProblem(problems, "acp.reconciliation_timeout_seconds", "must be greater than zero")
+	} else if cfg.MaxJobTimeoutSeconds > 0 && cfg.ReconciliationTimeoutSeconds > cfg.MaxJobTimeoutSeconds {
+		addConfigProblem(problems, "acp.reconciliation_timeout_seconds", "must not exceed acp.max_job_timeout_seconds")
+	}
 	if cfg.IdleTimeoutSeconds < 0 {
 		addConfigProblem(problems, "acp.idle_timeout_seconds", "must be zero or greater")
 	}
@@ -499,6 +507,12 @@ func validateBaseURL(problems *[]FieldError, value string) {
 		*problems = append(*problems, FieldError{
 			Field:   "model.base_url",
 			Problem: "must not contain a URL fragment",
+		})
+	}
+	if strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/chat/completions") {
+		*problems = append(*problems, FieldError{
+			Field:   "model.base_url",
+			Problem: "must be an API root, not a concrete /chat/completions operation URL",
 		})
 	}
 }

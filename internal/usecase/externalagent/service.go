@@ -49,6 +49,10 @@ type Service struct {
 	clock          port.Clock
 	logger         port.Logger
 	metrics        port.MetricRecorder
+	stopClaims     chan struct{}
+	stopOnce       sync.Once
+	admissionMu    sync.RWMutex
+	stopped        chan struct{}
 }
 
 var _ port.ExternalAgentJobReader = (*Service)(nil)
@@ -76,7 +80,8 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		metrics = port.NoopMetricRecorder{}
 	}
 	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
-		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, clock: deps.Clock, logger: logger, metrics: metrics}, nil
+		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, clock: deps.Clock, logger: logger, metrics: metrics,
+		stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
 }
 
 func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error) {
@@ -255,6 +260,10 @@ func (s *Service) CancelForConversation(ctx context.Context, jobID, actor string
 }
 
 func (s *Service) Reconcile(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.AcpInvocationResult, error) {
+	return s.ReconcileExpected(ctx, jobID, actor, conversationKey, -1)
+}
+
+func (s *Service) ReconcileExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int) (domain.AcpInvocationResult, error) {
 	job, err := s.Status(ctx, jobID, actor, conversationKey)
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
@@ -265,6 +274,12 @@ func (s *Service) Reconcile(ctx context.Context, jobID, actor string, conversati
 	if job.Status != domain.JobCompletionUnknown {
 		return domain.AcpInvocationResult{}, errors.New("external-agent job is not awaiting reconciliation")
 	}
+	if expectedRevision < -1 {
+		return domain.AcpInvocationResult{}, errors.New("expected status revision is invalid")
+	}
+	if expectedRevision >= 0 && job.StatusRevision != expectedRevision {
+		return domain.AcpInvocationResult{}, port.ErrExternalAgentJobRevisionConflict
+	}
 	recovery, ok := s.runtime.(port.ExternalAgentSessionRecoveryRuntime)
 	if !ok {
 		return domain.AcpInvocationResult{}, errors.New("session recovery is unsupported; inspect external state and close the completion_unknown job explicitly")
@@ -273,32 +288,69 @@ func (s *Service) Reconcile(ctx context.Context, jobID, actor string, conversati
 	if !ok {
 		return domain.AcpInvocationResult{}, errors.New("durable job store does not support reconciliation")
 	}
-	reconciling, err := reconciler.BeginReconciliation(ctx, jobID, actor, conversationKey, s.clock.Now().UTC(), "reconciler_"+randomID(), s.cfg.LeaseTTL)
+	owner := "reconciler_" + randomID()
+	var reconciling *domain.ExternalAgentJob
+	if expected, ok := s.store.(port.ExternalAgentJobExpectedReconciler); ok && expectedRevision >= 0 {
+		reconciling, err = expected.BeginReconciliationExpected(ctx, jobID, actor, conversationKey, expectedRevision, s.clock.Now().UTC(), owner, s.cfg.LeaseTTL)
+	} else {
+		reconciling, err = reconciler.BeginReconciliation(ctx, jobID, actor, conversationKey, s.clock.Now().UTC(), owner, s.cfg.LeaseTTL)
+	}
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
-	result, runErr := recovery.Reconcile(ctx, *reconciling)
+	reconcileCtx, cancelReconcile := context.WithCancel(ctx)
+	heartbeatDone := make(chan struct{})
+	heartbeatStopped := make(chan struct{})
+	go func() {
+		defer close(heartbeatStopped)
+		s.heartbeat(reconcileCtx, reconciling, heartbeatDone, cancelReconcile)
+	}()
+	result, runErr := recovery.Reconcile(reconcileCtx, *reconciling)
+	close(heartbeatDone)
+	<-heartbeatStopped
+	cancelReconcile()
 	next, code := domain.JobCompleted, ""
 	if runErr != nil {
 		next, code = domain.JobCompletionUnknown, "completion_unknown"
 	}
 	transitionErr := s.store.Transition(context.WithoutCancel(ctx), reconciling.ID, reconciling.LeaseOwner, reconciling.Attempt, next, &result, code, s.clock.Now().UTC())
 	if transitionErr != nil {
-		return domain.AcpInvocationResult{}, transitionErr
+		return domain.AcpInvocationResult{}, errors.New("external-agent reconciliation state update failed")
 	}
-	return result, runErr
+	if runErr != nil {
+		return domain.AcpInvocationResult{}, safeReconciliationError(runErr)
+	}
+	return result, nil
+}
+
+func safeReconciliationError(err error) error {
+	var acpErr *domain.ACPError
+	if errors.As(err, &acpErr) && acpErr.Code != "" {
+		return fmt.Errorf("external-agent reconciliation failed: %s", acpErr.Code)
+	}
+	return errors.New("external-agent reconciliation failed; job remains completion_unknown")
 }
 
 func (s *Service) Run(ctx context.Context) {
+	defer close(s.stopped)
 	var workers sync.WaitGroup
 	sem := make(chan struct{}, s.cfg.Concurrency)
 	ticker := time.NewTicker(s.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
+		select {
+		case <-s.stopClaims:
+			workers.Wait()
+			return
+		default:
+		}
 		s.recoverExpired(ctx)
 		s.claimAvailable(ctx, sem, &workers)
 		select {
 		case <-ctx.Done():
+			workers.Wait()
+			return
+		case <-s.stopClaims:
 			workers.Wait()
 			return
 		case <-ticker.C:
@@ -306,14 +358,55 @@ func (s *Service) Run(ctx context.Context) {
 	}
 }
 
+// StopAdmission prevents new durable claims while allowing already running
+// jobs to finish under their current context.
+func (s *Service) StopAdmission() {
+	if s == nil {
+		return
+	}
+	s.admissionMu.Lock()
+	s.stopOnce.Do(func() { close(s.stopClaims) })
+	s.admissionMu.Unlock()
+}
+
+// WaitStopped waits for the claim loop and all workers to finish.
+func (s *Service) WaitStopped(ctx context.Context) error {
+	if s == nil {
+		return nil
+	}
+	select {
+	case <-s.stopped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (s *Service) ShutdownStats(ctx context.Context) (domain.ExternalAgentJobShutdownStats, error) {
+	store, ok := s.store.(port.ExternalAgentJobShutdownStore)
+	if !ok {
+		return domain.ExternalAgentJobShutdownStats{}, errors.New("external-agent shutdown stats are unavailable")
+	}
+	return store.ShutdownStats(ctx)
+}
+
 func (s *Service) claimAvailable(ctx context.Context, sem chan struct{}, workers *sync.WaitGroup) {
 	for {
+		s.admissionMu.RLock()
+		select {
+		case <-s.stopClaims:
+			s.admissionMu.RUnlock()
+			return
+		default:
+		}
 		select {
 		case sem <- struct{}{}:
 		default:
+			s.admissionMu.RUnlock()
 			return
 		}
 		job, err := s.store.ClaimNext(ctx, s.clock.Now().UTC(), "worker_"+randomID(), s.cfg.LeaseTTL)
+		s.admissionMu.RUnlock()
 		if err != nil || job == nil {
 			<-sem
 			return
@@ -373,13 +466,14 @@ func (s *Service) heartbeat(ctx context.Context, job *domain.ExternalAgentJob, d
 			return
 		case <-ctx.Done():
 			return
-		case now := <-ticker.C:
+		case <-ticker.C:
+			now := s.clock.Now().UTC()
 			current, err := s.store.GetJob(context.WithoutCancel(ctx), job.ID)
 			if err == nil && current != nil && current.Status == domain.JobCancelRequested {
 				cancel()
 				continue
 			}
-			if err := s.store.RenewLease(context.WithoutCancel(ctx), job.ID, job.LeaseOwner, job.Attempt, now.UTC(), s.cfg.LeaseTTL); err != nil {
+			if err := s.store.RenewLease(context.WithoutCancel(ctx), job.ID, job.LeaseOwner, job.Attempt, now, s.cfg.LeaseTTL); err != nil {
 				cancel()
 				return
 			}
@@ -395,7 +489,9 @@ func (s *Service) recoverExpired(ctx context.Context) {
 	for _, job := range jobs {
 		now := s.clock.Now().UTC()
 		next, code := domain.JobQueued, ""
-		if job.SideEffectsPossible || job.ACPSessionID != "" {
+		if job.Status == domain.JobReconciling {
+			next, code = domain.JobCompletionUnknown, "completion_unknown"
+		} else if job.SideEffectsPossible || job.ACPSessionID != "" {
 			next, code = domain.JobCompletionUnknown, "completion_unknown"
 		} else if !job.TimeoutAt.After(now) || job.Attempt >= s.cfg.MaxAttempts {
 			next, code = domain.JobFailed, "job_lease_lost"

@@ -99,7 +99,7 @@ func (s *Service) handleStreamingTurn(
 	if deliveryErr != nil {
 		s.updateProgress(ctx, progress, domain.ProgressFailed)
 		if operation.MessageTS == "" && !createAttempted {
-			if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); err != nil {
+			if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.publicModelError(deliveryErr)); err != nil {
 				return OutcomePublishFailed, nil
 			}
 			return OutcomeModelFailed, nil
@@ -111,12 +111,12 @@ func (s *Service) handleStreamingTurn(
 		s.updateProgress(ctx, progress, domain.ProgressFailed)
 		if operation.MessageTS == "" {
 			_ = s.standardStore.AdvanceIncremental(ctx, operation.ID, domain.IncrementalInterrupted, operation.Sequence, operation.PrefixDigest, s.clock.Now().UTC())
-			if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); err != nil {
+			if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.publicModelError(terminal.Err)); err != nil {
 				return OutcomePublishFailed, nil
 			}
 			return OutcomeModelFailed, nil
 		}
-		s.interruptIncremental(ctx, &operation, "", s.cfg.ModelErrorMessage)
+		s.interruptIncremental(ctx, &operation, "", s.publicModelError(terminal.Err))
 		return OutcomeModelFailed, nil
 	}
 	if terminal.Kind == port.AgentStreamPendingConfirmation && terminal.Turn != nil && terminal.Turn.PendingConfirmation != nil {

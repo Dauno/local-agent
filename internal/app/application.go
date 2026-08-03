@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
@@ -23,8 +24,10 @@ import (
 )
 
 type Application struct {
-	root      string
-	logOutput io.Writer
+	root          string
+	logOutput     io.Writer
+	forceShutdown chan struct{}
+	forceOnce     sync.Once
 }
 
 func New(projectRoot string, logOutput io.Writer) (*Application, error) {
@@ -38,7 +41,16 @@ func New(projectRoot string, logOutput io.Writer) (*Application, error) {
 	if logOutput == nil {
 		logOutput = io.Discard
 	}
-	return &Application{root: filepath.Clean(root), logOutput: logOutput}, nil
+	return &Application{root: filepath.Clean(root), logOutput: logOutput, forceShutdown: make(chan struct{})}, nil
+}
+
+// ForceShutdown skips the configured drain period while preserving durable
+// worker cleanup and state classification.
+func (a *Application) ForceShutdown() {
+	if a == nil {
+		return
+	}
+	a.forceOnce.Do(func() { close(a.forceShutdown) })
 }
 
 func (a *Application) PrepareSetup(ctx context.Context) (bootstrap.Snapshot, bootstrap.Secrets, error) {

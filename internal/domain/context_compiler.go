@@ -13,12 +13,24 @@ type CompileRequest struct {
 	Contents           []Content
 	Continuity         ContinuityCapsule
 	ExistingSummary    string
+	Compaction         ContextCompactionSettings
 	ModelBudget        RequestBudget
 	FixedRequestTokens int
 	Actor              string
 	ConversationKey    string
 	SessionRevision    int64
 	OpenInvocationIDs  map[string]struct{}
+}
+
+// ContextCompactionSettings are the effective limits owned by the token-aware
+// compiler. History limits apply only to optional summary and completed turns;
+// active protocol contents remain governed by request-token admission.
+type ContextCompactionSettings struct {
+	Enabled         bool
+	MaxHistoryChars int
+	RecentTurns     int
+	SummaryEnabled  bool
+	SummaryMaxChars int
 }
 
 // CompileResult carries the bounded content projection and diagnostics.
@@ -32,14 +44,22 @@ type CompileResult struct {
 type CompileDiagnostics struct {
 	RequestTokensBefore   int
 	RequestTokensAfter    int
+	RequestCodePointsBefore int
+	RequestCodePointsAfter  int
 	ProtectedTokens       int
+	ProtectedCodePoints   int
 	ContinuityTokens      int
+	ContinuityCodePoints  int
 	RecentTurnsRetained   int
 	ResponsesExternalized int
 	ResponseTokensRemoved int
+	ResponseCodePointsRemoved int
 	ReductionReason       string
+	ReductionStage        string
+	LateExternalized      bool
 	HardLimitTokens       int
 	RecountPasses         int
+	CounterStrategy       string
 }
 
 // ContextProjectionMarker is the application-owned structured field inserted

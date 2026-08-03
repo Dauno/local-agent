@@ -18,13 +18,14 @@ import (
 )
 
 type acpJobDispatcher struct {
-	children   []preparedAgentTool
-	global     string
-	store      port.ExternalAgentJobStore
-	sanitize   func(string) string
-	artifacts  port.ResultArtifactStore
-	policy     domain.ResultDeliveryPolicy
-	partLabels bool
+	children              []preparedAgentTool
+	global                string
+	store                 port.ExternalAgentJobStore
+	sanitize              func(string) string
+	artifacts             port.ResultArtifactStore
+	policy                domain.ResultDeliveryPolicy
+	partLabels            bool
+	reconciliationTimeout time.Duration
 }
 
 type acpInvocationRecoverer interface {
@@ -186,12 +187,16 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 		for _, option := range child.acpResolved.ConfigOptions {
 			options = append(options, domain.ACPConfigOption{ID: option.ID, Value: option.Value})
 		}
+		recoveryTimeout := d.reconciliationTimeout
+		if recoveryTimeout <= 0 {
+			recoveryTimeout = 30 * time.Minute
+		}
 		result, runErr := recoverer.ReconcileInvocation(ctx, domain.AcpInvocationRequest{
 			JobID: job.ID, PrimaryProject: job.PrimaryProject, PrimaryPath: primary,
 			AdditionalProjects: append([]string(nil), job.AdditionalProjects...), AdditionalPaths: additional,
 			ProfileName: job.Profile, ProviderName: job.Provider, ConfigOptions: options,
 			GlobalInstruction: d.global, AgentInstruction: child.definition.Instruction,
-			PermissionOptionKind: child.acpResolved.PermissionOptionKind, Timeout: time.Until(job.TimeoutAt),
+			PermissionOptionKind: child.acpResolved.PermissionOptionKind, Timeout: recoveryTimeout,
 		}, job.ACPSessionID)
 		if runErr == nil && d.artifacts != nil {
 			result, runErr = d.materialize(ctx, job, result)
@@ -239,7 +244,8 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		LeaseTTL:       30 * time.Second, PollInterval: time.Second, Concurrency: cfg.ACP.WorkerConcurrency, MaxAttempts: 2,
 	}, externalagent.Dependencies{
 		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String,
-			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels},
+			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
+			reconciliationTimeout: time.Duration(cfg.ACP.ReconciliationTimeoutSeconds) * time.Second},
 		Publisher: nil, Artifacts: models.artifactStore, MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes),
 		Logger: models.logger, Metrics: models.metrics,
 	})

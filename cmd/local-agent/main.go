@@ -27,8 +27,19 @@ func main() {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(2)
 	}
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	ctx, cancel := context.WithCancel(context.Background())
+	signals := make(chan os.Signal, 2)
+	signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
+	go func() {
+		<-signals
+		cancel()
+		<-signals
+		// A second signal bypasses the drain period but still lets durable workers
+		// classify interrupted operations before process exit.
+		application.ForceShutdown()
+	}()
 	code := cli.Execute(ctx, root, os.Args[1:], os.Stderr)
+	signal.Stop(signals)
 	cancel()
 	os.Exit(code)
 }

@@ -33,6 +33,7 @@ type RuntimeConfig struct {
 	ContextProjector  port.ContextProjector
 	ContextCompiler   port.ContextCompiler
 	ContextBudget     domain.RequestBudget
+	ContextCompaction domain.ContextCompactionSettings
 	ContinuityStore   port.ContinuityStore
 	SummaryStore      port.SummaryStore
 	Metrics           port.MetricRecorder
@@ -56,6 +57,7 @@ type Runtime struct {
 	contextProjector  port.ContextProjector
 	contextCompiler   port.ContextCompiler
 	contextBudget     domain.RequestBudget
+	contextCompaction domain.ContextCompactionSettings
 	continuityStore   port.ContinuityStore
 	summaryStore      port.SummaryStore
 	staticTools       []tool.Tool
@@ -94,6 +96,7 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		contextProjector:  cfg.ContextProjector,
 		contextCompiler:   cfg.ContextCompiler,
 		contextBudget:     cfg.ContextBudget,
+		contextCompaction: cfg.ContextCompaction,
 		continuityStore:   cfg.ContinuityStore,
 		summaryStore:      cfg.SummaryStore,
 		metrics:           cfg.Metrics,
@@ -140,7 +143,7 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, injectEphemeralReference(reference))
 		}
 		if r.contextCompiler != nil {
-			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, CompilerBeforeModelCallback(r.contextCompiler, r.contextBudget, r.continuityStore, r.summaryStore, ephemeral.actor))
+			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, CompilerBeforeModelCallbackWithSnapshot(r.contextCompiler, r.contextBudget, r.continuityStore, r.summaryStore, r.sessionService, r.contextCompaction, ephemeral.actor))
 		}
 	}
 

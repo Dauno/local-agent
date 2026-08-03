@@ -458,6 +458,14 @@ type ExternalAgentJobStatusView struct {
 	FinishedAt      time.Time
 }
 
+// ExternalAgentJobShutdownStats is content-free lifecycle telemetry.
+type ExternalAgentJobShutdownStats struct {
+	Queued            int
+	Running           int
+	Reconciling       int
+	CompletionUnknown int
+}
+
 // ExternalAgentJobResult is the complete sanitized result returned by the
 // host-completion path. Artifact references never cross this boundary.
 type ExternalAgentJobResult struct {

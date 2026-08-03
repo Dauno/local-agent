@@ -31,6 +31,10 @@ type JobInspectionBackend interface {
 	InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error)
 }
 
+type JobReconciliationBackend interface {
+	ReconcileJob(ctx context.Context, jobID string, expectedRevision int) (domain.ExternalAgentJobStatusView, error)
+}
+
 type Streams struct {
 	In  io.Reader
 	Out io.Writer
@@ -224,7 +228,40 @@ func newJobsCommand(backend Backend, streams Streams) *cobra.Command {
 			return command.Help()
 		},
 	}
-	command.AddCommand(newJobsInspectCommand(backend, streams))
+	command.AddCommand(newJobsInspectCommand(backend, streams), newJobsReconcileCommand(backend, streams))
+	return command
+}
+
+func newJobsReconcileCommand(backend Backend, streams Streams) *cobra.Command {
+	var expectedRevision int
+	var confirm bool
+	command := &cobra.Command{
+		Use:   "reconcile <job_id>",
+		Short: "Reconcile a completion-unknown external-agent job",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			if !confirm {
+				return &ExitError{Code: 1, Cause: errors.New("--confirm is required")}
+			}
+			reconciler, ok := backend.(JobReconciliationBackend)
+			if !ok {
+				return &ExitError{Code: 1, Cause: errors.New("jobs reconcile is unavailable")}
+			}
+			view, err := reconciler.ReconcileJob(command.Context(), args[0], expectedRevision)
+			if err != nil {
+				return &ExitError{Code: 1, Cause: err}
+			}
+			fmt.Fprintf(streams.Out, "job_id: %s\nstatus: %s\nstatus_revision: %d\nresult_available: %t\n", view.JobID, view.Status, view.StatusRevision, view.ResultAvailable)
+			if view.ErrorCode != "" {
+				fmt.Fprintf(streams.Out, "error_code: %s\n", view.ErrorCode)
+			}
+			fmt.Fprintln(streams.Out, "next_action: inspect the durable notification or Slack thread")
+			return nil
+		},
+	}
+	command.Flags().IntVar(&expectedRevision, "expect-revision", -1, "exact durable job status revision required for reconciliation")
+	command.Flags().BoolVar(&confirm, "confirm", false, "confirm reconciliation of existing provider state")
+	_ = command.MarkFlagRequired("expect-revision")
 	return command
 }
 

@@ -60,6 +60,7 @@ var configSchema = []schemaField{
 		{name: "model_timeout_seconds"},
 		{name: "slack_api_timeout_seconds"},
 		{name: "max_concurrent_model_calls"},
+		{name: "shutdown_grace_seconds"},
 		{name: "busy_message"},
 		{name: "model_error_message"},
 	}},
@@ -149,6 +150,7 @@ var configSchema = []schemaField{
 		{name: "default_job_timeout_seconds"},
 		{name: "max_job_timeout_seconds"},
 		{name: "idle_timeout_seconds"},
+		{name: "reconciliation_timeout_seconds"},
 		{name: "worker_concurrency"},
 		{name: "artifact_retention_days"},
 		{name: "delivery", children: []schemaField{

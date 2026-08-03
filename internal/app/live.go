@@ -2,24 +2,31 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"io"
+	"iter"
 	"net/http"
 	"os/exec"
 	"strings"
+	"sync/atomic"
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
+	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/acpclient"
+	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
+	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
 
@@ -139,6 +146,56 @@ func (liveChecker) CheckResolvedModel(ctx context.Context, resolved *agentdef.Re
 		return nil
 	}
 	return errors.New("model endpoint returned no response")
+}
+
+func (liveChecker) CheckAttachmentAnalyzer(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error {
+	llm, err := newModelFromResolved(resolved, apiKey)
+	if err != nil {
+		return err
+	}
+	tracker := &toolCallTrackingModel{delegate: llm}
+	processor := adkartifact.NewProcessor(artifact.InMemoryService(), tracker, "Load the image artifact named in the current request and describe it.", defaultAttachmentTimeout, modelcalllimiter.New(1))
+	image, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
+	if err != nil {
+		return errors.New("decode attachment analyzer diagnostic image")
+	}
+	_, err = processor.Process(ctx, port.AttachmentRequest{
+		ProcessingID: "doctor-attachment-check",
+		Attachment: port.LoadedAttachment{
+			ID: "doctor-image", Name: "doctor.png", MIMEType: "image/png", Data: image,
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("attachment_analyzer load_artifacts smoke test failed: %w", err)
+	}
+	if !tracker.loadArtifactsCalled.Load() {
+		return errors.New("attachment_analyzer did not call load_artifacts")
+	}
+	return nil
+}
+
+type toolCallTrackingModel struct {
+	delegate            model.LLM
+	loadArtifactsCalled atomic.Bool
+}
+
+func (m *toolCallTrackingModel) Name() string { return m.delegate.Name() }
+
+func (m *toolCallTrackingModel) GenerateContent(ctx context.Context, request *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		for response, err := range m.delegate.GenerateContent(ctx, request, stream) {
+			if response != nil && response.Content != nil {
+				for _, part := range response.Content.Parts {
+					if part != nil && part.FunctionCall != nil && part.FunctionCall.Name == "load_artifacts" {
+						m.loadArtifactsCalled.Store(true)
+					}
+				}
+			}
+			if !yield(response, err) {
+				return
+			}
+		}
+	}
 }
 
 func newModelFromResolved(resolved *agentdef.ResolvedModel, apiKey string) (*openaillm.OpenAICompatibleLLM, error) {
