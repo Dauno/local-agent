@@ -142,7 +142,7 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 22.
 - **Memory**: curated entity memory stored in SQLite; `.local-agent/memory/` holds OKF file projections. Memory retrieval is deterministic (no LLM routing) and runs before each model call. Memory failure is non-fatal.
 - **Ephemeral context**: Slack enrichment and memory snippets are injected per-turn via the user message text; they must never become durable ADK events.
-- **Sandbox**: workspace inspection is opt-in through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env` and `.git` at every depth (including symlinks).
+- **Sandbox**: workspace inspection is enabled by default for the registered application root through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env` and `.git` at every depth (including symlinks).
 - **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, verified owner/digest reads, and are cleaned by `acp.artifact_retention_days` only when no unpublished delivery references them. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, delivery policy, and v22 job/outbox fields without reading result content or secrets. Durable ACP file fallback requires Slack `files:write`.
 - **Worktrees**: new worktrees live under `.worktrees/<name>` relative to the repo root (gitignored). Use the repo alias `git wtadd <name> [git-worktree-add args...]`, which resolves to `git worktree add .worktrees/<name> <args...>`.
 

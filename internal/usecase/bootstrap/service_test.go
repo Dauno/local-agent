@@ -13,6 +13,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsproject"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/manifest"
@@ -37,12 +38,21 @@ func TestEnsureBaseArtifactsFirstRun(t *testing.T) {
 		snapshot.Paths.DatabaseFile,
 		filepath.Join(snapshot.Paths.StateDir, "providers", "deepseek.yaml"),
 		filepath.Join(snapshot.Paths.StateDir, "agents", "root_agent.yaml"),
+		filepath.Join(snapshot.Paths.StateDir, "agents", "explore.yaml"),
 		filepath.Join(snapshot.Paths.StateDir, "agents", "memory_curator.yaml"),
 		filepath.Join(snapshot.Paths.StateDir, "agents", "attachment_analyzer.yaml.example"),
 	} {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
 			t.Fatalf("artifact %s: info=%v err=%v", path, info, err)
 		}
+	}
+	defs, err := agentdef.Load(snapshot.Paths.StateDir)
+	if err != nil {
+		t.Fatalf("load generated agent definitions: %v", err)
+	}
+	explore, ok := defs.Agents["explore"]
+	if !ok || explore.ToolScope != "invocation_scoped" || explore.IncludeContents != "none" {
+		t.Fatalf("generated explore definition = %+v", explore)
 	}
 	workflowsDir := filepath.Join(snapshot.Paths.StateDir, "workflows")
 	if info, err := os.Stat(workflowsDir); err != nil || !info.IsDir() {
@@ -166,6 +176,53 @@ func TestEnsureBaseArtifactsRespectsExistingConfigAndNeverOverwritesOrResets(t *
 	messages, err := store.RecentMessages(t.Context(), metadata.Key, 10)
 	if err != nil || len(messages) != 1 || messages[0].Content != "persisted" {
 		t.Fatalf("database was reset: messages=%#v err=%v", messages, err)
+	}
+}
+
+func TestEnsureBaseArtifactsSeedsMissingExploreFromPersistedRootModel(t *testing.T) {
+	service := newRealService(t)
+	root := t.TempDir()
+	snapshot, err := service.EnsureBaseArtifacts(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootAgentPath := filepath.Join(snapshot.Paths.StateDir, "agents", "root_agent.yaml")
+	rootData, err := os.ReadFile(rootAgentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootAgent, err := agentdef.UnmarshalAgentDef(rootData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootAgent.Model = "deepseek/pro-reasoning"
+	rootData, err = agentdef.MarshalAgentDef(rootAgent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rootAgentPath, rootData, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	explorePath := filepath.Join(snapshot.Paths.StateDir, "agents", "explore.yaml")
+	if err := os.Remove(explorePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.EnsureBaseArtifacts(t.Context(), root); err != nil {
+		t.Fatal(err)
+	}
+
+	exploreData, err := os.ReadFile(explorePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	explore, err := agentdef.UnmarshalAgentDef(exploreData)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if explore.Model != rootAgent.Model {
+		t.Fatalf("explore model = %q, want persisted root model %q", explore.Model, rootAgent.Model)
 	}
 }
 

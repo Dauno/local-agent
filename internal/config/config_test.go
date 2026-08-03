@@ -96,7 +96,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			MaxTopicChars:         10000,
 			MaxPatchOps:           10,
 		},
-		Sandbox:          config.SandboxConfig{Projects: map[string]string{}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
+		Sandbox:          config.SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
 		Canvases:         config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:          config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
 		OpenCode:         config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
@@ -272,8 +272,9 @@ memory:
   max_topic_chars: 10000
   max_patch_ops: 10
 sandbox:
-  enabled: false
-  projects: {}
+  enabled: true
+  projects:
+    workspace: .
   command_timeout_seconds: 30
   max_output_bytes: 65536
 canvases:
@@ -605,6 +606,8 @@ func TestResolvePaths(t *testing.T) {
 
 	root := t.TempDir()
 	cfg := config.Default()
+	cfg.Sandbox.Enabled = false
+	cfg.Sandbox.Projects = map[string]string{}
 	cfg.State.Dir = "var/state"
 	cfg.State.DB = filepath.Join(root, "outside", "agent.db")
 
@@ -743,7 +746,7 @@ func TestParseAppliesOpenCodeManagementAllowlist(t *testing.T) {
 	}
 }
 
-func TestParseSandboxDisabledByDefault(t *testing.T) {
+func TestParseSandboxEnabledByDefault(t *testing.T) {
 	t.Parallel()
 
 	cfg, err := config.Parse([]byte(`agent:
@@ -752,11 +755,11 @@ func TestParseSandboxDisabledByDefault(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Parse() error: %v", err)
 	}
-	if cfg.Sandbox.Enabled {
-		t.Fatal("sandbox should be disabled by default")
+	if !cfg.Sandbox.Enabled {
+		t.Fatal("sandbox should be enabled by default")
 	}
-	if len(cfg.Sandbox.Projects) != 0 {
-		t.Fatalf("sandbox projects should be empty by default")
+	if len(cfg.Sandbox.Projects) != 1 || cfg.Sandbox.Projects["workspace"] != "." {
+		t.Fatalf("sandbox projects should register workspace by default: %v", cfg.Sandbox.Projects)
 	}
 }
 
@@ -806,6 +809,7 @@ func TestValidateRejectsEnabledSandboxWithoutProjects(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default()
 	cfg.Sandbox.Enabled = true
+	cfg.Sandbox.Projects = map[string]string{}
 	err := cfg.Validate()
 	var validation *config.ValidationError
 	if !errors.As(err, &validation) || !validation.Has("sandbox.projects") {
@@ -846,7 +850,10 @@ func TestPathResolvesEmptySandboxToNil(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	paths, err := config.Default().ResolvePaths(root)
+	cfg := config.Default()
+	cfg.Sandbox.Enabled = false
+	cfg.Sandbox.Projects = map[string]string{}
+	paths, err := cfg.ResolvePaths(root)
 	if err != nil {
 		t.Fatalf("ResolvePaths() error: %v", err)
 	}
@@ -1044,6 +1051,8 @@ func TestRecoverableResultsDefaultChunksNotExceed(t *testing.T) {
 func TestCodeIntelligenceRequiresSandboxAndRecoverableResults(t *testing.T) {
 	cfg := config.Default()
 	cfg.CodeIntelligence.Enabled = true
+	cfg.Sandbox.Enabled = false
+	cfg.Sandbox.Projects = map[string]string{}
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "requires sandbox.enabled") {
 		t.Fatalf("Validate() = %v, want sandbox dependency error", err)
 	}
