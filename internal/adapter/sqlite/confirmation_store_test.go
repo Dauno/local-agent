@@ -83,6 +83,42 @@ func TestConfirmationStoreDoesNotListExpiredDelivery(t *testing.T) {
 	}
 }
 
+func TestConfirmationStoreExpireDeliveryIsSingleUseAndRemovesListExpiredRow(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	confirmations := NewConfirmationStore(store)
+	now := time.Unix(1710000000, 0).UTC()
+	if err := confirmations.CreateDelivery(ctx, port.ConfirmationDelivery{
+		WrapperCallID: "cas-expired-wrapper", OriginalCallID: "original", SessionID: "session",
+		Actor: "U12345678", TeamID: "T12345678", ChannelID: "D12345678",
+		Status: port.ConfirmationPublished, Expiry: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	listed, err := confirmations.ListExpired(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 1 {
+		t.Fatalf("ListExpired() before CAS = %#v", listed)
+	}
+	first, err := confirmations.ExpireDelivery(ctx, "cas-expired-wrapper", now)
+	if err != nil || !first {
+		t.Fatalf("first ExpireDelivery() = first:%t err:%v", first, err)
+	}
+	listed, err = confirmations.ListExpired(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(listed) != 0 {
+		t.Fatalf("ListExpired() after CAS = %#v", listed)
+	}
+	second, err := confirmations.ExpireDelivery(ctx, "cas-expired-wrapper", now)
+	if err != nil || second {
+		t.Fatalf("second ExpireDelivery() = second:%t err:%v", second, err)
+	}
+}
+
 func TestConfirmationStoreRejectDeliveryIsSingleUse(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTestStore(t)
