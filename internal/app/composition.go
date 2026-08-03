@@ -514,14 +514,19 @@ func (c *runtimeComposition) WaitExternal(ctx context.Context) error {
 	if c == nil {
 		return nil
 	}
-	var waitErrs []error
+	waiters := 0
+	waitDone := make(chan error, 2)
 	if c.externalJobService != nil {
-		if err := c.externalJobService.WaitStopped(ctx); err != nil {
-			waitErrs = append(waitErrs, err)
-		}
+		waiters++
+		go func() { waitDone <- c.externalJobService.WaitStopped(ctx) }()
 	}
 	if c.activationWorker != nil {
-		if err := c.activationWorker.WaitStopped(ctx); err != nil {
+		waiters++
+		go func() { waitDone <- c.activationWorker.WaitStopped(ctx) }()
+	}
+	var waitErrs []error
+	for range waiters {
+		if err := <-waitDone; err != nil {
 			waitErrs = append(waitErrs, err)
 		}
 	}

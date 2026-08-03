@@ -75,11 +75,8 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 		runtimeCancel()
 		waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
-		if waitErr := composition.WaitExternal(waitCtx); waitErr != nil {
+		if waitErr := errors.Join(composition.WaitExternal(waitCtx), composition.WaitNotification(waitCtx)); waitErr != nil {
 			models.logger.Warn("external-agent shutdown did not settle", "error", waitErr)
-		}
-		if waitErr := composition.WaitNotification(waitCtx); waitErr != nil {
-			models.logger.Warn("external-agent notification shutdown did not settle", "error", waitErr)
 		}
 		cancelWait()
 		afterStats, afterStatsErr := composition.ExternalShutdownStats(context.Background())
