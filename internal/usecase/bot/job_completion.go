@@ -128,7 +128,12 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 		defer modelRelease()
 		return s.runtime.Run(modelCtx, port.AgentRequest{
 			ConversationKey: activation.ConversationKey,
-			Messages:        modelContext,
+			Origin: port.AgentTurnOrigin{
+				Kind:         port.AgentTurnOriginJobCompletion,
+				Actor:        activation.Actor,
+				ActivationID: activation.ActivationID,
+			},
+			Messages: modelContext,
 		})
 	}()
 	cancel()

@@ -51,26 +51,26 @@ func (a *Application) Run(ctx context.Context) error {
 		beforeStats, beforeStatsErr := composition.ExternalShutdownStats(context.Background())
 		composition.StopExternalAdmission()
 		stopIntake()
-		if interrupted {
-			grace := time.Duration(setup.cfg.Runtime.ShutdownGraceSeconds) * time.Second
-			waitDone := make(chan error, 1)
-			go func() { waitDone <- composition.WaitExternal(context.Background()) }()
-			timer := time.NewTimer(grace)
-			select {
-			case waitErr := <-waitDone:
-				if waitErr != nil {
-					models.logger.Warn("external-agent shutdown drain failed", "error", waitErr)
-				}
-			case <-timer.C:
-				models.logger.Warn("external-agent shutdown grace expired")
-			case <-a.forceShutdown:
-				models.logger.Warn("external-agent shutdown drain bypassed")
+		grace := time.Duration(setup.cfg.Runtime.ShutdownGraceSeconds) * time.Second
+		waitDone := make(chan error, 1)
+		go func() {
+			waitDone <- errors.Join(composition.WaitExternal(context.Background()), composition.WaitNotification(context.Background()))
+		}()
+		timer := time.NewTimer(grace)
+		select {
+		case waitErr := <-waitDone:
+			if waitErr != nil {
+				models.logger.Warn("external-agent shutdown drain failed", "error", waitErr)
 			}
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
+		case <-timer.C:
+			models.logger.Warn("external-agent shutdown grace expired")
+		case <-a.forceShutdown:
+			models.logger.Warn("external-agent shutdown drain bypassed")
+		}
+		if !timer.Stop() {
+			select {
+			case <-timer.C:
+			default:
 			}
 		}
 		runtimeCancel()
@@ -93,6 +93,10 @@ func (a *Application) Run(ctx context.Context) error {
 				ambiguous = 0
 			}
 			models.logger.Info("external-agent shutdown", "queued", afterStats.Queued, "running", afterStats.Running, "drained", drained, "ambiguous", ambiguous)
+		}
+		activationHealth, healthErr := composition.ActivationHealth(context.Background())
+		if healthErr == nil {
+			models.logger.Info("external-agent activation shutdown", "pending", activationHealth.Pending, "processing", activationHealth.Processing, "model_started", activationHealth.ModelStarted, "response_prepared", activationHealth.ResponsePrepared, "processed", activationHealth.Processed, "completion_unknown", activationHealth.CompletionUnknown, "stuck", activationHealth.Stuck)
 		}
 	}
 	if composition == nil {

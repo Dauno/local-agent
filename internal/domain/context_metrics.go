@@ -78,4 +78,9 @@ const (
 	MetricExternalAgentNotificationCASConflictTotal = "external_agent_notification_cas_conflict_total"
 	MetricExternalAgentNotificationStuck            = "external_agent_notification_stuck"
 	MetricExternalAgentStatusAuthorizationTotal     = "external_agent_status_authorization_total"
+	MetricExternalAgentActivationClaimTotal         = "external_agent_activation_claim_total"
+	MetricExternalAgentActivationTotal              = "external_agent_activation_total"
+	MetricExternalAgentActivationReconcileTotal     = "external_agent_activation_reconcile_total"
+	MetricExternalAgentActivationCASConflictTotal   = "external_agent_activation_cas_conflict_total"
+	MetricExternalAgentActivationStuck              = "external_agent_activation_stuck"
 )

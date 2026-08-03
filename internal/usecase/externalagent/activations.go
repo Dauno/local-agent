@@ -20,10 +20,11 @@ const (
 // ActivationConfig controls durable activation polling and leases. Backoff is
 // only used while an activation is still before the model_started boundary.
 type ActivationConfig struct {
-	PollInterval time.Duration
-	LeaseTTL     time.Duration
-	RetryBase    time.Duration
-	RetryMax     time.Duration
+	PollInterval   time.Duration
+	LeaseTTL       time.Duration
+	RetryBase      time.Duration
+	RetryMax       time.Duration
+	StuckThreshold time.Duration
 }
 
 type ActivationDependencies struct {
@@ -31,6 +32,7 @@ type ActivationDependencies struct {
 	Handler port.ExternalAgentJobCompletionHandler
 	Clock   port.Clock
 	Logger  port.Logger
+	Metrics port.MetricRecorder
 }
 
 // ActivationWorker consumes the activation outbox one claimed activation at a
@@ -42,6 +44,7 @@ type ActivationWorker struct {
 	handler port.ExternalAgentJobCompletionHandler
 	clock   port.Clock
 	logger  port.Logger
+	metrics port.MetricRecorder
 	owner   string
 
 	stopClaims chan struct{}
@@ -62,11 +65,20 @@ func NewActivationWorker(cfg ActivationConfig, deps ActivationDependencies) (*Ac
 	if cfg.RetryMax < cfg.RetryBase {
 		return nil, errors.New("activation retry maximum must not be below its base delay")
 	}
+	if cfg.StuckThreshold < 0 {
+		return nil, errors.New("activation stuck threshold must not be negative")
+	}
+	if cfg.StuckThreshold == 0 {
+		cfg.StuckThreshold = 5 * time.Minute
+	}
 	if deps.Clock == nil {
 		deps.Clock = systemClock{}
 	}
 	if deps.Logger == nil {
 		deps.Logger = noopLogger{}
+	}
+	if deps.Metrics == nil {
+		deps.Metrics = port.NoopMetricRecorder{}
 	}
 	return &ActivationWorker{
 		cfg:        cfg,
@@ -74,6 +86,7 @@ func NewActivationWorker(cfg ActivationConfig, deps ActivationDependencies) (*Ac
 		handler:    deps.Handler,
 		clock:      deps.Clock,
 		logger:     deps.Logger,
+		metrics:    deps.Metrics,
 		owner:      "activation-worker_" + randomID(),
 		stopClaims: make(chan struct{}),
 		stopped:    make(chan struct{}),
@@ -97,6 +110,9 @@ func (w *ActivationWorker) Run(ctx context.Context) {
 		}
 		if err := w.ProcessOne(ctx); err != nil && !errors.Is(err, context.Canceled) {
 			w.logProcessingError(err)
+		}
+		if _, err := w.SnapshotHealth(ctx, w.clock.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
+			w.logger.Error("external-agent activation health snapshot failed", "error_code", activationErrorCode(err))
 		}
 		select {
 		case <-ctx.Done():
@@ -140,21 +156,32 @@ func (w *ActivationWorker) ProcessOne(ctx context.Context) error {
 	now := w.clock.Now().UTC()
 	activation, err := w.store.ClaimNextActivation(ctx, now, w.owner, w.cfg.LeaseTTL)
 	if err != nil {
+		w.recordCASConflict(err)
 		return err
 	}
 	if activation == nil {
 		return nil
 	}
+	w.metrics.AddCounter(domain.MetricExternalAgentActivationClaimTotal, 1, port.MetricLabels{"activation_outcome": "claimed"})
+	if activation.State == domain.ActivationModelStarted || activation.State == domain.ActivationResponsePrepared {
+		w.metrics.AddCounter(domain.MetricExternalAgentActivationReconcileTotal, 1, port.MetricLabels{"activation_outcome": boundedActivationOutcome(activation.State)})
+	}
+	var processErr error
 	switch activation.State {
 	case domain.ActivationPending, domain.ActivationProcessing:
-		return w.processBeforeModel(ctx, activation)
+		processErr = w.processBeforeModel(ctx, activation)
 	case domain.ActivationModelStarted, domain.ActivationResponsePrepared:
-		return w.reconcileAfterModel(ctx, activation)
+		processErr = w.reconcileAfterModel(ctx, activation)
 	case domain.ActivationCompleted, domain.ActivationCompletionUnknown, domain.ActivationFailed:
-		return nil
+		processErr = nil
 	default:
-		return wrapActivationError(activation, errors.New("activation state is invalid"))
+		processErr = wrapActivationError(activation, errors.New("activation state is invalid"))
 	}
+	if processErr != nil {
+		w.recordCASConflict(processErr)
+	}
+	w.recordActivationOutcome(ctx, activation)
+	return processErr
 }
 
 func (w *ActivationWorker) processBeforeModel(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
@@ -171,7 +198,7 @@ func (w *ActivationWorker) processBeforeModel(ctx context.Context, activation *d
 		// A handler may return an error after crossing the durable model
 		// boundary. Reconcile the persisted state; never invoke the normal
 		// handler again.
-		return w.reconcileAfterModel(ctx, current)
+		return w.reconcileAfterModel(context.WithoutCancel(ctx), current)
 	case domain.ActivationCompleted, domain.ActivationCompletionUnknown, domain.ActivationFailed:
 		return nil
 	case domain.ActivationPending, domain.ActivationProcessing:
@@ -294,6 +321,46 @@ func (w *ActivationWorker) currentActivation(ctx context.Context, activationID s
 	return activation, nil
 }
 
+// SnapshotHealth exposes bounded activation state and updates the worker's
+// stuck gauge. The optional store contract keeps health independent from the
+// claim/processing path.
+func (w *ActivationWorker) SnapshotHealth(ctx context.Context, now time.Time) (domain.ExternalAgentJobActivationHealth, error) {
+	if w == nil || w.store == nil {
+		return domain.ExternalAgentJobActivationHealth{}, errors.New("activation health store is unavailable")
+	}
+	store, ok := w.store.(port.ExternalAgentJobActivationHealthStore)
+	if !ok {
+		return domain.ExternalAgentJobActivationHealth{}, errors.New("activation health store is unavailable")
+	}
+	health, err := store.ActivationHealth(ctx, now, w.cfg.StuckThreshold)
+	if err != nil {
+		return domain.ExternalAgentJobActivationHealth{}, err
+	}
+	w.metrics.SetGauge(domain.MetricExternalAgentActivationStuck, int64(health.Stuck), nil)
+	return health, nil
+}
+
+func (w *ActivationWorker) recordActivationOutcome(ctx context.Context, claimed *domain.ExternalAgentJobActivation) {
+	if w == nil || claimed == nil {
+		return
+	}
+	current, err := w.store.GetActivation(context.WithoutCancel(ctx), claimed.ActivationID)
+	if err != nil || current == nil {
+		return
+	}
+	w.metrics.AddCounter(domain.MetricExternalAgentActivationTotal, 1, port.MetricLabels{
+		"activation_outcome": boundedActivationOutcome(current.State),
+		"terminal_status":    boundedTerminalStatus(current.TerminalStatus),
+	})
+}
+
+func (w *ActivationWorker) recordCASConflict(err error) {
+	if w == nil || (!errors.Is(err, port.ErrActivationStateConflict) && !errors.Is(err, port.ErrActivationClaimConflict)) {
+		return
+	}
+	w.metrics.AddCounter(domain.MetricExternalAgentActivationCASConflictTotal, 1, nil)
+}
+
 func (w *ActivationWorker) retryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
@@ -383,6 +450,26 @@ func (w *ActivationWorker) logProcessingError(err error) {
 		)
 	}
 	w.logger.Error("external-agent activation processing failed", args...)
+}
+
+func boundedActivationOutcome(state domain.ExternalAgentJobActivationState) string {
+	switch state {
+	case domain.ActivationPending, domain.ActivationProcessing, domain.ActivationModelStarted,
+		domain.ActivationResponsePrepared, domain.ActivationCompleted, domain.ActivationCompletionUnknown,
+		domain.ActivationFailed:
+		return string(state)
+	default:
+		return "unknown"
+	}
+}
+
+func boundedTerminalStatus(status domain.ExternalAgentJobStatus) string {
+	switch status {
+	case domain.JobCompleted, domain.JobFailed, domain.JobCancelled, domain.JobCompletionUnknown, domain.JobAbandoned:
+		return string(status)
+	default:
+		return "unknown"
+	}
 }
 
 type activationProcessingError struct {
