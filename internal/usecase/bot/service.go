@@ -40,13 +40,14 @@ type Config struct {
 }
 
 type Dependencies struct {
-	Store      port.ConversationStore
-	Runtime    port.AgentRuntime
-	History    port.HistoryReader
-	Publisher  port.ResponsePublisher
-	Clock      port.Clock
-	Logger     port.Logger
-	ModelCalls port.ModelCallLimiter
+	Store           port.ConversationStore
+	Runtime         port.AgentRuntime
+	ActivationStore port.ExternalAgentJobActivationStore
+	History         port.HistoryReader
+	Publisher       port.ResponsePublisher
+	Clock           port.Clock
+	Logger          port.Logger
+	ModelCalls      port.ModelCallLimiter
 
 	SanitizeContent       func(string) string
 	Memory                port.MemoryRetriever
@@ -67,6 +68,7 @@ type Dependencies struct {
 	StreamingRuntime      port.StreamingAgentRuntime
 	IncrementalPublisher  port.IncrementalPublisher
 	SummaryScheduler      port.SummaryScheduler
+	ExchangeFinder        port.AssistantExchangeFinder
 }
 
 type Outcome string
@@ -85,6 +87,7 @@ type Service struct {
 	cfg                   Config
 	store                 port.ConversationStore
 	runtime               port.AgentRuntime
+	activationStore       port.ExternalAgentJobActivationStore
 	history               port.HistoryReader
 	publisher             port.ResponsePublisher
 	clock                 port.Clock
@@ -111,6 +114,7 @@ type Service struct {
 	streamingRuntime      port.StreamingAgentRuntime
 	incrementalPublisher  port.IncrementalPublisher
 	summaryScheduler      port.SummaryScheduler
+	exchangeFinder        port.AssistantExchangeFinder
 }
 
 type confirmationExpirer interface {
@@ -186,8 +190,13 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.ModelCalls == nil {
 		deps.ModelCalls = unlimitedModelCalls{}
 	}
+	if deps.ExchangeFinder == nil {
+		if finder, ok := deps.History.(port.AssistantExchangeFinder); ok {
+			deps.ExchangeFinder = finder
+		}
+	}
 	return &Service{
-		cfg: cfg, store: deps.Store, runtime: deps.Runtime,
+		cfg: cfg, store: deps.Store, runtime: deps.Runtime, activationStore: deps.ActivationStore,
 		history: deps.History, publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
 		limiter: NewLimiter(cfg.MaxConcurrentCalls), modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
 		recall: deps.Memory, exchange: deps.Exchange, enricher: deps.Enricher,
@@ -204,7 +213,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		onboardingPublisher:  deps.OnboardingPublisher,
 		streamingRuntime:     deps.StreamingRuntime,
 		incrementalPublisher: deps.IncrementalPublisher,
-		summaryScheduler:     deps.SummaryScheduler,
+		summaryScheduler:     deps.SummaryScheduler, exchangeFinder: deps.ExchangeFinder,
 	}, nil
 }
 
@@ -1296,6 +1305,17 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		}
 		return OutcomeIgnoredFollowup
 	}
+	conversationRelease, conversationAcquired := s.limiter.TryAcquire(string(delivery.ConversationKey))
+	if !conversationAcquired {
+		s.logger.Info("confirmation resume rejected by conversation backpressure")
+		if interactive == nil {
+			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); pubErr != nil {
+				s.logger.Error("busy reply failed", "error", pubErr)
+			}
+		}
+		return OutcomeBusy
+	}
+	defer conversationRelease()
 
 	modelCtx := ctx
 	cancel := func() {}

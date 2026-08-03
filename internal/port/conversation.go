@@ -15,6 +15,12 @@ type ConversationStore interface {
 	CleanupDedupe(ctx context.Context, now time.Time) error
 }
 
+// JobCompletionMessageWriter makes the host-originated input idempotent. The
+// external activation ID is used as the durable message key, not Slack data.
+type JobCompletionMessageWriter interface {
+	AppendJobCompletionMessage(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int) error
+}
+
 type History struct {
 	Messages        []domain.Message
 	BotParticipated bool

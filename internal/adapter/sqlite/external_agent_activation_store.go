@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -168,6 +169,135 @@ func (s *ExternalAgentJobStore) MarkActivationModelStarted(ctx context.Context, 
 		return port.ErrActivationStateConflict
 	}
 	return nil
+}
+
+// PrepareActivationResponseWithExchange closes the response-preparation gap in
+// one SQLite transaction. The deterministic intent and correlation IDs make a
+// retry return the same durable exchange instead of creating another reply.
+func (s *ExternalAgentJobStore) PrepareActivationResponseWithExchange(
+	ctx context.Context,
+	activation *domain.ExternalAgentJobActivation,
+	metadata domain.ConversationMetadata,
+	message domain.Message,
+	retain int,
+	now time.Time,
+) (port.PreparedAssistantExchange, error) {
+	if s == nil || s.db == nil {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation store is not configured")
+	}
+	if activation == nil || activation.JobID == "" || activation.Kind == "" || activation.LeaseOwner == "" || activation.Attempt <= 0 {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation response identity is required")
+	}
+	if now.IsZero() {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation response time is required")
+	}
+	if retain <= 0 {
+		return port.PreparedAssistantExchange{}, errors.New("message retention must be positive")
+	}
+	message = message.WithInferredSource()
+	if message.Role != domain.RoleAssistant || message.Source != domain.MessageSourceAssistant || !utf8.ValidString(message.Content) || strings.TrimSpace(message.Content) == "" {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent assistant response is invalid")
+	}
+	digest := sha256.Sum256([]byte(message.Content))
+	responseSHA256 := hex.EncodeToString(digest[:])
+	intentID, correlationID := activationExchangeIDs(activation.ActivationID)
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("begin prepare external-agent assistant exchange: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, err := loadActivation(ctx, tx, `WHERE a.job_id = ? AND a.status_revision = ? AND a.kind = ?`, activation.JobID, activation.StatusRevision, activation.Kind)
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("load external-agent activation response state: %w", err)
+	}
+	if !sameActivationIdentity(&current, activation) {
+		return port.PreparedAssistantExchange{}, port.ErrActivationStateConflict
+	}
+	if current.State == domain.ActivationResponsePrepared || current.State == domain.ActivationCompleted {
+		if current.ResponseBody != message.Content || current.ResponseSHA256 != responseSHA256 || current.ExchangeIntentID == "" || current.CorrelationID == "" {
+			return port.PreparedAssistantExchange{}, errors.New("external-agent activation response is immutable")
+		}
+		if err := tx.Commit(); err != nil {
+			return port.PreparedAssistantExchange{}, fmt.Errorf("commit existing external-agent assistant exchange: %w", err)
+		}
+		return port.PreparedAssistantExchange{ID: current.ExchangeIntentID, CorrelationID: current.CorrelationID}, nil
+	}
+	if current.State != domain.ActivationModelStarted || current.LeaseOwner != activation.LeaseOwner || current.Attempt != activation.Attempt || current.LeaseExpiry.IsZero() || !current.LeaseExpiry.After(now.UTC()) {
+		return port.PreparedAssistantExchange{}, port.ErrActivationStateConflict
+	}
+	if current.ConversationKey != metadata.Key || current.TeamID != metadata.TeamID || current.ConversationKey == "" {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation conversation metadata conflicts")
+	}
+
+	source, err := sourceExchangeTx(ctx, tx, metadata.Key)
+	if err != nil {
+		return port.PreparedAssistantExchange{}, err
+	}
+	source = append(source, message)
+	payload, err := json.Marshal(sourceMessagesWrapper{MemoryEligible: false, Messages: marshalMessages(source)})
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("encode external-agent assistant exchange source: %w", err)
+	}
+	nowNanos := now.UTC().UnixNano()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_exchange_intents (
+			id, conversation_key, team_id, channel_id, channel_kind, root_ts, last_ts,
+			assistant_content, assistant_external_ts, assistant_created_at, retain, source_messages, created_at, publish_status, correlation_id, presentation_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, 'prepared', ?, '')
+		ON CONFLICT (id) DO NOTHING`,
+		intentID, string(metadata.Key), metadata.TeamID, metadata.ChannelID, string(metadata.ChannelKind), metadata.RootTS, metadata.LastTS,
+		message.Content, message.CreatedAt.UnixNano(), retain, string(payload), nowNanos, correlationID,
+	); err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("prepare external-agent assistant exchange: %w", err)
+	}
+	intent, err := loadAssistantExchangeIntent(ctx, tx, intentID)
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("load external-agent assistant exchange: %w", err)
+	}
+	if intent.ConversationKey != metadata.Key || intent.AssistantContent != message.Content || intent.CorrelationID != correlationID || !activationExchangeMemoryIneligible(intent.SourceMessages) {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent assistant exchange identity conflicts")
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE external_agent_job_activations SET
+		state = ?, response_body = ?, response_sha256 = ?, exchange_intent_id = ?, correlation_id = ?, last_error_code = '', updated_at = ?
+		WHERE job_id = ? AND status_revision = ? AND kind = ? AND state = ? AND lease_owner = ? AND attempt = ? AND lease_expiry > ?`,
+		domain.ActivationResponsePrepared, message.Content, responseSHA256, intentID, correlationID, nowNanos,
+		activation.JobID, activation.StatusRevision, activation.Kind, domain.ActivationModelStarted, activation.LeaseOwner, activation.Attempt, nowNanos)
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("mark external-agent activation response prepared: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return port.PreparedAssistantExchange{}, port.ErrActivationStateConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("commit external-agent assistant exchange: %w", err)
+	}
+	return port.PreparedAssistantExchange{ID: intentID, CorrelationID: correlationID}, nil
+}
+
+func activationExchangeIDs(activationID string) (string, string) {
+	digest := sha256.Sum256([]byte(activationID))
+	encoded := hex.EncodeToString(digest[:])
+	return "activation_exchange_" + encoded[:32], "activation_response_" + encoded[:32]
+}
+
+func activationExchangeMemoryIneligible(sourceJSON string) bool {
+	var wrapper sourceMessagesWrapper
+	return json.Unmarshal([]byte(sourceJSON), &wrapper) == nil && !wrapper.MemoryEligible
+}
+
+func sameActivationIdentity(left, right *domain.ExternalAgentJobActivation) bool {
+	if left == nil || right == nil {
+		return false
+	}
+	return left.ActivationID == right.ActivationID && left.JobID == right.JobID &&
+		left.StatusRevision == right.StatusRevision && left.Kind == right.Kind &&
+		left.TerminalStatus == right.TerminalStatus && left.NotificationSHA256 == right.NotificationSHA256 &&
+		left.Actor == right.Actor && left.TeamID == right.TeamID && left.ConversationKey == right.ConversationKey &&
+		left.OriginalCallID == right.OriginalCallID && left.DeliveryMode == right.DeliveryMode &&
+		left.ContentBytes == right.ContentBytes && left.SlackMessageTS == right.SlackMessageTS &&
+		left.PublishedAt.Equal(right.PublishedAt)
 }
 
 func (s *ExternalAgentJobStore) PrepareActivationResponse(ctx context.Context, activation *domain.ExternalAgentJobActivation, responseBody, responseSHA256, exchangeIntentID, correlationID string, now time.Time) error {

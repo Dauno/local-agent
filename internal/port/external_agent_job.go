@@ -97,6 +97,14 @@ type ExternalAgentJobActivationStore interface {
 	GetActivation(ctx context.Context, activationID string) (*domain.ExternalAgentJobActivation, error)
 }
 
+// ExternalAgentJobActivationExchangeStore atomically stages an assistant
+// exchange and advances its activation to response_prepared. Implementations
+// must derive the exchange identity from the activation, and must persist the
+// exchange as memory-ineligible.
+type ExternalAgentJobActivationExchangeStore interface {
+	PrepareActivationResponseWithExchange(ctx context.Context, activation *domain.ExternalAgentJobActivation, metadata domain.ConversationMetadata, message domain.Message, retain int, now time.Time) (PreparedAssistantExchange, error)
+}
+
 // ExternalAgentJobActivationLeaseStore supports bounded work that must renew
 // its claim without changing activation state.
 type ExternalAgentJobActivationLeaseStore interface {
