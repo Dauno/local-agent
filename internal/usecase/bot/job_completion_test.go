@@ -165,27 +165,57 @@ func (r *blockingResumeRuntime) resumeCount() int {
 	return r.resumes
 }
 
+type immediateResumeRuntime struct {
+	resumes  int
+	returned bool
+}
+
+func (r *immediateResumeRuntime) Run(context.Context, port.AgentRequest) (port.AgentTurn, error) {
+	return port.AgentTurn{}, nil
+}
+
+func (r *immediateResumeRuntime) Resume(context.Context, domain.ConfirmationDecision) (port.AgentTurn, error) {
+	r.resumes++
+	r.returned = true
+	return port.AgentTurn{Text: "expired confirmation closed"}, nil
+}
+
 type expiredConfirmationStore struct {
 	fakeConfirmationStore
 	expired []port.ConfirmationDelivery
 }
 
-func (s *expiredConfirmationStore) ExpireDelivery(_ context.Context, wrapperCallID string, _ time.Time) (bool, error) {
+func (s *expiredConfirmationStore) ExpireDelivery(_ context.Context, wrapperCallID string, now time.Time) (bool, error) {
 	for index := range s.expired {
-		if s.expired[index].WrapperCallID == wrapperCallID {
+		if s.expired[index].WrapperCallID == wrapperCallID &&
+			(s.expired[index].Status == port.ConfirmationPending || s.expired[index].Status == port.ConfirmationPublished) &&
+			!s.expired[index].Expiry.After(now) {
 			s.expired[index].Status = port.ConfirmationExpired
 			return true, nil
 		}
 	}
-	if s.delivery != nil && s.delivery.WrapperCallID == wrapperCallID {
+	if s.delivery != nil && s.delivery.WrapperCallID == wrapperCallID &&
+		(s.delivery.Status == port.ConfirmationPending || s.delivery.Status == port.ConfirmationPublished) &&
+		!s.delivery.Expiry.After(now) {
 		s.delivery.Status = port.ConfirmationExpired
 		return true, nil
 	}
 	return false, nil
 }
 
-func (s *expiredConfirmationStore) ListExpired(context.Context, time.Time) ([]port.ConfirmationDelivery, error) {
-	return append([]port.ConfirmationDelivery(nil), s.expired...), nil
+func (s *expiredConfirmationStore) ListExpired(_ context.Context, now time.Time) ([]port.ConfirmationDelivery, error) {
+	var result []port.ConfirmationDelivery
+	for _, delivery := range s.expired {
+		if (delivery.Status == port.ConfirmationPending || delivery.Status == port.ConfirmationPublished) && !delivery.Expiry.After(now) {
+			result = append(result, delivery)
+		}
+	}
+	if s.delivery != nil &&
+		(s.delivery.Status == port.ConfirmationPending || s.delivery.Status == port.ConfirmationPublished) &&
+		!s.delivery.Expiry.After(now) {
+		result = append(result, *s.delivery)
+	}
+	return result, nil
 }
 
 func (f *fakeCompletionFinder) FindPublishedAssistantExchange(_ context.Context, _ port.AssistantExchangeIntent) (string, bool, error) {
@@ -602,6 +632,129 @@ func TestStartupExpiredConfirmationResumeSharesConversationCoordinatorWithReconc
 	}
 	if runtime.resumeCount() != 1 {
 		t.Fatalf("startup expiry replayed Resume: %d", runtime.resumeCount())
+	}
+}
+
+func TestExpiredConfirmationRemainsRetryableWhenResponseReconciliationOwnsCoordinator(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activation.State = domain.ActivationResponsePrepared
+	activation.ResponseBody = "prepared response"
+	activation.ResponseSHA256 = sha256Hex(activation.ResponseBody)
+	activation.ExchangeIntentID = "intent-1"
+	activation.CorrelationID = "corr-1"
+	activationStore := &fakeActivationStore{activation: activation}
+	publisher := &fakePublisher{}
+	service := completionService(t, activationStore, &fakeRuntime{}, publisher)
+	service.exchange = &fakeExchangeWriter{}
+	service.exchangeFinder = &blockingCompletionFinder{started: make(chan struct{}), release: make(chan struct{})}
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "retryable-expired-wrapper", OriginalCallID: "original", SessionID: "adk:" + string(activation.ConversationKey),
+		Actor: activation.Actor, ConversationKey: activation.ConversationKey, Status: port.ConfirmationPublished,
+		Expiry: now.Add(-time.Minute),
+	}
+	confirmations := &expiredConfirmationStore{fakeConfirmationStore: fakeConfirmationStore{delivery: &delivery}}
+	runtime := &blockingResumeRuntime{started: make(chan struct{}), release: make(chan struct{})}
+	service.runtime = runtime
+	service.confirmationStore = confirmations
+	service.clock = fakeClock{now: now}
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- service.ReconcileJobCompletion(t.Context(), activation) }()
+	select {
+	case <-service.exchangeFinder.(*blockingCompletionFinder).started:
+	case <-time.After(time.Second):
+		t.Fatal("response reconciliation did not acquire the conversation coordinator")
+	}
+
+	if err := service.ReconcileConfirmations(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	expired, err := confirmations.ListExpired(t.Context(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || expired[0].Status != port.ConfirmationPublished {
+		t.Fatalf("startup busy expiry was consumed: %#v", expired)
+	}
+
+	if outcome := service.HandleConfirmation(t.Context(), botInvocation(), delivery.WrapperCallID, true); outcome != OutcomeModelFailed {
+		t.Fatalf("busy expired confirmation outcome = %q", outcome)
+	}
+	if runtime.resumeCount() != 0 {
+		t.Fatalf("busy expired confirmation resumed %d times", runtime.resumeCount())
+	}
+	expired, err = confirmations.ListExpired(t.Context(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(expired) != 1 || expired[0].Status != port.ConfirmationPublished {
+		t.Fatalf("busy expiry was consumed: %#v", expired)
+	}
+
+	close(service.exchangeFinder.(*blockingCompletionFinder).release)
+	if err := <-reconcileDone; err != nil {
+		t.Fatal(err)
+	}
+
+	retryDone := make(chan error, 1)
+	go func() { retryDone <- service.ReconcileConfirmations(t.Context(), nil) }()
+	select {
+	case <-runtime.started:
+	case <-time.After(time.Second):
+		t.Fatal("expired confirmation was not retried after the coordinator was released")
+	}
+	if runtime.resumeCount() != 1 {
+		t.Fatalf("expired confirmation retry count = %d", runtime.resumeCount())
+	}
+	close(runtime.release)
+	if err := <-retryDone; err != nil {
+		t.Fatal(err)
+	}
+	remaining, err := confirmations.ListExpired(t.Context(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(remaining) != 0 || delivery.Status != port.ConfirmationExpired {
+		t.Fatalf("retried expiry state = status:%q remaining:%#v", delivery.Status, remaining)
+	}
+}
+
+func TestExpiredConfirmationKeepsCoordinatorThroughPostResumePublication(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activation.State = domain.ActivationResponsePrepared
+	activation.ResponseBody = "prepared response"
+	activation.ResponseSHA256 = sha256Hex(activation.ResponseBody)
+	activation.ExchangeIntentID = "intent-1"
+	activation.CorrelationID = "corr-1"
+	activationStore := &fakeActivationStore{activation: activation}
+	runtime := &immediateResumeRuntime{}
+	publisher := &fakePublisher{}
+	service := completionService(t, activationStore, &fakeRuntime{}, publisher)
+	service.runtime = runtime
+	service.confirmationStore = &expiredConfirmationStore{fakeConfirmationStore: fakeConfirmationStore{delivery: &port.ConfirmationDelivery{
+		WrapperCallID: "post-resume-expired-wrapper", OriginalCallID: "original", SessionID: "adk:" + string(activation.ConversationKey),
+		Actor: activation.Actor, ConversationKey: activation.ConversationKey, Status: port.ConfirmationPublished,
+		Expiry: now.Add(-time.Minute),
+	}}}
+	service.clock = fakeClock{now: now}
+	var interleaved error
+	publisher.onPublish = func() {
+		if !runtime.returned {
+			t.Error("expired confirmation was published before Resume returned")
+		}
+		interleaved = service.ReconcileJobCompletion(t.Context(), activation)
+	}
+
+	if outcome := service.HandleConfirmation(t.Context(), botInvocation(), "post-resume-expired-wrapper", true); outcome != OutcomeIgnoredFollowup {
+		t.Fatalf("expired confirmation outcome = %q", outcome)
+	}
+	if interleaved == nil || activationErrorCode(t, interleaved) != "conversation_busy" {
+		t.Fatalf("post-Resume reconciliation interleaved: %v", interleaved)
+	}
+	if runtime.resumes != 1 || len(publisher.calls) != 1 || publisher.calls[0].text != "This confirmation has expired." {
+		t.Fatalf("post-Resume expiry delivery = resumes:%d publishes:%#v", runtime.resumes, publisher.calls)
 	}
 }
 
