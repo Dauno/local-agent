@@ -14,6 +14,41 @@ var ErrExternalAgentJobRevisionConflict = errors.New("external-agent job status 
 var ErrActivationStateConflict = errors.New("external-agent activation state conflict")
 var ErrActivationClaimConflict = ErrActivationStateConflict
 
+// ActivationProcessError classifies a host-completion failure without making
+// provider details part of the durable activation error code.
+type ActivationProcessError struct {
+	Code      string
+	Retryable bool
+	Err       error
+}
+
+func (e *ActivationProcessError) Error() string {
+	if e == nil {
+		return ""
+	}
+	if e.Code != "" {
+		return e.Code
+	}
+	if e.Err != nil {
+		return e.Err.Error()
+	}
+	return "external-agent activation processing failed"
+}
+
+func (e *ActivationProcessError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func NewActivationProcessError(code string, retryable bool, err error) error {
+	if err == nil {
+		err = errors.New("external-agent activation processing failed")
+	}
+	return &ActivationProcessError{Code: code, Retryable: retryable, Err: err}
+}
+
 // ExternalAgentJobStore is the durable source of truth for external-agent
 // execution. Implementations must bind lease operations to owner and attempt.
 type ExternalAgentJobStore interface {
