@@ -14,6 +14,7 @@ import (
 )
 
 var _ port.ConversationStore = (*Store)(nil)
+var _ port.JobCompletionMessageWriter = (*Store)(nil)
 var _ port.AssistantExchangeWriter = (*Store)(nil)
 
 func (s *Store) ClaimDedupe(
@@ -179,6 +180,42 @@ func (s *Store) AppendMessage(
 	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit conversation message: %w", err)
+	}
+	return nil
+}
+
+// AppendJobCompletionMessage persists the host-originated turn input once. Its
+// ExternalTS is the activation ID, so retries cannot create another input
+// message even when the model boundary was crossed before a response was
+// prepared.
+func (s *Store) AppendJobCompletionMessage(
+	ctx context.Context,
+	metadata domain.ConversationMetadata,
+	message domain.Message,
+	retain int,
+) error {
+	if message.Role != domain.RoleUser || message.Source != domain.MessageSourceJobCompletion || strings.TrimSpace(message.ExternalTS) == "" {
+		return errors.New("job completion message identity is required")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin append job completion message: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	var exists bool
+	if err := tx.QueryRowContext(ctx, `SELECT EXISTS (
+		SELECT 1 FROM messages
+		WHERE conversation_key = ? AND role = ? AND source = ? AND external_ts = ?
+	)`, string(metadata.Key), string(domain.RoleUser), string(domain.MessageSourceJobCompletion), message.ExternalTS).Scan(&exists); err != nil {
+		return fmt.Errorf("check job completion message: %w", err)
+	}
+	if !exists {
+		if err := appendMessageTx(ctx, tx, metadata, message, retain); err != nil {
+			return err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit job completion message: %w", err)
 	}
 	return nil
 }
