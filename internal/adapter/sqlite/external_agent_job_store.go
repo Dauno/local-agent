@@ -26,9 +26,17 @@ var _ port.ArtifactReferenceChecker = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobReconciler = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobExpectedReconciler = (*ExternalAgentJobStore)(nil)
 var _ port.ExternalAgentJobShutdownStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobActivationStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobActivationClaimStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobActivationRetryStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobActivationCompletionStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobActivationLeaseStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobActivationReconciler = (*ExternalAgentJobStore)(nil)
 
 var ErrNotificationStateConflict = port.ErrNotificationStateConflict
 var ErrNotificationClaimConflict = port.ErrNotificationClaimConflict
+var ErrActivationStateConflict = port.ErrActivationStateConflict
+var ErrActivationClaimConflict = port.ErrActivationClaimConflict
 
 const (
 	notificationRetryBaseDelay = time.Second
@@ -631,14 +639,14 @@ func insertJobNotification(ctx context.Context, exec interface {
 		return err
 	}
 	_, err = exec.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
-		job_id, status_revision, kind, canonical_markdown, content_sha256,
+		job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,
 		renderer_version, channel_id, thread_ts, publish_state, lease_owner,
 		lease_expiry, attempts, next_attempt_at, recovered_slack_ts, last_error_code,
 		created_at, updated_at, delivery_mode, policy_version, artifact_ref, result_bytes,
 		max_markdown_parts, upload_state, slack_file_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, '')
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, '')
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
-		notification.JobID, notification.StatusRevision, notification.Kind,
+		notification.JobID, notification.StatusRevision, notification.Kind, notification.TerminalStatus,
 		notification.CanonicalMarkdown, notification.ContentSHA256, notification.RendererVersion,
 		notification.Target.ChannelID, notification.Target.ThreadTS, notification.PublishState,
 		unix(job.UpdatedAt), unix(job.UpdatedAt), unix(job.UpdatedAt), notification.DeliveryMode, notification.PolicyVersion,
@@ -706,18 +714,48 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 	if notification == nil || notification.JobID == "" || notification.LeaseOwner == "" || slackTS == "" {
 		return errors.New("notification publication identity is required")
 	}
-	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin notification publication: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	result, err := tx.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
 		publish_state = ?, recovered_slack_ts = ?, lease_owner = '', lease_expiry = 0,
-		last_error_code = '', updated_at = ?, upload_state = CASE WHEN delivery_mode = 'file' THEN ? ELSE upload_state END
+		last_error_code = '', published_at = ?, updated_at = ?, upload_state = CASE WHEN delivery_mode = 'file' THEN ? ELSE upload_state END
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND publish_state = ?
 		AND lease_owner = ? AND attempts = ? AND (policy_version = 'legacy_v1' OR
-			(delivery_mode = 'markdown' OR (delivery_mode = 'file' AND upload_state = 'completed' AND length(slack_file_id) > 0)))`, domain.NotificationPublished, slackTS, now.UnixNano(),
-		domain.JobResultUploadCompleted, notification.JobID, notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
+			(delivery_mode = 'markdown' OR (delivery_mode = 'file' AND upload_state = 'completed' AND length(slack_file_id) > 0)))`, domain.NotificationPublished, slackTS,
+		now.UnixNano(), now.UnixNano(), domain.JobResultUploadCompleted, notification.JobID, notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
 	if err != nil {
 		return fmt.Errorf("mark notification published: %w", err)
 	}
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrNotificationStateConflict
+	}
+	activationID := domain.ExternalAgentJobActivationID(notification.JobID, notification.StatusRevision, notification.Kind)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO external_agent_job_activations (
+		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
+		actor, team_id, conversation_key, original_call_id, delivery_mode, content_bytes,
+		slack_message_ts, published_at, state, attempt, lease_owner, lease_expiry,
+		next_attempt_at, last_error_code, response_body, response_sha256, exchange_intent_id,
+		correlation_id, response_slack_ts, created_at, updated_at)
+		SELECT n.job_id, n.status_revision, n.kind, ?, n.terminal_status, n.content_sha256,
+			j.actor, j.slack_team_id, j.conversation_key, j.original_call_id, n.delivery_mode,
+			n.result_bytes,
+			n.recovered_slack_ts, n.published_at, 'pending', 0, '', 0, n.published_at,
+			'', '', '', '', '', '', n.published_at, n.published_at
+		FROM external_agent_job_notifications n
+		JOIN external_agent_jobs j ON j.job_id = n.job_id
+		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ? AND n.terminal_status != ''
+		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
+		activationID, notification.JobID, notification.StatusRevision, notification.Kind); err != nil {
+		return fmt.Errorf("insert external-agent activation: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit notification publication: %w", err)
 	}
 	return nil
 }
@@ -978,7 +1016,7 @@ func safeAdminUploadState(value string) domain.JobResultUploadState {
 	}
 }
 
-const notificationColumns = `n.job_id, n.status_revision, n.kind, n.canonical_markdown, n.content_sha256, n.renderer_version, n.channel_id, n.thread_ts, n.publish_state, n.lease_owner, n.lease_expiry, n.attempts, n.next_attempt_at, n.recovered_slack_ts, n.last_error_code, n.created_at, n.updated_at, n.delivery_mode, n.policy_version, n.artifact_ref, n.result_bytes, n.max_markdown_parts, n.upload_state, n.slack_file_id`
+const notificationColumns = `n.job_id, n.status_revision, n.kind, n.terminal_status, n.published_at, n.canonical_markdown, n.content_sha256, n.renderer_version, n.channel_id, n.thread_ts, n.publish_state, n.lease_owner, n.lease_expiry, n.attempts, n.next_attempt_at, n.recovered_slack_ts, n.last_error_code, n.created_at, n.updated_at, n.delivery_mode, n.policy_version, n.artifact_ref, n.result_bytes, n.max_markdown_parts, n.upload_state, n.slack_file_id`
 
 func loadNotification(ctx context.Context, queryer queryRower, jobID string, revision int, kind string) (domain.ExternalAgentJobNotification, error) {
 	var n domain.ExternalAgentJobNotification
@@ -989,12 +1027,16 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 		FROM external_agent_job_notifications n
 		JOIN external_agent_jobs j ON j.job_id = n.job_id
 		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ?`, jobID, revision, kind)
-	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &n.CanonicalMarkdown, &n.ContentSHA256, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID, &n.Actor, &n.ConversationKey)
+	var terminalStatus string
+	var publishedAt int64
+	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &terminalStatus, &publishedAt, &n.CanonicalMarkdown, &n.ContentSHA256, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID, &n.Actor, &n.ConversationKey)
 	if err != nil {
 		return domain.ExternalAgentJobNotification{}, fmt.Errorf("load notification: %w", err)
 	}
 	n.Target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", n.JobID, n.StatusRevision, n.Kind)
 	n.PublishState = domain.NotificationPublishState(state)
+	n.TerminalStatus = domain.ExternalAgentJobStatus(terminalStatus)
+	n.PublishedAt = fromUnix(publishedAt)
 	n.DeliveryMode = domain.JobResultDeliveryMode(deliveryMode)
 	n.PolicyVersion = policyVersion
 	n.UploadState = domain.JobResultUploadState(uploadState)

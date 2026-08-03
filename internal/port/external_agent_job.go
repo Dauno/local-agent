@@ -11,6 +11,8 @@ import (
 var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
 var ErrNotificationClaimConflict = ErrNotificationStateConflict
 var ErrExternalAgentJobRevisionConflict = errors.New("external-agent job status revision conflict")
+var ErrActivationStateConflict = errors.New("external-agent activation state conflict")
+var ErrActivationClaimConflict = ErrActivationStateConflict
 
 // ExternalAgentJobStore is the durable source of truth for external-agent
 // execution. Implementations must bind lease operations to owner and attempt.
@@ -30,6 +32,54 @@ type ExternalAgentJobNotificationStore interface {
 	ClaimNextNotification(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobNotification, error)
 	MarkNotificationPublished(ctx context.Context, notification *domain.ExternalAgentJobNotification, slackTS string, now time.Time) error
 	MarkNotificationUnknown(ctx context.Context, notification *domain.ExternalAgentJobNotification, errorCode string) error
+}
+
+// ExternalAgentJobActivationClaimStore owns durable activation claims. Claims
+// are ordered by conversation and compare-and-set against lease state.
+type ExternalAgentJobActivationClaimStore interface {
+	ClaimNextActivation(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error)
+}
+
+type ExternalAgentJobActivationRetryStore interface {
+	RetryActivation(ctx context.Context, activation *domain.ExternalAgentJobActivation, errorCode string, nextAttemptAt, now time.Time) error
+}
+
+type ExternalAgentJobActivationCompletionStore interface {
+	MarkActivationModelStarted(ctx context.Context, activation *domain.ExternalAgentJobActivation, now time.Time) error
+	PrepareActivationResponse(ctx context.Context, activation *domain.ExternalAgentJobActivation, responseBody, responseSHA256, exchangeIntentID, correlationID string, now time.Time) error
+	CompleteActivation(ctx context.Context, activation *domain.ExternalAgentJobActivation, responseSlackTS string, now time.Time) error
+	FailActivation(ctx context.Context, activation *domain.ExternalAgentJobActivation, errorCode string, now time.Time) error
+	MarkActivationCompletionUnknown(ctx context.Context, activation *domain.ExternalAgentJobActivation, errorCode string, now time.Time) error
+}
+
+// ExternalAgentJobActivationStore owns the durable root-turn outbox. Every
+// mutation is compare-and-set against the claimed activation owner and attempt;
+// implementations must never derive identity from an incoming model message.
+type ExternalAgentJobActivationStore interface {
+	ExternalAgentJobActivationClaimStore
+	ExternalAgentJobActivationRetryStore
+	ExternalAgentJobActivationCompletionStore
+	GetActivation(ctx context.Context, activationID string) (*domain.ExternalAgentJobActivation, error)
+}
+
+// ExternalAgentJobActivationLeaseStore supports bounded work that must renew
+// its claim without changing activation state.
+type ExternalAgentJobActivationLeaseStore interface {
+	RenewActivationLease(ctx context.Context, activation *domain.ExternalAgentJobActivation, now time.Time, leaseTTL time.Duration) error
+}
+
+// ExternalAgentJobActivationReconciler claims a specific durable activation
+// only after revalidating its persisted actor/team/conversation binding.
+type ExternalAgentJobActivationReconciler interface {
+	ReconcileActivation(ctx context.Context, activationID, actor, teamID string, conversationKey domain.ConversationKey, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error)
+}
+
+// ExternalAgentJobCompletionHandler is the use-case boundary for a root turn
+// started by a published external-agent completion. It is intentionally
+// separate from the ACP runtime and from Slack event handling.
+type ExternalAgentJobCompletionHandler interface {
+	HandleJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error
+	ReconcileJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error
 }
 
 // ExternalAgentJobNotificationRetryStore persists a definitive, retryable
