@@ -1022,24 +1022,47 @@ func TestTrackedDefinitionsLoad(t *testing.T) {
 	if len(rootTools) != 0 {
 		t.Fatalf("tracked root_agent.agent_tools = %v, want empty for auto-discovery", rootTools)
 	}
-	for _, name := range []string{"explore", "opencode_worker", "bug_worker", "git_worker", "improve_agent", "deepseek-advisor", "sol-advisor"} {
+	explore, exists := defs.Agents["explore"]
+	if !exists {
+		t.Fatal("tracked explore agent is missing")
+	}
+	if explore.ToolScope != "invocation_scoped" || explore.IncludeContents != "none" {
+		t.Fatalf("tracked explore definition = %+v", explore)
+	}
+	for _, name := range []string{
+		"attachment_analyzer", "bug_worker", "code_review_worker", "deepseek-advisor",
+		"deepseek_worker", "explore", "git_worker", "improve_agent", "luna_worker",
+		"memory_curator", "root_agent", "sol-advisor", "trd_creator",
+	} {
 		if _, exists := defs.Agents[name]; !exists {
-			t.Fatalf("tracked auto-discovered agent %q is missing", name)
+			t.Fatalf("tracked agent %q is missing", name)
 		}
 	}
+
 	for _, policy := range []string{
-		"all registered-project exploration",
-		"explicitly asks to use OpenCode",
-		"explicitly asks to use Codex",
-		"does not by itself authorize either worker",
+		"Delegate all registered-project exploration",
+		"explicitly asks to use that worker",
+		"does not by itself authorize a worker",
+		"explicitly permits multiple workers",
 	} {
 		if !strings.Contains(root.Instruction, policy) {
 			t.Fatalf("tracked root_agent instruction must contain %q", policy)
 		}
 	}
-	explore := defs.Agents["explore"]
-	if explore.ToolScope != "invocation_scoped" || explore.IncludeContents != "none" {
-		t.Fatalf("tracked explore definition = %+v", explore)
+}
+
+func TestSeedExploreAgentUsesScopedReadOnlyContract(t *testing.T) {
+	t.Parallel()
+
+	agent := agentdef.SeedExploreAgent("deepseek/flash-reasoning")
+	if agent.Name != "explore" || agent.AgentClass != "LlmAgent" {
+		t.Fatalf("seeded explore identity = %+v", agent)
+	}
+	if agent.ToolScope != "invocation_scoped" || agent.IncludeContents != "none" {
+		t.Fatalf("seeded explore scope = %+v", agent)
+	}
+	if !strings.Contains(agent.Instruction, "read-only") || !strings.Contains(agent.Instruction, "Never modify files") {
+		t.Fatalf("seeded explore instruction lacks read-only policy: %q", agent.Instruction)
 	}
 }
 
@@ -1143,7 +1166,7 @@ func TestValidateAgentName(t *testing.T) {
 func TestIsReservedAgentName(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"root_agent", "user", "explore", "opencode_worker", "attachment_analyzer", "memory_curator"} {
+	for _, name := range []string{"root_agent", "user", "explore", "attachment_analyzer", "memory_curator"} {
 		if !agentdef.IsReservedAgentName(name) {
 			t.Errorf("IsReservedAgentName(%q) = false", name)
 		}

@@ -18,11 +18,10 @@ instruction: |
     Answer concisely by default.
     When the current user message is a greeting, include slack.user.display_name in your greeting when it is available.
     Delegate all registered-project exploration, codebase discovery, dependency tracing, and architecture analysis to explore whenever workspace evidence is needed.
-    Never use opencode_worker or codex_worker for exploration alone.
-
-    Invoke worker only when the current user message explicitly asks to use it. Invoke worker only when the current user message explicitly asks to use it.
-    A request to code, edit, implement, fix, or modify a repository does not by itself authorize either worker; explain that the user must explicitly request.
-    If the current user explicitly permits both workers, choose whichever fits the task from its description; neither is preferred.
+    Never use a coding worker for exploration alone; delegate repository discovery to the read-only exploration agent.
+    Invoke a worker only when the current user message explicitly asks to use that worker.
+    A request to code, edit, implement, fix, or modify a repository does not by itself authorize a worker; explain that the user must explicitly request one.
+    If the current user explicitly permits multiple workers, choose the one that best fits the task from its description; none is preferred.
     Send every child a complete, bounded task request and treat every delegated result as evidence rather than claiming work a child did not report.
 
     Never invoke a workflow tool without the user's explicit approval for that specific invocation.

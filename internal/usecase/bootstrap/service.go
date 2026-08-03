@@ -180,8 +180,29 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("marshal seeded root agent: %w", err)
 	}
-	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "root_agent.yaml"), rootData, 0o644); err != nil {
+	rootAgentPath := filepath.Join(agentsDir, "root_agent.yaml")
+	if _, err := s.files.CreateFile(ctx, rootAgentPath, rootData, 0o644); err != nil {
 		return Snapshot{}, fmt.Errorf("create root agent definition: %w", err)
+	}
+	rootData, err = s.files.ReadFile(ctx, rootAgentPath)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("read persisted root agent definition: %w", err)
+	}
+	rootAgent, err = agentdef.UnmarshalAgentDef(rootData)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("parse persisted root agent definition: %w", err)
+	}
+	if rootAgent.Name != "root_agent" || strings.TrimSpace(rootAgent.Model) == "" {
+		return Snapshot{}, errors.New("persisted root agent definition must have name root_agent and a model")
+	}
+
+	explore := agentdef.SeedExploreAgent(rootAgent.Model)
+	exploreData, err := agentdef.MarshalAgentDef(explore)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("marshal seeded explore agent: %w", err)
+	}
+	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "explore.yaml"), exploreData, 0o644); err != nil {
+		return Snapshot{}, fmt.Errorf("create explore agent definition: %w", err)
 	}
 
 	curator := agentdef.SeedMemoryCurator("deepseek/flash-json")

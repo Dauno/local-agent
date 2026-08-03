@@ -186,9 +186,10 @@ state reset; `run` never resets state automatically.
 
 ### Workspace inspection
 
-Filesystem inspection is disabled by default. To let authorized Slack users
-inspect selected projects, explicitly enable the sandbox and register logical
-project names in `.local-agent/config.yaml`:
+Filesystem inspection is enabled by default for the application root. `init`
+registers it as `workspace`; authorized Slack users can inspect it through the
+read-only tools. Add other logical project names in `.local-agent/config.yaml`
+as needed:
 
 ```yaml
 sandbox:
@@ -198,6 +199,8 @@ sandbox:
   command_timeout_seconds: 30
   max_output_bytes: 65536
 ```
+
+Set `sandbox.enabled: false` to disable workspace inspection entirely.
 
 Relative project paths are resolved against the directory where `local-agent`
 started. The agent can discover registered names, list one directory at a time,
