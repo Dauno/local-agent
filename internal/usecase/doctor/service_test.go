@@ -36,8 +36,9 @@ type failingDatabase struct{ err error }
 func (d failingDatabase) CheckDatabase(context.Context, string) error { return d.err }
 
 type fakeLive struct {
-	bot, app, context, canvas, exports, model, attachment int
-	modelAPIKey                                           string
+	bot, app, context, canvas, exports, model, attachment, audio int
+	modelAPIKey                                                  string
+	audioAPIKey                                                  string
 }
 
 type fakeCLI struct {
@@ -90,6 +91,12 @@ func (f *fakeLive) CheckResolvedModel(_ context.Context, _ *agentdef.ResolvedMod
 func (f *fakeLive) CheckAttachmentAnalyzer(_ context.Context, _ *agentdef.ResolvedModel, apiKey string) error {
 	f.attachment++
 	f.modelAPIKey = apiKey
+	return nil
+}
+
+func (f *fakeLive) CheckAudioTranscription(_ context.Context, _ *agentdef.ResolvedModel, apiKey string) error {
+	f.audio++
+	f.audioAPIKey = apiKey
 	return nil
 }
 
@@ -206,6 +213,41 @@ func TestLiveDoctorChecksGeneratedFileCapabilityWhenEnabled(t *testing.T) {
 	report := service.Run(t.Context(), true)
 	if report.ExitCode() != 0 || live.exports != 1 {
 		t.Fatalf("report=%#v live=%#v", report, live)
+	}
+}
+
+func TestDoctorValidatesAndChecksDedicatedAudioTranscriptionProfile(t *testing.T) {
+	deps, _, live := validDependencies()
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Slack.Files.TranscriptionProfile = "legacy/default"
+		return cfg, nil
+	}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), true)
+	if report.ExitCode() != 0 {
+		t.Fatalf("doctor failed: %#v", report.Results)
+	}
+	if live.audio != 1 || live.audioAPIKey != "secret-model-key" {
+		t.Fatalf("audio live checks=%d api key=%q", live.audio, live.audioAPIKey)
+	}
+	foundProfile, foundEndpoint := false, false
+	for _, result := range report.Results {
+		if result.Name == "audio transcription profile" && result.Status == StatusPass {
+			foundProfile = true
+		}
+		if result.Name == "audio transcription endpoint" && result.Status == StatusPass {
+			foundEndpoint = true
+		}
+		if result.Name == "model endpoint (audio)" {
+			t.Fatalf("audio profile used generic Chat check: %#v", result)
+		}
+	}
+	if !foundProfile || !foundEndpoint {
+		t.Fatalf("dedicated audio doctor results missing: %#v", report.Results)
 	}
 }
 

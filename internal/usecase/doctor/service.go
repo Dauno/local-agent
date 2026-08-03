@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -63,6 +64,10 @@ type LiveChecker interface {
 
 type AttachmentLiveChecker interface {
 	CheckAttachmentAnalyzer(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error
+}
+
+type AudioTranscriptionLiveChecker interface {
+	CheckAudioTranscription(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error
 }
 
 // CLIProviderCheck is the typed result of one offline agent_cli provider
@@ -215,11 +220,13 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	projectRoot := filepath.Dir(filepath.Dir(s.deps.ConfigPath))
 	paths, pathErr := cfg.ResolvePaths(projectRoot)
 	var (
-		defs           *agentdef.Definitions
-		resolvedModel  *agentdef.ResolvedModel
-		selectedModels []selectedModel
-		defsLoadFailed bool
-		durableACP     bool
+		defs                    *agentdef.Definitions
+		resolvedModel           *agentdef.ResolvedModel
+		selectedModels          []selectedModel
+		defsLoadFailed          bool
+		durableACP              bool
+		transcriptionResolved   *agentdef.ResolvedModel
+		transcriptionResolveErr error
 	)
 	if pathErr != nil {
 		report.fail("SQLite", pathErr.Error(), "Fix state.dir and state.db in .local-agent/config.yaml.", false)
@@ -360,6 +367,21 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			}
 		}
 	}
+	transcriptionProfile := strings.TrimSpace(cfg.Slack.Files.TranscriptionProfile)
+	if transcriptionProfile != "" {
+		transcriptionDefs := defs
+		if transcriptionDefs == nil {
+			transcriptionDefs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody)
+		}
+		if transcriptionDefs == nil {
+			transcriptionResolveErr = errors.New("no provider registry is available")
+		} else {
+			transcriptionResolved, transcriptionResolveErr = transcriptionDefs.ResolveModel(transcriptionProfile)
+			if transcriptionResolveErr == nil {
+				transcriptionResolveErr = validateAudioTranscriptionProfile(transcriptionResolved)
+			}
+		}
+	}
 	if defs != nil {
 		for _, definition := range defs.Agents {
 			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
@@ -387,6 +409,9 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	keys := []string{modelAPIKeyEnv, SlackBotTokenKey, SlackAppTokenKey}
 	if defs != nil {
 		keys = append(keys, defs.RequiredAPIKeyEnvs()...)
+	}
+	if transcriptionResolved != nil && transcriptionResolved.Type() == agentdef.ProviderTypeOpenAICompatible && strings.TrimSpace(transcriptionResolved.APIKeyEnv) != "" {
+		keys = append(keys, transcriptionResolved.APIKeyEnv)
 	}
 	keys = uniqueStrings(keys)
 	values, err := s.deps.Secrets.Resolve(keys...)
@@ -432,6 +457,24 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	}
 	checkSecret("Slack bot token", SlackBotTokenKey, "xoxb-", "Set a Bot User OAuth Token beginning with xoxb-.")
 	checkSecret("Slack app token", SlackAppTokenKey, "xapp-", "Set an app-level Socket Mode token beginning with xapp- and connections:write.")
+
+	audioTranscriptionReady := false
+	if transcriptionProfile != "" {
+		switch {
+		case transcriptionResolveErr != nil:
+			report.fail("audio transcription profile", redactor.String(fmt.Sprintf("resolve %q: %v", transcriptionProfile, transcriptionResolveErr)), "Fix slack.files.transcription_profile and its openai_compatible provider definition.", false)
+		case cfg.Slack.Files.TranscriptionTimeoutSeconds <= 0:
+			report.fail("audio transcription profile", "transcription timeout must be greater than zero", "Set slack.files.transcription_timeout_seconds to a positive value.", false)
+		case transcriptionResolved == nil || transcriptionResolved.Type() != agentdef.ProviderTypeOpenAICompatible:
+			report.fail("audio transcription profile", "profile must resolve to an openai_compatible provider", "Select an openai_compatible profile in slack.files.transcription_profile.", false)
+		case !validSecrets[transcriptionResolved.APIKeyEnv]:
+			report.fail("audio transcription profile", fmt.Sprintf("profile %q requires %s, which is not set", transcriptionProfile, transcriptionResolved.APIKeyEnv), "Set the transcription provider API key in the process environment or .env.", false)
+		default:
+			validSecrets[transcriptionResolved.APIKeyEnv] = true
+			audioTranscriptionReady = true
+			report.pass("audio transcription profile", fmt.Sprintf("profile %q resolved to %s/%s; dedicated multipart STT is configured", transcriptionProfile, transcriptionResolved.Provider.Name, transcriptionResolved.Model))
+		}
+	}
 
 	if pathErr == nil {
 		if err := s.deps.Database.CheckDatabase(ctx, paths.DatabaseFile); err != nil {
@@ -661,6 +704,21 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			}
 		}
 	}
+	if transcriptionProfile != "" && audioTranscriptionReady && transcriptionResolved != nil {
+		checker, ok := s.deps.Live.(AudioTranscriptionLiveChecker)
+		if !ok {
+			report.fail("audio transcription endpoint", "audio transcription live checker is unavailable", "Reinstall local-agent with dedicated STT live-check support.", false)
+		} else {
+			liveCtx, cancel := checkTimeout(ctx, defaultAuxiliaryModelTimeoutSeconds)
+			err := checker.CheckAudioTranscription(liveCtx, transcriptionResolved, values[transcriptionResolved.APIKeyEnv])
+			cancel()
+			if err != nil {
+				report.fail("audio transcription endpoint", redactor.String(err.Error()), "Verify the transcription provider base URL, model, API key, and /audio/transcriptions support.", false)
+			} else {
+				report.pass("audio transcription endpoint", "dedicated multipart /audio/transcriptions request passed")
+			}
+		}
+	}
 	for _, selected := range selectedModels {
 		if selected.resolved == nil || selected.resolved.Type() != agentdef.ProviderTypeOpenAICompatible || selected.agent == "root_agent" {
 			continue
@@ -720,4 +778,27 @@ func (r *Report) fail(name, detail, remediation string, fatal bool) {
 	r.Results = append(r.Results, Result{
 		Name: name, Status: StatusFail, Detail: detail, Remediation: remediation, Fatal: fatal,
 	})
+}
+
+func validateAudioTranscriptionProfile(resolved *agentdef.ResolvedModel) error {
+	if resolved == nil {
+		return errors.New("profile resolved to no model")
+	}
+	if resolved.Type() != agentdef.ProviderTypeOpenAICompatible {
+		return fmt.Errorf("profile requires an %s provider; got %s", agentdef.ProviderTypeOpenAICompatible, resolved.Type())
+	}
+	if strings.TrimSpace(resolved.Model) == "" {
+		return errors.New("profile model must not be empty")
+	}
+	if strings.TrimSpace(resolved.APIKeyEnv) == "" {
+		return errors.New("profile API-key environment variable must not be empty")
+	}
+	parsed, err := url.Parse(resolved.BaseURL)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		return errors.New("profile base URL must be an absolute http or https URL")
+	}
+	if parsed.User != nil || parsed.Fragment != "" {
+		return errors.New("profile base URL must not contain credentials or a fragment")
+	}
+	return nil
 }

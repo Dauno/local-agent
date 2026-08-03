@@ -36,6 +36,16 @@ type AttachmentProcessor interface {
 	Process(ctx context.Context, request AttachmentRequest) (ProcessedAttachment, error)
 }
 
+type AudioTranscriptionRequest struct {
+	FileName string
+	MIMEType string
+	Data     []byte
+}
+
+type AudioTranscriber interface {
+	Transcribe(ctx context.Context, request AudioTranscriptionRequest) (string, error)
+}
+
 type CanvasCreateResult struct {
 	CanvasID string
 }

@@ -22,6 +22,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
+	"github.com/Dauno/slack-local-agent/internal/adapter/openaistt"
 	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
@@ -172,6 +173,40 @@ func (liveChecker) CheckAttachmentAnalyzer(ctx context.Context, resolved *agentd
 		return errors.New("attachment_analyzer did not call load_artifacts")
 	}
 	return nil
+}
+
+func (liveChecker) CheckAudioTranscription(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error {
+	if resolved == nil {
+		return errors.New("audio transcription profile is not resolved")
+	}
+	transcriber, err := openaistt.New(openaistt.Config{
+		BaseURL: resolved.BaseURL,
+		APIKey:  apiKey,
+		Model:   resolved.Model,
+		Headers: resolved.Headers,
+	})
+	if err != nil {
+		return err
+	}
+	if _, err := transcriber.Transcribe(ctx, port.AudioTranscriptionRequest{
+		FileName: "doctor.wav",
+		MIMEType: "audio/wav",
+		Data:     diagnosticWAV(),
+	}); err != nil {
+		return fmt.Errorf("audio transcription endpoint check failed: %w", err)
+	}
+	return nil
+}
+
+func diagnosticWAV() []byte {
+	// One silent PCM sample is sufficient to validate multipart routing without
+	// depending on a real Slack attachment or transcript quality.
+	return []byte{
+		'R', 'I', 'F', 'F', 0x25, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E',
+		'f', 'm', 't', ' ', 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
+		0x40, 0x1f, 0x00, 0x00, 0x40, 0x1f, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00,
+		'd', 'a', 't', 'a', 0x01, 0x00, 0x00, 0x00, 0x80,
+	}
 }
 
 type toolCallTrackingModel struct {

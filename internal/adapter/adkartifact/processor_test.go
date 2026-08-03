@@ -24,37 +24,17 @@ type visualTestModel struct {
 	sawImage bool
 }
 
-type audioTestModel struct {
+type audioTestTranscriber struct {
 	calls    int
-	sawAudio bool
+	request  port.AudioTranscriptionRequest
+	response string
+	err      error
 }
 
-func (*audioTestModel) Name() string { return "audio-test" }
-
-func (m *audioTestModel) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		m.calls++
-		for _, content := range request.Contents {
-			for _, part := range content.Parts {
-				if part != nil && part.InlineData != nil && IsAudioMIME(part.InlineData.MIMEType) {
-					m.sawAudio = true
-				}
-			}
-		}
-		if !m.sawAudio {
-			yield(&model.LLMResponse{Content: &genai.Content{
-				Role: genai.RoleModel,
-				Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					ID: "load-audio", Name: "load_artifacts", Args: map[string]any{"artifact_names": []string{"meeting.wav"}},
-				}}},
-			}, FinishReason: genai.FinishReasonStop}, nil)
-			return
-		}
-		yield(&model.LLMResponse{
-			Content:      genai.NewContentFromText("meeting transcript", genai.RoleModel),
-			FinishReason: genai.FinishReasonStop, TurnComplete: true,
-		}, nil)
-	}
+func (m *audioTestTranscriber) Transcribe(_ context.Context, request port.AudioTranscriptionRequest) (string, error) {
+	m.calls++
+	m.request = request
+	return m.response, m.err
 }
 
 type rejectingModelLimiter struct{}
@@ -69,15 +49,11 @@ func (m *trackingModelLimiter) TryAcquire() (func(), bool) {
 	return func() { m.released = true }, true
 }
 
-type blockingAudioModel struct{}
+type blockingAudioTranscriber struct{}
 
-func (blockingAudioModel) Name() string { return "blocking-audio-test" }
-
-func (blockingAudioModel) GenerateContent(ctx context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		<-ctx.Done()
-		yield(nil, ctx.Err())
-	}
+func (blockingAudioTranscriber) Transcribe(ctx context.Context, _ port.AudioTranscriptionRequest) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
 }
 
 func (*visualTestModel) Name() string { return "visual-test" }
@@ -183,8 +159,8 @@ func TestProcessorLoadsImageArtifactThroughADK(t *testing.T) {
 	}
 }
 
-func TestProcessorLoadsAudioArtifactThroughADK(t *testing.T) {
-	audio := &audioTestModel{}
+func TestProcessorTranscribesAudioThroughPortAfterSavingArtifact(t *testing.T) {
+	audio := &audioTestTranscriber{response: "meeting transcript"}
 	limiter := &trackingModelLimiter{}
 	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, audio, time.Second, limiter)
 	got, err := processor.Process(t.Context(), port.AttachmentRequest{
@@ -196,8 +172,11 @@ func TestProcessorLoadsAudioArtifactThroughADK(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if audio.calls != 2 || !audio.sawAudio {
-		t.Fatalf("audio calls=%d sawAudio=%t", audio.calls, audio.sawAudio)
+	if audio.calls != 1 {
+		t.Fatalf("audio calls=%d, want one provider call", audio.calls)
+	}
+	if audio.request.FileName != "meeting.wav" || audio.request.MIMEType != "audio/wav" || string(audio.request.Data) != "wav" {
+		t.Fatalf("transcription request = %#v", audio.request)
 	}
 	if got.Name != "meeting.wav" || got.MIMEType != "audio-transcript" || got.Text != "meeting transcript" {
 		t.Fatalf("processed audio = %#v", got)
@@ -208,7 +187,7 @@ func TestProcessorLoadsAudioArtifactThroughADK(t *testing.T) {
 }
 
 func TestProcessorAudioHonorsSharedModelLimiter(t *testing.T) {
-	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, &audioTestModel{}, time.Second, rejectingModelLimiter{})
+	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, &audioTestTranscriber{response: "ignored"}, time.Second, rejectingModelLimiter{})
 	_, err := processor.Process(t.Context(), port.AttachmentRequest{
 		ProcessingID: "event-5:0",
 		Attachment: port.LoadedAttachment{
@@ -221,7 +200,7 @@ func TestProcessorAudioHonorsSharedModelLimiter(t *testing.T) {
 }
 
 func TestProcessorAudioHonorsConfiguredTimeout(t *testing.T) {
-	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, blockingAudioModel{}, 5*time.Millisecond, testModelLimiter{})
+	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, blockingAudioTranscriber{}, 5*time.Millisecond, testModelLimiter{})
 	_, err := processor.Process(t.Context(), port.AttachmentRequest{
 		ProcessingID: "event-6:0",
 		Attachment: port.LoadedAttachment{
@@ -230,5 +209,22 @@ func TestProcessorAudioHonorsConfiguredTimeout(t *testing.T) {
 	})
 	if !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("audio timeout error = %v", err)
+	}
+}
+
+func TestProcessorRejectsEmptyAudioTranscriptAndReleasesPermit(t *testing.T) {
+	limiter := &trackingModelLimiter{}
+	processor := NewProcessorWithTranscription(artifact.InMemoryService(), nil, "", 0, &audioTestTranscriber{response: " \n\t"}, time.Second, limiter)
+	_, err := processor.Process(t.Context(), port.AttachmentRequest{
+		ProcessingID: "event-7:0",
+		Attachment: port.LoadedAttachment{
+			ID: "F7", Name: "empty.m4a", MIMEType: "audio/mp4", Data: []byte("m4a"),
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "no transcript") {
+		t.Fatalf("empty transcript error = %v", err)
+	}
+	if !limiter.released {
+		t.Fatal("audio limiter permit was not released after empty transcript")
 	}
 }
