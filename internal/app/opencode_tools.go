@@ -87,3 +87,14 @@ func (f *openCodeManagementToolFactory) ToolsForInvocation(actor string, key dom
 	}
 	return append(tools, managementTool), nil
 }
+
+func (f *openCodeManagementToolFactory) ToolsForActivation(actor string, key domain.ConversationKey, activation domain.ExternalAgentJobActivation) ([]any, error) {
+	if f == nil || f.base == nil {
+		return nil, fmt.Errorf("activation host-only tool factory is unavailable")
+	}
+	factory, ok := f.base.(port.ActivationAgentToolFactory)
+	if !ok {
+		return nil, fmt.Errorf("activation host-only tool factory is unavailable")
+	}
+	return factory.ToolsForActivation(actor, key, activation)
+}

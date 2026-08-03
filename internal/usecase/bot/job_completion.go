@@ -29,7 +29,7 @@ func (s *Service) HandleJobCompletion(ctx context.Context, activation domain.Ext
 	case domain.ActivationResponsePrepared, domain.ActivationCompleted:
 		return s.ReconcileJobCompletion(ctx, *current)
 	case domain.ActivationModelStarted:
-		return s.reconcileModelStarted(ctx, current)
+		return s.ReconcileJobCompletion(ctx, *current)
 	case domain.ActivationProcessing:
 		return s.runJobCompletion(ctx, current)
 	case domain.ActivationPending:
@@ -49,6 +49,17 @@ func (s *Service) ReconcileJobCompletion(ctx context.Context, activation domain.
 		return port.NewActivationProcessError("activation_store_unavailable", true, errors.New("external-agent activation store is unavailable"))
 	}
 	current, err := s.authoritativeActivation(ctx, activation)
+	if err != nil {
+		return err
+	}
+	releaseConversation, acquired := s.limiter.TryAcquire(string(current.ConversationKey))
+	if !acquired {
+		return port.NewActivationProcessError("conversation_busy", true, errors.New("conversation already has an active root turn"))
+	}
+	defer releaseConversation()
+	// The activation may have changed while waiting for the conversation
+	// coordinator. Re-read it before publishing or finalizing anything.
+	current, err = s.authoritativeActivation(ctx, activation)
 	if err != nil {
 		return err
 	}
@@ -102,9 +113,10 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 		if err := s.appendJobCompletionMessage(ctx, metadata, completion); err != nil {
 			return port.NewActivationProcessError("activation_message_retryable", true, err)
 		}
-		prior = append(prior, completion)
 	}
-	modelContext := domain.LimitMessages(prior, s.cfg.ContextLimits)
+	// Keep one durable envelope, but make it the current input on every retry.
+	// A human turn may have been persisted after a model-busy attempt.
+	modelContext := domain.LimitMessages(currentJobCompletionInput(prior, completion), s.cfg.ContextLimits)
 	if len(modelContext) == 0 || modelContext[len(modelContext)-1].Role != domain.RoleUser {
 		return s.failActivation(ctx, activation, "activation_context_invalid", false, errors.New("activation context does not end with a user message"))
 	}
@@ -133,7 +145,8 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 				Actor:        activation.Actor,
 				ActivationID: activation.ActivationID,
 			},
-			Messages: modelContext,
+			Messages:   modelContext,
+			Activation: activation,
 		})
 	}()
 	cancel()
@@ -242,7 +255,38 @@ func (s *Service) findPublishedAssistantExchange(ctx context.Context, intent por
 }
 
 func (s *Service) reconcileModelStarted(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
-	return s.markUnknown(ctx, activation, "completion_unknown")
+	recovery, ok := s.runtime.(port.AgentActivationRecovery)
+	if !ok {
+		return s.markUnknown(ctx, activation, "completion_unknown")
+	}
+	turn, found, err := recovery.RecoverActivation(ctx, activation.ConversationKey, activation.ActivationID)
+	if err != nil {
+		return port.NewActivationProcessError("activation_recovery_retryable", true, err)
+	}
+	if !found {
+		return s.markUnknown(ctx, activation, "completion_unknown")
+	}
+	if turn.PendingConfirmation != nil {
+		return s.markUnknown(ctx, activation, "activation_confirmation_not_allowed")
+	}
+	response := s.sanitize(turn.Text)
+	if strings.TrimSpace(response) == "" {
+		return s.markUnknown(ctx, activation, "activation_empty_response")
+	}
+	metadata, _, err := activationMetadata(*activation)
+	if err != nil {
+		return s.markUnknown(ctx, activation, "completion_unknown")
+	}
+	message := domain.Message{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant, Content: response, CreatedAt: s.clock.Now().UTC()}
+	prepared, prepareErr := s.prepareActivationResponse(ctx, activation, metadata, message)
+	if prepareErr != nil {
+		return port.NewActivationProcessError("activation_response_prepare_retryable", true, prepareErr)
+	}
+	activation.State = domain.ActivationResponsePrepared
+	activation.ResponseBody = response
+	activation.ExchangeIntentID = prepared.ID
+	activation.CorrelationID = prepared.CorrelationID
+	return s.publishPreparedActivation(ctx, activation)
 }
 
 func (s *Service) markUnknown(ctx context.Context, activation *domain.ExternalAgentJobActivation, code string) error {
@@ -331,6 +375,17 @@ func hasJobCompletionMessage(messages []domain.Message, activationID string) boo
 		}
 	}
 	return false
+}
+
+func currentJobCompletionInput(messages []domain.Message, completion domain.Message) []domain.Message {
+	result := make([]domain.Message, 0, len(messages)+1)
+	for _, message := range messages {
+		if message.Role == domain.RoleUser && message.Source == domain.MessageSourceJobCompletion && message.ExternalTS == completion.ExternalTS {
+			continue
+		}
+		result = append(result, message)
+	}
+	return append(result, completion)
 }
 
 func jobCompletionEnvelope(activation domain.ExternalAgentJobActivation) string {

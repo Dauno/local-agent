@@ -1,10 +1,12 @@
 package app
 
 import (
+	"context"
 	"errors"
 	"io"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/secure"
 )
@@ -91,6 +93,56 @@ func TestRedactingWriter(t *testing.T) {
 			t.Fatal("redaction failed: secret still visible")
 		}
 	})
+}
+
+func TestWaitInParallelStartsAllWaitersBeforeReturning(t *testing.T) {
+	startedA := make(chan struct{})
+	startedB := make(chan struct{})
+	release := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- waitInParallel(t.Context(), func(context.Context) error {
+			close(startedA)
+			<-release
+			return nil
+		}, func(context.Context) error {
+			close(startedB)
+			<-release
+			return nil
+		})
+	}()
+	select {
+	case <-startedA:
+	case <-time.After(time.Second):
+		t.Fatal("first waiter did not start")
+	}
+	select {
+	case <-startedB:
+	case <-time.After(time.Second):
+		t.Fatal("second waiter did not start concurrently")
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestWaitInParallelHonorsBoundedContext(t *testing.T) {
+	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	blocked := make(chan struct{})
+	started := time.Now()
+	err := waitInParallel(ctx, func(context.Context) error {
+		<-blocked
+		return nil
+	}, func(context.Context) error { return nil })
+	close(blocked)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("wait error = %v, want deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("bounded wait took %s", elapsed)
+	}
 }
 
 type errorWriter struct{ err error }

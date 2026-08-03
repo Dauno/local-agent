@@ -10,6 +10,8 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/secure"
 )
 
+const shutdownStatsTimeout = time.Second
+
 func (a *Application) Run(ctx context.Context) error {
 	setup, err := a.loadRuntimeSetup()
 	if err != nil {
@@ -48,38 +50,37 @@ func (a *Application) Run(ctx context.Context) error {
 		interrupted = true
 	}
 	if composition != nil {
-		beforeStats, beforeStatsErr := composition.ExternalShutdownStats(context.Background())
 		composition.StopExternalAdmission()
 		stopIntake()
+		beforeStatsCtx, cancelBeforeStats := context.WithTimeout(context.Background(), shutdownStatsTimeout)
+		beforeStats, beforeStatsErr := composition.ExternalShutdownStats(beforeStatsCtx)
+		cancelBeforeStats()
 		grace := time.Duration(setup.cfg.Runtime.ShutdownGraceSeconds) * time.Second
 		waitDone := make(chan error, 1)
+		drainCtx, cancelDrain := context.WithTimeout(context.Background(), grace)
 		go func() {
-			waitDone <- errors.Join(composition.WaitExternal(context.Background()), composition.WaitNotification(context.Background()))
+			waitDone <- waitExternalAndNotification(drainCtx, composition)
 		}()
-		timer := time.NewTimer(grace)
 		select {
 		case waitErr := <-waitDone:
 			if waitErr != nil {
 				models.logger.Warn("external-agent shutdown drain failed", "error", waitErr)
 			}
-		case <-timer.C:
+		case <-drainCtx.Done():
 			models.logger.Warn("external-agent shutdown grace expired")
 		case <-a.forceShutdown:
 			models.logger.Warn("external-agent shutdown drain bypassed")
 		}
-		if !timer.Stop() {
-			select {
-			case <-timer.C:
-			default:
-			}
-		}
+		cancelDrain()
 		runtimeCancel()
 		waitCtx, cancelWait := context.WithTimeout(context.Background(), 5*time.Second)
-		if waitErr := errors.Join(composition.WaitExternal(waitCtx), composition.WaitNotification(waitCtx)); waitErr != nil {
+		if waitErr := waitExternalAndNotification(waitCtx, composition); waitErr != nil {
 			models.logger.Warn("external-agent shutdown did not settle", "error", waitErr)
 		}
 		cancelWait()
-		afterStats, afterStatsErr := composition.ExternalShutdownStats(context.Background())
+		afterStatsCtx, cancelAfterStats := context.WithTimeout(context.Background(), shutdownStatsTimeout)
+		afterStats, afterStatsErr := composition.ExternalShutdownStats(afterStatsCtx)
+		cancelAfterStats()
 		if beforeStatsErr == nil && afterStatsErr == nil {
 			drained := beforeStats.Running - afterStats.Running
 			if drained < 0 {
@@ -91,7 +92,9 @@ func (a *Application) Run(ctx context.Context) error {
 			}
 			models.logger.Info("external-agent shutdown", "queued", afterStats.Queued, "running", afterStats.Running, "drained", drained, "ambiguous", ambiguous)
 		}
-		activationHealth, healthErr := composition.ActivationHealth(context.Background())
+		healthCtx, cancelHealth := context.WithTimeout(context.Background(), shutdownStatsTimeout)
+		activationHealth, healthErr := composition.ActivationHealth(healthCtx)
+		cancelHealth()
 		if healthErr == nil {
 			models.logger.Info("external-agent activation shutdown", "pending", activationHealth.Pending, "processing", activationHealth.Processing, "model_started", activationHealth.ModelStarted, "response_prepared", activationHealth.ResponsePrepared, "processed", activationHealth.Processed, "completion_unknown", activationHealth.CompletionUnknown, "stuck", activationHealth.Stuck)
 		}
@@ -108,6 +111,41 @@ func (a *Application) Run(ctx context.Context) error {
 		}
 	}
 	return runErr
+}
+
+func waitExternalAndNotification(ctx context.Context, composition *runtimeComposition) error {
+	if composition == nil {
+		return nil
+	}
+	return waitInParallel(ctx, composition.WaitExternal, composition.WaitNotification)
+}
+
+func waitInParallel(ctx context.Context, waiters ...func(context.Context) error) error {
+	if len(waiters) == 0 {
+		return nil
+	}
+	done := make(chan error, len(waiters))
+	for _, waiter := range waiters {
+		if waiter == nil {
+			done <- nil
+			continue
+		}
+		go func(waiter func(context.Context) error) {
+			done <- waiter(ctx)
+		}(waiter)
+	}
+	var waitErrs []error
+	for range waiters {
+		select {
+		case err := <-done:
+			if err != nil {
+				waitErrs = append(waitErrs, err)
+			}
+		case <-ctx.Done():
+			return ctx.Err()
+		}
+	}
+	return errors.Join(waitErrs...)
 }
 
 func requiredSlackTokens(botToken, appToken string) error {

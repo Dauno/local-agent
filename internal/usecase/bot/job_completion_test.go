@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -106,6 +107,31 @@ type fakeCompletionFinder struct {
 	timestamp string
 	found     bool
 	calls     int
+}
+
+type activationRecoveryRuntime struct {
+	*fakeRuntime
+	turn         port.AgentTurn
+	found        bool
+	recoveryErr  error
+	recoveryCall int
+}
+
+func (r *activationRecoveryRuntime) RecoverActivation(context.Context, domain.ConversationKey, string) (port.AgentTurn, bool, error) {
+	r.recoveryCall++
+	return r.turn, r.found, r.recoveryErr
+}
+
+type blockingCompletionFinder struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (f *blockingCompletionFinder) FindPublishedAssistantExchange(context.Context, port.AssistantExchangeIntent) (string, bool, error) {
+	f.once.Do(func() { close(f.started) })
+	<-f.release
+	return "", false, nil
 }
 
 func (f *fakeCompletionFinder) FindPublishedAssistantExchange(_ context.Context, _ port.AssistantExchangeIntent) (string, bool, error) {
@@ -278,6 +304,136 @@ func TestResponsePreparedRetryUsesPublishedEvidenceWithoutModelReplay(t *testing
 	if activationStore.completeCalls != 1 || len(publisher.calls) != 0 {
 		t.Fatalf("reconciliation retry duplicated completion: completes=%d publishes=%d", activationStore.completeCalls, len(publisher.calls))
 	}
+}
+
+func TestModelStartedReconcilesDurableADKFinalWithoutModelReplay(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activation.State = domain.ActivationModelStarted
+	activationStore := &fakeActivationStore{activation: activation}
+	runtime := &activationRecoveryRuntime{fakeRuntime: &fakeRuntime{runTurn: port.AgentTurn{Text: "must not run"}}, turn: port.AgentTurn{Text: "recovered synthesis"}, found: true}
+	publisher := &fakePublisher{}
+	service := completionService(t, activationStore, runtime.fakeRuntime, publisher)
+	service.runtime = runtime
+	service.exchange = &fakeExchangeWriter{}
+
+	if err := service.ReconcileJobCompletion(t.Context(), activation); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.recoveryCall != 1 || runtime.runCalls != 0 || activationStore.activation.State != domain.ActivationCompleted {
+		t.Fatalf("recovery lifecycle = calls:%d run:%d state:%q", runtime.recoveryCall, runtime.runCalls, activationStore.activation.State)
+	}
+	if len(publisher.calls) != 1 || publisher.calls[0].text != "recovered synthesis" {
+		t.Fatalf("recovered publication = %#v", publisher.calls)
+	}
+}
+
+func TestModelStartedWithoutDurableFinalBecomesCompletionUnknown(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activation.State = domain.ActivationModelStarted
+	activationStore := &fakeActivationStore{activation: activation}
+	service := completionService(t, activationStore, &fakeRuntime{runTurn: port.AgentTurn{Text: "must not run"}}, &fakePublisher{})
+
+	if err := service.ReconcileJobCompletion(t.Context(), activation); err != nil {
+		t.Fatal(err)
+	}
+	if activationStore.unknownCalls != 1 || activationStore.lastErrorCode != "completion_unknown" || activationStore.activation.State != domain.ActivationCompletionUnknown {
+		t.Fatalf("unknown lifecycle = %#v", activationStore)
+	}
+}
+
+func TestRetryMovesExistingCompletionEnvelopeAfterInterleavedHumanTurn(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activationStore := &fakeActivationStore{activation: activation}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "human response"}}
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	service := completionService(t, activationStore, runtime, &fakePublisher{})
+	service.store = store
+	service.exchange = &fakeExchangeWriter{}
+	modelLimiter := &trackingModelCallLimiter{}
+	service.modelCalls = modelLimiter
+	release, acquired := modelLimiter.TryAcquire()
+	if !acquired {
+		t.Fatal("failed to occupy model limiter")
+	}
+	err := service.HandleJobCompletion(t.Context(), activation)
+	release()
+	if got := activationErrorCode(t, err); got != "model_busy" {
+		t.Fatalf("busy error code = %q", got)
+	}
+	if countJobCompletionMessages(store.appended) != 1 {
+		t.Fatalf("persisted envelope count after busy = %d", countJobCompletionMessages(store.appended))
+	}
+
+	// The human turn is persisted after the busy activation attempt.
+	store.recent[activation.ConversationKey] = append([]domain.Message(nil), store.appended...)
+	invocation := botInvocation()
+	invocation.EventID = "human-interleaved"
+	invocation.Text = "human follow-up"
+	if outcome, err := service.Handle(t.Context(), invocation); err != nil || outcome != OutcomeResponded {
+		t.Fatalf("human interleave outcome=%q err=%v", outcome, err)
+	}
+	store.recent[activation.ConversationKey] = append([]domain.Message(nil), store.appended...)
+
+	runtime.runTurn = port.AgentTurn{Text: "activation retry response"}
+	if err := service.HandleJobCompletion(t.Context(), activation); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1].Source != domain.MessageSourceJobCompletion || runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1].ExternalTS != activation.ActivationID {
+		t.Fatalf("retry current input = %#v", runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1])
+	}
+	if countJobCompletionMessages(runtime.runRequest.Messages) != 1 || countJobCompletionMessages(store.appended) != 1 {
+		t.Fatalf("retry duplicated envelope: model=%d durable=%d", countJobCompletionMessages(runtime.runRequest.Messages), countJobCompletionMessages(store.appended))
+	}
+}
+
+func TestReconcileResponsePreparedUsesConversationCoordinator(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	activation := completionActivation(now)
+	activation.State = domain.ActivationResponsePrepared
+	activation.ResponseBody = "prepared response"
+	activation.ResponseSHA256 = sha256Hex(activation.ResponseBody)
+	activation.ExchangeIntentID = "intent-1"
+	activation.CorrelationID = "corr-1"
+	activationStore := &fakeActivationStore{activation: activation}
+	publisher := &fakePublisher{}
+	service := completionService(t, activationStore, &fakeRuntime{runTurn: port.AgentTurn{Text: "must not run"}}, publisher)
+	service.exchange = &fakeExchangeWriter{}
+	finder := &blockingCompletionFinder{started: make(chan struct{}), release: make(chan struct{})}
+	service.exchangeFinder = finder
+
+	reconcileDone := make(chan error, 1)
+	go func() { reconcileDone <- service.ReconcileJobCompletion(t.Context(), activation) }()
+	select {
+	case <-finder.started:
+	case <-time.After(time.Second):
+		t.Fatal("reconciliation did not reach the durable exchange lookup")
+	}
+
+	human := botInvocation()
+	human.EventID = "human-during-reconcile"
+	if outcome, err := service.Handle(t.Context(), human); err != nil || outcome != OutcomeBusy {
+		t.Fatalf("human during reconciliation outcome=%q err=%v", outcome, err)
+	}
+	close(finder.release)
+	if err := <-reconcileDone; err != nil {
+		t.Fatal(err)
+	}
+	if runtime, ok := service.runtime.(*fakeRuntime); !ok || runtime.runCalls != 0 {
+		t.Fatal("human turn crossed coordinator while reconciliation was active")
+	}
+}
+
+func countJobCompletionMessages(messages []domain.Message) int {
+	count := 0
+	for _, message := range messages {
+		if message.Source == domain.MessageSourceJobCompletion {
+			count++
+		}
+	}
+	return count
 }
 
 func TestResponsePreparationSurvivesFinalizeCrashWithoutRepublishing(t *testing.T) {

@@ -8,7 +8,6 @@ import (
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/session"
-	"google.golang.org/adk/v2/tool"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -19,6 +18,7 @@ type originContextLLM struct {
 	turnContext port.AgentTurnContext
 	contextOK   bool
 	request     *model.LLMRequest
+	calls       int
 }
 
 func (*originContextLLM) Name() string { return "origin-context-model" }
@@ -27,6 +27,7 @@ func (m *originContextLLM) GenerateContent(ctx context.Context, request *model.L
 	return func(yield func(*model.LLMResponse, error) bool) {
 		m.turnContext, m.contextOK = port.AgentTurnContextFromContext(ctx)
 		m.request = request
+		m.calls++
 		yield(&model.LLMResponse{
 			Content: genai.NewContentFromText("root synthesis", genai.RoleModel),
 			CustomMetadata: map[string]any{
@@ -44,15 +45,13 @@ type recordingOriginToolFactory struct {
 	key   domain.ConversationKey
 }
 
-type originNamedTool string
-
-func (t originNamedTool) Name() string      { return string(t) }
-func (originNamedTool) Description() string { return "test tool" }
-func (originNamedTool) IsLongRunning() bool { return false }
-
-var _ tool.Tool = originNamedTool("")
-
 func (f *recordingOriginToolFactory) ToolsForInvocation(actor string, key domain.ConversationKey) ([]any, error) {
+	f.actor = actor
+	f.key = key
+	return nil, nil
+}
+
+func (f *recordingOriginToolFactory) ToolsForActivation(actor string, key domain.ConversationKey, _ domain.ExternalAgentJobActivation) ([]any, error) {
 	f.actor = actor
 	f.key = key
 	return nil, nil
@@ -88,6 +87,7 @@ func TestRuntimeUsesTypedJobOriginAndHostMetadata(t *testing.T) {
 			UserID:     "USLACKACTOR",
 			ExternalTS: "slack-message-ts",
 		}},
+		Activation: &domain.ExternalAgentJobActivation{ActivationID: activationID, Actor: "UORIGINAL1", ConversationKey: key},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -128,6 +128,46 @@ func TestRuntimeUsesTypedJobOriginAndHostMetadata(t *testing.T) {
 	}
 	if loaded.Session.Events().At(1).CustomMetadata["model_metadata"] != "retained" {
 		t.Fatal("non-reserved model metadata was discarded")
+	}
+}
+
+func TestRuntimeRecoversDurableActivationFinalWithoutModelReplay(t *testing.T) {
+	llm := &originContextLLM{}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	activationID := "activation_recover_123"
+	_, err = runtime.Run(t.Context(), port.AgentRequest{
+		ConversationKey: key,
+		Origin:          port.AgentTurnOrigin{Kind: port.AgentTurnOriginJobCompletion, Actor: "U12345678", ActivationID: activationID},
+		Messages:        []domain.Message{{Role: domain.RoleUser, Source: domain.MessageSourceJobCompletion, Content: "compact envelope", UserID: "U12345678", ExternalTS: activationID}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	turn, found, err := runtime.RecoverActivation(t.Context(), key, activationID)
+	if err != nil || !found || turn.Text != "root synthesis" {
+		t.Fatalf("recovery = %#v, found=%t, err=%v", turn, found, err)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("model calls = %d, want one original call", llm.calls)
+	}
+}
+
+func TestRuntimeReportsMissingActivationFinalAsUnrecoverable(t *testing.T) {
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName: "Dev Agent", Model: &originContextLLM{}, SessionService: session.InMemoryService(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	foundTurn, found, err := runtime.RecoverActivation(t.Context(), "slack:T12345678:dm:D12345678", "activation_missing")
+	if err != nil || found || foundTurn.Text != "" {
+		t.Fatalf("missing recovery = %#v, found=%t, err=%v", foundTurn, found, err)
 	}
 }
 
@@ -210,21 +250,5 @@ func TestRuntimeRejectsOversizedHostCompletionEnvelope(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "compact host limit") {
 		t.Fatalf("oversized envelope error = %v", err)
-	}
-}
-
-func TestToolsForOriginKeepsOnlyJobReadTools(t *testing.T) {
-	all := []tool.Tool{
-		originNamedTool("job_status"),
-		originNamedTool("read_job_result"),
-		originNamedTool("read_job_result_chunk"),
-		originNamedTool("delete_file"),
-	}
-	filtered := toolsForOrigin(all, port.AgentTurnOrigin{Kind: port.AgentTurnOriginJobCompletion, Actor: "U12345678", ActivationID: "activation_123"})
-	if len(filtered) != 2 || filtered[0].Name() != "job_status" || filtered[1].Name() != "read_job_result_chunk" {
-		t.Fatalf("activation tools = %#v, want job_status and read_job_result_chunk", filtered)
-	}
-	if normal := toolsForOrigin(all, port.AgentTurnOrigin{Kind: port.AgentTurnOriginUser}); len(normal) != len(all) {
-		t.Fatalf("normal tools = %d, want %d", len(normal), len(all))
 	}
 }

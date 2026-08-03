@@ -87,6 +87,12 @@ func TestLoadScopedOpenAICompatibleAgentTool(t *testing.T) {
 	}
 }
 
+func TestActivationChunkToolNameIsReserved(t *testing.T) {
+	if err := agentdef.ValidateAgentName("read_job_result_chunk"); err == nil || !strings.Contains(err.Error(), "conflicts with a direct tool") {
+		t.Fatalf("validation error = %v", err)
+	}
+}
+
 func TestRejectInvalidAgentToolComposition(t *testing.T) {
 	tests := []struct {
 		name   string

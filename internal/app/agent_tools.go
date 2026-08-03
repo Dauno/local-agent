@@ -288,6 +288,20 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 	return combined, nil
 }
 
+// ToolsForActivation delegates only to the base host factory. Children and
+// workflows are intentionally absent from this path even if their names
+// collide with a host tool.
+func (f *compositeAgentToolFactory) ToolsForActivation(actor string, key domain.ConversationKey, activation domain.ExternalAgentJobActivation) ([]any, error) {
+	if f == nil || f.base == nil {
+		return nil, errors.New("activation host-only tool factory is unavailable")
+	}
+	factory, ok := f.base.(port.ActivationAgentToolFactory)
+	if !ok {
+		return nil, errors.New("activation host-only tool factory is unavailable")
+	}
+	return factory.ToolsForActivation(actor, key, activation)
+}
+
 func newAcpAgentTool(
 	definition agentdef.AgentDef,
 	globalInstruction string,

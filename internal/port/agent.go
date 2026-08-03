@@ -87,6 +87,9 @@ type AgentRequest struct {
 	Messages        []domain.Message
 	Memory          []domain.MemorySnippet
 	Context         domain.AgentContext
+	// Activation is host-owned durable identity used only to build the
+	// activation tool scope. It is not rendered into the model prompt.
+	Activation *domain.ExternalAgentJobActivation
 }
 
 // AgentTurn is the structured result of one agent invocation. It carries
@@ -101,6 +104,12 @@ type AgentTurn struct {
 type AgentRuntime interface {
 	Run(ctx context.Context, request AgentRequest) (AgentTurn, error)
 	Resume(ctx context.Context, decision domain.ConfirmationDecision) (AgentTurn, error)
+}
+
+// AgentActivationRecovery proves whether a durable ADK session already has a
+// final response for one activation. It must never invoke the model.
+type AgentActivationRecovery interface {
+	RecoverActivation(ctx context.Context, conversationKey domain.ConversationKey, activationID string) (AgentTurn, bool, error)
 }
 
 type AgentStreamEventKind string

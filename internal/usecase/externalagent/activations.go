@@ -226,6 +226,13 @@ func (w *ActivationWorker) reconcileAfterModel(ctx context.Context, activation *
 		// caller observed a provider error after committing it.
 		return nil
 	case domain.ActivationModelStarted:
+		var classified *port.ActivationProcessError
+		if reconcileErr != nil && errors.As(reconcileErr, &classified) && classified.Retryable {
+			// A busy conversation or a transient durable-session read must not
+			// turn an otherwise recoverable model boundary into unknown. The
+			// lease expiry will make this activation reclaimable without replay.
+			return wrapActivationError(current, reconcileErr)
+		}
 		// No durable final response can be proven. This is terminal and must
 		// not be retried because retrying could execute the model twice.
 		if err := w.store.MarkActivationCompletionUnknown(context.WithoutCancel(ctx), current, "completion_unknown", w.clock.Now().UTC()); err != nil {

@@ -51,6 +51,20 @@ func (r stubExternalJobReader) ReadResultChunk(context.Context, string, string, 
 	return r.chunk, nil
 }
 
+func (r stubExternalJobReader) StatusAtRevision(_ context.Context, _ string, _ string, _ domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus) (*domain.ExternalAgentJob, error) {
+	if r.job == nil || r.job.StatusRevision != expectedRevision || r.job.Status != expectedStatus {
+		return nil, errors.New("external-agent job revision is no longer current")
+	}
+	return r.job, nil
+}
+
+func (r stubExternalJobReader) ReadResultChunkAtRevision(_ context.Context, _ string, _ string, _ domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus, _, _ int64) (domain.ResultChunk, error) {
+	if r.job == nil || r.job.StatusRevision != expectedRevision || r.job.Status != expectedStatus {
+		return domain.ResultChunk{}, errors.New("external-agent job revision is no longer current")
+	}
+	return r.chunk, nil
+}
+
 func (r stubExternalJobReader) HostCompletionTurn(context.Context, string, string, domain.ConversationKey) (port.AgentTurn, error) {
 	return port.AgentTurn{Text: r.result.Text}, nil
 }
@@ -334,6 +348,46 @@ func TestFactoryExposesBoundedJobResultChunkTool(t *testing.T) {
 	}
 	if value["content"] != "part" || fmt.Sprint(value["offset_bytes"]) != "2" || fmt.Sprint(value["next_offset_bytes"]) != "6" || value["sha256"] != "digest" {
 		t.Fatalf("chunk tool response = %#v", value)
+	}
+}
+
+func TestFactoryActivationScopeBindsRevisionAndContainsOnlyHostTools(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	reader := &stubExternalJobReader{
+		job:   &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete"},
+		chunk: domain.ResultChunk{Content: "part", OffsetBytes: 0, NextOffsetBytes: 4, EOF: true, SHA256: "digest"},
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	activation := domain.ExternalAgentJobActivation{
+		ActivationID: "activation_1", JobID: "job_1", StatusRevision: 4, TerminalStatus: domain.JobCompleted,
+		Actor: "U12345678", ConversationKey: key,
+	}
+	tools, err := factory.ToolsForActivation(activation.Actor, key, activation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tools) != 2 || tools[0].(interface{ Name() string }).Name() != "job_status" || tools[1].(interface{ Name() string }).Name() != "read_job_result_chunk" {
+		t.Fatalf("activation tools = %v", tools)
+	}
+	var status, chunk runnableFunctionTool
+	for _, candidate := range tools {
+		named := candidate.(interface{ Name() string })
+		switch named.Name() {
+		case "job_status":
+			status = candidate.(runnableFunctionTool)
+		case "read_job_result_chunk":
+			chunk = candidate.(runnableFunctionTool)
+		}
+	}
+	if _, err := status.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := chunk.Run(&stubToolContext{}, map[string]any{"job_id": "job_1", "offset_bytes": 0, "max_bytes": 4}); err != nil {
+		t.Fatal(err)
+	}
+	reader.job.StatusRevision = 6
+	if _, err := chunk.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"}); err == nil {
+		t.Fatal("activation tool read a reconciled later revision")
 	}
 }
 
