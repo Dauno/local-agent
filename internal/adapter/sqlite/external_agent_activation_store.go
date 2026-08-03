@@ -39,6 +39,73 @@ func (s *ExternalAgentJobStore) GetActivation(ctx context.Context, activationID 
 	return &activation, nil
 }
 
+// ActivationHealth returns content-free activation counts. An expired lease
+// or a retry overdue by the stuck threshold is reported as stuck without
+// loading any job task, result, or artifact data.
+func (s *ExternalAgentJobStore) ActivationHealth(ctx context.Context, now time.Time, stuckThreshold time.Duration) (domain.ExternalAgentJobActivationHealth, error) {
+	if s == nil || s.db == nil {
+		return domain.ExternalAgentJobActivationHealth{}, errors.New("external-agent activation health store is not configured")
+	}
+	if stuckThreshold < 0 {
+		return domain.ExternalAgentJobActivationHealth{}, errors.New("activation stuck threshold must not be negative")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	var health domain.ExternalAgentJobActivationHealth
+	rows, err := s.db.QueryContext(ctx, `SELECT state, COUNT(*)
+		FROM external_agent_job_activations GROUP BY state`)
+	if err != nil {
+		return health, fmt.Errorf("count external-agent activation states: %w", err)
+	}
+	for rows.Next() {
+		var state string
+		var count int
+		if err := rows.Scan(&state, &count); err != nil {
+			_ = rows.Close()
+			return health, fmt.Errorf("scan external-agent activation state count: %w", err)
+		}
+		switch domain.ExternalAgentJobActivationState(state) {
+		case domain.ActivationPending:
+			health.Pending += count
+		case domain.ActivationProcessing:
+			health.Processing += count
+		case domain.ActivationModelStarted:
+			health.ModelStarted += count
+		case domain.ActivationResponsePrepared:
+			health.ResponsePrepared += count
+		case domain.ActivationCompleted:
+			health.Completed += count
+		case domain.ActivationCompletionUnknown:
+			health.CompletionUnknown += count
+		case domain.ActivationFailed:
+			health.Failed += count
+		}
+	}
+	if err := rows.Err(); err != nil {
+		_ = rows.Close()
+		return health, fmt.Errorf("read external-agent activation state counts: %w", err)
+	}
+	if err := rows.Close(); err != nil {
+		return health, fmt.Errorf("close external-agent activation state counts: %w", err)
+	}
+	health.Processed = health.Completed + health.Failed
+	cutoff := now.Add(-stuckThreshold).UnixNano()
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_activations
+		WHERE state NOT IN (?, ?, ?) AND (
+			(state = ? AND next_attempt_at > 0 AND next_attempt_at <= ?) OR
+			(state IN (?, ?, ?) AND lease_expiry > 0 AND lease_expiry <= ?)
+		)`,
+		domain.ActivationCompleted, domain.ActivationCompletionUnknown, domain.ActivationFailed,
+		domain.ActivationPending, cutoff,
+		domain.ActivationProcessing, domain.ActivationModelStarted, domain.ActivationResponsePrepared, now.UnixNano(),
+	).Scan(&health.Stuck); err != nil {
+		return health, fmt.Errorf("count stuck external-agent activations: %w", err)
+	}
+	return health, nil
+}
+
 func (s *ExternalAgentJobStore) ClaimNextActivation(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error) {
 	return s.claimActivation(ctx, now, owner, leaseTTL, "", nil)
 }

@@ -230,6 +230,10 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	if err := policy.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("validate durable ACP result delivery policy: %w", err)
 	}
+	maxResultChunkBytes := int64(0)
+	if cfg.Context.RecoverableResults != nil {
+		maxResultChunkBytes = int64(cfg.Context.RecoverableResults.ChunkMaxBytes)
+	}
 	store := adaptersqlite.NewExternalAgentJobStore(infra.store)
 	if store == nil {
 		return nil, nil, errors.New("initialize external-agent job store")
@@ -246,7 +250,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String,
 			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
 			reconciliationTimeout: time.Duration(cfg.ACP.ReconciliationTimeoutSeconds) * time.Second},
-		Publisher: nil, Artifacts: models.artifactStore, MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes),
+		Publisher: nil, Artifacts: models.artifactStore, MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
 		Logger: models.logger, Metrics: models.metrics,
 	})
 	if err != nil {

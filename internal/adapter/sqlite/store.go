@@ -723,5 +723,12 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	if health.Stuck > 0 {
 		return fmt.Errorf("external-agent notification outbox has %d stuck notifications", health.Stuck)
 	}
+	activationHealth, err := NewExternalAgentJobStore(s).ActivationHealth(ctx, time.Now().UTC(), 5*time.Minute)
+	if err != nil {
+		return fmt.Errorf("inspect external-agent activation health: %w", err)
+	}
+	if activationHealth.Stuck > 0 {
+		return fmt.Errorf("external-agent activation outbox has %d stuck activations", activationHealth.Stuck)
+	}
 	return nil
 }

@@ -137,6 +137,12 @@ type ExternalAgentJobNotificationHealthStore interface {
 	NotificationHealth(ctx context.Context, now time.Time, stuckThreshold time.Duration) (domain.ExternalAgentJobNotificationHealth, error)
 }
 
+// ExternalAgentJobActivationHealthStore exposes bounded, content-free health
+// for the host-originated root-turn outbox.
+type ExternalAgentJobActivationHealthStore interface {
+	ActivationHealth(ctx context.Context, now time.Time, stuckThreshold time.Duration) (domain.ExternalAgentJobActivationHealth, error)
+}
+
 // ExternalAgentJobAdminStore exposes a read-only, redacted job inspection view.
 type ExternalAgentJobAdminStore interface {
 	InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error)

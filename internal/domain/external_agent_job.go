@@ -254,6 +254,21 @@ type ExternalAgentJobNotificationHealth struct {
 	Stuck             int
 }
 
+// ExternalAgentJobActivationHealth is a content-free aggregate of the root
+// activation outbox. Processed is the terminal completed/failed count; the
+// ambiguous completion_unknown count stays separate for operator visibility.
+type ExternalAgentJobActivationHealth struct {
+	Pending           int
+	Processing        int
+	ModelStarted      int
+	ResponsePrepared  int
+	Processed         int
+	Completed         int
+	CompletionUnknown int
+	Failed            int
+	Stuck             int
+}
+
 // NotificationHealthSnapshot is kept as a descriptive alias for callers that
 // expose the aggregate as a health snapshot.
 type NotificationHealthSnapshot = ExternalAgentJobNotificationHealth
