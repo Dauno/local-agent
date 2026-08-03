@@ -1,6 +1,6 @@
 agent_class: AcpAgent
 name: sol-advisor
-runtime: opencode/sol-high
+runtime: opencode/sol-xhigh
 confirmation: required
 execution_mode: durable_job
 timeout_seconds: 7200

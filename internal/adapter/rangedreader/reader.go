@@ -90,7 +90,7 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 	}
 	for _, segment := range strings.Split(cleanPath, string(os.PathSeparator)) {
 		switch segment {
-		case ".env", ".local-agent", ".git":
+		case ".env", ".git":
 			return domain.SourceRange{}, fmt.Errorf("path %q is unavailable", req.Path)
 		}
 	}

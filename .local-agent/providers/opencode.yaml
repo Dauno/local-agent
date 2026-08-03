@@ -29,7 +29,6 @@ profiles:
       - id: mode
         value: build
     permission_option_kind: allow_once
-
   pro-reasoning:
     config_options:
       - id: model
@@ -37,16 +36,25 @@ profiles:
       - id: effort
         value: max
       - id: mode
-        value: build
+        value: worker
     permission_option_kind: allow_once
-  sol-high:
+  sol-xhigh:
+    config_options:
+      - id: model
+        value: openai/gpt-5.6-sol
+      - id: effort
+        value: xhigh
+      - id: mode
+        value: thinker
+    permission_option_kind: allow_once
+  sol-worker:
     config_options:
       - id: model
         value: openai/gpt-5.6-sol
       - id: effort
         value: high
       - id: mode
-        value: thinker
+        value: worker
     permission_option_kind: allow_once
   luna-xhigh:
     config_options:
@@ -55,7 +63,7 @@ profiles:
       - id: effort
         value: xhigh
       - id: mode
-        value: build
+        value: worker
     permission_option_kind: allow_once
   luna-max:
     config_options:
@@ -64,5 +72,14 @@ profiles:
       - id: effort
         value: max
       - id: mode
-        value: build
+        value: worker
+    permission_option_kind: allow_once
+  deepseek-worker:
+    config_options:
+      - id: model
+        value: deepseek/deepseek-v4-flash
+      - id: effort
+        value: max
+      - id: mode
+        value: worker
     permission_option_kind: allow_once

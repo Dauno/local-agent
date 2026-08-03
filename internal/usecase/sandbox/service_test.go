@@ -128,7 +128,7 @@ func TestListDirectoryRejectsRestrictedSegments(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	restricted := []string{".env", ".local-agent", ".git", ".env/config", "subdir/.git", ".local-agent/db"}
+	restricted := []string{".env", ".git", ".env/config", "subdir/.git"}
 	for _, path := range restricted {
 		t.Run(path, func(t *testing.T) {
 			exec := &executorFake{}
@@ -148,7 +148,7 @@ func TestListDirectoryAcceptsSafePaths(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	safe := []string{".env.example", ".gitignore", ".github", ".github/workflows", "internal/adapter", "release..old", "src"}
+	safe := []string{".env.example", ".gitignore", ".github", ".github/workflows", ".local-agent", ".local-agent/db", "internal/adapter", "release..old", "src"}
 	for _, path := range safe {
 		t.Run(path, func(t *testing.T) {
 			exec := &executorFake{}
