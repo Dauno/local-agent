@@ -167,7 +167,11 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		if err != nil {
 			return nil, fmt.Errorf("build read_job_result tool: %w", err)
 		}
-		tools = append(tools, statusTool, resultTool)
+		chunkTool, err := f.readJobResultChunkTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_job_result_chunk tool: %w", err)
+		}
+		tools = append(tools, statusTool, resultTool, chunkTool)
 		if f.externalReconciler != nil {
 			reconcileTool, err := f.reconcileJobTool(actor, key)
 			if err != nil {
@@ -282,6 +286,34 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 	}
 
 	return tools, nil
+}
+
+// ToolsForActivation is deliberately separate from ToolsForInvocation. An
+// activation must never inherit child agents, workflows, mutable tools, or a
+// result reader bound to the job's current revision.
+func (f *Factory) ToolsForActivation(actor string, key domain.ConversationKey, activation domain.ExternalAgentJobActivation) ([]any, error) {
+	if f == nil || f.externalJobs == nil {
+		return nil, errors.New("external-agent activation tools are unavailable")
+	}
+	if strings.TrimSpace(actor) == "" || actor != activation.Actor || key == "" || key != activation.ConversationKey {
+		return nil, errors.New("external-agent activation tool binding is invalid")
+	}
+	if strings.TrimSpace(activation.ActivationID) == "" || strings.TrimSpace(activation.JobID) == "" || activation.StatusRevision < 0 || strings.TrimSpace(string(activation.TerminalStatus)) == "" {
+		return nil, errors.New("external-agent activation tool identity is incomplete")
+	}
+	reader, ok := f.externalJobs.(port.ExternalAgentJobActivationReader)
+	if !ok {
+		return nil, errors.New("external-agent activation reader is unavailable")
+	}
+	statusTool, err := f.activationJobStatusTool(reader, activation)
+	if err != nil {
+		return nil, fmt.Errorf("build activation job_status tool: %w", err)
+	}
+	chunkTool, err := f.activationReadJobResultChunkTool(reader, activation)
+	if err != nil {
+		return nil, fmt.Errorf("build activation read_job_result_chunk tool: %w", err)
+	}
+	return []any{statusTool, chunkTool}, nil
 }
 
 func (f *Factory) syntaxQueryTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
@@ -859,6 +891,37 @@ func (f *Factory) jobStatusTool(actor string, key domain.ConversationKey) (tool.
 	})
 }
 
+func (f *Factory) activationJobStatusTool(reader port.ExternalAgentJobActivationReader, activation domain.ExternalAgentJobActivation) (tool.Tool, error) {
+	return functiontool.New(functiontool.Config{
+		Name:        "job_status",
+		Description: "Returns the status snapshot bound to this external-agent activation revision. Read-only; actor, destination, revision, and terminal status are host-bound.",
+	}, func(ctx agent.Context, args jobIDArgs) (jobStatusResult, error) {
+		if strings.TrimSpace(args.JobID) == "" {
+			return jobStatusResult{}, errors.New("job_id is required")
+		}
+		if args.JobID != activation.JobID {
+			return jobStatusResult{}, errors.New("job_id is not bound to this activation")
+		}
+		job, err := reader.StatusAtRevision(ctx, activation.JobID, activation.Actor, activation.ConversationKey, activation.StatusRevision, activation.TerminalStatus)
+		if err != nil {
+			return jobStatusResult{}, err
+		}
+		if job == nil {
+			return jobStatusResult{}, errors.New("external-agent job was not found")
+		}
+		status := job.StatusView()
+		view := jobStatusResult{
+			JobID: status.JobID, Status: string(status.Status), StatusRevision: status.StatusRevision,
+			ResultAvailable: status.ResultAvailable, ResultSHA256: status.ResultSHA256,
+			ResultBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode), ErrorCode: status.ErrorCode,
+		}
+		if !status.FinishedAt.IsZero() {
+			view.FinishedAt = status.FinishedAt.UTC().Format(time.RFC3339)
+		}
+		return view, nil
+	})
+}
+
 type readJobResultResult struct {
 	JobID           string `json:"job_id"`
 	StatusRevision  int    `json:"status_revision"`
@@ -906,6 +969,62 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 			ResultAvailable: true,
 			ContentSHA256:   result.ContentSHA256, ContentBytes: result.ContentBytes,
 			DeliveryMode: string(result.DeliveryMode),
+		}, nil
+	})
+}
+
+type readJobResultChunkArgs struct {
+	JobID       string `json:"job_id" jsonschema:"durable ACP job ID returned when the job was accepted"`
+	OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"server-provided UTF-8 continuation offset"`
+	MaxBytes    int64  `json:"max_bytes,omitempty" jsonschema:"maximum bytes requested for this bounded chunk"`
+}
+
+type readJobResultChunkResult struct {
+	Content         string `json:"content"`
+	OffsetBytes     int64  `json:"offset_bytes"`
+	NextOffsetBytes int64  `json:"next_offset_bytes"`
+	EOF             bool   `json:"eof"`
+	SHA256          string `json:"sha256"`
+}
+
+func (f *Factory) readJobResultChunkTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
+	reader := f.externalJobs
+	return functiontool.New(functiontool.Config{
+		Name:        "read_job_result_chunk",
+		Description: "Reads one bounded, verified UTF-8 chunk from a completed ACP durable job in this Slack conversation. Read-only; the complete file-mode artifact is never placed in the tool response.",
+	}, func(ctx agent.Context, args readJobResultChunkArgs) (readJobResultChunkResult, error) {
+		if strings.TrimSpace(args.JobID) == "" {
+			return readJobResultChunkResult{}, errors.New("job_id is required")
+		}
+		chunk, err := reader.ReadResultChunk(ctx, args.JobID, actor, key, args.OffsetBytes, args.MaxBytes)
+		if err != nil {
+			return readJobResultChunkResult{}, err
+		}
+		return readJobResultChunkResult{
+			Content: chunk.Content, OffsetBytes: chunk.OffsetBytes, NextOffsetBytes: chunk.NextOffsetBytes,
+			EOF: chunk.EOF, SHA256: chunk.SHA256,
+		}, nil
+	})
+}
+
+func (f *Factory) activationReadJobResultChunkTool(reader port.ExternalAgentJobActivationReader, activation domain.ExternalAgentJobActivation) (tool.Tool, error) {
+	return functiontool.New(functiontool.Config{
+		Name:        "read_job_result_chunk",
+		Description: "Reads one bounded, verified UTF-8 result chunk from the terminal revision that created this activation. Read-only; later reconciliations are not visible.",
+	}, func(ctx agent.Context, args readJobResultChunkArgs) (readJobResultChunkResult, error) {
+		if strings.TrimSpace(args.JobID) == "" {
+			return readJobResultChunkResult{}, errors.New("job_id is required")
+		}
+		if args.JobID != activation.JobID {
+			return readJobResultChunkResult{}, errors.New("job_id is not bound to this activation")
+		}
+		chunk, err := reader.ReadResultChunkAtRevision(ctx, activation.JobID, activation.Actor, activation.ConversationKey, activation.StatusRevision, activation.TerminalStatus, args.OffsetBytes, args.MaxBytes)
+		if err != nil {
+			return readJobResultChunkResult{}, err
+		}
+		return readJobResultChunkResult{
+			Content: chunk.Content, OffsetBytes: chunk.OffsetBytes, NextOffsetBytes: chunk.NextOffsetBytes,
+			EOF: chunk.EOF, SHA256: chunk.SHA256,
 		}, nil
 	})
 }

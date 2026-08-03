@@ -40,13 +40,14 @@ type Config struct {
 }
 
 type Dependencies struct {
-	Store      port.ConversationStore
-	Runtime    port.AgentRuntime
-	History    port.HistoryReader
-	Publisher  port.ResponsePublisher
-	Clock      port.Clock
-	Logger     port.Logger
-	ModelCalls port.ModelCallLimiter
+	Store           port.ConversationStore
+	Runtime         port.AgentRuntime
+	ActivationStore port.ExternalAgentJobActivationStore
+	History         port.HistoryReader
+	Publisher       port.ResponsePublisher
+	Clock           port.Clock
+	Logger          port.Logger
+	ModelCalls      port.ModelCallLimiter
 
 	SanitizeContent       func(string) string
 	Memory                port.MemoryRetriever
@@ -67,6 +68,7 @@ type Dependencies struct {
 	StreamingRuntime      port.StreamingAgentRuntime
 	IncrementalPublisher  port.IncrementalPublisher
 	SummaryScheduler      port.SummaryScheduler
+	ExchangeFinder        port.AssistantExchangeFinder
 }
 
 type Outcome string
@@ -85,6 +87,7 @@ type Service struct {
 	cfg                   Config
 	store                 port.ConversationStore
 	runtime               port.AgentRuntime
+	activationStore       port.ExternalAgentJobActivationStore
 	history               port.HistoryReader
 	publisher             port.ResponsePublisher
 	clock                 port.Clock
@@ -111,6 +114,7 @@ type Service struct {
 	streamingRuntime      port.StreamingAgentRuntime
 	incrementalPublisher  port.IncrementalPublisher
 	summaryScheduler      port.SummaryScheduler
+	exchangeFinder        port.AssistantExchangeFinder
 }
 
 type confirmationExpirer interface {
@@ -120,6 +124,8 @@ type confirmationExpirer interface {
 type expiredConfirmationLister interface {
 	ListExpired(context.Context, time.Time) ([]port.ConfirmationDelivery, error)
 }
+
+var errConversationBusy = errors.New("conversation already has an active root turn")
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.Store == nil {
@@ -186,8 +192,13 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.ModelCalls == nil {
 		deps.ModelCalls = unlimitedModelCalls{}
 	}
+	if deps.ExchangeFinder == nil {
+		if finder, ok := deps.History.(port.AssistantExchangeFinder); ok {
+			deps.ExchangeFinder = finder
+		}
+	}
 	return &Service{
-		cfg: cfg, store: deps.Store, runtime: deps.Runtime,
+		cfg: cfg, store: deps.Store, runtime: deps.Runtime, activationStore: deps.ActivationStore,
 		history: deps.History, publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
 		limiter: NewLimiter(cfg.MaxConcurrentCalls), modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
 		recall: deps.Memory, exchange: deps.Exchange, enricher: deps.Enricher,
@@ -204,7 +215,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		onboardingPublisher:  deps.OnboardingPublisher,
 		streamingRuntime:     deps.StreamingRuntime,
 		incrementalPublisher: deps.IncrementalPublisher,
-		summaryScheduler:     deps.SummaryScheduler,
+		summaryScheduler:     deps.SummaryScheduler, exchangeFinder: deps.ExchangeFinder,
 	}, nil
 }
 
@@ -991,30 +1002,23 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 			return fmt.Errorf("list expired confirmations: %w", err)
 		}
 		for _, delivery := range expired {
-			expirer, ok := s.confirmationStore.(confirmationExpirer)
-			if !ok {
+			first, err := s.expireAndResumeConfirmation(ctx, delivery, func() error {
+				if s.confirmationPublisher == nil || delivery.RendererMode != confirmationRendererMode {
+					return nil
+				}
+				expiredDelivery := delivery
+				expiredDelivery.Status = port.ConfirmationExpired
+				return s.confirmationPublisher.UpdateConfirmation(ctx, expiredDelivery, "This confirmation has expired.")
+			})
+			if errors.Is(err, errConversationBusy) {
+				s.logger.Info("expired confirmation deferred by conversation backpressure", "wrapper_call_id", delivery.WrapperCallID)
 				continue
 			}
-			first, err := expirer.ExpireDelivery(ctx, delivery.WrapperCallID, s.clock.Now().UTC())
 			if err != nil {
-				return fmt.Errorf("expire confirmation %s: %w", delivery.WrapperCallID, err)
+				return fmt.Errorf("close expired confirmation %s in ADK: %w", delivery.WrapperCallID, err)
 			}
 			if !first || s.runtime == nil {
 				continue
-			}
-			if _, err := s.runtime.Resume(ctx, domain.ConfirmationDecision{
-				WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
-				ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
-				Approved: false, Payload: map[string]any{"expired": true},
-			}); err != nil {
-				return fmt.Errorf("close expired confirmation %s in ADK: %w", delivery.WrapperCallID, err)
-			}
-			if s.confirmationPublisher != nil && delivery.RendererMode == confirmationRendererMode {
-				expiredDelivery := delivery
-				expiredDelivery.Status = port.ConfirmationExpired
-				if err := s.confirmationPublisher.UpdateConfirmation(ctx, expiredDelivery, "This confirmation has expired."); err != nil {
-					return fmt.Errorf("update expired confirmation %s: %w", delivery.WrapperCallID, err)
-				}
 			}
 		}
 	}
@@ -1163,6 +1167,52 @@ func (s *Service) HandleConfirmation(ctx context.Context, invocation domain.Invo
 	return s.handleConfirmationCore(ctx, invocation, wrapperCallID, approved, nil)
 }
 
+// resumeExpiredConfirmation assumes the caller owns the conversation
+// coordinator. This prevents a reentrant acquisition while keeping the
+// expiration, resume, and terminal publication serialized as one operation.
+func (s *Service) resumeExpiredConfirmation(ctx context.Context, delivery port.ConfirmationDelivery) error {
+	_, err := s.runtime.Resume(ctx, domain.ConfirmationDecision{
+		WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
+		ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
+		Approved: false, Payload: map[string]any{"expired": true},
+	})
+	return err
+}
+
+// expireAndResumeConfirmation acquires the conversation coordinator before the
+// CAS transition. A busy conversation therefore leaves the delivery pending
+// or published so a later reconciliation can retry it.
+func (s *Service) expireAndResumeConfirmation(ctx context.Context, delivery port.ConfirmationDelivery, afterResume func() error) (bool, error) {
+	release, acquired := s.limiter.TryAcquire(string(delivery.ConversationKey))
+	if !acquired {
+		return false, errConversationBusy
+	}
+	defer release()
+
+	firstExpiry := delivery.Status == port.ConfirmationPending || delivery.Status == port.ConfirmationPublished
+	if expirer, ok := s.confirmationStore.(confirmationExpirer); ok {
+		var err error
+		firstExpiry, err = expirer.ExpireDelivery(ctx, delivery.WrapperCallID, s.clock.Now().UTC())
+		if err != nil {
+			return false, fmt.Errorf("expire confirmation %s: %w", delivery.WrapperCallID, err)
+		}
+	} else if err := s.confirmationStore.ExpireDeliveries(ctx, s.clock.Now().UTC()); err != nil {
+		return false, fmt.Errorf("expire confirmation %s: %w", delivery.WrapperCallID, err)
+	}
+	if !firstExpiry || s.runtime == nil {
+		return firstExpiry, nil
+	}
+	if err := s.resumeExpiredConfirmation(ctx, delivery); err != nil {
+		return true, err
+	}
+	if afterResume != nil {
+		if err := afterResume(); err != nil {
+			return true, err
+		}
+	}
+	return true, nil
+}
+
 // handleConfirmationCore is shared by text commands and interactive button clicks.
 // interactive is non-nil when the decision came from a Block Kit button.
 func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.Invocation, wrapperCallID string, approved bool, interactive *domain.ConfirmationInteractiveAction) Outcome {
@@ -1250,39 +1300,32 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	}
 
 	if !delivery.Expiry.After(now) {
-		firstExpiry := delivery.Status == port.ConfirmationPending || delivery.Status == port.ConfirmationPublished
-		var expiryErr error
-		if expirer, ok := s.confirmationStore.(confirmationExpirer); ok {
-			firstExpiry, expiryErr = expirer.ExpireDelivery(ctx, wrapperCallID, now)
-		} else {
-			expiryErr = s.confirmationStore.ExpireDeliveries(ctx, now)
+		expiredDelivery := *delivery
+		expiredDelivery.Status = port.ConfirmationExpired
+		publishExpired := func() error {
+			if interactive != nil && s.confirmationPublisher != nil {
+				if err := s.confirmationPublisher.UpdateConfirmation(ctx, expiredDelivery, "This confirmation has expired."); err != nil {
+					s.logger.Error("expired confirmation prompt update failed", "wrapper_call_id", wrapperCallID, "error", err)
+				}
+			}
+			if interactive == nil {
+				if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has expired."); pubErr != nil {
+					s.logger.Error("expiry reply failed", "error", pubErr)
+				}
+			}
+			return nil
 		}
-		if expiryErr != nil {
-			s.logger.Error("confirmation expiry persistence failed", "wrapper_call_id", wrapperCallID, "error", expiryErr)
+		firstExpiry, expiryErr := s.expireAndResumeConfirmation(ctx, *delivery, publishExpired)
+		if errors.Is(expiryErr, errConversationBusy) {
+			s.logger.Info("expired confirmation deferred by conversation backpressure", "wrapper_call_id", wrapperCallID)
 			return OutcomeModelFailed
 		}
-		if firstExpiry && s.runtime != nil {
-			_, resumeErr := s.runtime.Resume(ctx, domain.ConfirmationDecision{
-				WrapperCallID: wrapperCallID, OriginalCallID: delivery.OriginalCallID,
-				ConversationKey: delivery.ConversationKey, Actor: delivery.Actor,
-				Approved: false, Payload: map[string]any{"expired": true},
-			})
-			if resumeErr != nil {
-				s.logger.Error("expired confirmation ADK terminal response failed", "wrapper_call_id", wrapperCallID, "error", resumeErr)
-				return OutcomeModelFailed
-			}
+		if expiryErr != nil {
+			s.logger.Error("confirmation expiry or terminal response failed", "wrapper_call_id", wrapperCallID, "error", expiryErr)
+			return OutcomeModelFailed
 		}
-		if interactive != nil && s.confirmationPublisher != nil {
-			expiredDelivery := *delivery
-			expiredDelivery.Status = port.ConfirmationExpired
-			if err := s.confirmationPublisher.UpdateConfirmation(ctx, expiredDelivery, "This confirmation has expired."); err != nil {
-				s.logger.Error("expired confirmation prompt update failed", "wrapper_call_id", wrapperCallID, "error", err)
-			}
-		}
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has expired."); pubErr != nil {
-				s.logger.Error("expiry reply failed", "error", pubErr)
-			}
+		if !firstExpiry || s.runtime == nil {
+			_ = publishExpired()
 		}
 		return OutcomeIgnoredFollowup
 	}
@@ -1296,6 +1339,17 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		}
 		return OutcomeIgnoredFollowup
 	}
+	conversationRelease, conversationAcquired := s.limiter.TryAcquire(string(delivery.ConversationKey))
+	if !conversationAcquired {
+		s.logger.Info("confirmation resume rejected by conversation backpressure")
+		if interactive == nil {
+			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); pubErr != nil {
+				s.logger.Error("busy reply failed", "error", pubErr)
+			}
+		}
+		return OutcomeBusy
+	}
+	defer conversationRelease()
 
 	modelCtx := ctx
 	cancel := func() {}

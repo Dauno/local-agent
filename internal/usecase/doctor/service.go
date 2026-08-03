@@ -13,6 +13,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/secure"
 )
 
@@ -36,6 +37,13 @@ type ArtifactChecker interface {
 
 type JobStoreChecker interface {
 	CheckExternalAgentJobs(ctx context.Context, path string) error
+}
+
+// JobStoreHealthChecker is optional so existing doctor embedders keep the
+// original checker contract while activation-aware stores expose bounded
+// outbox state.
+type JobStoreHealthChecker interface {
+	CheckExternalAgentActivationHealth(ctx context.Context, path string) (domain.ExternalAgentJobActivationHealth, error)
 }
 
 type RemediableError interface {
@@ -499,6 +507,16 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 				report.fail("external-agent jobs", redactor.String(err.Error()), "Run local-agent init to migrate the local job store, or repair the configured database.", false)
 			} else {
 				report.pass("external-agent jobs", "durable job and notification outbox are available")
+			}
+			if healthChecker, ok := s.deps.Jobs.(JobStoreHealthChecker); ok {
+				health, healthErr := healthChecker.CheckExternalAgentActivationHealth(ctx, paths.DatabaseFile)
+				if healthErr != nil {
+					report.fail("external-agent activations", redactor.String(healthErr.Error()), "Drain or investigate the activation outbox before starting the agent.", false)
+				} else if health.Stuck > 0 {
+					report.fail("external-agent activations", fmt.Sprintf("activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)", health.Stuck, health.Pending, health.Processed, health.CompletionUnknown), "Inspect the activation worker and let expired leases become reclaimable.", false)
+				} else {
+					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
+				}
 			}
 		}
 	}

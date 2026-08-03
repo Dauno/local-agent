@@ -490,20 +490,47 @@ type runtimeComposition struct {
 	service            *botusecase.Service
 	agentBuilderSvc    port.AgentBuilderService
 	externalJobService *externalagentusecase.Service
+	notificationWorker *externalagentusecase.NotificationWorker
+	activationWorker   *externalagentusecase.ActivationWorker
 	notificationDone   chan struct{}
 }
 
 func (c *runtimeComposition) StopExternalAdmission() {
-	if c != nil && c.externalJobService != nil {
+	if c == nil {
+		return
+	}
+	if c.externalJobService != nil {
 		c.externalJobService.StopAdmission()
+	}
+	if c.notificationWorker != nil {
+		c.notificationWorker.StopAdmission()
+	}
+	if c.activationWorker != nil {
+		c.activationWorker.StopAdmission()
 	}
 }
 
 func (c *runtimeComposition) WaitExternal(ctx context.Context) error {
-	if c == nil || c.externalJobService == nil {
+	if c == nil {
 		return nil
 	}
-	return c.externalJobService.WaitStopped(ctx)
+	waiters := 0
+	waitDone := make(chan error, 2)
+	if c.externalJobService != nil {
+		waiters++
+		go func() { waitDone <- c.externalJobService.WaitStopped(ctx) }()
+	}
+	if c.activationWorker != nil {
+		waiters++
+		go func() { waitDone <- c.activationWorker.WaitStopped(ctx) }()
+	}
+	var waitErrs []error
+	for range waiters {
+		if err := <-waitDone; err != nil {
+			waitErrs = append(waitErrs, err)
+		}
+	}
+	return errors.Join(waitErrs...)
 }
 
 func (c *runtimeComposition) ExternalShutdownStats(ctx context.Context) (domain.ExternalAgentJobShutdownStats, error) {
@@ -514,6 +541,9 @@ func (c *runtimeComposition) ExternalShutdownStats(ctx context.Context) (domain.
 }
 
 func (c *runtimeComposition) WaitNotification(ctx context.Context) error {
+	if c != nil && c.notificationWorker != nil {
+		return c.notificationWorker.WaitStopped(ctx)
+	}
 	if c == nil || c.notificationDone == nil {
 		return nil
 	}
@@ -523,6 +553,13 @@ func (c *runtimeComposition) WaitNotification(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+}
+
+func (c *runtimeComposition) ActivationHealth(ctx context.Context) (domain.ExternalAgentJobActivationHealth, error) {
+	if c == nil || c.activationWorker == nil {
+		return domain.ExternalAgentJobActivationHealth{}, nil
+	}
+	return c.activationWorker.SnapshotHealth(ctx, time.Now().UTC())
 }
 
 func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (*runtimeComposition, error) {
@@ -536,6 +573,8 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var compositeFactory *compositeAgentToolFactory
 	var externalJobService *externalagentusecase.Service
 	var notificationWorker *externalagentusecase.NotificationWorker
+	var activationStore port.ExternalAgentJobActivationStore
+	var activationWorker *externalagentusecase.ActivationWorker
 	var notificationDone chan struct{}
 	var summaryScheduler port.SummaryScheduler
 	var continuityStore port.ContinuityStore
@@ -679,22 +718,13 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		}
 		if externalJobService != nil {
 			factory.WithExternalAgentJobs(externalJobService)
+			activationStore = adaptersqlite.NewExternalAgentJobStore(infra.store)
+			if activationStore == nil {
+				return nil, errors.New("initialize external-agent activation store")
+			}
 		}
 		if compositeFactory != nil && externalJobService != nil {
 			compositeFactory.setJobStarter(externalJobService)
-		}
-		if externalJobService != nil {
-			bindForegroundRuntimes(models, externalJobService)
-		}
-		if externalJobService != nil {
-			go externalJobService.Run(ctx)
-		}
-		if notificationWorker != nil {
-			notificationDone = make(chan struct{})
-			go func() {
-				defer close(notificationDone)
-				notificationWorker.Run(ctx)
-			}()
 		}
 		if setup.defs != nil {
 			if provider, exists := setup.defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
@@ -780,7 +810,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		RetainMessages: cfg.Context.RetainMessagesPerConversation, MaxConcurrentCalls: cfg.Runtime.MaxConcurrentModelCalls,
 		ModelTimeout: time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second, BusyMessage: cfg.Runtime.BusyMessage, ModelErrorMessage: cfg.Runtime.ModelErrorMessage, UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 		ProgressEnabled: cfg.Slack.StandardAgent.ProgressEnabled, PromptsEnabled: cfg.Slack.StandardAgent.PromptsEnabled, SuggestedPrompts: cfg.Slack.StandardAgent.SuggestedPrompts, StreamingEnabled: cfg.Slack.StandardAgent.StreamingEnabled, UpdateInterval: time.Duration(cfg.Slack.StandardAgent.UpdateIntervalSeconds) * time.Second, StreamingCarryRunes: models.redactor.StreamingCarryRunes(),
-	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler})
+	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, ActivationStore: activationStore, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler})
 	if err != nil {
 		return nil, err
 	}
@@ -799,7 +829,29 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			return nil, err
 		}
 	}
-	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationDone: notificationDone}, nil
+	if externalJobService != nil {
+		activationWorker, err = externalagentusecase.NewActivationWorker(externalagentusecase.ActivationConfig{
+			PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute,
+		}, externalagentusecase.ActivationDependencies{
+			Store: activationStore, Handler: service, Logger: models.logger, Metrics: models.metrics,
+		})
+		if err != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent activation worker: %w", err))
+		}
+		bindForegroundRuntimes(models, externalJobService)
+		go externalJobService.Run(ctx)
+	}
+	if notificationWorker != nil {
+		notificationDone = make(chan struct{})
+		go func() {
+			defer close(notificationDone)
+			notificationWorker.Run(ctx)
+		}()
+	}
+	if activationWorker != nil {
+		go activationWorker.Run(ctx)
+	}
+	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, notificationDone: notificationDone}, nil
 }
 
 func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service) error {

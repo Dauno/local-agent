@@ -1,6 +1,8 @@
 package domain
 
 import (
+	"errors"
+	"fmt"
 	"slices"
 	"time"
 	"unicode/utf8"
@@ -13,12 +15,54 @@ const (
 	RoleAssistant Role = "assistant"
 )
 
+type MessageSource string
+
+const (
+	MessageSourceHuman         MessageSource = "human"
+	MessageSourceJobCompletion MessageSource = "job_completion"
+	MessageSourceAssistant     MessageSource = "assistant"
+
+	// Short aliases keep source names readable at call sites.
+	SourceHuman         = MessageSourceHuman
+	SourceJobCompletion = MessageSourceJobCompletion
+	SourceAssistant     = MessageSourceAssistant
+)
+
 type Message struct {
 	Role       Role
+	Source     MessageSource
 	Content    string
 	UserID     string
 	ExternalTS string
 	CreatedAt  time.Time
+}
+
+func (m Message) Validate() error {
+	if m.Source == "" {
+		return errors.New("message source is required")
+	}
+	if m.Role == RoleUser && (m.Source == MessageSourceHuman || m.Source == MessageSourceJobCompletion) {
+		return nil
+	}
+	if m.Role == RoleAssistant && m.Source == MessageSourceAssistant {
+		return nil
+	}
+	return fmt.Errorf("message role %q and source %q are incompatible", m.Role, m.Source)
+}
+
+// WithInferredSource preserves compatibility for callers created before
+// message provenance was persisted explicitly. The SQLite boundary stores the
+// returned value, so new durable rows always carry a source.
+func (m Message) WithInferredSource() Message {
+	if m.Source != "" {
+		return m
+	}
+	if m.Role == RoleAssistant {
+		m.Source = MessageSourceAssistant
+	} else if m.Role == RoleUser {
+		m.Source = MessageSourceHuman
+	}
+	return m
 }
 
 type ConversationMetadata struct {

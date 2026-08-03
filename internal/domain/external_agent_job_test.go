@@ -120,3 +120,60 @@ func TestResultDeliveryPolicyAcceptsConfiguredPartBoundsOnly(t *testing.T) {
 		}
 	}
 }
+
+func TestMessageSourceMatchesTechnicalRole(t *testing.T) {
+	valid := []domain.Message{
+		{Role: domain.RoleUser, Source: domain.MessageSourceHuman},
+		{Role: domain.RoleUser, Source: domain.MessageSourceJobCompletion},
+		{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant},
+	}
+	for _, message := range valid {
+		if err := message.Validate(); err != nil {
+			t.Fatalf("valid message rejected: %+v: %v", message, err)
+		}
+	}
+	for _, message := range []domain.Message{
+		{Role: domain.RoleAssistant, Source: domain.MessageSourceHuman},
+		{Role: domain.RoleAssistant, Source: domain.MessageSourceJobCompletion},
+		{Role: domain.RoleUser, Source: domain.MessageSourceAssistant},
+	} {
+		if err := message.Validate(); err == nil {
+			t.Fatalf("invalid message accepted: %+v", message)
+		}
+	}
+}
+
+func TestExternalAgentJobActivationTransitionsDoNotReplayModel(t *testing.T) {
+	activation := domain.ExternalAgentJobActivation{State: domain.ActivationPending}
+	for _, next := range []domain.ExternalAgentJobActivationState{
+		domain.ActivationProcessing,
+		domain.ActivationModelStarted,
+		domain.ActivationResponsePrepared,
+		domain.ActivationCompleted,
+	} {
+		if err := activation.Transition(next); err != nil {
+			t.Fatalf("transition to %s: %v", next, err)
+		}
+	}
+	if err := activation.Transition(domain.ActivationProcessing); err == nil {
+		t.Fatal("completed activation was replayable")
+	}
+	activation.State = domain.ActivationModelStarted
+	if err := activation.Transition(domain.ActivationCompletionUnknown); err != nil {
+		t.Fatal(err)
+	}
+	if err := activation.Transition(domain.ActivationProcessing); err == nil {
+		t.Fatal("completion_unknown activation was replayable")
+	}
+}
+
+func TestExternalAgentJobActivationIDIsStablePerTerminalIdentity(t *testing.T) {
+	left := domain.ExternalAgentJobActivationID("job_1", 4, domain.JobNotificationTerminal)
+	right := domain.ExternalAgentJobActivationID("job_1", 4, domain.JobNotificationTerminal)
+	if left == "" || left != right {
+		t.Fatalf("activation ID is not stable: %q / %q", left, right)
+	}
+	if left == domain.ExternalAgentJobActivationID("job_1", 5, domain.JobNotificationTerminal) {
+		t.Fatal("different terminal revision reused activation ID")
+	}
+}

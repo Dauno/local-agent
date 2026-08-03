@@ -7,6 +7,7 @@ import (
 	"errors"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -31,13 +32,16 @@ type NotificationDependencies struct {
 }
 
 type NotificationWorker struct {
-	cfg       NotificationConfig
-	store     port.ExternalAgentJobNotificationStore
-	publisher port.JobNotificationPublisher
-	completer port.ExternalAgentJobHostCompleter
-	logger    port.Logger
-	metrics   port.MetricRecorder
-	owner     string
+	cfg        NotificationConfig
+	store      port.ExternalAgentJobNotificationStore
+	publisher  port.JobNotificationPublisher
+	completer  port.ExternalAgentJobHostCompleter
+	logger     port.Logger
+	metrics    port.MetricRecorder
+	owner      string
+	stopClaims chan struct{}
+	stopOnce   sync.Once
+	stopped    chan struct{}
 }
 
 const defaultNotificationStuckThreshold = 5 * time.Minute
@@ -80,13 +84,22 @@ func NewNotificationWorker(cfg NotificationConfig, deps NotificationDependencies
 		metrics = port.NoopMetricRecorder{}
 	}
 	return &NotificationWorker{cfg: cfg, store: deps.Store, publisher: deps.Publisher, completer: deps.HostCompleter,
-		logger: logger, metrics: metrics, owner: "notification-worker"}, nil
+		logger: logger, metrics: metrics, owner: "notification-worker", stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
 }
 
 func (w *NotificationWorker) Run(ctx context.Context) {
+	if w == nil {
+		return
+	}
+	defer close(w.stopped)
 	ticker := time.NewTicker(w.cfg.PollInterval)
 	defer ticker.Stop()
 	for {
+		select {
+		case <-w.stopClaims:
+			return
+		default:
+		}
 		if err := w.ProcessOne(ctx); err != nil {
 			w.logProcessingError(err)
 		}
@@ -98,8 +111,33 @@ func (w *NotificationWorker) Run(ctx context.Context) {
 		select {
 		case <-ctx.Done():
 			return
+		case <-w.stopClaims:
+			return
 		case <-ticker.C:
 		}
+	}
+}
+
+// StopAdmission prevents new notification claims while allowing the current
+// publication to finish and leave a durable retry/unknown decision.
+func (w *NotificationWorker) StopAdmission() {
+	if w == nil {
+		return
+	}
+	w.stopOnce.Do(func() { close(w.stopClaims) })
+}
+
+// WaitStopped waits for the notification polling loop and its current
+// publication to finish.
+func (w *NotificationWorker) WaitStopped(ctx context.Context) error {
+	if w == nil {
+		return nil
+	}
+	select {
+	case <-w.stopped:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 

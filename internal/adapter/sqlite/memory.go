@@ -991,22 +991,22 @@ func (s *Store) LoadOutboxMessages(ctx context.Context, item *domain.OutboxItem)
 	// Pre-v4 outbox rows have no source snapshot, so retain legacy recovery.
 	rows, err := s.db.QueryContext(ctx, `
 		WITH exchange AS (
-			SELECT id, role, content, user_id, external_ts, created_at
+			SELECT id, role, source, content, user_id, external_ts, created_at
 			FROM messages
 			WHERE conversation_key = ? AND external_ts = ? AND role = 'assistant'
 			ORDER BY id DESC LIMIT 1
 		), prior_user AS (
-			SELECT m.id, m.role, m.content, m.user_id, m.external_ts, m.created_at
+			SELECT m.id, m.role, m.source, m.content, m.user_id, m.external_ts, m.created_at
 			FROM messages m JOIN exchange e
 			ON m.conversation_key = ? AND m.role = 'user'
 			AND (m.created_at < e.created_at OR (m.created_at = e.created_at AND m.id < e.id))
 			ORDER BY m.created_at DESC, m.id DESC LIMIT 1
 		), source AS (
-			SELECT id, role, content, user_id, external_ts, created_at FROM exchange
+			SELECT id, role, source, content, user_id, external_ts, created_at FROM exchange
 			UNION ALL
-			SELECT id, role, content, user_id, external_ts, created_at FROM prior_user
+			SELECT id, role, source, content, user_id, external_ts, created_at FROM prior_user
 		)
-		SELECT role, content, user_id, external_ts, created_at FROM source ORDER BY created_at ASC, id ASC`,
+		SELECT role, source, content, user_id, external_ts, created_at FROM source ORDER BY created_at ASC, id ASC`,
 		string(item.ConversationKey), item.ExchangeTS, string(item.ConversationKey))
 	if err != nil {
 		return nil, fmt.Errorf("load outbox messages: %w", err)
@@ -1020,7 +1020,7 @@ func (s *Store) LoadOutboxMessages(ctx context.Context, item *domain.OutboxItem)
 			role         string
 			createdNanos int64
 		)
-		if err := rows.Scan(&role, &msg.Content, &msg.UserID, &msg.ExternalTS, &createdNanos); err != nil {
+		if err := rows.Scan(&role, &msg.Source, &msg.Content, &msg.UserID, &msg.ExternalTS, &createdNanos); err != nil {
 			return nil, fmt.Errorf("scan outbox message: %w", err)
 		}
 		msg.Role = domain.Role(role)
