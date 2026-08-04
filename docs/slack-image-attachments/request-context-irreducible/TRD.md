@@ -2,7 +2,7 @@
 
 ## Estado
 
-- Estado: Proposed
+- Estado: Implemented (P0) - code review approved
 - Fecha: 2026-08-03
 - Feature: `slack-image-attachments`
 - Identificador: `request-context-irreducible`
@@ -411,23 +411,23 @@ git diff --check
 
 ## Criterios de aceptacion
 
-- [ ] Una imagen realista de aproximadamente 600 KiB que hoy supera el hard limit por base64 llega al proveedor y produce una descripcion textual.
-- [ ] El payload contable no contiene bytes ni base64 de la imagen; el request HTTP conserva la imagen normalizada real.
-- [ ] Dos imagenes con iguales dimensiones/detail y distinta compresion reciben el mismo coste visual.
-- [ ] Una imagen cuyo coste visual total supera el presupuesto falla antes de cualquier request HTTP.
-- [ ] Texto, tools y requests sin media conservan el comportamiento actual del guard.
-- [ ] Imagenes pequenas no se amplian, pero se recodifican y pierden EXIF/metadata no necesaria.
-- [ ] Orientacion EXIF queda visualmente correcta y dimensiones finales corresponden a la orientacion aplicada.
-- [ ] PNG transparente conserva alpha; WebP opaque/alpha produce JPEG/PNG canonico respectivamente.
-- [ ] GIF procesa primer frame con warning determinista.
-- [ ] MIME falso, archivo corrupto, dimensiones gigantes y decompression bombs fallan antes del modelo con errores seguros y deterministas.
-- [ ] Artifact visual contiene solo el derivado normalizado con MIME y extension canonicos.
-- [ ] `load_artifacts` entrega ese derivado, la peticion visual es admitida y el analyzer devuelve descripcion textual.
-- [ ] `estimator/visual-tile-conservative-v1` se construye por estrategia+ID; IDs desconocidos fallan al iniciar y en doctor.
-- [ ] No existe fallback silencioso a conteo de base64 ni a media con coste cero.
-- [ ] `image_detail` se omite por default y solo emite `auto|low|high` configurado.
-- [ ] Metricas exponen dimensiones/bytes originales y finales, formato, estrategia/ID y estimacion sin contenido sensible.
-- [ ] `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent` pasan.
+- [x] Una imagen realista de aproximadamente 600 KiB que hoy supera el hard limit por base64 llega al proveedor y produce una descripcion textual.
+- [x] El payload contable no contiene bytes ni base64 de la imagen; el request HTTP conserva la imagen normalizada real.
+- [x] Dos imagenes con iguales dimensiones/detail y distinta compresion reciben el mismo coste visual.
+- [x] Una imagen cuyo coste visual total supera el presupuesto falla antes de cualquier request HTTP.
+- [x] Texto, tools y requests sin media conservan el comportamiento actual del guard.
+- [x] Imagenes pequenas no se amplian, pero se recodifican y pierden EXIF/metadata no necesaria.
+- [x] Orientacion EXIF queda visualmente correcta y dimensiones finales corresponden a la orientacion aplicada.
+- [x] PNG transparente conserva alpha; WebP opaque/alpha produce JPEG/PNG canonico respectivamente.
+- [x] GIF procesa primer frame con warning determinista.
+- [x] MIME falso, archivo corrupto, dimensiones gigantes y decompression bombs fallan antes del modelo con errores seguros y deterministas.
+- [x] Artifact visual contiene solo el derivado normalizado con MIME y extension canonicos.
+- [x] `load_artifacts` entrega ese derivado, la peticion visual es admitida y el analyzer devuelve descripcion textual.
+- [x] `estimator/visual-tile-conservative-v1` se construye por estrategia+ID; IDs desconocidos fallan al iniciar y en doctor.
+- [x] No existe fallback silencioso a conteo de base64 ni a media con coste cero.
+- [ ] `image_detail` se omite por default y solo emite `auto|low|high` configurado. (P1 - P1-01, FR-19)
+- [ ] Metricas exponen dimensiones/bytes originales y finales, formato, estrategia/ID y estimacion sin contenido sensible. (P1 - P1-03)
+- [x] `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent` pasan.
 
 ## Referencias
 
@@ -452,3 +452,16 @@ git diff --check
 - `internal/config/config.go`
 - `internal/config/validate.go`
 - `internal/usecase/doctor/service.go`
+
+## Estado P0 (2026-08-04)
+
+- 15/17 criterios de aceptacion cumplidos con evidencia de tests; los 2 restantes quedan diferidos a P1 por diseno (P1-01 `image_detail`, P1-03 metricas), sin gap de alcance P0.
+- Code review del P0: veredicto approved; CR1-CR6 validados sin hallazgos accionables ni regresiones:
+  - CR1: la proyeccion contable v1 usa `byte_bound` conservando el ajuste 2x; regresion en `compiler_test.go:64`.
+  - CR2: el audio real se incluye en la proyeccion v1 con guard antes de HTTP.
+  - CR3: los counters auxiliares se validan fuera del bloque root OpenAI.
+  - CR4: multiplicaciones/sumas checked, dimensiones negativas rechazadas y overflow acumulado probado.
+  - CR5: `byte_bound` exige ID vacio en loader, capability y factory.
+  - CR6: el test exige exclusivamente `ErrIrreducibleContext` y valida limites.
+- Commits del P0 en la rama `feat/slack-image-attachments-multimodal`: `194441b`, `1f244bc`, `a64fe4e`, `2b5dd78`. PR #35 contra `main`: https://github.com/Dauno/local-agent/pull/35
+- Comandos verdes confirmados: `go test ./...`, `go vet ./...`, `go build -trimpath ./cmd/local-agent`, `git diff --check`.
