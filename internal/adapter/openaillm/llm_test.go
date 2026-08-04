@@ -1,21 +1,29 @@
 package openaillm
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/jpeg"
+	"image/png"
 	"iter"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 
-	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
+	"github.com/openai/openai-go/v3"
+
+	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -381,9 +389,9 @@ func TestRequestParamsPreservesTextAndImagePartOrder(t *testing.T) {
 	request := &model.LLMRequest{Contents: []*genai.Content{{
 		Role: genai.RoleUser,
 		Parts: []*genai.Part{
-			genai.NewPartFromBytes([]byte("png"), "image/png"),
+			genai.NewPartFromBytes(realTestPNG(t), "image/png"),
 			genai.NewPartFromText("between"),
-			genai.NewPartFromBytes([]byte("jpg"), "image/jpeg"),
+			genai.NewPartFromBytes(realTestJPEG(t), "image/jpeg"),
 		},
 	}}}
 	params, err := llm.requestParams(request)
@@ -407,6 +415,299 @@ func TestRequestParamsPreservesTextAndImagePartOrder(t *testing.T) {
 	if strings.Join(got, ",") != "image_url,text,image_url" {
 		t.Fatalf("content part order = %v", got)
 	}
+}
+
+func TestConvertRequestBuildsRealAndCountableMultimodalProjection(t *testing.T) {
+	llm := &OpenAICompatibleLLM{model: "test-model"}
+	image := realTestPNG(t)
+	request := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			genai.NewPartFromText("caption: "),
+			genai.NewPartFromBytes(image, "image/png"),
+		},
+	}}}
+	converted, err := llm.convertRequest(request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.envelope.SerializerID != port.SerializerOpenAIChatCompletionsMultimodalV2 {
+		t.Fatalf("serializer = %q, want %q", converted.envelope.SerializerID, port.SerializerOpenAIChatCompletionsMultimodalV2)
+	}
+	if len(converted.envelope.Media) != 1 {
+		t.Fatalf("media = %#v", converted.envelope.Media)
+	}
+	media := converted.envelope.Media[0]
+	if media.MIMEType != "image/png" || media.Width != 4 || media.Height != 4 || media.Detail != "" {
+		t.Fatalf("media metadata = %#v", media)
+	}
+
+	// The countable projection carries the fixed marker and no binary data.
+	if !strings.Contains(converted.envelope.Serialized, mediaMarker) {
+		t.Fatal("countable projection is missing the media marker")
+	}
+	if strings.Contains(converted.envelope.Serialized, "base64") {
+		t.Fatal("countable projection contains base64")
+	}
+	if strings.Contains(converted.envelope.Serialized, "iVBOR") {
+		t.Fatal("countable projection contains binary image data")
+	}
+	var countableBody map[string]any
+	if err := json.Unmarshal([]byte(converted.envelope.Serialized), &countableBody); err != nil {
+		t.Fatalf("countable projection is not JSON: %v", err)
+	}
+	innerParams, ok := countableBody["params"].(map[string]any)
+	if !ok {
+		t.Fatalf("countable projection params = %#v", countableBody["params"])
+	}
+	countableURL := countableImageURL(t, innerParams)
+	if countableURL != mediaMarker {
+		t.Fatalf("countable image URL = %q, want marker", countableURL)
+	}
+	countableOrder := countablePartOrder(t, innerParams)
+	if strings.Join(countableOrder, ",") != "text,image_url" {
+		t.Fatalf("countable part order = %v", countableOrder)
+	}
+
+	// The real params keep the actual data URL and the original order.
+	encoded, err := json.Marshal(converted.params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var realBody map[string]any
+	if err := json.Unmarshal(encoded, &realBody); err != nil {
+		t.Fatal(err)
+	}
+	realURL := countableImageURL(t, realBody)
+	if !strings.HasPrefix(realURL, "data:image/png;base64,") {
+		t.Fatalf("real image URL = %q, want data URL", realURL)
+	}
+	if strings.Contains(converted.envelope.Serialized, realURL) {
+		t.Fatal("countable projection leaked the real data URL")
+	}
+	realOrder := countablePartOrder(t, realBody)
+	if strings.Join(realOrder, ",") != "text,image_url" {
+		t.Fatalf("real part order = %v", realOrder)
+	}
+}
+
+func TestConvertRequestKeepsV1SerializerForTextAndTools(t *testing.T) {
+	llm := &OpenAICompatibleLLM{model: "test-model"}
+	request := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "lookup"}}}},
+		},
+	}
+	converted, err := llm.convertRequest(request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.envelope.SerializerID != port.SerializerOpenAIChatCompletionsV1 {
+		t.Fatalf("serializer = %q, want %q", converted.envelope.SerializerID, port.SerializerOpenAIChatCompletionsV1)
+	}
+	if len(converted.envelope.Media) != 0 {
+		t.Fatalf("text-only envelope media = %#v", converted.envelope.Media)
+	}
+	if strings.Contains(converted.envelope.Serialized, mediaMarker) {
+		t.Fatal("text-only countable projection contains the media marker")
+	}
+	// The v1 projection is exactly the real params plus the stream flag, so
+	// text-only counting is byte-identical in shape to the previous behavior.
+	var serializedEnvelope struct {
+		Params any  `json:"params"`
+		Stream bool `json:"stream"`
+	}
+	if err := json.Unmarshal([]byte(converted.envelope.Serialized), &serializedEnvelope); err != nil {
+		t.Fatal(err)
+	}
+	if serializedEnvelope.Stream != false {
+		t.Fatalf("countable stream flag = %v", serializedEnvelope.Stream)
+	}
+	var realParams any
+	realEncoded, err := json.Marshal(converted.params)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(realEncoded, &realParams); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(serializedEnvelope.Params, realParams) {
+		t.Fatal("text-only countable projection differs from the real params")
+	}
+}
+
+func TestGuardRejectsMediaOverBudgetBeforeHTTP(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	t.Cleanup(server.Close)
+	llm, err := New(WithAPIKey("test"), WithBaseURL(server.URL), WithModel("model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := tokencounter.New("estimator", "visual-tile-conservative-v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The visual estimate for a 4x4 image is 2048 tokens plus the countable
+	// payload, which exceeds this hard limit.
+	if err := llm.ConfigureRequestGuard(counter, domain.RequestBudget{HardTokens: 500}, "test/vision"); err != nil {
+		t.Fatal(err)
+	}
+	request := &model.LLMRequest{Contents: []*genai.Content{{
+		Role: genai.RoleUser,
+		Parts: []*genai.Part{
+			genai.NewPartFromText("describe"),
+			genai.NewPartFromBytes(realTestPNG(t), "image/png"),
+		},
+	}}}
+	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), request, false))
+	if !errors.Is(gotErr, domain.ErrIrreducibleContext) {
+		t.Fatalf("GenerateContent() error = %v, want irreducible context", gotErr)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("over-budget media request made %d HTTP calls, want 0", calls.Load())
+	}
+}
+
+func TestGuardRejectsMediaWithByteBoundBeforeHTTP(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { calls.Add(1) }))
+	t.Cleanup(server.Close)
+	llm, err := New(WithAPIKey("test"), WithBaseURL(server.URL), WithModel("model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := tokencounter.New("byte_bound", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := llm.ConfigureRequestGuard(counter, domain.RequestBudget{HardTokens: 1_000_000}, "test/vision"); err != nil {
+		t.Fatal(err)
+	}
+	request := &model.LLMRequest{Contents: []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromBytes(realTestPNG(t), "image/png")},
+	}}}
+	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), request, false))
+	if gotErr == nil || !strings.Contains(gotErr.Error(), "request_token_count_unavailable") {
+		t.Fatalf("GenerateContent() error = %v, want request_token_count_unavailable", gotErr)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("media request with byte_bound made %d HTTP calls, want 0", calls.Load())
+	}
+}
+
+func TestGuardRejectsLargeInputAudioBeforeHTTP(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(writer, "unexpected HTTP request", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	llm, err := New(WithAPIKey("test"), WithBaseURL(server.URL), WithModel("model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := tokencounter.New(tokencounter.StrategyEstimator, tokencounter.EstimatorVisualTileConservativeV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := domain.RequestBudget{HardTokens: 512}
+	if err := llm.ConfigureRequestGuard(counter, budget, "test/audio"); err != nil {
+		t.Fatal(err)
+	}
+	request := &model.LLMRequest{Contents: []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromBytes(bytes.Repeat([]byte("audio"), 4096), "audio/wav")},
+	}}}
+	converted, err := llm.convertRequest(request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.envelope.SerializerID != port.SerializerOpenAIChatCompletionsV1 {
+		t.Fatalf("audio serializer = %q, want %q", converted.envelope.SerializerID, port.SerializerOpenAIChatCompletionsV1)
+	}
+	if strings.Contains(converted.envelope.Serialized, mediaMarker) {
+		t.Fatal("audio countable projection replaced real bytes with media marker")
+	}
+	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), request, false))
+	if !errors.Is(gotErr, domain.ErrIrreducibleContext) {
+		t.Fatalf("GenerateContent() error = %v, want irreducible context", gotErr)
+	}
+	var irreducible *domain.IrreducibleContextError
+	if !errors.As(gotErr, &irreducible) {
+		t.Fatalf("GenerateContent() error = %v, want IrreducibleContextError", gotErr)
+	}
+	if irreducible.MinimumTokens <= budget.HardTokens || irreducible.HardTokens != budget.HardTokens {
+		t.Fatalf("irreducible budget = %#v, want minimum > %d and hard %d", irreducible, budget.HardTokens, budget.HardTokens)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("over-budget audio request made %d HTTP calls, want 0", calls.Load())
+	}
+}
+
+func TestConvertRequestRejectsUndecodableImagePart(t *testing.T) {
+	llm := &OpenAICompatibleLLM{model: "test-model"}
+	request := &model.LLMRequest{Contents: []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromBytes([]byte("png"), "image/png")},
+	}}}
+	_, err := llm.convertRequest(request, false)
+	if err == nil || !strings.Contains(err.Error(), "not a decodable image") {
+		t.Fatalf("convertRequest() error = %v", err)
+	}
+}
+
+// countableImageURL extracts the first image_url url from a decoded request body.
+func countableImageURL(t *testing.T, body map[string]any) string {
+	t.Helper()
+	for _, rawMessage := range body["messages"].([]any) {
+		content, ok := rawMessage.(map[string]any)["content"]
+		if !ok {
+			continue
+		}
+		if _, isText := content.(string); isText {
+			continue
+		}
+		for _, rawPart := range content.([]any) {
+			part := rawPart.(map[string]any)
+			if part["type"] != "image_url" {
+				continue
+			}
+			imageURL, ok := part["image_url"].(map[string]any)["url"].(string)
+			if !ok {
+				t.Fatalf("image_url part = %#v", part)
+			}
+			return imageURL
+		}
+	}
+	t.Fatalf("no image_url found in %#v", body)
+	return ""
+}
+
+// countablePartOrder returns the ordered content part types of the first user
+// message in a decoded request body.
+func countablePartOrder(t *testing.T, body map[string]any) []string {
+	t.Helper()
+	messages := body["messages"].([]any)
+	for _, rawMessage := range messages {
+		content, ok := rawMessage.(map[string]any)["content"]
+		if !ok {
+			continue
+		}
+		if _, isText := content.(string); isText {
+			return []string{"text"}
+		}
+		parts := content.([]any)
+		order := make([]string, 0, len(parts))
+		for _, rawPart := range parts {
+			order = append(order, rawPart.(map[string]any)["type"].(string))
+		}
+		return order
+	}
+	t.Fatalf("no user content found in %#v", body)
+	return nil
 }
 
 func TestGenerateContentReturnsProviderAndEmptyResponseErrors(t *testing.T) {
@@ -619,6 +920,38 @@ func TestNewValidatesOptionsWithoutExposingValues(t *testing.T) {
 	}
 }
 
+// realTestPNG returns a tiny decodable PNG for conversion tests.
+func realTestPNG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 60), G: uint8(y * 60), B: 120, A: 255})
+		}
+	}
+	var buffer bytes.Buffer
+	if err := png.Encode(&buffer, img); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
+// realTestJPEG returns a tiny decodable JPEG for conversion tests.
+func realTestJPEG(t *testing.T) []byte {
+	t.Helper()
+	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
+	for y := 0; y < 4; y++ {
+		for x := 0; x < 4; x++ {
+			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 60), G: uint8(y * 60), B: 120, A: 255})
+		}
+	}
+	var buffer bytes.Buffer
+	if err := jpeg.Encode(&buffer, img, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatal(err)
+	}
+	return buffer.Bytes()
+}
+
 type capturedRequest struct {
 	path       string
 	authorize  string
@@ -705,7 +1038,7 @@ func TestFinalRequestGuardEmitsCompleteMetrics(t *testing.T) {
 	if err := llm.ConfigureRequestGuard(fixedRequestCounter(5), budget, "test/profile", metrics); err != nil {
 		t.Fatal(err)
 	}
-	if err := llm.guardRequest(t.Context(), openai.ChatCompletionNewParams{}, false); err != nil {
+	if err := llm.guardRequest(t.Context(), testConvertedRequest(5)); err != nil {
 		t.Fatal(err)
 	}
 	for _, name := range []string{
@@ -724,7 +1057,7 @@ func TestFinalRequestGuardEmitsCompleteMetrics(t *testing.T) {
 	if err := llm.ConfigureRequestGuard(fixedRequestCounter(11), budget, "test/profile", metrics); err != nil {
 		t.Fatal(err)
 	}
-	if err := llm.guardRequest(t.Context(), openai.ChatCompletionNewParams{}, false); !errors.Is(err, domain.ErrIrreducibleContext) {
+	if err := llm.guardRequest(t.Context(), testConvertedRequest(11)); err != nil && !errors.Is(err, domain.ErrIrreducibleContext) {
 		t.Fatalf("rejected guard error = %v", err)
 	}
 	if len(metrics.samples[domain.MetricModelRequestIrreducibleTotal]) == 0 {
@@ -734,7 +1067,7 @@ func TestFinalRequestGuardEmitsCompleteMetrics(t *testing.T) {
 	if err := llm.ConfigureRequestGuard(failingRequestCounter{}, budget, "test/profile", metrics); err != nil {
 		t.Fatal(err)
 	}
-	if err := llm.guardRequest(t.Context(), openai.ChatCompletionNewParams{}, false); err == nil {
+	if err := llm.guardRequest(t.Context(), testConvertedRequest(1)); err == nil {
 		t.Fatal("count failure was accepted")
 	}
 	outcomes := metrics.samples[domain.MetricModelRequestGuardOutcomeTotal]
@@ -747,6 +1080,19 @@ func configureTestGuard(t *testing.T, llm *OpenAICompatibleLLM) {
 	t.Helper()
 	if err := llm.ConfigureRequestGuard(testRequestCounter{}, domain.RequestBudget{HardTokens: 1_000_000}, "test/profile"); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// testConvertedRequest builds a minimal countable request for guard tests; the
+// Serialized bytes are what fixed counters measure.
+func testConvertedRequest(_ int) convertedRequest {
+	return convertedRequest{
+		params: openai.ChatCompletionNewParams{},
+		envelope: port.ModelRequestEnvelope{
+			SerializerID: port.SerializerOpenAIChatCompletionsV1,
+			ProfileID:    "test/profile",
+			Serialized:   "{}",
+		},
 	}
 }
 

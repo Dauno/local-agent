@@ -3,6 +3,7 @@ package doctor
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,6 +99,21 @@ func (f *fakeLive) CheckAudioTranscription(_ context.Context, _ *agentdef.Resolv
 	f.audio++
 	f.audioAPIKey = apiKey
 	return nil
+}
+
+// fakeCounter implements CounterChecker with a configurable availability set.
+type fakeCounter struct {
+	implemented map[string]string
+}
+
+func (f *fakeCounter) CheckCounter(strategy, id string) error {
+	if f == nil || f.implemented == nil {
+		return nil
+	}
+	if f.implemented[strategy] == id {
+		return nil
+	}
+	return fmt.Errorf("unsupported token counter id: estimator id %q", id)
 }
 
 func validDependencies() (Dependencies, *fakeDatabase, *fakeLive) {
@@ -483,7 +499,8 @@ profiles:
     model: vision/model
     context_window_tokens: 128000
     token_counter:
-      strategy: byte_bound
+      strategy: estimator
+      id: visual-tile-conservative-v1
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -507,6 +524,7 @@ instruction: inspect image
 		"VISION_API_KEY": "vision-secret", SlackBotTokenKey: "xoxb-secret-token", SlackAppTokenKey: "xapp-secret-token",
 	}}
 	deps.CLI = &fakeCLI{}
+	deps.Counter = &fakeCounter{implemented: map[string]string{"estimator": agentdef.VisualEstimatorID}}
 	service, err := New(deps)
 	if err != nil {
 		t.Fatal(err)
@@ -514,6 +532,61 @@ instruction: inspect image
 	report := service.Run(t.Context(), true)
 	if report.ExitCode() != 0 || live.attachment != 1 || live.modelAPIKey != "vision-secret" {
 		t.Fatalf("report=%#v live=%#v", report.Results, live)
+	}
+}
+
+func TestDoctorRejectsUnimplementedCounterCombination(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "test.yaml"), []byte(`
+name: test
+type: openai_compatible
+base_url: https://example.test
+api_key_env: DECLARATIVE_MODEL_KEY
+profiles:
+  default:
+    model: test-model
+    context_window_tokens: 128000
+    token_counter:
+      strategy: estimator
+      id: not-installed
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(`
+agent_class: LlmAgent
+name: root_agent
+model: test/default
+global_instruction: policy here
+instruction: test
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.Counter = &fakeCounter{implemented: map[string]string{"estimator": agentdef.VisualEstimatorID}}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), false)
+	if report.ExitCode() != 1 {
+		t.Fatalf("unknown estimator id must fail doctor, got %#v", report.Results)
+	}
+	found := false
+	for _, result := range report.Results {
+		if result.Name == "token counter" && result.Status == StatusFail && strings.Contains(result.Detail, "not-installed") {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("actionable token counter failure missing: %#v", report.Results)
 	}
 }
 
@@ -764,6 +837,56 @@ tool_scope: invocation_scoped
 	if len(cli.models) != 0 || cli.describeCalls != 0 || cli.authCalls != 0 {
 		t.Fatalf("openai_compatible agent tool triggered CLI validation: %#v", cli)
 	}
+}
+
+func TestDoctorRejectsUnimplementedOpenAIAuxiliaryCounterWithCLIRoot(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorCLIDefinitions(t, stateDir, false)
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "auxiliary.yaml"), []byte(`
+name: auxiliary
+type: openai_compatible
+base_url: https://auxiliary.example.test
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  default:
+    model: auxiliary-model
+    context_window_tokens: 128000
+    token_counter:
+      strategy: estimator
+      id: not-installed
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "scout.yaml"), []byte(`
+agent_class: LlmAgent
+name: scout
+model: auxiliary/default
+description: inspect workspace
+instruction: inspect the workspace
+tool_scope: invocation_scoped
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.CLI = &fakeCLI{}
+	deps.Counter = &fakeCounter{implemented: map[string]string{"estimator": agentdef.VisualEstimatorID}}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), false)
+	if report.ExitCode() != 1 {
+		t.Fatalf("doctor accepted unimplemented auxiliary counter: %#v", report.Results)
+	}
+	for _, result := range report.Results {
+		if result.Name == "token counter (scout)" && result.Status == StatusFail && strings.Contains(result.Detail, "not-installed") {
+			return
+		}
+	}
+	t.Fatalf("auxiliary token counter failure missing: %#v", report.Results)
 }
 
 func writeDoctorCLIDefinitions(t *testing.T, stateDir string, includeAttachment bool) {

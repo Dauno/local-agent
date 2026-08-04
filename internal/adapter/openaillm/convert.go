@@ -1,43 +1,129 @@
 package openaillm
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/gif"
+	"image/jpeg"
+	"image/png"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
 	"github.com/openai/openai-go/v3/packages/param"
 	"github.com/openai/openai-go/v3/shared"
+	"golang.org/x/image/webp"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
+
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
+// mediaMarker is the fixed, content-free replacement for every binary data URL
+// inside the countable projection. It never contains bytes, digests, or
+// base64 fragments (FR-12).
+const mediaMarker = "local-agent://media/omitted"
+
+// registerImageFormats makes image.DecodeConfig able to validate image parts
+// by content. The registry is a global map assignment, so this is idempotent
+// across packages.
+func registerImageFormats() {
+	image.RegisterFormat("jpeg", "\xff\xd8", jpeg.Decode, jpeg.DecodeConfig)
+	image.RegisterFormat("png", "\x89PNG\r\n\x1a\n", png.Decode, png.DecodeConfig)
+	image.RegisterFormat("gif", "GIF8?a", gif.Decode, gif.DecodeConfig)
+	image.RegisterFormat("webp", "RIFF????WEBPVP", webp.Decode, webp.DecodeConfig)
+}
+
+func init() {
+	registerImageFormats()
+}
+
+// requestConversion is the single-pass typed conversion of one ADK request
+// into real provider parameters and an equivalent countable projection.
+type requestConversion struct {
+	params    openai.ChatCompletionNewParams
+	countable openai.ChatCompletionNewParams
+	media     []port.ModelRequestMedia
+	hasImages bool
+}
+
+// convertedRequest pairs the real HTTP parameters with the countable envelope
+// produced from the same typed conversion pass (FR-12).
+type convertedRequest struct {
+	params   openai.ChatCompletionNewParams
+	envelope port.ModelRequestEnvelope
+}
+
+func (m *OpenAICompatibleLLM) convertRequest(request *model.LLMRequest, stream bool) (convertedRequest, error) {
+	conversion, err := m.buildRequest(request)
+	if err != nil {
+		return convertedRequest{}, err
+	}
+	serializerID := port.SerializerOpenAIChatCompletionsV1
+	if conversion.hasImages {
+		serializerID = port.SerializerOpenAIChatCompletionsMultimodalV2
+	}
+	serialized, err := json.Marshal(struct {
+		Params openai.ChatCompletionNewParams `json:"params"`
+		Stream bool                           `json:"stream"`
+	}{Params: conversion.countable, Stream: stream})
+	if err != nil {
+		return convertedRequest{}, fmt.Errorf("serialize OpenAI-compatible request for guard: %w", err)
+	}
+	return convertedRequest{
+		params: conversion.params,
+		envelope: port.ModelRequestEnvelope{
+			SerializerID: serializerID,
+			ProfileID:    m.profileID,
+			Serialized:   string(serialized),
+			Media:        conversion.media,
+		},
+	}, nil
+}
+
 func (m *OpenAICompatibleLLM) requestParams(request *model.LLMRequest) (openai.ChatCompletionNewParams, error) {
+	conversion, err := m.buildRequest(request)
+	if err != nil {
+		return openai.ChatCompletionNewParams{}, err
+	}
+	return conversion.params, nil
+}
+
+func (m *OpenAICompatibleLLM) buildRequest(request *model.LLMRequest) (requestConversion, error) {
 	if request == nil {
-		return openai.ChatCompletionNewParams{}, errors.New("ADK model request is nil")
+		return requestConversion{}, errors.New("ADK model request is nil")
 	}
 
 	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(request.Contents)+1)
+	countableMessages := make([]openai.ChatCompletionMessageParamUnion, 0, len(request.Contents)+1)
 	if request.Config != nil && request.Config.SystemInstruction != nil {
 		text, err := textFromContent(request.Config.SystemInstruction)
 		if err != nil {
-			return openai.ChatCompletionNewParams{}, fmt.Errorf("convert system instruction: %w", err)
+			return requestConversion{}, fmt.Errorf("convert system instruction: %w", err)
 		}
 		if strings.TrimSpace(text) != "" {
-			messages = append(messages, openai.SystemMessage(text))
+			system := openai.SystemMessage(text)
+			messages = append(messages, system)
+			countableMessages = append(countableMessages, system)
 		}
 	}
+	var media []port.ModelRequestMedia
+	hasImages := false
 	for index, content := range request.Contents {
-		converted, err := contentToMessages(content)
+		converted, err := contentToMessageSets(content)
 		if err != nil {
-			return openai.ChatCompletionNewParams{}, fmt.Errorf("convert content %d: %w", index, err)
+			return requestConversion{}, fmt.Errorf("convert content %d: %w", index, err)
 		}
-		messages = append(messages, converted...)
+		messages = append(messages, converted.real...)
+		countableMessages = append(countableMessages, converted.countable...)
+		media = append(media, converted.media...)
+		hasImages = hasImages || converted.hasImages
 	}
 	if len(messages) == 0 {
-		return openai.ChatCompletionNewParams{}, errors.New("ADK model request contains no messages")
+		return requestConversion{}, errors.New("ADK model request contains no messages")
 	}
 
 	params := openai.ChatCompletionNewParams{
@@ -49,7 +135,7 @@ func (m *OpenAICompatibleLLM) requestParams(request *model.LLMRequest) (openai.C
 	}
 	if request.Config != nil {
 		if err := applyGenerateConfig(&params, request.Config); err != nil {
-			return openai.ChatCompletionNewParams{}, err
+			return requestConversion{}, err
 		}
 	}
 	if m.defaultMaxOutputTokens > 0 && (request.Config == nil || request.Config.MaxOutputTokens <= 0) {
@@ -58,12 +144,26 @@ func (m *OpenAICompatibleLLM) requestParams(request *model.LLMRequest) (openai.C
 	if len(m.extraBody) > 0 {
 		params.SetExtraFields(m.extraBody)
 	}
-	return params, nil
+	countable := params
+	countable.Messages = countableMessages
+	return requestConversion{params: params, countable: countable, media: media, hasImages: hasImages}, nil
 }
 
 func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessageParamUnion, error) {
+	converted, err := contentToMessageSets(content)
+	if err != nil {
+		return nil, err
+	}
+	return converted.real, nil
+}
+
+// contentToMessageSets converts one ADK content into real provider messages
+// and the equivalent countable messages in a single pass. Image data URLs exist
+// only in the real set; audio stays real because v1 counts its serialized bytes.
+// Images use the fixed marker and order-preserving media metadata.
+func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 	if content == nil {
-		return nil, ErrUnsupportedPart
+		return convertedContent{}, ErrUnsupportedPart
 	}
 
 	var texts []string
@@ -75,7 +175,7 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 
 	for _, part := range content.Parts {
 		if part == nil {
-			return nil, ErrUnsupportedPart
+			return convertedContent{}, ErrUnsupportedPart
 		}
 		switch {
 		case part.FunctionCall != nil:
@@ -90,11 +190,11 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 				audioParts = append(audioParts, part)
 				orderedContentParts = append(orderedContentParts, part)
 			} else {
-				return nil, ErrUnsupportedPart
+				return convertedContent{}, ErrUnsupportedPart
 			}
 		default:
 			if part.ToolCall != nil || part.ToolResponse != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
-				return nil, ErrUnsupportedPart
+				return convertedContent{}, ErrUnsupportedPart
 			}
 			texts = append(texts, part.Text)
 			orderedContentParts = append(orderedContentParts, part)
@@ -102,27 +202,27 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 	}
 
 	if len(functionCalls) > 0 && len(functionResponses) > 0 {
-		return nil, errors.New("content cannot mix function calls and responses")
+		return convertedContent{}, errors.New("content cannot mix function calls and responses")
 	}
 	if len(imageParts) > 0 && (len(functionCalls) > 0 || len(functionResponses) > 0) {
-		return nil, errors.New("content cannot mix images with function calls or responses")
+		return convertedContent{}, errors.New("content cannot mix images with function calls or responses")
 	}
 	if len(audioParts) > 0 && (len(functionCalls) > 0 || len(functionResponses) > 0) {
-		return nil, errors.New("content cannot mix audio with function calls or responses")
+		return convertedContent{}, errors.New("content cannot mix audio with function calls or responses")
 	}
 	if len(imageParts) > 0 && len(audioParts) > 0 {
-		return nil, errors.New("content cannot mix images and audio")
+		return convertedContent{}, errors.New("content cannot mix images and audio")
 	}
 	if len(functionCalls) > 0 {
 		if content.Role != genai.RoleModel {
-			return nil, fmt.Errorf("function calls require model role, got %q", content.Role)
+			return convertedContent{}, fmt.Errorf("function calls require model role, got %q", content.Role)
 		}
 		assistant := &openai.ChatCompletionAssistantMessageParam{
 			ToolCalls: make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(functionCalls)),
 		}
 		for _, call := range functionCalls {
 			if call == nil || strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
-				return nil, errors.New("function call ID and name are required")
+				return convertedContent{}, errors.New("function call ID and name are required")
 			}
 			args := call.Args
 			if args == nil {
@@ -130,7 +230,7 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 			}
 			encoded, err := json.Marshal(args)
 			if err != nil {
-				return nil, fmt.Errorf("encode function call arguments: %w", err)
+				return convertedContent{}, fmt.Errorf("encode function call arguments: %w", err)
 			}
 			assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
 				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
@@ -142,25 +242,25 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 		if len(texts) > 0 {
 			assistant.Content.OfString = param.NewOpt(strings.Join(texts, ""))
 		}
-		return []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}, nil
+		return convertedContent{real: []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}, countable: []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}}, nil
 	}
 
 	if len(functionResponses) > 0 {
 		if content.Role != genai.RoleUser || len(texts) > 0 {
-			return nil, errors.New("function responses require a user-role content with no text")
+			return convertedContent{}, errors.New("function responses require a user-role content with no text")
 		}
 		messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(functionResponses))
 		for _, response := range functionResponses {
 			if response == nil || strings.TrimSpace(response.ID) == "" || strings.TrimSpace(response.Name) == "" {
-				return nil, errors.New("function response ID and name are required")
+				return convertedContent{}, errors.New("function response ID and name are required")
 			}
 			encoded, err := json.Marshal(response.Response)
 			if err != nil {
-				return nil, fmt.Errorf("encode function response: %w", err)
+				return convertedContent{}, fmt.Errorf("encode function response: %w", err)
 			}
 			messages = append(messages, openai.ToolMessage(string(encoded), response.ID))
 		}
-		return messages, nil
+		return convertedContent{real: messages, countable: messages}, nil
 	}
 
 	text := strings.Join(texts, "")
@@ -169,55 +269,105 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 
 	if !hasImages && !hasAudio {
 		if strings.TrimSpace(text) == "" {
-			return nil, errors.New("content must have non-empty text")
+			return convertedContent{}, errors.New("content must have non-empty text")
 		}
 		switch content.Role {
 		case "", genai.RoleUser:
-			return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(text)}, nil
+			message := openai.UserMessage(text)
+			return convertedContent{real: []openai.ChatCompletionMessageParamUnion{message}, countable: []openai.ChatCompletionMessageParamUnion{message}}, nil
 		case genai.RoleModel:
-			return []openai.ChatCompletionMessageParamUnion{openai.AssistantMessage(text)}, nil
+			message := openai.AssistantMessage(text)
+			return convertedContent{real: []openai.ChatCompletionMessageParamUnion{message}, countable: []openai.ChatCompletionMessageParamUnion{message}}, nil
 		default:
-			return nil, fmt.Errorf("unsupported ADK role %q", content.Role)
+			return convertedContent{}, fmt.Errorf("unsupported ADK role %q", content.Role)
 		}
 	}
 
 	// Image and audio content parts: build a multipart user message.
 	if content.Role != genai.RoleUser && content.Role != "" {
 		if hasImages && !hasAudio {
-			return nil, fmt.Errorf("image content requires user role, got %q", content.Role)
+			return convertedContent{}, fmt.Errorf("image content requires user role, got %q", content.Role)
 		}
-		return nil, fmt.Errorf("media content requires user role, got %q", content.Role)
+		return convertedContent{}, fmt.Errorf("media content requires user role, got %q", content.Role)
 	}
 
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(orderedContentParts))
-	for _, part := range orderedContentParts {
+	countableParts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(orderedContentParts))
+	var media []port.ModelRequestMedia
+	for index, part := range orderedContentParts {
 		if part.InlineData != nil {
 			if supportedImageMIME(part.InlineData.MIMEType) {
+				width, height, err := mediaDimensions(part.InlineData.Data)
+				if err != nil {
+					return convertedContent{}, fmt.Errorf("image part %d is not a decodable image: %w", index, err)
+				}
 				dataURL := "data:" + part.InlineData.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(part.InlineData.Data)
 				parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
 					URL: dataURL,
 				}))
+				countableParts = append(countableParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+					URL: mediaMarker,
+				}))
+				media = append(media, port.ModelRequestMedia{
+					MIMEType: part.InlineData.MIMEType,
+					Width:    width,
+					Height:   height,
+				})
 				continue
 			}
 			format, ok := audioFormat(part.InlineData.MIMEType)
 			if !ok {
-				return nil, fmt.Errorf("audio MIME type %q is not supported by Chat Completions input_audio", part.InlineData.MIMEType)
+				return convertedContent{}, fmt.Errorf("audio MIME type %q is not supported by Chat Completions input_audio", part.InlineData.MIMEType)
 			}
+			encodedAudio := base64.StdEncoding.EncodeToString(part.InlineData.Data)
 			parts = append(parts, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
-				Data:   base64.StdEncoding.EncodeToString(part.InlineData.Data),
+				Data:   encodedAudio,
+				Format: format,
+			}))
+			countableParts = append(countableParts, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
+				Data:   encodedAudio,
 				Format: format,
 			}))
 			continue
 		}
 		if part.Text != "" {
-			parts = append(parts, openai.TextContentPart(part.Text))
+			textPart := openai.TextContentPart(part.Text)
+			parts = append(parts, textPart)
+			countableParts = append(countableParts, textPart)
 		}
 	}
 	if len(parts) == 0 {
-		return nil, errors.New("media content has no text or media")
+		return convertedContent{}, errors.New("media content has no text or media")
 	}
 
-	return []openai.ChatCompletionMessageParamUnion{openai.UserMessage(parts)}, nil
+	return convertedContent{
+		real:      []openai.ChatCompletionMessageParamUnion{openai.UserMessage(parts)},
+		countable: []openai.ChatCompletionMessageParamUnion{openai.UserMessage(countableParts)},
+		media:     media,
+		hasImages: hasImages,
+	}, nil
+}
+
+// mediaDimensions validates an image part by header only; the full raster is
+// never decoded during request construction.
+func mediaDimensions(data []byte) (int, int, error) {
+	config, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return 0, 0, err
+	}
+	if config.Width <= 0 || config.Height <= 0 {
+		return 0, 0, errors.New("image dimensions must be positive")
+	}
+	return config.Width, config.Height, nil
+}
+
+// convertedContent is the result of converting one ADK content into real and
+// countable message sets plus order-preserving media metadata.
+type convertedContent struct {
+	real      []openai.ChatCompletionMessageParamUnion
+	countable []openai.ChatCompletionMessageParamUnion
+	media     []port.ModelRequestMedia
+	hasImages bool
 }
 
 func supportedImageMIME(mimeType string) bool {

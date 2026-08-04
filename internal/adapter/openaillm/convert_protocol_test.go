@@ -43,7 +43,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			name: "supported image part",
 			contents: []*genai.Content{{
 				Role:  genai.RoleUser,
-				Parts: []*genai.Part{genai.NewPartFromBytes([]byte("png"), "image/png")},
+				Parts: []*genai.Part{genai.NewPartFromBytes(realTestPNG(t), "image/png")},
 			}},
 			options: openAIProtocolOptions(true),
 		},
@@ -112,7 +112,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			name: "image requires user role",
 			contents: []*genai.Content{{
 				Role:  genai.RoleModel,
-				Parts: []*genai.Part{genai.NewPartFromBytes([]byte("png"), "image/png")},
+				Parts: []*genai.Part{genai.NewPartFromBytes(realTestPNG(t), "image/png")},
 			}},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "image content requires user role",
