@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
@@ -337,7 +338,8 @@ func validProviderProfileReference(value string) bool {
 }
 
 // validateProgressLabels restricts slack.standard_agent.progress_labels to the
-// six known progress states, with non-empty single-line labels.
+// six known progress states, with non-empty single-line labels bounded by the
+// Slack markdown_text limit (see domain.ProgressLabelMaxRunes).
 func validateProgressLabels(problems *[]FieldError, labels map[domain.ProgressState]string) {
 	valid := map[domain.ProgressState]bool{
 		domain.ProgressWorking:             true,
@@ -363,6 +365,8 @@ func validateProgressLabels(problems *[]FieldError, labels map[domain.ProgressSt
 			addConfigProblem(problems, field, "must not be empty")
 		} else if strings.ContainsAny(label, "\r\n\x00") {
 			addConfigProblem(problems, field, "must be a single line without NUL bytes")
+		} else if utf8.RuneCountInString(label) > domain.ProgressLabelMaxRunes {
+			addConfigProblem(problems, field, fmt.Sprintf("must not exceed %d Unicode code points", domain.ProgressLabelMaxRunes))
 		}
 	}
 }

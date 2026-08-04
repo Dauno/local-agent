@@ -93,9 +93,13 @@ func (p *StandardPublisher) PublishProgress(ctx context.Context, target domain.R
 	if err := p.validateProgress(operation); err != nil {
 		return port.PublishedResponse{}, err
 	}
+	markdown, err := p.progressMarkdown(operation.State)
+	if err != nil {
+		return port.PublishedResponse{}, err
+	}
 	callCtx, cancel := standardTimeout(ctx, p.timeout)
 	defer cancel()
-	timestamp, err := p.client.PostStandard(callCtx, target.ChannelID, target.ThreadTS, p.progressLabel(operation.State), progressMetadata(operation))
+	timestamp, err := p.client.PostStandard(callCtx, target.ChannelID, target.ThreadTS, markdown, progressMetadata(operation))
 	if err != nil {
 		return port.PublishedResponse{}, fmt.Errorf("publish Slack progress: %w", err)
 	}
@@ -109,9 +113,13 @@ func (p *StandardPublisher) UpdateProgress(ctx context.Context, operation domain
 	if operation.MessageTS == "" {
 		return errors.New("Slack progress message timestamp is required")
 	}
+	markdown, err := p.progressMarkdown(operation.State)
+	if err != nil {
+		return err
+	}
 	callCtx, cancel := standardTimeout(ctx, p.timeout)
 	defer cancel()
-	if err := p.client.UpdateStandard(callCtx, operation.ChannelID, operation.MessageTS, p.progressLabel(operation.State), progressMetadata(operation)); err != nil {
+	if err := p.client.UpdateStandard(callCtx, operation.ChannelID, operation.MessageTS, markdown, progressMetadata(operation)); err != nil {
 		return fmt.Errorf("update Slack progress: %w", err)
 	}
 	return nil
@@ -333,6 +341,23 @@ func (p *StandardPublisher) progressLabel(state domain.ProgressState) string {
 	default:
 		return ""
 	}
+}
+
+// progressMarkdown resolves the label for a state to publishable Slack
+// markdown: Slack control sequences are neutralized and the result is bounded
+// to domain.ProgressLabelMaxRunes Unicode code points, measured after
+// neutralization (which can grow the text). An oversized label is rejected
+// rather than truncated so a misconfigured label never silently degrades.
+func (p *StandardPublisher) progressMarkdown(state domain.ProgressState) (string, error) {
+	label := p.progressLabel(state)
+	if label == "" {
+		return "", fmt.Errorf("unsupported Slack progress state %q", state)
+	}
+	markdown := neutralizeUnsafeControls(label)
+	if len([]rune(markdown)) > domain.ProgressLabelMaxRunes {
+		return "", fmt.Errorf("Slack progress label exceeds %d Unicode code points", domain.ProgressLabelMaxRunes)
+	}
+	return markdown, nil
 }
 
 func standardTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {

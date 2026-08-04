@@ -115,6 +115,97 @@ func TestResolveProgressLabelsOverlaysDefaults(t *testing.T) {
 	}
 }
 
+func TestStandardPublisherNeutralizesProgressLabelControls(t *testing.T) {
+	client := &fakeStandardMessageClient{}
+	publisher := &StandardPublisher{
+		client:    client,
+		botUserID: "U00000001",
+		progressLabels: ResolveProgressLabels(map[domain.ProgressState]string{
+			domain.ProgressWorking: "Trabajando <@U12345678> y <!here>",
+			domain.ProgressFinalizing: "Fin <!subteam^S12345678> en <#C12345678>",
+		}),
+	}
+	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
+	target := domain.ReplyTarget{ChannelID: operation.ChannelID, ThreadTS: operation.ThreadTS}
+	published, err := publisher.PublishProgress(t.Context(), target, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, unsafe := range []string{"<@U12345678>", "<!here>"} {
+		if strings.Contains(client.postedText, unsafe) {
+			t.Fatalf("unsafe progress label rendering: %q", client.postedText)
+		}
+	}
+	if !strings.Contains(client.postedText, "&lt;@U12345678>") || !strings.Contains(client.postedText, "&lt;!here>") {
+		t.Fatalf("progress label not neutralized: %q", client.postedText)
+	}
+	operation.MessageTS = published.LastMessageTS
+	operation.State = domain.ProgressFinalizing
+	if err := publisher.UpdateProgress(t.Context(), operation); err != nil {
+		t.Fatal(err)
+	}
+	for _, unsafe := range []string{"<!subteam^S12345678>", "<#C12345678>"} {
+		if strings.Contains(client.updatedText, unsafe) {
+			t.Fatalf("unsafe progress label update: %q", client.updatedText)
+		}
+	}
+	if !strings.Contains(client.updatedText, "&lt;!subteam^S12345678>") || !strings.Contains(client.updatedText, "&lt;#C12345678>") {
+		t.Fatalf("progress label update not neutralized: %q", client.updatedText)
+	}
+}
+
+func TestStandardPublisherRejectsOversizedProgressLabels(t *testing.T) {
+	for name, label := range map[string]string{
+		"ascii":     strings.Repeat("a", domain.ProgressLabelMaxRunes+1),
+		"multibyte": strings.Repeat("界", domain.ProgressLabelMaxRunes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			client := &fakeStandardMessageClient{}
+			publisher := &StandardPublisher{
+				client:    client,
+				botUserID: "U00000001",
+				progressLabels: ResolveProgressLabels(map[domain.ProgressState]string{
+					domain.ProgressWorking: label,
+				}),
+			}
+			operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
+			target := domain.ReplyTarget{ChannelID: operation.ChannelID, ThreadTS: operation.ThreadTS}
+			if _, err := publisher.PublishProgress(t.Context(), target, operation); err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("PublishProgress error = %v, want length error", err)
+			}
+			if client.postedText != "" {
+				t.Fatalf("oversized label was posted: %q", client.postedText)
+			}
+			operation.MessageTS = "1700000001.000001"
+			if err := publisher.UpdateProgress(t.Context(), operation); err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("UpdateProgress error = %v, want length error", err)
+			}
+			if client.updatedText != "" {
+				t.Fatalf("oversized label was updated: %q", client.updatedText)
+			}
+		})
+	}
+}
+
+func TestStandardPublisherAcceptsMultibyteProgressLabelAtLimit(t *testing.T) {
+	client := &fakeStandardMessageClient{}
+	publisher := &StandardPublisher{
+		client:    client,
+		botUserID: "U00000001",
+		progressLabels: ResolveProgressLabels(map[domain.ProgressState]string{
+			domain.ProgressWorking: strings.Repeat("界", domain.ProgressLabelMaxRunes),
+		}),
+	}
+	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
+	target := domain.ReplyTarget{ChannelID: operation.ChannelID, ThreadTS: operation.ThreadTS}
+	if _, err := publisher.PublishProgress(t.Context(), target, operation); err != nil {
+		t.Fatalf("label at the code point limit should publish, got %v", err)
+	}
+	if runes := len([]rune(client.postedText)); runes != domain.ProgressLabelMaxRunes {
+		t.Fatalf("posted runes = %d, want %d", runes, domain.ProgressLabelMaxRunes)
+	}
+}
+
 func TestStandardPublisherRecoversProgressByExactMetadata(t *testing.T) {
 	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
 	client := &fakeStandardMessageClient{messages: []slackapi.Message{{Msg: slackapi.Msg{
