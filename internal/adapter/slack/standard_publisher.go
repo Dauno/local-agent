@@ -69,15 +69,16 @@ func (c sdkStandardMessageClient) StandardMessages(ctx context.Context, channelI
 }
 
 type StandardPublisher struct {
-	client      standardMessageClient
-	blockClient blockPostClient
-	botUserID   string
-	timeout     time.Duration
-	renderer    *TemplateRenderer
-	renderErr   error
+	client         standardMessageClient
+	blockClient    blockPostClient
+	botUserID      string
+	timeout        time.Duration
+	renderer       *TemplateRenderer
+	renderErr      error
+	progressLabels map[domain.ProgressState]string
 }
 
-func NewStandardPublisher(client *slackapi.Client, botUserID string, timeout time.Duration) *StandardPublisher {
+func NewStandardPublisher(client *slackapi.Client, botUserID string, timeout time.Duration, progressLabels map[domain.ProgressState]string) *StandardPublisher {
 	var standard standardMessageClient
 	var blocks blockPostClient
 	if client != nil {
@@ -85,16 +86,20 @@ func NewStandardPublisher(client *slackapi.Client, botUserID string, timeout tim
 		blocks = sdkBlockPostClient{client: client}
 	}
 	renderer, renderErr := NewEmbeddedTemplateRenderer()
-	return &StandardPublisher{client: standard, blockClient: blocks, botUserID: botUserID, timeout: timeout, renderer: renderer, renderErr: renderErr}
+	return &StandardPublisher{client: standard, blockClient: blocks, botUserID: botUserID, timeout: timeout, renderer: renderer, renderErr: renderErr, progressLabels: progressLabels}
 }
 
 func (p *StandardPublisher) PublishProgress(ctx context.Context, target domain.ReplyTarget, operation domain.ProgressOperation) (port.PublishedResponse, error) {
 	if err := p.validateProgress(operation); err != nil {
 		return port.PublishedResponse{}, err
 	}
+	markdown, err := p.progressMarkdown(operation.State)
+	if err != nil {
+		return port.PublishedResponse{}, err
+	}
 	callCtx, cancel := standardTimeout(ctx, p.timeout)
 	defer cancel()
-	timestamp, err := p.client.PostStandard(callCtx, target.ChannelID, target.ThreadTS, progressLabel(operation.State), progressMetadata(operation))
+	timestamp, err := p.client.PostStandard(callCtx, target.ChannelID, target.ThreadTS, markdown, progressMetadata(operation))
 	if err != nil {
 		return port.PublishedResponse{}, fmt.Errorf("publish Slack progress: %w", err)
 	}
@@ -108,9 +113,13 @@ func (p *StandardPublisher) UpdateProgress(ctx context.Context, operation domain
 	if operation.MessageTS == "" {
 		return errors.New("Slack progress message timestamp is required")
 	}
+	markdown, err := p.progressMarkdown(operation.State)
+	if err != nil {
+		return err
+	}
 	callCtx, cancel := standardTimeout(ctx, p.timeout)
 	defer cancel()
-	if err := p.client.UpdateStandard(callCtx, operation.ChannelID, operation.MessageTS, progressLabel(operation.State), progressMetadata(operation)); err != nil {
+	if err := p.client.UpdateStandard(callCtx, operation.ChannelID, operation.MessageTS, markdown, progressMetadata(operation)); err != nil {
 		return fmt.Errorf("update Slack progress: %w", err)
 	}
 	return nil
@@ -270,7 +279,7 @@ func (p *StandardPublisher) validateProgress(operation domain.ProgressOperation)
 	if p.botUserID == "" || operation.ID == "" || operation.ChannelID == "" || operation.ThreadTS == "" {
 		return errors.New("Slack progress identity is required")
 	}
-	if progressLabel(operation.State) == "" {
+	if p.progressLabel(operation.State) == "" {
 		return fmt.Errorf("unsupported Slack progress state %q", operation.State)
 	}
 	return nil
@@ -283,7 +292,41 @@ func progressMetadata(operation domain.ProgressOperation) slackapi.SlackMetadata
 	}}
 }
 
-func progressLabel(state domain.ProgressState) string {
+// defaultProgressLabels are the built-in Slack progress labels; configured
+// labels overlay them per state.
+var defaultProgressLabels = map[domain.ProgressState]string{
+	domain.ProgressWorking:             "Working",
+	domain.ProgressWaitingConfirmation: "Waiting for approval",
+	domain.ProgressFinalizing:          "Finalizing",
+	domain.ProgressCleared:             "Completed",
+	domain.ProgressFailed:              "Interrupted",
+	domain.ProgressInterrupted:         "Interrupted",
+}
+
+// ResolveProgressLabels overlays configured labels onto the built-in defaults.
+// A missing or empty configured value keeps the default label for that state,
+// so an absent or partial map behaves exactly like the current hardcoded
+// behavior.
+func ResolveProgressLabels(configured map[domain.ProgressState]string) map[domain.ProgressState]string {
+	resolved := make(map[domain.ProgressState]string, len(defaultProgressLabels))
+	for state, label := range defaultProgressLabels {
+		resolved[state] = label
+	}
+	for state, label := range configured {
+		if strings.TrimSpace(label) == "" {
+			continue
+		}
+		resolved[state] = label
+	}
+	return resolved
+}
+
+func (p *StandardPublisher) progressLabel(state domain.ProgressState) string {
+	if p != nil && p.progressLabels != nil {
+		if label := p.progressLabels[state]; strings.TrimSpace(label) != "" {
+			return label
+		}
+	}
 	switch state {
 	case domain.ProgressWorking:
 		return "Working"
@@ -298,6 +341,23 @@ func progressLabel(state domain.ProgressState) string {
 	default:
 		return ""
 	}
+}
+
+// progressMarkdown resolves the label for a state to publishable Slack
+// markdown: Slack control sequences are neutralized and the result is bounded
+// to domain.ProgressLabelMaxRunes Unicode code points, measured after
+// neutralization (which can grow the text). An oversized label is rejected
+// rather than truncated so a misconfigured label never silently degrades.
+func (p *StandardPublisher) progressMarkdown(state domain.ProgressState) (string, error) {
+	label := p.progressLabel(state)
+	if label == "" {
+		return "", fmt.Errorf("unsupported Slack progress state %q", state)
+	}
+	markdown := neutralizeUnsafeControls(label)
+	if len([]rune(markdown)) > domain.ProgressLabelMaxRunes {
+		return "", fmt.Errorf("Slack progress label exceeds %d Unicode code points", domain.ProgressLabelMaxRunes)
+	}
+	return markdown, nil
 }
 
 func standardTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
