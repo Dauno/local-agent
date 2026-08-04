@@ -26,6 +26,12 @@ type acpJobDispatcher struct {
 	policy                domain.ResultDeliveryPolicy
 	partLabels            bool
 	reconciliationTimeout time.Duration
+	progressStore         port.ExternalAgentJobProgressStore
+	processRegistry       port.ACPProcessRegistry
+	progressWarnAfter     time.Duration
+	logger                port.Logger
+	metrics               port.MetricRecorder
+	progressGauge         *externalagent.ActiveProgressGauge
 }
 
 type acpInvocationRecoverer interface {
@@ -53,6 +59,13 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		for _, option := range child.acpResolved.ConfigOptions {
 			options = append(options, domain.ACPConfigOption{ID: option.ID, Value: option.Value})
 		}
+		recorder := d.newRecorder(job)
+		onProgress := func(domain.ACPProgressEvent) {}
+		if recorder != nil {
+			recorder.Start(ctx)
+			defer recorder.Close()
+			onProgress = recorder.Record
+		}
 		result, runErr := child.acpRuntime.Run(ctx, domain.AcpInvocationRequest{
 			JobID: job.ID, PrimaryProject: job.PrimaryProject, PrimaryPath: primary,
 			AdditionalProjects: append([]string(nil), job.AdditionalProjects...), AdditionalPaths: additional,
@@ -60,6 +73,9 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 			GlobalInstruction: d.global, AgentInstruction: child.definition.Instruction, Task: job.Task,
 			Timeout: time.Until(job.TimeoutAt),
 			OnSessionCreated: func(sessionID string) error {
+				if recorder != nil {
+					recorder.SetSessionID(sessionID)
+				}
 				if d.store == nil {
 					return errors.New("durable ACP job store is unavailable")
 				}
@@ -77,6 +93,7 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 				}
 				return d.store.MarkSideEffectsPossible(ctx, job.ID, job.LeaseOwner, job.Attempt)
 			},
+			OnProgress: onProgress,
 		})
 		if runErr == nil && d.artifacts != nil && job.Mode == domain.JobDetached {
 			result, runErr = d.materialize(ctx, job, result)
@@ -89,6 +106,15 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		return domain.AcpInvocationResult{}, errors.New("durable ACP job scope revision does not match current configuration")
 	}
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
+}
+
+// newRecorder installs the host-owned progress recorder for one job attempt.
+// Monitoring is observational: recorder failure never fails the ACP prompt.
+func (d *acpJobDispatcher) newRecorder(job domain.ExternalAgentJob) *externalagent.ProgressRecorder {
+	if d.progressStore == nil {
+		return nil
+	}
+	return externalagent.NewProgressRecorder(d.progressStore, d.processRegistry, nil, d.logger, d.metrics, d.progressGauge, d.progressWarnAfter, job.ID, job.LeaseOwner, job.Attempt)
 }
 
 func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalAgentJob, result domain.AcpInvocationResult) (domain.AcpInvocationResult, error) {
@@ -243,14 +269,24 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		global = models.rootDef.EffectiveDelegatedGlobalInstruction()
 	}
 	service, err := externalagent.New(externalagent.Config{
-		DefaultTimeout: time.Duration(cfg.ACP.DefaultJobTimeoutSeconds) * time.Second,
-		MaxTimeout:     time.Duration(cfg.ACP.MaxJobTimeoutSeconds) * time.Second,
-		LeaseTTL:       30 * time.Second, PollInterval: time.Second, Concurrency: cfg.ACP.WorkerConcurrency, MaxAttempts: 2,
+		DefaultTimeout:         time.Duration(cfg.ACP.DefaultJobTimeoutSeconds) * time.Second,
+		MaxTimeout:             time.Duration(cfg.ACP.MaxJobTimeoutSeconds) * time.Second,
+		LeaseTTL:               30 * time.Second,
+		PollInterval:           time.Second,
+		Concurrency:            cfg.ACP.WorkerConcurrency,
+		MaxAttempts:            2,
+		ProgressWarningSeconds: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
 	}, externalagent.Dependencies{
 		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String,
 			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
-			reconciliationTimeout: time.Duration(cfg.ACP.ReconciliationTimeoutSeconds) * time.Second},
-		Publisher: nil, Artifacts: models.artifactStore, MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
+			reconciliationTimeout: time.Duration(cfg.ACP.ReconciliationTimeoutSeconds) * time.Second,
+			progressStore:         store, processRegistry: infra.processRegistry,
+			progressWarnAfter: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
+			logger:            models.logger, metrics: models.metrics,
+			progressGauge: externalagent.NewActiveProgressGauge(models.metrics)},
+		Publisher: nil, Artifacts: models.artifactStore,
+		ProgressStore: store, ProcessRegistry: infra.processRegistry,
+		MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
 		Logger: models.logger, Metrics: models.metrics,
 	})
 	if err != nil {

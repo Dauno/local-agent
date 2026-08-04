@@ -854,6 +854,18 @@ type jobStatusResult struct {
 	JobID           string `json:"job_id"`
 	Status          string `json:"status"`
 	StatusRevision  int    `json:"status_revision"`
+	ACPSessionID    string `json:"acp_session_id"`
+	Phase           string `json:"phase"`
+	Health          string `json:"health"`
+	LastEventKind   string `json:"last_event_kind"`
+	LastTransport   string `json:"last_transport_activity_at"`
+	LastSession     string `json:"last_session_update_at"`
+	LastMeaningful  string `json:"last_meaningful_progress_at"`
+	ActiveTools     int    `json:"active_tool_count"`
+	PendingPerm     bool   `json:"pending_permission"`
+	PromptElapsed   int64  `json:"prompt_elapsed_seconds"`
+	StopReason      string `json:"stop_reason"`
+	ProcessAlive    *bool  `json:"process_alive"`
 	ResultAvailable bool   `json:"result_available"`
 	ResultSHA256    string `json:"result_sha256,omitempty"`
 	ResultBytes     int64  `json:"result_bytes,omitempty"`
@@ -862,39 +874,69 @@ type jobStatusResult struct {
 	FinishedAt      string `json:"finished_at,omitempty"`
 }
 
+func statusViewToJobResult(status domain.ExternalAgentJobStatusView) jobStatusResult {
+	view := jobStatusResult{
+		JobID: status.JobID, Status: string(status.Status), StatusRevision: status.StatusRevision,
+		ACPSessionID: status.ACPSessionID, Phase: string(status.Phase), Health: string(status.Health),
+		LastEventKind: string(status.LastEventKind),
+		ActiveTools:   status.ActiveToolCount, PendingPerm: status.PendingPermission,
+		PromptElapsed: status.PromptElapsedSeconds, StopReason: status.StopReason,
+		ProcessAlive:    status.ProcessAlive,
+		ResultAvailable: status.ResultAvailable, ResultSHA256: status.ResultSHA256,
+		ResultBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode), ErrorCode: status.ErrorCode,
+	}
+	if !status.LastTransportActivityAt.IsZero() {
+		view.LastTransport = status.LastTransportActivityAt.UTC().Format(time.RFC3339)
+	}
+	if !status.LastSessionUpdateAt.IsZero() {
+		view.LastSession = status.LastSessionUpdateAt.UTC().Format(time.RFC3339)
+	}
+	if !status.LastMeaningfulProgressAt.IsZero() {
+		view.LastMeaningful = status.LastMeaningfulProgressAt.UTC().Format(time.RFC3339)
+	}
+	if !status.FinishedAt.IsZero() {
+		view.FinishedAt = status.FinishedAt.UTC().Format(time.RFC3339)
+	}
+	return view
+}
+
 func (f *Factory) jobStatusTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "job_status",
-		Description: "Returns the status of an ACP durable job created in this Slack conversation. Read-only; actor and destination are bound by the host.",
+		Description: "Returns the status of an ACP durable job created in this Slack conversation. Read-only; actor and destination are bound by the host. When acp_session_id is non-empty, the response must always be presented with the complete ACP session line verbatim; presenting an authorized status without that line is a contract failure, not optional summarization.",
 	}, func(ctx agent.Context, args jobIDArgs) (jobStatusResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return jobStatusResult{}, errors.New("job_id is required")
 		}
-		job, err := reader.Status(ctx, args.JobID, actor, key)
-		if err != nil {
-			return jobStatusResult{}, err
+		var status domain.ExternalAgentJobStatusView
+		if projection, ok := reader.(port.ExternalAgentJobStatusProjectionReader); ok {
+			projected, err := projection.StatusProjection(ctx, args.JobID, actor, key)
+			if err != nil {
+				return jobStatusResult{}, err
+			}
+			if projected == nil {
+				return jobStatusResult{}, errors.New("external-agent job was not found")
+			}
+			status = *projected
+		} else {
+			job, err := reader.Status(ctx, args.JobID, actor, key)
+			if err != nil {
+				return jobStatusResult{}, err
+			}
+			if job == nil {
+				return jobStatusResult{}, errors.New("external-agent job was not found")
+			}
+			status = job.StatusView()
 		}
-		if job == nil {
-			return jobStatusResult{}, errors.New("external-agent job was not found")
-		}
-		status := job.StatusView()
-		view := jobStatusResult{
-			JobID: status.JobID, Status: string(status.Status), StatusRevision: status.StatusRevision,
-			ResultAvailable: status.ResultAvailable, ResultSHA256: status.ResultSHA256,
-			ResultBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode), ErrorCode: status.ErrorCode,
-		}
-		if !status.FinishedAt.IsZero() {
-			view.FinishedAt = status.FinishedAt.UTC().Format(time.RFC3339)
-		}
-		return view, nil
+		return statusViewToJobResult(status), nil
 	})
 }
 
 func (f *Factory) activationJobStatusTool(reader port.ExternalAgentJobActivationReader, activation domain.ExternalAgentJobActivation) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:        "job_status",
-		Description: "Returns the status snapshot bound to this external-agent activation revision. Read-only; actor, destination, revision, and terminal status are host-bound.",
+		Description: "Returns the status snapshot bound to this external-agent activation revision. Read-only; actor, destination, revision, and terminal status are host-bound. When acp_session_id is non-empty, the response must always be presented with the complete ACP session line verbatim; presenting an authorized status without that line is a contract failure, not optional summarization.",
 	}, func(ctx agent.Context, args jobIDArgs) (jobStatusResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return jobStatusResult{}, errors.New("job_id is required")
@@ -910,15 +952,28 @@ func (f *Factory) activationJobStatusTool(reader port.ExternalAgentJobActivation
 			return jobStatusResult{}, errors.New("external-agent job was not found")
 		}
 		status := job.StatusView()
-		view := jobStatusResult{
-			JobID: status.JobID, Status: string(status.Status), StatusRevision: status.StatusRevision,
-			ResultAvailable: status.ResultAvailable, ResultSHA256: status.ResultSHA256,
-			ResultBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode), ErrorCode: status.ErrorCode,
+		// Live projection fields are best-effort enrichment of the
+		// revision-bound snapshot: they are merged only when the current
+		// revision still matches the activation, so a concurrent transition
+		// can never mix identities. Errors degrade only the live fields, never
+		// the revision-bound status contract.
+		if projection, ok := reader.(port.ExternalAgentJobStatusProjectionReader); ok {
+			if projected, projectionErr := projection.StatusProjection(ctx, activation.JobID, activation.Actor, activation.ConversationKey); projectionErr == nil && projected != nil &&
+				projected.StatusRevision == activation.StatusRevision && projected.Status == activation.TerminalStatus {
+				status.Phase = projected.Phase
+				status.Health = projected.Health
+				status.LastEventKind = projected.LastEventKind
+				status.LastTransportActivityAt = projected.LastTransportActivityAt
+				status.LastSessionUpdateAt = projected.LastSessionUpdateAt
+				status.LastMeaningfulProgressAt = projected.LastMeaningfulProgressAt
+				status.ActiveToolCount = projected.ActiveToolCount
+				status.PendingPermission = projected.PendingPermission
+				status.PromptElapsedSeconds = projected.PromptElapsedSeconds
+				status.StopReason = projected.StopReason
+				status.ProcessAlive = projected.ProcessAlive
+			}
 		}
-		if !status.FinishedAt.IsZero() {
-			view.FinishedAt = status.FinishedAt.UTC().Format(time.RFC3339)
-		}
-		return view, nil
+		return statusViewToJobResult(status), nil
 	})
 }
 

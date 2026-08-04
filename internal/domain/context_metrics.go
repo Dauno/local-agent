@@ -84,3 +84,14 @@ const (
 	MetricExternalAgentActivationCASConflictTotal   = "external_agent_activation_cas_conflict_total"
 	MetricExternalAgentActivationStuck              = "external_agent_activation_stuck"
 )
+
+// ACP live progress observability metrics. Labels are restricted to bounded
+// enums (event kind, phase, health, outcome). Job ID, session ID, PID,
+// tool-call ID, actor, conversation, and paths are forbidden as labels.
+const (
+	MetricExternalAgentACPProgressEventTotal          = "external_agent_acp_progress_event_total"
+	MetricExternalAgentACPPhaseTransitionTotal        = "external_agent_acp_phase_transition_total"
+	MetricExternalAgentACPProgressPersistFailureTotal = "external_agent_acp_progress_persist_failure_total"
+	MetricExternalAgentACPInactivityWarningTotal      = "external_agent_acp_inactivity_warning_total"
+	MetricExternalAgentACPActiveJobs                  = "external_agent_acp_active_jobs"
+)

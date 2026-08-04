@@ -252,6 +252,7 @@ func newJobsReconcileCommand(backend Backend, streams Streams) *cobra.Command {
 				return &ExitError{Code: 1, Cause: err}
 			}
 			fmt.Fprintf(streams.Out, "job_id: %s\nstatus: %s\nstatus_revision: %d\nresult_available: %t\n", view.JobID, view.Status, view.StatusRevision, view.ResultAvailable)
+			fmt.Fprintf(streams.Out, "acp_session_id: %s\n", inspectionSessionID(view.ACPSessionID))
 			if view.ErrorCode != "" {
 				fmt.Fprintf(streams.Out, "error_code: %s\n", view.ErrorCode)
 			}
@@ -293,6 +294,20 @@ func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
 	fmt.Fprintf(out, "job_id: %s\n", view.JobID)
 	fmt.Fprintf(out, "status: %s\n", view.Status)
 	fmt.Fprintf(out, "status_revision: %d\n", view.StatusRevision)
+	fmt.Fprintf(out, "acp_session_id: %s\n", inspectionSessionID(view.ACPSessionID))
+	if view.Phase != "" || view.Health != "" || view.ProcessAlive != nil {
+		fmt.Fprintf(out, "phase: %s\n", view.Phase)
+		fmt.Fprintf(out, "health: %s\n", view.Health)
+		fmt.Fprintf(out, "last_event: %s\n", view.LastEventKind)
+		fmt.Fprintf(out, "last_acp_activity: %s\n", inspectionAge(view.LastTransportActivityAt))
+		fmt.Fprintf(out, "prompt_elapsed: %s\n", inspectionDuration(view.PromptElapsedSeconds))
+		fmt.Fprintf(out, "active_tools: %d\n", view.ActiveToolCount)
+		fmt.Fprintf(out, "pending_permission: %t\n", view.PendingPermission)
+		fmt.Fprintf(out, "process: %s\n", inspectionProcess(view.ProcessAlive))
+		if view.StopReason != "" {
+			fmt.Fprintf(out, "stop_reason: %s\n", view.StopReason)
+		}
+	}
 	fmt.Fprintf(out, "finished_at: %s\n", inspectionTime(view.FinishedAt))
 	if len(view.Deliveries) == 0 {
 		fmt.Fprintln(out, "delivery_mode:")
@@ -334,4 +349,53 @@ func inspectionTime(value time.Time) string {
 		return ""
 	}
 	return value.UTC().Format(time.RFC3339Nano)
+}
+
+// inspectionSessionID renders the complete session ID without truncation.
+// An empty session renders as pending, never as an empty line.
+func inspectionSessionID(sessionID string) string {
+	if sessionID == "" {
+		return "pending"
+	}
+	return sessionID
+}
+
+// inspectionProcess renders nullable process liveness. A missing runtime
+// handle renders as unknown, never as dead.
+func inspectionProcess(alive *bool) string {
+	if alive == nil {
+		return "unknown"
+	}
+	if *alive {
+		return "alive"
+	}
+	return "dead"
+}
+
+func inspectionAge(value time.Time) string {
+	if value.IsZero() {
+		return ""
+	}
+	elapsed := time.Since(value)
+	if elapsed < 0 {
+		elapsed = 0
+	}
+	return formatHumanDuration(elapsed)
+}
+
+func inspectionDuration(seconds int64) string {
+	if seconds <= 0 {
+		return ""
+	}
+	return formatHumanDuration(time.Duration(seconds) * time.Second)
+}
+
+func formatHumanDuration(value time.Duration) string {
+	if value < time.Minute {
+		return fmt.Sprintf("%ds", int(value/time.Second))
+	}
+	if value < time.Hour {
+		return fmt.Sprintf("%dm %02ds", int(value/time.Minute), int(value/time.Second)%60)
+	}
+	return fmt.Sprintf("%dh %02dm", int(value/time.Hour), int(value/time.Minute)%60)
 }

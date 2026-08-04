@@ -692,8 +692,8 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("inspect SQLite schema version: %w", err)
 	}
-	if version < 29 {
-		return fmt.Errorf("external-agent job activation requires SQLite schema v29, found v%d", version)
+	if version < 30 {
+		return fmt.Errorf("external-agent job activation requires SQLite schema v30, found v%d", version)
 	}
 	var name string
 	if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_agent_job_notifications'`).Scan(&name); err != nil {
@@ -715,6 +715,12 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	}
 	if name != "external_agent_job_activations" {
 		return errors.New("external-agent activation outbox is missing")
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_agent_job_progress'`).Scan(&name); err != nil {
+		return fmt.Errorf("inspect external-agent progress projection: %w", err)
+	}
+	if name != "external_agent_job_progress" {
+		return errors.New("external-agent progress projection is missing")
 	}
 	health, err := NewExternalAgentJobStore(s).NotificationHealth(ctx, time.Now().UTC(), 5*time.Minute)
 	if err != nil {

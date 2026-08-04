@@ -24,6 +24,9 @@ type Config struct {
 	PollInterval   time.Duration
 	Concurrency    int
 	MaxAttempts    int
+	// ProgressWarningSeconds controls passive health derivation and one-warning
+	// per silent-episode emission. It never cancels or mutates a job.
+	ProgressWarningSeconds time.Duration
 }
 
 type Dependencies struct {
@@ -31,6 +34,10 @@ type Dependencies struct {
 	Runtime   port.ExternalAgentJobRuntime
 	Publisher port.ExternalAgentJobPublisher
 	Artifacts port.ResultArtifactStore
+	// ProgressStore and ProcessRegistry are optional live-observability
+	// dependencies. Without them, status projection reports no live fields.
+	ProgressStore   port.ExternalAgentJobProgressStore
+	ProcessRegistry port.ACPProcessRegistry
 	// MaxResultBytes bounds host-completion reads. The artifact adapter applies
 	// its own bound as a second, independent check.
 	MaxResultBytes int64
@@ -48,6 +55,8 @@ type Service struct {
 	runtime             port.ExternalAgentJobRuntime
 	publisher           port.ExternalAgentJobPublisher
 	artifacts           port.ResultArtifactStore
+	progressStore       port.ExternalAgentJobProgressStore
+	processRegistry     port.ACPProcessRegistry
 	maxResultBytes      int64
 	maxResultChunkBytes int64
 	clock               port.Clock
@@ -84,6 +93,9 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 			deps.MaxResultChunkBytes = deps.MaxResultBytes
 		}
 	}
+	if cfg.ProgressWarningSeconds <= 0 {
+		cfg.ProgressWarningSeconds = 900 * time.Second
+	}
 	logger := deps.Logger
 	if logger == nil {
 		logger = noopLogger{}
@@ -93,7 +105,8 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		metrics = port.NoopMetricRecorder{}
 	}
 	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
-		artifacts: deps.Artifacts, maxResultBytes: deps.MaxResultBytes, maxResultChunkBytes: deps.MaxResultChunkBytes,
+		artifacts: deps.Artifacts, progressStore: deps.ProgressStore, processRegistry: deps.ProcessRegistry,
+		maxResultBytes: deps.MaxResultBytes, maxResultChunkBytes: deps.MaxResultChunkBytes,
 		clock: deps.Clock, logger: logger, metrics: metrics,
 		stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
 }
@@ -221,6 +234,53 @@ func (s *Service) StatusAtRevision(ctx context.Context, jobID, actor string, con
 		return nil, errors.New("external-agent job revision is no longer current")
 	}
 	return job, nil
+}
+
+// StatusProjection returns the authorized status view merged with the
+// content-free live ACP projection and read-time health. It never opens or
+// probes the ACP session. A missing progress store yields the plain view.
+func (s *Service) StatusProjection(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJobStatusView, error) {
+	job, err := s.Status(ctx, jobID, actor, conversationKey)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, errors.New("external-agent job was not found")
+	}
+	view := job.StatusView()
+	if s.progressStore == nil {
+		return &view, nil
+	}
+	progress, err := s.progressStore.ReadJobProgress(ctx, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if progress == nil {
+		return &view, nil
+	}
+	var alive *bool
+	if s.processRegistry != nil {
+		alive = s.processRegistry.ProcessAlive(jobID, progress.Attempt)
+	}
+	now := s.clock.Now().UTC()
+	view.Health = DeriveProgressHealth(*progress, now, s.cfg.ProgressWarningSeconds, alive, isTerminalStatus(job.Status))
+	view.Phase = progress.Phase
+	view.LastEventKind = progress.LastEventKind
+	view.LastTransportActivityAt = progress.LastTransportActivityAt
+	view.LastSessionUpdateAt = progress.LastSessionUpdateAt
+	view.LastMeaningfulProgressAt = progress.LastMeaningfulProgressAt
+	view.ActiveToolCount = progress.ActiveToolCount
+	view.PendingPermission = progress.PendingPermission
+	view.StopReason = progress.StopReason
+	view.ProcessAlive = alive
+	if !progress.PromptStartedAt.IsZero() {
+		elapsed := now.Sub(progress.PromptStartedAt)
+		if elapsed < 0 {
+			elapsed = 0
+		}
+		view.PromptElapsedSeconds = int64(elapsed / time.Second)
+	}
+	return &view, nil
 }
 
 // ReadResult returns the complete sanitized result for an authorized,

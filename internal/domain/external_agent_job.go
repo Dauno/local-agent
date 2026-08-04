@@ -293,12 +293,31 @@ type ExternalAgentJobDeliveryInspection struct {
 }
 
 // ExternalAgentJobInspection is the safe local operator view of one job.
+// The complete ACP session ID is present because the view is actor-free and
+// locally authorized. Task, actor, conversation, paths, and result content
+// remain excluded.
 type ExternalAgentJobInspection struct {
 	JobID          string                               `json:"job_id"`
 	Status         ExternalAgentJobStatus               `json:"status"`
 	StatusRevision int                                  `json:"status_revision"`
+	ACPSessionID   string                               `json:"acp_session_id"`
 	FinishedAt     time.Time                            `json:"finished_at"`
 	Deliveries     []ExternalAgentJobDeliveryInspection `json:"deliveries"`
+	// Live projection fields; empty until the projection row exists.
+	Phase                    ACPProgressPhase  `json:"phase"`
+	Health                   ACPProgressHealth `json:"health"`
+	LastEventKind            ACPEventKind      `json:"last_event_kind"`
+	LastTransportActivityAt  time.Time         `json:"last_transport_activity_at"`
+	LastSessionUpdateAt      time.Time         `json:"last_session_update_at"`
+	LastMeaningfulProgressAt time.Time         `json:"last_meaningful_progress_at"`
+	PromptStartedAt          time.Time         `json:"prompt_started_at"`
+	ActiveToolCount          int               `json:"active_tool_count"`
+	PendingPermission        bool              `json:"pending_permission"`
+	PromptElapsedSeconds     int64             `json:"prompt_elapsed_seconds"`
+	StopReason               string            `json:"stop_reason"`
+	// ProcessAlive is nil when the current process has no trustworthy runtime
+	// handle (for example the read-only CLI); it must never be rendered as dead.
+	ProcessAlive *bool `json:"process_alive"`
 }
 
 // ExternalAgentJobAdminView is an explicit name for the same safe view used by
@@ -604,12 +623,26 @@ type ExternalAgentJobStatusView struct {
 	JobID           string
 	Status          ExternalAgentJobStatus
 	StatusRevision  int
+	ACPSessionID    string
 	ResultAvailable bool
 	ResultSHA256    string
 	ResultBytes     int64
 	DeliveryMode    JobResultDeliveryMode
 	ErrorCode       string
 	FinishedAt      time.Time
+	// Live ACP projection fields are content-free and may be empty when the
+	// durable projection has not started or the provider is not ACP-backed.
+	Phase                    ACPProgressPhase
+	Health                   ACPProgressHealth
+	LastEventKind            ACPEventKind
+	LastTransportActivityAt  time.Time
+	LastSessionUpdateAt      time.Time
+	LastMeaningfulProgressAt time.Time
+	ActiveToolCount          int
+	PendingPermission        bool
+	PromptElapsedSeconds     int64
+	StopReason               string
+	ProcessAlive             *bool
 }
 
 // ExternalAgentJobShutdownStats is content-free lifecycle telemetry.
@@ -640,6 +673,7 @@ func (j ExternalAgentJob) StatusView() ExternalAgentJobStatusView {
 	}
 	return ExternalAgentJobStatusView{
 		JobID: j.ID, Status: j.Status, StatusRevision: j.StatusRevision,
+		ACPSessionID:    j.ACPSessionID,
 		ResultAvailable: j.Status == JobCompleted && (j.ResultSummary != "" || j.ResultArtifact != ""),
 		ResultSHA256:    j.ResultSHA256, ResultBytes: j.ResultBytes, DeliveryMode: mode,
 		ErrorCode: j.ErrorCode, FinishedAt: j.FinishedAt,

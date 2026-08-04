@@ -134,6 +134,7 @@ type runtimeInfrastructure struct {
 	attachmentProc        *adkartifact.Processor
 	contextEnricher       *slackadapter.ContextEnricher
 	sessionSvc            *adaptersqlite.AdkSessionService
+	processRegistry       *inProcessRegistry
 }
 
 func (a *Application) loadRuntimeSetup() (runtimeSetup, error) {
@@ -481,6 +482,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 		confirmationPublisher: confirmationPublisher, blockPublisher: blockPublisher,
 		standardPublisher: standardPublisher, attachmentProc: attachmentProc,
 		contextEnricher: contextEnricher, sessionSvc: sessionSvc,
+		processRegistry: newInProcessRegistry(),
 	}
 	ok = true
 	return infra, nil

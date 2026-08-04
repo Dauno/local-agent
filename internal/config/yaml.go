@@ -151,6 +151,7 @@ var configSchema = []schemaField{
 		{name: "max_job_timeout_seconds"},
 		{name: "idle_timeout_seconds"},
 		{name: "reconciliation_timeout_seconds"},
+		{name: "progress_warning_seconds"},
 		{name: "worker_concurrency"},
 		{name: "artifact_retention_days"},
 		{name: "delivery", children: []schemaField{

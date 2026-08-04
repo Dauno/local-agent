@@ -22,6 +22,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/manifest"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
+	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 )
 
 type Application struct {
@@ -200,7 +201,39 @@ func (a *Application) InspectJob(ctx context.Context, jobID string) (*domain.Ext
 	}
 	defer store.Close()
 	jobStore := adaptersqlite.NewExternalAgentJobStore(store)
-	return jobStore.InspectJob(ctx, jobID)
+	view, err := jobStore.InspectJob(ctx, jobID)
+	if err != nil || view == nil {
+		return view, err
+	}
+	// Health and prompt elapsed are derived at read time only when the
+	// durable projection exists; a queued or pre-session job has no
+	// projection and must never be assigned fabricated health. The read-only
+	// CLI process has no runtime process handle, so liveness is unknown and
+	// can never claim a process is dead.
+	if view.Phase != "" {
+		now := time.Now().UTC()
+		view.Health = externalagent.DeriveProgressHealth(domain.ExternalAgentJobProgress{
+			Phase: view.Phase, LastTransportActivityAt: view.LastTransportActivityAt,
+			LastMeaningfulProgressAt: view.LastMeaningfulProgressAt, PromptStartedAt: view.PromptStartedAt,
+		}, now, time.Duration(cfg.ACP.ProgressWarningSeconds)*time.Second, nil, isTerminalInspectionStatus(view.Status))
+		if !view.PromptStartedAt.IsZero() {
+			elapsed := now.Sub(view.PromptStartedAt)
+			if elapsed < 0 {
+				elapsed = 0
+			}
+			view.PromptElapsedSeconds = int64(elapsed / time.Second)
+		}
+	}
+	return view, nil
+}
+
+func isTerminalInspectionStatus(status domain.ExternalAgentJobStatus) bool {
+	switch status {
+	case domain.JobCompleted, domain.JobFailed, domain.JobCancelled, domain.JobAbandoned, domain.JobCompletionUnknown:
+		return true
+	default:
+		return false
+	}
 }
 
 // ResetState implements the destructive init --reset-state command.

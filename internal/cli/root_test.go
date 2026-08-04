@@ -285,6 +285,70 @@ func TestJobsInspectMissingJobReturnsSafeResult(t *testing.T) {
 	}
 }
 
+func TestJobsInspectRendersSessionAndProgress(t *testing.T) {
+	base := time.Date(2026, 8, 4, 2, 41, 2, 0, time.UTC)
+	backend := &inspectionBackend{fakeBackend: setupBackend(), view: &domain.ExternalAgentJobInspection{
+		JobID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1,
+		ACPSessionID: "ses_full_identity_0123456789", Phase: domain.ACPPhaseToolRunning,
+		Health: domain.ACPHealthPossiblyStalled, LastEventKind: domain.ACPEventToolCallUpdate,
+		LastTransportActivityAt: base, PromptElapsedSeconds: 3780,
+		ActiveToolCount: 1, PendingPermission: true, StopReason: "",
+	}}
+	var output, stderr bytes.Buffer
+	root, _ := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if code := Execute(t.Context(), root, []string{"jobs", "inspect", "job_bb3ed6"}, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	text := output.String()
+	for _, want := range []string{
+		"job_id: job_bb3ed6",
+		"acp_session_id: ses_full_identity_0123456789",
+		"phase: tool_running",
+		"health: possibly_stalled",
+		"last_event: tool_call_update",
+		"prompt_elapsed: 1h 03m",
+		"active_tools: 1",
+		"pending_permission: true",
+		"process: unknown",
+	} {
+		if !strings.Contains(text, want) {
+			t.Fatalf("inspection output missing %q:\n%s", want, text)
+		}
+	}
+	if strings.Contains(text, "task") || strings.Contains(text, "result") {
+		t.Fatalf("inspection output leaked unsafe content:\n%s", text)
+	}
+}
+
+func TestJobsInspectRendersPendingSession(t *testing.T) {
+	backend := &inspectionBackend{fakeBackend: setupBackend(), view: &domain.ExternalAgentJobInspection{
+		JobID: "job_queued", Status: domain.JobQueued, StatusRevision: 0,
+	}}
+	var output, stderr bytes.Buffer
+	root, _ := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if code := Execute(t.Context(), root, []string{"jobs", "inspect", "job_queued"}, &stderr); code != 0 {
+		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
+	}
+	if !strings.Contains(output.String(), "acp_session_id: pending") {
+		t.Fatalf("queued output missing pending session:\n%s", output.String())
+	}
+}
+
+func TestJobsReconcileRendersSessionID(t *testing.T) {
+	backend := &reconciliationBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{
+		JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5,
+		ResultAvailable: true, ACPSessionID: "ses_reconciled_identity",
+	}}
+	var output, stderr bytes.Buffer
+	root, _ := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if code := Execute(t.Context(), root, []string{"jobs", "reconcile", "job_123", "--expect-revision", "5", "--confirm"}, &stderr); code != 0 {
+		t.Fatalf("confirmed exit=%d stderr=%q", code, stderr.String())
+	}
+	if !strings.Contains(output.String(), "acp_session_id: ses_reconciled_identity") {
+		t.Fatalf("reconcile output missing session ID:\n%s", output.String())
+	}
+}
+
 func TestJobsReconcileRequiresConfirmationAndRevision(t *testing.T) {
 	backend := &reconciliationBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5, ResultAvailable: true}}
 	var output, stderr bytes.Buffer
