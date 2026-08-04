@@ -176,8 +176,41 @@ func TestValidateAttachmentModelRejectsAgentCLI(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "load_artifacts") || !strings.Contains(err.Error(), "openai_compatible") {
 		t.Fatalf("expected actionable attachment incompatibility, got %v", err)
 	}
-	if err := validateAttachmentModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible}}); err != nil {
-		t.Fatalf("openai_compatible attachment should remain supported: %v", err)
+}
+
+func TestValidateAttachmentModelRequiresVisualEstimator(t *testing.T) {
+	t.Parallel()
+	capable := &agentdef.ResolvedModel{
+		Provider:        agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible},
+		Model:           "vision",
+		CounterStrategy: "estimator",
+		CounterID:       agentdef.VisualEstimatorID,
+	}
+	if err := validateAttachmentModel(capable); err != nil {
+		t.Fatalf("estimator attachment model should be supported: %v", err)
+	}
+	tests := []struct {
+		name     string
+		strategy string
+		id       string
+		want     string
+	}{
+		{name: "openai without counter", want: "token_counter.strategy"},
+		{name: "byte_bound cannot value media", strategy: "byte_bound", want: "estimator"},
+		{name: "unknown estimator id", strategy: "estimator", id: "not-installed", want: "visual-tile-conservative-v1"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateAttachmentModel(&agentdef.ResolvedModel{
+				Provider:        agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible},
+				Model:           "vision",
+				CounterStrategy: tt.strategy,
+				CounterID:       tt.id,
+			})
+			if err == nil || !strings.Contains(err.Error(), tt.want) {
+				t.Fatalf("attachment validation = %v, want containing %q", err, tt.want)
+			}
+		})
 	}
 }
 

@@ -24,6 +24,11 @@ const (
 	MaxACPTimeoutSeconds    = 24 * 60 * 60
 )
 
+// VisualEstimatorID is the only media-capable token counter combination
+// implemented for P0 (FR-18). The profile selected for attachment_analyzer
+// must use it before rollout; any other combination fails before traffic.
+const VisualEstimatorID = "visual-tile-conservative-v1"
+
 const (
 	MaxAgentNameLength   = 64
 	MinAgentNameLength   = 3

@@ -631,6 +631,9 @@ func validateProfile(providerPrefix, providerType, name string, profile Profile)
 							errs = append(errs, fmt.Sprintf("%s: token_counter.id is required for strategy %q", prefix, profile.TokenCounter.Strategy))
 						}
 					case "byte_bound":
+						if strings.TrimSpace(profile.TokenCounter.ID) != "" {
+							errs = append(errs, fmt.Sprintf("%s: token_counter.id must be empty for strategy %q", prefix, profile.TokenCounter.Strategy))
+						}
 					default:
 						errs = append(errs, fmt.Sprintf("%s: token_counter.strategy must be one of official, endpoint, estimator, or byte_bound", prefix))
 					}
@@ -964,8 +967,33 @@ func ValidateProfileCapability(resolved *ResolvedModel) []string {
 			errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.id is required for strategy %q", resolved.Model, resolved.CounterStrategy))
 		}
 	case "byte_bound":
+		if strings.TrimSpace(resolved.CounterID) != "" {
+			errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.id must be empty for strategy %q", resolved.Model, resolved.CounterStrategy))
+		}
 	default:
 		errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.strategy must be one of official, endpoint, estimator, or byte_bound", resolved.Model))
+	}
+	return errs
+}
+
+// ValidateAttachmentModelCapability validates that the profile selected for
+// attachment_analyzer can both run the ADK visual pipeline and value media
+// requests. P0 requires an openai_compatible profile with the versioned
+// visual estimator (FR-18); anything else fails before serving traffic so a
+// visual profile can never be served by an incapable counter.
+func ValidateAttachmentModelCapability(resolved *ResolvedModel) []string {
+	if resolved == nil {
+		return []string{"attachment_analyzer resolved to no model"}
+	}
+	var errs []string
+	if resolved.Type() != ProviderTypeOpenAICompatible {
+		errs = append(errs, "attachment_analyzer cannot use an agent_cli or acp provider because image processing requires the ADK load_artifacts tool; select an openai_compatible profile")
+		return errs
+	}
+	if resolved.CounterStrategy != "estimator" {
+		errs = append(errs, fmt.Sprintf("attachment_analyzer profile %q must configure token_counter.strategy: estimator because image requests need a visual token estimate; byte_bound cannot value media", resolved.Model))
+	} else if resolved.CounterID != VisualEstimatorID {
+		errs = append(errs, fmt.Sprintf("attachment_analyzer profile %q must configure token_counter.id: %s; %q is not implemented for media", resolved.Model, VisualEstimatorID, resolved.CounterID))
 	}
 	return errs
 }

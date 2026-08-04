@@ -103,8 +103,8 @@ func handshakeSelectedAgentCLI(ctx context.Context, resolved *agentdef.ResolvedM
 }
 
 func validateAttachmentModel(resolved *agentdef.ResolvedModel) error {
-	if resolved != nil && resolved.IsAgentCLI() {
-		return errors.New("attachment_analyzer cannot use an agent_cli provider because image processing requires the ADK load_artifacts tool; select an openai_compatible profile")
+	if problems := agentdef.ValidateAttachmentModelCapability(resolved); len(problems) > 0 {
+		return errors.New(strings.Join(problems, "; "))
 	}
 	return nil
 }
