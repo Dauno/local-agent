@@ -10,6 +10,8 @@ import (
 	"strings"
 
 	"gopkg.in/yaml.v3"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 type sourceDocument struct {
@@ -88,6 +90,7 @@ var configSchema = []schemaField{
 			{name: "suggested_prompts"},
 			{name: "streaming_enabled"},
 			{name: "update_interval_seconds"},
+			{name: "progress_labels"},
 		}},
 		{name: "context", children: []schemaField{
 			{name: "enabled"},
@@ -389,6 +392,9 @@ func normalizeCollections(cfg *Config) {
 	}
 	if cfg.Slack.StandardAgent.SuggestedPrompts == nil {
 		cfg.Slack.StandardAgent.SuggestedPrompts = []string{}
+	}
+	if cfg.Slack.StandardAgent.ProgressLabels == nil {
+		cfg.Slack.StandardAgent.ProgressLabels = map[domain.ProgressState]string{}
 	}
 	if cfg.OpenCode.Management.AllowedUserIDs == nil {
 		cfg.OpenCode.Management.AllowedUserIDs = []string{}

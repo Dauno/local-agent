@@ -168,12 +168,13 @@ type SlackConfig struct {
 
 // SlackStandardAgentConfig gates incompatible standard Slack agent behavior.
 type SlackStandardAgentConfig struct {
-	ThreadedDM            bool     `yaml:"threaded_dm"`
-	ProgressEnabled       bool     `yaml:"progress_enabled"`
-	PromptsEnabled        bool     `yaml:"prompts_enabled"`
-	SuggestedPrompts      []string `yaml:"suggested_prompts"`
-	StreamingEnabled      bool     `yaml:"streaming_enabled"`
-	UpdateIntervalSeconds int      `yaml:"update_interval_seconds"`
+	ThreadedDM            bool                            `yaml:"threaded_dm"`
+	ProgressEnabled       bool                            `yaml:"progress_enabled"`
+	PromptsEnabled        bool                            `yaml:"prompts_enabled"`
+	SuggestedPrompts      []string                        `yaml:"suggested_prompts"`
+	StreamingEnabled      bool                            `yaml:"streaming_enabled"`
+	UpdateIntervalSeconds int                             `yaml:"update_interval_seconds"`
+	ProgressLabels        map[domain.ProgressState]string `yaml:"progress_labels"`
 }
 
 type SlackFilesConfig struct {
@@ -289,7 +290,7 @@ func Default() Config {
 				"Resume el contexto y destaca las decisiones pendientes.",
 				"Analiza el proyecto y señala los riesgos principales.",
 				"Prepara un plan de implementación verificable.",
-			}, UpdateIntervalSeconds: 3},
+			}, UpdateIntervalSeconds: 3, ProgressLabels: map[domain.ProgressState]string{}},
 			Context: SlackContextConfig{
 				Enabled:                     false,
 				MaxChars:                    1500,
