@@ -442,7 +442,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 	fileLoader := slackadapter.NewFileLoader(api, models.botToken, slackTimeout)
 	confirmationPublisher := slackadapter.NewConfirmationPublisher(api, auth.UserID, slackTimeout, models.logger)
 	blockPublisher := slackadapter.NewBlockPublisher(api, slackTimeout, models.logger)
-	standardPublisher := slackadapter.NewStandardPublisher(api, auth.UserID, slackTimeout)
+	standardPublisher := slackadapter.NewStandardPublisher(api, auth.UserID, slackTimeout, slackadapter.ResolveProgressLabels(cfg.Slack.StandardAgent.ProgressLabels))
 	artifactSvc := artifact.InMemoryService()
 	attachmentInstruction := ""
 	attachmentTimeout := defaultAttachmentTimeout

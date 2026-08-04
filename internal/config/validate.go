@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
@@ -189,6 +190,7 @@ func Validate(cfg Config) error {
 			add(field, "must be a single line without NUL bytes")
 		}
 	}
+	validateProgressLabels(&problems, cfg.Slack.StandardAgent.ProgressLabels)
 	validateIDs(&problems, "opencode.management.allowed_user_ids", cfg.OpenCode.Management.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
 	validateACP(&problems, cfg.ACP)
 
@@ -333,6 +335,40 @@ func validProviderProfileReference(value string) bool {
 	}
 	parts := strings.SplitN(value, "/", 2)
 	return parts[0] != "" && parts[1] != ""
+}
+
+// validateProgressLabels restricts slack.standard_agent.progress_labels to the
+// six known progress states, with non-empty single-line labels bounded by the
+// Slack markdown_text limit (see domain.ProgressLabelMaxRunes).
+func validateProgressLabels(problems *[]FieldError, labels map[domain.ProgressState]string) {
+	valid := map[domain.ProgressState]bool{
+		domain.ProgressWorking:             true,
+		domain.ProgressWaitingConfirmation: true,
+		domain.ProgressFinalizing:          true,
+		domain.ProgressCleared:             true,
+		domain.ProgressFailed:              true,
+		domain.ProgressInterrupted:         true,
+	}
+	states := make([]domain.ProgressState, 0, len(labels))
+	for state := range labels {
+		states = append(states, state)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i] < states[j] })
+	for _, state := range states {
+		label := labels[state]
+		field := fmt.Sprintf("slack.standard_agent.progress_labels[%q]", state)
+		if !valid[state] {
+			addConfigProblem(problems, field, "must be one of working, waiting_confirmation, finalizing, cleared, failed, or interrupted")
+			continue
+		}
+		if strings.TrimSpace(label) == "" {
+			addConfigProblem(problems, field, "must not be empty")
+		} else if strings.ContainsAny(label, "\r\n\x00") {
+			addConfigProblem(problems, field, "must be a single line without NUL bytes")
+		} else if utf8.RuneCountInString(label) > domain.ProgressLabelMaxRunes {
+			addConfigProblem(problems, field, fmt.Sprintf("must not exceed %d Unicode code points", domain.ProgressLabelMaxRunes))
+		}
+	}
 }
 
 func validateModelBudget(problems *[]FieldError, cfg ModelBudgetConfig) {
