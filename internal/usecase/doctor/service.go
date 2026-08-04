@@ -624,28 +624,6 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 					report.pass("token counter", detail)
 				}
 			}
-			for _, selected := range selectedModels {
-				if selected.resolved == nil || selected.resolved.Type() != agentdef.ProviderTypeOpenAICompatible || selected.resolved.CounterStrategy == "" {
-					continue
-				}
-				if selected.agent == "root_agent" {
-					continue
-				}
-				agentName := "token counter (" + selected.agent + ")"
-				detail := fmt.Sprintf("strategy: %s", selected.resolved.CounterStrategy)
-				if selected.resolved.CounterID != "" {
-					detail += fmt.Sprintf(", id: %s", selected.resolved.CounterID)
-				}
-				if s.deps.Counter == nil {
-					report.pass(agentName, detail)
-					continue
-				}
-				if counterErr := s.deps.Counter.CheckCounter(selected.resolved.CounterStrategy, selected.resolved.CounterID); counterErr != nil {
-					report.fail(agentName, redactor.String(counterErr.Error()), "Use a strategy and id implemented by this release; there is no silent fallback.", false)
-				} else {
-					report.pass(agentName, detail)
-				}
-			}
 			if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
 				if attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model); resolveErr == nil {
 					if problems := agentdef.ValidateAttachmentModelCapability(attachmentResolved); len(problems) > 0 {
@@ -654,6 +632,30 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 						report.pass("attachment_analyzer capability", fmt.Sprintf("visual estimator %s is configured and media-capable", agentdef.VisualEstimatorID))
 					}
 				}
+			}
+		}
+	}
+	if cfg.Context.ModelBudget != nil {
+		for _, selected := range selectedModels {
+			if selected.resolved == nil || selected.resolved.Type() != agentdef.ProviderTypeOpenAICompatible || selected.resolved.CounterStrategy == "" {
+				continue
+			}
+			if selected.agent == "root_agent" {
+				continue
+			}
+			agentName := "token counter (" + selected.agent + ")"
+			detail := fmt.Sprintf("strategy: %s", selected.resolved.CounterStrategy)
+			if selected.resolved.CounterID != "" {
+				detail += fmt.Sprintf(", id: %s", selected.resolved.CounterID)
+			}
+			if s.deps.Counter == nil {
+				report.pass(agentName, detail)
+				continue
+			}
+			if counterErr := s.deps.Counter.CheckCounter(selected.resolved.CounterStrategy, selected.resolved.CounterID); counterErr != nil {
+				report.fail(agentName, redactor.String(counterErr.Error()), "Use a strategy and id implemented by this release; there is no silent fallback.", false)
+			} else {
+				report.pass(agentName, detail)
 			}
 		}
 	}

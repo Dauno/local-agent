@@ -142,6 +142,16 @@ func TestNewByteBound(t *testing.T) {
 	}
 }
 
+func TestNewByteBoundRejectsNonEmptyID(t *testing.T) {
+	counter, err := New(StrategyByteBound, "unexpected")
+	if !errors.Is(err, ErrUnsupportedCounterID) {
+		t.Fatalf("expected ErrUnsupportedCounterID, got %v", err)
+	}
+	if counter != nil {
+		t.Fatal("expected nil counter for byte_bound id")
+	}
+}
+
 func TestNewEstimatorUnknownIDFailsWithoutFallback(t *testing.T) {
 	counter, err := New("estimator", "not-installed")
 	if !errors.Is(err, ErrUnsupportedCounterID) {
@@ -312,6 +322,23 @@ func TestVisualTileCountsTextOnlyV1LikeByteBound(t *testing.T) {
 	}
 }
 
+func TestVisualTileCountsContextProjectionLikeByteBound(t *testing.T) {
+	counter, err := New(StrategyEstimator, EstimatorVisualTileConservativeV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counted, err := counter.CountRequest(context.Background(), port.ModelRequestEnvelope{
+		SerializerID: port.SerializerContextProjectionV1,
+		Serialized:   "projection",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counted.Tokens != len("projection") || counted.Strategy != StrategyByteBound {
+		t.Fatalf("context projection count = %#v, want %d byte_bound", counted, len("projection"))
+	}
+}
+
 func TestVisualTileMultiImageSum(t *testing.T) {
 	counter, err := New("estimator", "visual-tile-conservative-v1")
 	if err != nil {
@@ -334,6 +361,30 @@ func TestVisualTileMultiImageSum(t *testing.T) {
 	expected := len("abc") + 2048 + 3072 + 2048
 	if counted.Tokens != expected {
 		t.Fatalf("tokens = %d, want %d", counted.Tokens, expected)
+	}
+}
+
+func TestVisualTileRejectsAggregateInt64Overflow(t *testing.T) {
+	counter, err := New(StrategyEstimator, EstimatorVisualTileConservativeV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const maxPNGDimension = 1<<32 - 1
+	media := make([]port.ModelRequestMedia, 128)
+	for index := range media {
+		media[index] = port.ModelRequestMedia{
+			MIMEType: "image/png",
+			Width:    maxPNGDimension,
+			Height:   maxPNGDimension,
+		}
+	}
+	_, err = counter.CountRequest(context.Background(), port.ModelRequestEnvelope{
+		SerializerID: port.SerializerOpenAIChatCompletionsMultimodalV2,
+		Serialized:   "x",
+		Media:        media,
+	})
+	if err == nil || !strings.Contains(err.Error(), "overflows") {
+		t.Fatalf("aggregate overflow error = %v, want overflow rejection", err)
 	}
 }
 

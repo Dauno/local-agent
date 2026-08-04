@@ -64,6 +64,7 @@ func TestComposeRootTokenCounterAvailabilityMatrix(t *testing.T) {
 		wantError bool
 	}{
 		{name: "byte_bound", strategy: "byte_bound"},
+		{name: "byte_bound with id", strategy: "byte_bound", id: "unexpected", wantError: true},
 		{name: "estimator with known id", strategy: "estimator", id: agentdef.VisualEstimatorID},
 		{name: "estimator with unknown id", strategy: "estimator", id: "not-installed", wantError: true},
 		{name: "estimator without id", strategy: "estimator", wantError: true},

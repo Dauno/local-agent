@@ -8,7 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math"
+	"strings"
 
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -74,6 +74,11 @@ func (c *visualTileCounter) CountRequest(ctx context.Context, envelope port.Mode
 		return port.TokenCount{}, err
 	}
 	switch envelope.SerializerID {
+	case port.SerializerContextProjectionV1:
+		if len(envelope.Media) > 0 {
+			return port.TokenCount{}, fmt.Errorf("estimator %s cannot count media in serializer %q", EstimatorVisualTileConservativeV1, envelope.SerializerID)
+		}
+		return port.TokenCount{Tokens: len(envelope.Serialized), Strategy: StrategyByteBound, Exact: false}, nil
 	case port.SerializerOpenAIChatCompletionsV1:
 		// Text-only requests are counted exactly like byte_bound; media in a
 		// v1 envelope means the conversion never produced the countable shape.
@@ -85,15 +90,22 @@ func (c *visualTileCounter) CountRequest(ctx context.Context, envelope port.Mode
 		return port.TokenCount{}, fmt.Errorf("estimator %s cannot count serializer %q", EstimatorVisualTileConservativeV1, envelope.SerializerID)
 	}
 	total := int64(len(envelope.Serialized))
+	maxInt := int(^uint(0) >> 1)
 	for index, media := range envelope.Media {
 		cost, err := visualTileTokens(media)
 		if err != nil {
 			return port.TokenCount{}, fmt.Errorf("media %d: %w", index, err)
 		}
-		total += int64(cost)
-		if total > math.MaxInt {
+		if cost < 0 || total > int64(maxInt)-int64(cost) {
 			return port.TokenCount{}, errors.New("multimodal token estimate overflows")
 		}
+		total += int64(cost)
+		if total < 0 {
+			return port.TokenCount{}, errors.New("multimodal token estimate overflows")
+		}
+	}
+	if total < 0 || total > int64(maxInt) {
+		return port.TokenCount{}, errors.New("multimodal token estimate overflows")
 	}
 	return port.TokenCount{
 		Tokens:   int(total),
@@ -118,18 +130,30 @@ func visualTileTokens(media port.ModelRequestMedia) (int, error) {
 	case "", "auto", "high":
 		tilesX := ceilDiv(media.Width, visualTileEdge)
 		tilesY := ceilDiv(media.Height, visualTileEdge)
-		tiles := int64(tilesX) * int64(tilesY)
-		if tiles > math.MaxInt-visualTileBase {
+		maxInt := int(^uint(0) >> 1)
+		if tilesX > maxInt/tilesY {
 			return 0, errors.New("visual tile estimate overflows")
 		}
-		return visualTileBase + visualTileScale*int(tiles), nil
+		tiles := tilesX * tilesY
+		if tiles > (maxInt-visualTileBase)/visualTileScale {
+			return 0, errors.New("visual tile estimate overflows")
+		}
+		scaledTiles := visualTileScale * tiles
+		if scaledTiles > maxInt-visualTileBase {
+			return 0, errors.New("visual tile estimate overflows")
+		}
+		return visualTileBase + scaledTiles, nil
 	default:
 		return 0, fmt.Errorf("unknown image detail %q", media.Detail)
 	}
 }
 
 func ceilDiv(value, divisor int) int {
-	return (value + divisor - 1) / divisor
+	quotient := value / divisor
+	if value%divisor != 0 {
+		quotient++
+	}
+	return quotient
 }
 
 func supportedImageMIME(mimeType string) bool {
@@ -147,6 +171,9 @@ func supportedImageMIME(mimeType string) bool {
 func New(strategy, id string) (port.RequestTokenCounter, error) {
 	switch strategy {
 	case StrategyByteBound:
+		if strings.TrimSpace(id) != "" {
+			return nil, fmt.Errorf("%w: byte_bound id must be empty", ErrUnsupportedCounterID)
+		}
 		return &byteBoundCounter{}, nil
 	case StrategyEstimator:
 		switch id {

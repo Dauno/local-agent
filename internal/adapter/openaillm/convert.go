@@ -158,9 +158,9 @@ func contentToMessages(content *genai.Content) ([]openai.ChatCompletionMessagePa
 }
 
 // contentToMessageSets converts one ADK content into real provider messages
-// and the equivalent countable messages in a single pass. Every image data URL
-// exists only in the real set; the countable set replaces each binary with the
-// fixed marker and records order-preserving media metadata.
+// and the equivalent countable messages in a single pass. Image data URLs exist
+// only in the real set; audio stays real because v1 counts its serialized bytes.
+// Images use the fixed marker and order-preserving media metadata.
 func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 	if content == nil {
 		return convertedContent{}, ErrUnsupportedPart
@@ -319,12 +319,13 @@ func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 			if !ok {
 				return convertedContent{}, fmt.Errorf("audio MIME type %q is not supported by Chat Completions input_audio", part.InlineData.MIMEType)
 			}
+			encodedAudio := base64.StdEncoding.EncodeToString(part.InlineData.Data)
 			parts = append(parts, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
-				Data:   base64.StdEncoding.EncodeToString(part.InlineData.Data),
+				Data:   encodedAudio,
 				Format: format,
 			}))
 			countableParts = append(countableParts, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
-				Data:   mediaMarker,
+				Data:   encodedAudio,
 				Format: format,
 			}))
 			continue

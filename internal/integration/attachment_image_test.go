@@ -339,8 +339,18 @@ func TestAttachmentImageRegressionRejectsOverBudgetBeforeHTTP(t *testing.T) {
 	if envelopes[1].SerializerID != port.SerializerOpenAIChatCompletionsMultimodalV2 {
 		t.Fatalf("visual envelope serializer = %q", envelopes[1].SerializerID)
 	}
-	if !errors.Is(err, domain.ErrIrreducibleContext) && !strings.Contains(err.Error(), "request_context_irreducible") && !strings.Contains(err.Error(), "request_token_count_unavailable") {
-		t.Fatalf("error = %v, want irreducible or count failure", err)
+	if !errors.Is(err, domain.ErrIrreducibleContext) {
+		t.Fatalf("error = %v, want irreducible context", err)
+	}
+	var irreducible *domain.IrreducibleContextError
+	if !errors.As(err, &irreducible) {
+		t.Fatalf("error = %v, want IrreducibleContextError", err)
+	}
+	if irreducible.HardTokens != 4096 {
+		t.Fatalf("hard tokens = %d, want 4096", irreducible.HardTokens)
+	}
+	if irreducible.MinimumTokens <= irreducible.HardTokens {
+		t.Fatalf("minimum tokens = %d, want > hard tokens %d", irreducible.MinimumTokens, irreducible.HardTokens)
 	}
 }
 
