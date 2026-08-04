@@ -188,8 +188,8 @@ func TestOpenExistingUpgradesV28WithoutBackfillingActivations(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 29 {
-		t.Fatalf("upgraded schema version = %d, want 29", version)
+	if version != 30 {
+		t.Fatalf("upgraded schema version = %d, want 30", version)
 	}
 	rows, err := store.db.QueryContext(ctx, `SELECT role, source FROM messages ORDER BY id`)
 	if err != nil {

@@ -142,8 +142,23 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	var status string
 	var statusRevision int
 	var finishedAt int64
-	err := s.db.QueryRowContext(ctx, `SELECT status, status_revision, finished_at
-		FROM external_agent_jobs WHERE job_id = ?`, jobID).Scan(&status, &statusRevision, &finishedAt)
+	var sessionID string
+	var phase string
+	var lastEventKind string
+	var transport, session, meaningful, promptStarted int64
+	var activeTools int
+	var pending int
+	var stopReason string
+	err := s.db.QueryRowContext(ctx, `SELECT j.status, j.status_revision, j.finished_at, j.acp_session_id,
+		COALESCE(p.phase, ''), COALESCE(p.last_event_kind, ''), COALESCE(p.last_transport_activity_at, 0),
+		COALESCE(p.last_session_update_at, 0), COALESCE(p.last_meaningful_progress_at, 0),
+		COALESCE(p.prompt_started_at, 0), COALESCE(p.active_tool_count, 0),
+		COALESCE(p.pending_permission, 0), COALESCE(p.stop_reason, '')
+		FROM external_agent_jobs j
+		LEFT JOIN external_agent_job_progress p ON p.job_id = j.job_id
+		WHERE j.job_id = ?`, jobID).
+		Scan(&status, &statusRevision, &finishedAt, &sessionID, &phase, &lastEventKind,
+			&transport, &session, &meaningful, &promptStarted, &activeTools, &pending, &stopReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -152,7 +167,16 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	}
 	view := &domain.ExternalAgentJobInspection{
 		JobID: jobID, Status: safeAdminJobStatus(status), StatusRevision: statusRevision,
-		FinishedAt: fromUnix(finishedAt),
+		ACPSessionID: safeAdminSessionID(sessionID), FinishedAt: fromUnix(finishedAt),
+		Phase:                    domain.ACPProgressPhase(phase),
+		LastEventKind:            domain.ACPEventKind(lastEventKind),
+		LastTransportActivityAt:  fromUnix(transport),
+		LastSessionUpdateAt:      fromUnix(session),
+		LastMeaningfulProgressAt: fromUnix(meaningful),
+		PromptStartedAt:          fromUnix(promptStarted),
+		ActiveToolCount:          activeTools,
+		PendingPermission:        pending != 0,
+		StopReason:               stopReason,
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT status_revision, kind, publish_state,
 		attempts, lease_owner, lease_expiry, last_error_code, next_attempt_at, recovered_slack_ts,
@@ -955,6 +979,20 @@ func safeAdminPublishState(value string) domain.NotificationPublishState {
 
 func safeAdminLeaseOwner(value string) string {
 	if value == "" || len(value) > 128 {
+		return ""
+	}
+	for _, r := range value {
+		if r < ' ' || r == '\x7f' {
+			return ""
+		}
+	}
+	return value
+}
+
+// safeAdminSessionID returns the complete session ID unchanged when it is a
+// bounded, control-free value. It is never truncated.
+func safeAdminSessionID(value string) string {
+	if value == "" || len(value) > 512 {
 		return ""
 	}
 	for _, r := range value {

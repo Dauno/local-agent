@@ -148,6 +148,30 @@ type ExternalAgentJobAdminStore interface {
 	InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error)
 }
 
+// ExternalAgentJobProgressStore persists the content-free live ACP projection.
+// Writes are bound to the job lease owner and attempt while the job is
+// running; terminal projections remain readable after lease release.
+type ExternalAgentJobProgressStore interface {
+	WriteJobProgress(ctx context.Context, jobID, owner string, attempt int, progress domain.ExternalAgentJobProgress) error
+	ReadJobProgress(ctx context.Context, jobID string) (*domain.ExternalAgentJobProgress, error)
+}
+
+// ACPProcessRegistry reports best-effort in-process process liveness keyed
+// by job and attempt. A nil result means the current process has no
+// trustworthy runtime handle (for example after restart) and must never be
+// rendered as dead.
+type ACPProcessRegistry interface {
+	Register(jobID string, attempt int, pid int)
+	ProcessAlive(jobID string, attempt int) *bool
+}
+
+// ExternalAgentJobStatusProjectionReader is the optional authorized status
+// contract that merges the durable live projection and read-time health into
+// the model-facing status view.
+type ExternalAgentJobStatusProjectionReader interface {
+	StatusProjection(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJobStatusView, error)
+}
+
 // NotificationPublishError classifies a failed delivery boundary without
 // carrying provider response bodies or result content.
 type NotificationPublishError struct {

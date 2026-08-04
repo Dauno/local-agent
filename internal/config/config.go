@@ -79,6 +79,7 @@ type ACPConfig struct {
 	MaxJobTimeoutSeconds         int               `yaml:"max_job_timeout_seconds"`
 	IdleTimeoutSeconds           int               `yaml:"idle_timeout_seconds"`
 	ReconciliationTimeoutSeconds int               `yaml:"reconciliation_timeout_seconds"`
+	ProgressWarningSeconds       int               `yaml:"progress_warning_seconds"`
 	WorkerConcurrency            int               `yaml:"worker_concurrency"`
 	ArtifactRetentionDays        int               `yaml:"artifact_retention_days"`
 	Delivery                     ACPDeliveryConfig `yaml:"delivery"`
@@ -327,6 +328,7 @@ func Default() Config {
 			MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024,
 			DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400,
 			ReconciliationTimeoutSeconds: 1800,
+			ProgressWarningSeconds:       900,
 			WorkerConcurrency:            1,
 			ArtifactRetentionDays:        30,
 			Delivery:                     ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},

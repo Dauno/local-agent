@@ -49,6 +49,7 @@ const (
 	ACPErrorPermissionUnavailable      ACPErrorCode = "acp_permission_unavailable"
 	ACPErrorInvalidInput               ACPErrorCode = "acp_invalid_input"
 	ACPErrorSessionRecoveryUnsupported ACPErrorCode = "acp_session_recovery_unsupported"
+	ACPErrorProgressInvalid            ACPErrorCode = "acp_progress_invalid"
 )
 
 type ACPError struct {
@@ -156,6 +157,10 @@ type AcpInvocationRequest struct {
 	OnSessionCreated      func(string) error
 	OnSideEffectsPossible func() error
 	BeforePermission      func() error
+	// OnProgress receives content-free live progress events derived from the
+	// original ACP stream. Monitoring failures must never fail or cancel an
+	// otherwise healthy invocation, so the callback returns no error.
+	OnProgress func(ACPProgressEvent)
 }
 
 type AcpInvocationResult struct {

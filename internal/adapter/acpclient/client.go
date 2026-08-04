@@ -154,24 +154,30 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 	if err := validateWorkspacePaths(req.PrimaryPath, req.AdditionalPaths); err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
+	emitter := &progressEmitter{onProgress: req.OnProgress}
 	proc, err := c.start(ctx, req.PrimaryPath)
 	if err != nil {
 		return domain.AcpInvocationResult{}, fmt.Errorf("acp client start: %w", err)
 	}
 	defer c.terminate(proc)
+	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventProcessStarted, PID: processPID(proc)})
 
 	init, err := c.initialize(proc)
 	if err != nil {
+		emitter.emitProgressFailure(err)
 		return domain.AcpInvocationResult{}, fmt.Errorf("acp initialize: %w", err)
 	}
+	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventInitializeResponse})
 	if len(req.AdditionalPaths) > 0 && !init.SessionCapabilities.AdditionalDirectories {
 		return domain.AcpInvocationResult{}, errors.New("ACP agent does not advertise additionalDirectories; no verified fallback is available")
 	}
 
 	sessionID, initialConfig, err := c.newSession(proc, req.PrimaryPath, req.AdditionalPaths)
 	if err != nil {
+		emitter.emitProgressFailure(err)
 		return domain.AcpInvocationResult{}, fmt.Errorf("acp session/new: %w", err)
 	}
+	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventSessionNew})
 	if req.OnSessionCreated != nil {
 		if err := req.OnSessionCreated(sessionID); err != nil {
 			return domain.AcpInvocationResult{}, err
@@ -181,20 +187,65 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 		return domain.AcpInvocationResult{}, errors.New("ACP session did not advertise configuration options")
 	}
 	if err := c.applyConfig(proc, sessionID, req.ConfigOptions); err != nil {
+		emitter.emitProgressFailure(err)
 		return domain.AcpInvocationResult{}, err
 	}
+	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventTransportActivity})
 
 	prompt := buildPrompt(req.GlobalInstruction, req.AgentInstruction, req.Task, req.AdditionalProjects, req.AdditionalPaths)
-	result, err := c.prompt(proc, sessionID, prompt, req.PermissionOptionKind, req.ConfigOptions, req.JobID, req.OnSideEffectsPossible, req.BeforePermission)
+	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPromptSent})
+	result, err := c.prompt(proc, sessionID, prompt, req.PermissionOptionKind, req.ConfigOptions, req.JobID, req.OnSideEffectsPossible, req.BeforePermission, emitter)
 	if err != nil {
+		// Host cancellation or timeout is not a process failure: the terminal
+		// prompt response (e.g. cancelled) must not be regressed to failed.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
+			emitter.emitProgressFailure(err)
+		}
 		return domain.AcpInvocationResult{}, err
 	}
 	if init.SessionCapabilities.Close {
 		if err := c.closeSession(proc, sessionID); err != nil {
 			return domain.AcpInvocationResult{}, fmt.Errorf("acp session/close: %w", err)
 		}
+		emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventTransportActivity})
 	}
 	return result, nil
+}
+
+// progressEmitter forwards content-free progress events to the host-owned
+// callback. A nil callback is valid for probes and reconciliation.
+type progressEmitter struct {
+	onProgress func(domain.ACPProgressEvent)
+}
+
+func (e *progressEmitter) emit(event domain.ACPProgressEvent) {
+	if e == nil || e.onProgress == nil {
+		return
+	}
+	e.onProgress(event)
+}
+
+func (e *progressEmitter) emitProgressFailure(err error) {
+	if e == nil || e.onProgress == nil {
+		return
+	}
+	e.emit(domain.ACPProgressEvent{Kind: domain.ACPEventProcessFailed, ErrorClass: acpFailureClass(err)})
+}
+
+// acpFailureClass maps a transport error to a bounded host-owned class.
+func acpFailureClass(err error) string {
+	var acpErr *domain.ACPError
+	if errors.As(err, &acpErr) && acpErr.Code != "" {
+		return string(acpErr.Code)
+	}
+	return "acp_prompt_failed"
+}
+
+func processPID(proc *process) int {
+	if proc == nil || proc.cmd == nil || proc.cmd.Process == nil {
+		return 0
+	}
+	return proc.cmd.Process.Pid
 }
 
 // Reconcile negotiates recovery before attempting any session operation. It
@@ -271,7 +322,7 @@ func (c *Client) reconcile(ctx context.Context, req domain.AcpInvocationRequest,
 	if permission != domain.ACPPermissionRejectOnce && permission != domain.ACPPermissionAllowOnce {
 		return domain.AcpInvocationResult{}, errors.New("ACP recovery permission policy is invalid")
 	}
-	result, err := c.prompt(proc, sessionID, recoveryPrompt, permission, req.ConfigOptions, req.JobID, nil, nil)
+	result, err := c.prompt(proc, sessionID, recoveryPrompt, permission, req.ConfigOptions, req.JobID, nil, nil, nil)
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
@@ -718,6 +769,17 @@ func boundedIdentity(value string) bool {
 	return strings.TrimSpace(value) != "" && len(value) <= 256 && !strings.ContainsAny(value, "\r\n\x00")
 }
 
+// boundedStopReason maps an unknown provider stop reason to the bounded
+// allowlist; unrecognized reasons emit as empty (failed phase, no reason).
+func boundedStopReason(reason string) string {
+	switch reason {
+	case domain.ACPStopReasonEndTurn, domain.ACPStopReasonCancelled, domain.ACPStopReasonMaxTokens, domain.ACPStopReasonRefusal:
+		return reason
+	default:
+		return ""
+	}
+}
+
 func capabilityObject(raw json.RawMessage) map[string]json.RawMessage {
 	var result map[string]json.RawMessage
 	_ = json.Unmarshal(raw, &result)
@@ -837,17 +899,20 @@ type promptCollector struct {
 	ownerID          string
 	onSideEffects    func() error
 	beforePermission func() error
+	progress         *progressEmitter
 	sideEffectsSeen  bool
 	messageID        string
 	hasMessageID     bool
+	lastInputTokens  int
+	lastOutputTokens int
 	text             strings.Builder
 }
 
-func (c *Client) prompt(proc *process, sessionID, text, permissionKind string, expectedConfig []domain.ACPConfigOption, ownerID string, onSideEffects func() error, beforePermission func() error) (domain.AcpInvocationResult, error) {
+func (c *Client) prompt(proc *process, sessionID, text, permissionKind string, expectedConfig []domain.ACPConfigOption, ownerID string, onSideEffects func() error, beforePermission func() error, emitter *progressEmitter) (domain.AcpInvocationResult, error) {
 	if ownerID == "" {
 		ownerID = "invocation-" + sessionID
 	}
-	collector := &promptCollector{client: c, sessionID: sessionID, permissionKind: permissionKind, expectedConfig: expectedConfig, ownerID: ownerID, onSideEffects: onSideEffects, beforePermission: beforePermission}
+	collector := &promptCollector{client: c, sessionID: sessionID, permissionKind: permissionKind, expectedConfig: expectedConfig, ownerID: ownerID, onSideEffects: onSideEffects, beforePermission: beforePermission, progress: emitter}
 	result, err := c.request(proc, "session/prompt", map[string]any{
 		"sessionId": sessionID,
 		"prompt":    []any{map[string]string{"type": "text", "text": text}},
@@ -866,14 +931,22 @@ func (c *Client) prompt(proc *process, sessionID, text, permissionKind string, e
 		return domain.AcpInvocationResult{}, errors.New("ACP prompt result is malformed")
 	}
 	if response.StopReason == domain.ACPStopReasonCancelled && proc.ctx.Err() != nil {
+		emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPromptResponse, StopReason: domain.ACPStopReasonCancelled})
 		return domain.AcpInvocationResult{}, proc.ctx.Err()
 	}
 	if response.StopReason != domain.ACPStopReasonEndTurn {
+		// The stop reason is bounded before emission so unknown provider
+		// reasons can never enter the projection or logs.
+		emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPromptResponse, StopReason: boundedStopReason(response.StopReason)})
 		return domain.AcpInvocationResult{}, fmt.Errorf("ACP run stopped with reason %q", response.StopReason)
 	}
+	// Drain trailing updates before emitting the terminal response so a late
+	// update can never regress the projection from completed to an earlier
+	// phase.
 	if err := c.drainPromptUpdates(proc, collector); err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
+	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPromptResponse, StopReason: domain.ACPStopReasonEndTurn})
 	return collector.result(proc.ctx)
 }
 
@@ -932,6 +1005,10 @@ func (c *promptCollector) handleUpdate(raw json.RawMessage) error {
 			MessageID     string                `json:"messageId"`
 			Content       json.RawMessage       `json:"content"`
 			ConfigOptions []sessionConfigOption `json:"configOptions"`
+			Usage         json.RawMessage       `json:"usage"`
+			ToolCallID    string                `json:"toolCallId"`
+			ToolKind      string                `json:"kind"`
+			ToolStatus    string                `json:"status"`
 		} `json:"update"`
 	}
 	if err := json.Unmarshal(raw, &notification); err != nil || notification.SessionID != c.sessionID {
@@ -946,6 +1023,16 @@ func (c *promptCollector) handleUpdate(raw json.RawMessage) error {
 			}
 			c.sideEffectsSeen = true
 		}
+		kind := domain.ACPEventToolCall
+		if notification.Update.Kind == "tool_call_update" {
+			kind = domain.ACPEventToolCallUpdate
+		}
+		c.progress.emit(domain.ACPProgressEvent{Kind: kind, Tool: parseToolProgress(
+			notification.Update.ToolCallID,
+			notification.Update.ToolKind,
+			notification.Update.ToolStatus,
+			kind == domain.ACPEventToolCall,
+		)})
 	case "agent_message_chunk":
 		var content struct {
 			Type string `json:"type"`
@@ -968,6 +1055,16 @@ func (c *promptCollector) handleUpdate(raw json.RawMessage) error {
 			return &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("ACP final result exceeds configured artifact limit")}
 		}
 		c.text.WriteString(content.Text)
+		c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventMessageChunk})
+	case "agent_thought_chunk":
+		// Thought content is discarded immediately and never retained.
+		c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventThoughtChunk})
+	case "usage_update":
+		// Non-increasing usage still refreshes session activity; only
+		// increasing bounded counters count as meaningful progress.
+		c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventUsageUpdate, UsageIncreased: usageIncreased(c, notification.Update.Usage)})
+	case "plan":
+		c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPlan})
 	case "config_option_update":
 		state, err := configState(notification.Update.ConfigOptions)
 		if err != nil {
@@ -976,8 +1073,51 @@ func (c *promptCollector) handleUpdate(raw json.RawMessage) error {
 		if err := verifyConfigState(c.expectedConfig, state); err != nil {
 			return &domain.ACPError{Code: domain.ACPErrorConfigDrift, Err: err}
 		}
+		c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventConfigOptionUpdate})
+	default:
+		c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventUnknownNotification})
 	}
 	return nil
+}
+
+// usageIncreased reports whether a valid usage frame strictly increased one
+// bounded counter compared with the last seen values. Malformed frames are
+// treated as not-increasing (a protocol-safe ignored extension).
+func usageIncreased(c *promptCollector, raw json.RawMessage) bool {
+	var usage struct {
+		InputTokens  int `json:"inputTokens"`
+		OutputTokens int `json:"outputTokens"`
+	}
+	if len(raw) == 0 || json.Unmarshal(raw, &usage) != nil || usage.InputTokens < 0 || usage.OutputTokens < 0 {
+		return false
+	}
+	increase := usage.InputTokens > c.lastInputTokens || usage.OutputTokens > c.lastOutputTokens
+	c.lastInputTokens, c.lastOutputTokens = usage.InputTokens, usage.OutputTokens
+	return increase
+}
+
+// parseToolProgress builds bounded tool identity from an ACP v1 wire status.
+// ACP v1 statuses (pending, in_progress, completed, failed) map onto the
+// bounded internal set; malformed payloads return nil, and the frame still
+// counts as session activity.
+func parseToolProgress(callID, kind, status string, initial bool) *domain.ACPToolProgress {
+	if initial && status == "" {
+		status = "pending"
+	}
+	toolStatus, ok := domain.ACPToolStatusFromWire(status)
+	if !ok || callID == "" || len(callID) > 256 {
+		return nil
+	}
+	for _, r := range callID {
+		if r < ' ' || r == '\x7f' {
+			return nil
+		}
+	}
+	toolKind := domain.ACPToolKind("")
+	if initial || kind != "" {
+		toolKind = domain.ACPToolKindFromWire(kind)
+	}
+	return &domain.ACPToolProgress{CallID: callID, Kind: toolKind, Status: toolStatus}
 }
 
 func (c *promptCollector) result(ctx context.Context) (domain.AcpInvocationResult, error) {
@@ -1009,6 +1149,7 @@ func (c *promptCollector) handlePermission(proc *process, id json.RawMessage, ra
 	if err := json.Unmarshal(raw, &request); err != nil || request.SessionID != c.sessionID {
 		return errors.New("ACP permission request is malformed or belongs to another session")
 	}
+	c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPermissionRequested, PermissionPending: true})
 	if proc.ctx.Err() != nil {
 		return c.client.respondResult(proc, id, map[string]any{"outcome": map[string]string{"outcome": "cancelled"}})
 	}
@@ -1030,7 +1171,11 @@ func (c *promptCollector) handlePermission(proc *process, id json.RawMessage, ra
 			return err
 		}
 	}
-	return c.client.respondResult(proc, id, map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}})
+	if err := c.client.respondResult(proc, id, map[string]any{"outcome": map[string]string{"outcome": "selected", "optionId": selected}}); err != nil {
+		return err
+	}
+	c.progress.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPermissionResponded, PermissionPending: false})
+	return nil
 }
 
 func (c *Client) closeSession(proc *process, sessionID string) error {

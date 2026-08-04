@@ -455,6 +455,11 @@ func validateACP(problems *[]FieldError, cfg ACPConfig) {
 	if cfg.IdleTimeoutSeconds < 0 {
 		addConfigProblem(problems, "acp.idle_timeout_seconds", "must be zero or greater")
 	}
+	if cfg.ProgressWarningSeconds <= 0 {
+		addConfigProblem(problems, "acp.progress_warning_seconds", "must be greater than zero")
+	} else if cfg.MaxJobTimeoutSeconds > 0 && cfg.ProgressWarningSeconds > cfg.MaxJobTimeoutSeconds {
+		addConfigProblem(problems, "acp.progress_warning_seconds", "must not exceed acp.max_job_timeout_seconds")
+	}
 	if cfg.Delivery.MaxMarkdownParts < 1 || cfg.Delivery.MaxMarkdownParts > 8 {
 		addConfigProblem(problems, "acp.delivery.max_markdown_parts", "must be between 1 and 8")
 	}
