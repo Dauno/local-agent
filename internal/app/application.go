@@ -109,6 +109,7 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		Jobs:       jobStoreChecker{},
 		CLI:        cliProviderChecker{},
 		ACP:        acpProviderChecker{},
+		Counter:    counterChecker{},
 	}
 	if includeLive {
 		dependencies.Live = liveChecker{}

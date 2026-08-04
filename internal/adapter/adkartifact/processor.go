@@ -64,10 +64,17 @@ func (p *Processor) Process(ctx context.Context, request port.AttachmentRequest)
 		return port.ProcessedAttachment{}, errors.New("attachment data is empty")
 	}
 
+	sessionID := fmt.Sprintf("attachment:%s", request.ProcessingID)
+
+	// Images are normalized by content before any Artifact.Save: the canonical
+	// derivative (real format, bounded dimensions, no metadata) is the only
+	// bytes ever stored, so the analyzer and provider never see the original.
+	if IsImageMIME(request.Attachment.MIMEType) {
+		return p.processImageAttachment(ctx, request, sessionID)
+	}
+
 	artifactName := safeArtifactName(request.Attachment.Name)
 	part := genai.NewPartFromBytes(request.Attachment.Data, request.Attachment.MIMEType)
-
-	sessionID := fmt.Sprintf("attachment:%s", request.ProcessingID)
 	_, err := p.artifactService.Save(ctx, &art.SaveRequest{
 		AppName:   attachmentAnalyzerAppName,
 		UserID:    attachmentAnalyzerUserID,
@@ -87,11 +94,28 @@ func (p *Processor) Process(ctx context.Context, request port.AttachmentRequest)
 		return p.processText(ctx, request, artifactName, sessionID)
 	}
 
-	if IsImageMIME(request.Attachment.MIMEType) {
-		return p.processImage(ctx, request, artifactName, sessionID)
-	}
-
 	return port.ProcessedAttachment{}, fmt.Errorf("unsupported file type %q", request.Attachment.MIMEType)
+}
+
+// processImageAttachment normalizes the image, saves only the derived
+// canonical bytes, and runs the analyzer against the derived Artifact.
+func (p *Processor) processImageAttachment(ctx context.Context, request port.AttachmentRequest, sessionID string) (port.ProcessedAttachment, error) {
+	normalized, err := normalizeImage(ctx, request.Attachment.Data, request.Attachment.MIMEType)
+	if err != nil {
+		return port.ProcessedAttachment{}, err
+	}
+	artifactName := canonicalArtifactName(request.Attachment.Name, normalized.extension)
+	part := genai.NewPartFromBytes(normalized.data, normalized.mimeType)
+	if _, err := p.artifactService.Save(ctx, &art.SaveRequest{
+		AppName:   attachmentAnalyzerAppName,
+		UserID:    attachmentAnalyzerUserID,
+		SessionID: sessionID,
+		FileName:  artifactName,
+		Part:      part,
+	}); err != nil {
+		return port.ProcessedAttachment{}, fmt.Errorf("save image artifact: %w", err)
+	}
+	return p.processImage(ctx, request, artifactName, sessionID, normalized.warning)
 }
 
 func (p *Processor) processAudio(ctx context.Context, request port.AttachmentRequest, artifactName string) (port.ProcessedAttachment, error) {
@@ -158,7 +182,7 @@ func (p *Processor) processText(ctx context.Context, request port.AttachmentRequ
 	}, nil
 }
 
-func (p *Processor) processImage(ctx context.Context, request port.AttachmentRequest, artifactName, sessionID string) (port.ProcessedAttachment, error) {
+func (p *Processor) processImage(ctx context.Context, request port.AttachmentRequest, artifactName, sessionID, warning string) (port.ProcessedAttachment, error) {
 	if p.analyzerModel == nil {
 		return port.ProcessedAttachment{}, errors.New("attachment_analyzer is not configured for image processing")
 	}
@@ -230,6 +254,9 @@ func (p *Processor) processImage(ctx context.Context, request port.AttachmentReq
 
 	if strings.TrimSpace(description) == "" {
 		return port.ProcessedAttachment{}, errors.New("attachment_analyzer returned no description")
+	}
+	if strings.TrimSpace(warning) != "" {
+		description = warning + "\n\n" + description
 	}
 
 	return port.ProcessedAttachment{

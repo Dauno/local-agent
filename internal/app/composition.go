@@ -350,9 +350,9 @@ func composeRootTokenCounter(resolved *agentdef.ResolvedModel) (port.RequestToke
 	if resolved.Type() != agentdef.ProviderTypeOpenAICompatible {
 		return nil, nil
 	}
-	counter, err := tokencounter.New(resolved.CounterStrategy)
+	counter, err := tokencounter.New(resolved.CounterStrategy, resolved.CounterID)
 	if err != nil {
-		return nil, fmt.Errorf("compose root model token counter strategy %q: %w", resolved.CounterStrategy, err)
+		return nil, fmt.Errorf("compose root model token counter strategy %q id %q: %w", resolved.CounterStrategy, resolved.CounterID, err)
 	}
 	return counter, nil
 }

@@ -184,7 +184,7 @@ func (m *OpenAICompatibleLLM) ConfigureDefaultMaxOutputTokens(tokens int) error 
 	return nil
 }
 
-func (m *OpenAICompatibleLLM) guardRequest(ctx context.Context, params openai.ChatCompletionNewParams, stream bool) error {
+func (m *OpenAICompatibleLLM) guardRequest(ctx context.Context, converted convertedRequest) error {
 	if m != nil && m.recorder != nil {
 		m.recorder.SetGauge(domain.MetricModelRequestContextWindowTokens, int64(m.requestBudget.WindowTokens), port.MetricLabels{"profile_id": m.profileID})
 		m.recorder.SetGauge(domain.MetricModelRequestHardLimitTokens, int64(m.requestBudget.HardTokens), port.MetricLabels{"profile_id": m.profileID})
@@ -195,18 +195,7 @@ func (m *OpenAICompatibleLLM) guardRequest(ctx context.Context, params openai.Ch
 		}
 		return errors.New("OpenAI-compatible final request guard is not configured")
 	}
-	serialized, err := json.Marshal(struct {
-		Params openai.ChatCompletionNewParams `json:"params"`
-		Stream bool                           `json:"stream"`
-	}{Params: params, Stream: stream})
-	if err != nil {
-		return fmt.Errorf("serialize OpenAI-compatible request for guard: %w", err)
-	}
-	count, err := m.requestCounter.CountRequest(ctx, port.ModelRequestEnvelope{
-		SerializerID: "openai-chat-completions-v1",
-		ProfileID:    m.profileID,
-		Serialized:   string(serialized),
-	})
+	count, err := m.requestCounter.CountRequest(ctx, converted.envelope)
 	if err != nil {
 		if m.recorder != nil {
 			m.recorder.AddCounter(domain.MetricModelRequestGuardOutcomeTotal, 1, port.MetricLabels{"guard_outcome": "count_failed", "profile_id": m.profileID})
@@ -255,20 +244,20 @@ func (m *OpenAICompatibleLLM) GenerateContent(ctx context.Context, request *mode
 			return
 		}
 
-		params, err := m.requestParams(request)
+		params, err := m.convertRequest(request, stream)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		if err := m.guardRequest(ctx, params, stream); err != nil {
+		if err := m.guardRequest(ctx, params); err != nil {
 			yield(nil, err)
 			return
 		}
 		if stream {
-			m.generateStream(ctx, params, yield)
+			m.generateStream(ctx, params.params, yield)
 			return
 		}
-		completion, err := m.client.Chat.Completions.New(ctx, params)
+		completion, err := m.client.Chat.Completions.New(ctx, params.params)
 		if err != nil {
 			yield(nil, fmt.Errorf("OpenAI-compatible Chat Completions request failed: %w", err))
 			return

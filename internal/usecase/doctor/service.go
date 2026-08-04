@@ -101,6 +101,13 @@ type ACPProviderChecker interface {
 	CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, projectRoots map[string]string) (string, error)
 }
 
+// CounterChecker validates that a configured token counter strategy and ID
+// are implemented by this release. It is the same availability resolution
+// used at startup, so doctor offline can never disagree with the binary.
+type CounterChecker interface {
+	CheckCounter(strategy, id string) error
+}
+
 type Dependencies struct {
 	ConfigPath string
 	LoadConfig func(path string) (config.Config, error)
@@ -111,6 +118,7 @@ type Dependencies struct {
 	Live       LiveChecker
 	CLI        CLIProviderChecker
 	ACP        ACPProviderChecker
+	Counter    CounterChecker
 }
 
 type Status string
@@ -354,15 +362,12 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 				if defsErr == nil {
 					if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
 						attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model)
-						switch {
-						case resolveErr != nil:
+						if resolveErr != nil {
 							defsErr = fmt.Errorf("resolve attachment_analyzer model: %w", resolveErr)
-						case attachmentResolved.IsAgentCLI():
-							defsErr = errors.New("attachment_analyzer cannot use an agent_cli provider because it requires the ADK load_artifacts tool")
-						default:
-							if !selectedModelAlreadyIncluded(selectedModels, "attachment_analyzer") {
-								selectedModels = append(selectedModels, selectedModel{agent: "attachment_analyzer", resolved: attachmentResolved})
-							}
+						} else if problems := agentdef.ValidateAttachmentModelCapability(attachmentResolved); len(problems) > 0 {
+							defsErr = errors.New(strings.Join(problems, "; "))
+						} else if !selectedModelAlreadyIncluded(selectedModels, "attachment_analyzer") {
+							selectedModels = append(selectedModels, selectedModel{agent: "attachment_analyzer", resolved: attachmentResolved})
 						}
 					}
 				}
@@ -605,7 +610,50 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			if counterCheck == "" {
 				report.fail("token counter", "no token_counter configured for root openai_compatible model", "Add token_counter.strategy (e.g. byte_bound) to the root profile YAML.", false)
 			} else {
-				report.pass("token counter", fmt.Sprintf("strategy: %s", counterCheck))
+				detail := fmt.Sprintf("strategy: %s", counterCheck)
+				if resolvedModel.CounterID != "" {
+					detail += fmt.Sprintf(", id: %s", resolvedModel.CounterID)
+				}
+				if s.deps.Counter != nil {
+					if counterErr := s.deps.Counter.CheckCounter(resolvedModel.CounterStrategy, resolvedModel.CounterID); counterErr != nil {
+						report.fail("token counter", redactor.String(counterErr.Error()), "Use a strategy and id implemented by this release, or roll back to a binary that implements the configured combination. There is no silent fallback.", false)
+					} else {
+						report.pass("token counter", detail)
+					}
+				} else {
+					report.pass("token counter", detail)
+				}
+			}
+			for _, selected := range selectedModels {
+				if selected.resolved == nil || selected.resolved.Type() != agentdef.ProviderTypeOpenAICompatible || selected.resolved.CounterStrategy == "" {
+					continue
+				}
+				if selected.agent == "root_agent" {
+					continue
+				}
+				agentName := "token counter (" + selected.agent + ")"
+				detail := fmt.Sprintf("strategy: %s", selected.resolved.CounterStrategy)
+				if selected.resolved.CounterID != "" {
+					detail += fmt.Sprintf(", id: %s", selected.resolved.CounterID)
+				}
+				if s.deps.Counter == nil {
+					report.pass(agentName, detail)
+					continue
+				}
+				if counterErr := s.deps.Counter.CheckCounter(selected.resolved.CounterStrategy, selected.resolved.CounterID); counterErr != nil {
+					report.fail(agentName, redactor.String(counterErr.Error()), "Use a strategy and id implemented by this release; there is no silent fallback.", false)
+				} else {
+					report.pass(agentName, detail)
+				}
+			}
+			if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
+				if attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model); resolveErr == nil {
+					if problems := agentdef.ValidateAttachmentModelCapability(attachmentResolved); len(problems) > 0 {
+						report.fail("attachment_analyzer capability", strings.Join(problems, "; "), "Configure the attachment_analyzer profile with token_counter.strategy: estimator and id: "+agentdef.VisualEstimatorID+" before rollout.", false)
+					} else {
+						report.pass("attachment_analyzer capability", fmt.Sprintf("visual estimator %s is configured and media-capable", agentdef.VisualEstimatorID))
+					}
+				}
 			}
 		}
 	}
