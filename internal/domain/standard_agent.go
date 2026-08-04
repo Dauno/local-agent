@@ -17,6 +17,12 @@ func (s ProgressState) Terminal() bool {
 	return s == ProgressCleared || s == ProgressFailed || s == ProgressInterrupted
 }
 
+// ProgressLabelMaxRunes is the maximum length of a single progress label in
+// Unicode code points. Slack limits markdown_text to 12,000 characters; this
+// repo uses 11,900 as the safe limit (the same margin as
+// SlackMarkdownChunkRunes), leaving a 100 code point buffer.
+const ProgressLabelMaxRunes = 11900
+
 type ProgressOperation struct {
 	ID              string
 	ConversationKey ConversationKey

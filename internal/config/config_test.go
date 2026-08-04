@@ -615,6 +615,39 @@ func TestValidateRejectsEmptyProgressLabel(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsOversizedProgressLabels(t *testing.T) {
+	t.Parallel()
+	for name, label := range map[string]string{
+		"ascii":     strings.Repeat("a", domain.ProgressLabelMaxRunes+1),
+		"multibyte": strings.Repeat("界", domain.ProgressLabelMaxRunes+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			t.Parallel()
+			cfg := config.Default()
+			cfg.Slack.StandardAgent.ProgressLabels = map[domain.ProgressState]string{
+				domain.ProgressWorking: label,
+			}
+			err := cfg.Validate()
+			var validation *config.ValidationError
+			if !errors.As(err, &validation) || !validation.Has(`slack.standard_agent.progress_labels["working"]`) {
+				t.Fatalf("Validate() error = %v", err)
+			}
+		})
+	}
+}
+
+func TestValidateProgressLabelLimitCountsRunesNotBytes(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Slack.StandardAgent.ProgressLabels = map[domain.ProgressState]string{
+		domain.ProgressWorking: strings.Repeat("界", domain.ProgressLabelMaxRunes),
+		domain.ProgressCleared: strings.Repeat("é", 6000),
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("labels within the Unicode code point limit should validate, got %v", err)
+	}
+}
+
 func TestValidateStandardAgentFeaturesRequireThreadedDMAndBoundedPrompts(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default()
