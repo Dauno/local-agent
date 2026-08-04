@@ -121,7 +121,7 @@ func TestStandardPublisherNeutralizesProgressLabelControls(t *testing.T) {
 		client:    client,
 		botUserID: "U00000001",
 		progressLabels: ResolveProgressLabels(map[domain.ProgressState]string{
-			domain.ProgressWorking: "Trabajando <@U12345678> y <!here>",
+			domain.ProgressWorking:    "Trabajando <@U12345678> y <!here>",
 			domain.ProgressFinalizing: "Fin <!subteam^S12345678> en <#C12345678>",
 		}),
 	}
@@ -200,6 +200,83 @@ func TestStandardPublisherAcceptsMultibyteProgressLabelAtLimit(t *testing.T) {
 	target := domain.ReplyTarget{ChannelID: operation.ChannelID, ThreadTS: operation.ThreadTS}
 	if _, err := publisher.PublishProgress(t.Context(), target, operation); err != nil {
 		t.Fatalf("label at the code point limit should publish, got %v", err)
+	}
+	if runes := len([]rune(client.postedText)); runes != domain.ProgressLabelMaxRunes {
+		t.Fatalf("posted runes = %d, want %d", runes, domain.ProgressLabelMaxRunes)
+	}
+}
+
+// TestStandardPublisherRejectsProgressLabelOversizedOnlyAfterNeutralization
+// pins the "neutralize first, then measure" ordering: a raw label at or under
+// ProgressLabelMaxRunes can still exceed the limit after slackControlPattern
+// expands "<" into "&lt;". A regression that measured the raw label before
+// neutralization would let this label through, so the error must be produced
+// and the Slack client must never be invoked.
+func TestStandardPublisherRejectsProgressLabelOversizedOnlyAfterNeutralization(t *testing.T) {
+	for name, label := range map[string]string{
+		// 11900-14 "a" runes + 12 runes for "<@U12345678>" = 11900-2 runes raw
+		// (within limit), but neutralization grows "<" to "&lt;" so the result
+		// is 11900-14+15 = 11901 runes (over the limit).
+		"mention": strings.Repeat("a", domain.ProgressLabelMaxRunes-14) + "<@U12345678>",
+		// Same shape with a channel-reference control.
+		"channel": strings.Repeat("a", domain.ProgressLabelMaxRunes-14) + "<#C12345678>",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if raw := len([]rune(label)); raw > domain.ProgressLabelMaxRunes {
+				t.Fatalf("premise broken: raw label has %d runes, want <= %d", raw, domain.ProgressLabelMaxRunes)
+			}
+			if neutralized := len([]rune(neutralizeUnsafeControls(label))); neutralized <= domain.ProgressLabelMaxRunes {
+				t.Fatalf("premise broken: neutralized label has %d runes, want > %d", neutralized, domain.ProgressLabelMaxRunes)
+			}
+			client := &fakeStandardMessageClient{}
+			publisher := &StandardPublisher{
+				client:    client,
+				botUserID: "U00000001",
+				progressLabels: ResolveProgressLabels(map[domain.ProgressState]string{
+					domain.ProgressWorking: label,
+				}),
+			}
+			operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
+			target := domain.ReplyTarget{ChannelID: operation.ChannelID, ThreadTS: operation.ThreadTS}
+			if _, err := publisher.PublishProgress(t.Context(), target, operation); err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("PublishProgress error = %v, want length error", err)
+			}
+			if client.postedText != "" {
+				t.Fatalf("post-neutralization oversized label was posted: %q", client.postedText)
+			}
+			operation.MessageTS = "1700000001.000001"
+			if err := publisher.UpdateProgress(t.Context(), operation); err == nil || !strings.Contains(err.Error(), "exceeds") {
+				t.Fatalf("UpdateProgress error = %v, want length error", err)
+			}
+			if client.updatedText != "" {
+				t.Fatalf("post-neutralization oversized label was updated: %q", client.updatedText)
+			}
+		})
+	}
+}
+
+// TestStandardPublisherAcceptsProgressLabelAtLimitAfterNeutralization pins the
+// boundary of the "neutralize first, then measure" ordering: a raw label that
+// neutralizes to exactly ProgressLabelMaxRunes runes is accepted and published.
+func TestStandardPublisherAcceptsProgressLabelAtLimitAfterNeutralization(t *testing.T) {
+	// 11900-15 "a" runes + 12 runes for "<@U12345678>" = 11900-3 runes raw,
+	// neutralized to exactly 11900 runes (the maximum allowed).
+	label := strings.Repeat("a", domain.ProgressLabelMaxRunes-15) + "<@U12345678>"
+	if neutralized := len([]rune(neutralizeUnsafeControls(label))); neutralized != domain.ProgressLabelMaxRunes {
+		t.Fatalf("premise broken: neutralized label has %d runes, want exactly %d", neutralized, domain.ProgressLabelMaxRunes)
+	}
+	client := &fakeStandardMessageClient{}
+	publisher := &StandardPublisher{
+		client:    client,
+		botUserID: "U00000001",
+		progressLabels: ResolveProgressLabels(map[domain.ProgressState]string{
+			domain.ProgressWorking: label,
+		}),
+	}
+	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
+	target := domain.ReplyTarget{ChannelID: operation.ChannelID, ThreadTS: operation.ThreadTS}
+	if _, err := publisher.PublishProgress(t.Context(), target, operation); err != nil {
+		t.Fatalf("label at the post-neutralization limit should publish, got %v", err)
 	}
 	if runes := len([]rune(client.postedText)); runes != domain.ProgressLabelMaxRunes {
 		t.Fatalf("posted runes = %d, want %d", runes, domain.ProgressLabelMaxRunes)
