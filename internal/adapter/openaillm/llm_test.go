@@ -598,6 +598,55 @@ func TestGuardRejectsMediaWithByteBoundBeforeHTTP(t *testing.T) {
 	}
 }
 
+func TestGuardRejectsLargeInputAudioBeforeHTTP(t *testing.T) {
+	var calls atomic.Int64
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		http.Error(writer, "unexpected HTTP request", http.StatusInternalServerError)
+	}))
+	t.Cleanup(server.Close)
+	llm, err := New(WithAPIKey("test"), WithBaseURL(server.URL), WithModel("model"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	counter, err := tokencounter.New(tokencounter.StrategyEstimator, tokencounter.EstimatorVisualTileConservativeV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	budget := domain.RequestBudget{HardTokens: 512}
+	if err := llm.ConfigureRequestGuard(counter, budget, "test/audio"); err != nil {
+		t.Fatal(err)
+	}
+	request := &model.LLMRequest{Contents: []*genai.Content{{
+		Role:  genai.RoleUser,
+		Parts: []*genai.Part{genai.NewPartFromBytes(bytes.Repeat([]byte("audio"), 4096), "audio/wav")},
+	}}}
+	converted, err := llm.convertRequest(request, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if converted.envelope.SerializerID != port.SerializerOpenAIChatCompletionsV1 {
+		t.Fatalf("audio serializer = %q, want %q", converted.envelope.SerializerID, port.SerializerOpenAIChatCompletionsV1)
+	}
+	if strings.Contains(converted.envelope.Serialized, mediaMarker) {
+		t.Fatal("audio countable projection replaced real bytes with media marker")
+	}
+	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), request, false))
+	if !errors.Is(gotErr, domain.ErrIrreducibleContext) {
+		t.Fatalf("GenerateContent() error = %v, want irreducible context", gotErr)
+	}
+	var irreducible *domain.IrreducibleContextError
+	if !errors.As(gotErr, &irreducible) {
+		t.Fatalf("GenerateContent() error = %v, want IrreducibleContextError", gotErr)
+	}
+	if irreducible.MinimumTokens <= budget.HardTokens || irreducible.HardTokens != budget.HardTokens {
+		t.Fatalf("irreducible budget = %#v, want minimum > %d and hard %d", irreducible, budget.HardTokens, budget.HardTokens)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("over-budget audio request made %d HTTP calls, want 0", calls.Load())
+	}
+}
+
 func TestConvertRequestRejectsUndecodableImagePart(t *testing.T) {
 	llm := &OpenAICompatibleLLM{model: "test-model"}
 	request := &model.LLMRequest{Contents: []*genai.Content{{

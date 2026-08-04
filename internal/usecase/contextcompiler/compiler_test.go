@@ -9,6 +9,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -57,6 +58,37 @@ func TestCompilerMinimumDryRunFailsBeforeWrites(t *testing.T) {
 	}
 	if store.putCalls != 0 {
 		t.Fatalf("result-store writes = %d, want zero before minimum admission", store.putCalls)
+	}
+}
+
+func TestCompilerAcceptsVisualEstimatorForNonEmptyBudgetTurn(t *testing.T) {
+	counter, err := tokencounter.New(tokencounter.StrategyEstimator, tokencounter.EstimatorVisualTileConservativeV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := []domain.Content{{
+		Role:  domain.ContentRoleUser,
+		Parts: []domain.ContentPart{{Text: "hello"}},
+	}}
+	result, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents,
+		ModelBudget: domain.RequestBudget{
+			HardTokens:   10_000,
+			TargetTokens: 10_000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("non-empty estimator budget turn failed: %v", err)
+	}
+	if result.Diagnostics.CounterStrategy != tokencounter.StrategyByteBound {
+		t.Fatalf("compiler counter strategy = %q, want %q", result.Diagnostics.CounterStrategy, tokencounter.StrategyByteBound)
+	}
+	serialized, err := domain.CanonicalJSON(result.Contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Diagnostics.RequestTokensBefore != len(serialized)*2 {
+		t.Fatalf("compiler projection count = %d, want conservative 2x byte bound %d", result.Diagnostics.RequestTokensBefore, len(serialized)*2)
 	}
 }
 

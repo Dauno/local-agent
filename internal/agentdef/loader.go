@@ -631,6 +631,9 @@ func validateProfile(providerPrefix, providerType, name string, profile Profile)
 							errs = append(errs, fmt.Sprintf("%s: token_counter.id is required for strategy %q", prefix, profile.TokenCounter.Strategy))
 						}
 					case "byte_bound":
+						if strings.TrimSpace(profile.TokenCounter.ID) != "" {
+							errs = append(errs, fmt.Sprintf("%s: token_counter.id must be empty for strategy %q", prefix, profile.TokenCounter.Strategy))
+						}
 					default:
 						errs = append(errs, fmt.Sprintf("%s: token_counter.strategy must be one of official, endpoint, estimator, or byte_bound", prefix))
 					}
@@ -964,6 +967,9 @@ func ValidateProfileCapability(resolved *ResolvedModel) []string {
 			errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.id is required for strategy %q", resolved.Model, resolved.CounterStrategy))
 		}
 	case "byte_bound":
+		if strings.TrimSpace(resolved.CounterID) != "" {
+			errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.id must be empty for strategy %q", resolved.Model, resolved.CounterStrategy))
+		}
 	default:
 		errs = append(errs, fmt.Sprintf("openai_compatible model %q: token_counter.strategy must be one of official, endpoint, estimator, or byte_bound", resolved.Model))
 	}

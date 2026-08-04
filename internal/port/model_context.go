@@ -15,6 +15,7 @@ import (
 const (
 	SerializerOpenAIChatCompletionsV1           = "openai-chat-completions-v1"
 	SerializerOpenAIChatCompletionsMultimodalV2 = "openai-chat-completions-multimodal-v2"
+	SerializerContextProjectionV1               = "context-projection-v1"
 )
 
 // ModelRequestMedia is provider-neutral metadata for one binary media part in

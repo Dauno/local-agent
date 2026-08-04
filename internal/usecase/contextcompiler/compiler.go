@@ -414,7 +414,7 @@ func (c *Compiler) countProjection(ctx context.Context, contents []domain.Conten
 	if err != nil {
 		return port.TokenCount{}, fmt.Errorf("context compiler: serialize final projection: %w", err)
 	}
-	count, err := c.tokenCounter.CountRequest(ctx, port.ModelRequestEnvelope{SerializerID: "context-projection-v1", Serialized: string(serialized)})
+	count, err := c.tokenCounter.CountRequest(ctx, port.ModelRequestEnvelope{SerializerID: port.SerializerContextProjectionV1, Serialized: string(serialized)})
 	if err != nil {
 		return port.TokenCount{}, fmt.Errorf("request_token_count_unavailable: %w", err)
 	}
@@ -432,7 +432,9 @@ func (c *Compiler) countProjection(ctx context.Context, contents []domain.Conten
 	}
 	// Domain projection JSON can become JSON-escaped string content during
 	// provider conversion. A 2x byte bound remains conservative for that second
-	// serialization; the provider-shaped guard is still authoritative.
+	// serialization; the provider-shaped guard is still authoritative. Estimator
+	// counters return byte_bound for this internal serializer so this adjustment
+	// remains explicit rather than being hidden in the estimator.
 	if count.Strategy == "byte_bound" && !zeroSample {
 		maxInt := int(^uint(0) >> 1)
 		if count.Tokens > maxInt/2 {

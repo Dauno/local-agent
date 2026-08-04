@@ -839,6 +839,56 @@ tool_scope: invocation_scoped
 	}
 }
 
+func TestDoctorRejectsUnimplementedOpenAIAuxiliaryCounterWithCLIRoot(t *testing.T) {
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorCLIDefinitions(t, stateDir, false)
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "auxiliary.yaml"), []byte(`
+name: auxiliary
+type: openai_compatible
+base_url: https://auxiliary.example.test
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  default:
+    model: auxiliary-model
+    context_window_tokens: 128000
+    token_counter:
+      strategy: estimator
+      id: not-installed
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "scout.yaml"), []byte(`
+agent_class: LlmAgent
+name: scout
+model: auxiliary/default
+description: inspect workspace
+instruction: inspect the workspace
+tool_scope: invocation_scoped
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	deps, _, _ := validDependencies()
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
+	deps.CLI = &fakeCLI{}
+	deps.Counter = &fakeCounter{implemented: map[string]string{"estimator": agentdef.VisualEstimatorID}}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report := service.Run(t.Context(), false)
+	if report.ExitCode() != 1 {
+		t.Fatalf("doctor accepted unimplemented auxiliary counter: %#v", report.Results)
+	}
+	for _, result := range report.Results {
+		if result.Name == "token counter (scout)" && result.Status == StatusFail && strings.Contains(result.Detail, "not-installed") {
+			return
+		}
+	}
+	t.Fatalf("auxiliary token counter failure missing: %#v", report.Results)
+}
+
 func writeDoctorCLIDefinitions(t *testing.T, stateDir string, includeAttachment bool) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
