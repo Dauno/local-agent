@@ -1,6 +1,6 @@
 # Release Notes
 
-## ADK Context Compaction
+## v0.5.0 (2026-08-04)
 
 - Durable ADK history projection now preserves complete active tool and confirmation protocols, including invocations that began before a concurrent user message.
 - Recent raw turns are selected before optional summaries; summaries are bounded, redacted before persistence, revalidated on reload, and protected by accumulated source digests.
