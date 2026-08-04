@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 func TestDefaultMatchesPRD(t *testing.T) {
@@ -68,7 +69,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 				"Resume el contexto y destaca las decisiones pendientes.",
 				"Analiza el proyecto y señala los riesgos principales.",
 				"Prepara un plan de implementación verificable.",
-			}, UpdateIntervalSeconds: 3},
+			}, UpdateIntervalSeconds: 3, ProgressLabels: map[domain.ProgressState]string{}},
 			Context: config.SlackContextConfig{
 				Enabled:                     false,
 				MaxChars:                    1500,
@@ -246,6 +247,7 @@ slack:
       - Prepara un plan de implementación verificable.
     streaming_enabled: false
     update_interval_seconds: 3
+    progress_labels: {}
   context:
     enabled: false
     max_chars: 1500
@@ -543,6 +545,73 @@ func TestValidateAcceptsConfiguredAccessListsAndHeaders(t *testing.T) {
 
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() error: %v", err)
+	}
+}
+
+func TestParseAppliesProgressLabels(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte(`slack:
+  standard_agent:
+    progress_labels:
+      working: Pensando
+      waiting_confirmation: Revisión pendiente
+      finalizing: Finalizando
+      cleared: Listo
+      failed: Error
+      interrupted: Interrumpido
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	want := map[domain.ProgressState]string{
+		domain.ProgressWorking:             "Pensando",
+		domain.ProgressWaitingConfirmation: "Revisión pendiente",
+		domain.ProgressFinalizing:          "Finalizando",
+		domain.ProgressCleared:             "Listo",
+		domain.ProgressFailed:              "Error",
+		domain.ProgressInterrupted:         "Interrumpido",
+	}
+	if !reflect.DeepEqual(cfg.Slack.StandardAgent.ProgressLabels, want) {
+		t.Fatalf("progress labels = %#v, want %#v", cfg.Slack.StandardAgent.ProgressLabels, want)
+	}
+}
+
+func TestParseMissingProgressLabelsStayEmpty(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte(`agent:
+  name: minimal
+`))
+	if err != nil {
+		t.Fatalf("Parse() error: %v", err)
+	}
+	if labels := cfg.Slack.StandardAgent.ProgressLabels; labels == nil || len(labels) != 0 {
+		t.Fatalf("absent progress_labels should resolve to an empty map: %#v", labels)
+	}
+}
+
+func TestParseRejectsUnknownProgressLabelKeys(t *testing.T) {
+	t.Parallel()
+	_, err := config.Parse([]byte(`slack:
+  standard_agent:
+    progress_labels:
+      working: Pensando
+      unknown_state: Surprise
+`))
+	if err == nil || !strings.Contains(err.Error(), "unknown_state") || !strings.Contains(err.Error(), "progress_labels") {
+		t.Fatalf("Parse() error = %v, want unknown progress state error", err)
+	}
+}
+
+func TestValidateRejectsEmptyProgressLabel(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Slack.StandardAgent.ProgressLabels = map[domain.ProgressState]string{
+		domain.ProgressWorking: "",
+	}
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) || !validation.Has(`slack.standard_agent.progress_labels["working"]`) {
+		t.Fatalf("Validate() error = %v", err)
 	}
 }
 

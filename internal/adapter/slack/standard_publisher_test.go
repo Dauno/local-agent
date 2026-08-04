@@ -58,6 +58,63 @@ func TestStandardPublisherUsesApplicationOwnedProgressLabels(t *testing.T) {
 	}
 }
 
+func TestStandardPublisherUsesConfiguredProgressLabelsWithFallback(t *testing.T) {
+	client := &fakeStandardMessageClient{}
+	publisher := &StandardPublisher{
+		client:    client,
+		botUserID: "U00000001",
+		progressLabels: ResolveProgressLabels(map[domain.ProgressState]string{
+			domain.ProgressWorking: "Pensando",
+			domain.ProgressCleared: "Listo",
+		}),
+	}
+	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
+	target := domain.ReplyTarget{ChannelID: operation.ChannelID, ThreadTS: operation.ThreadTS}
+	published, err := publisher.PublishProgress(t.Context(), target, operation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.postedText != "Pensando" {
+		t.Fatalf("configured working label text=%q", client.postedText)
+	}
+	for state, want := range map[domain.ProgressState]string{
+		domain.ProgressWaitingConfirmation: "Waiting for approval",
+		domain.ProgressFinalizing:          "Finalizing",
+		domain.ProgressCleared:             "Listo",
+		domain.ProgressFailed:              "Interrupted",
+		domain.ProgressInterrupted:         "Interrupted",
+	} {
+		operation.MessageTS = published.LastMessageTS
+		operation.State = state
+		if err := publisher.UpdateProgress(t.Context(), operation); err != nil {
+			t.Fatal(err)
+		}
+		if client.updatedText != want {
+			t.Fatalf("state %q label=%q, want %q", state, client.updatedText, want)
+		}
+	}
+}
+
+func TestResolveProgressLabelsOverlaysDefaults(t *testing.T) {
+	resolved := ResolveProgressLabels(nil)
+	if len(resolved) != 6 || resolved[domain.ProgressWorking] != "Working" || resolved[domain.ProgressInterrupted] != "Interrupted" {
+		t.Fatalf("nil resolution = %#v", resolved)
+	}
+	resolved = ResolveProgressLabels(map[domain.ProgressState]string{
+		domain.ProgressWorking: "Pensando",
+		domain.ProgressFailed:  "Interrumpido",
+	})
+	if resolved[domain.ProgressWorking] != "Pensando" || resolved[domain.ProgressFailed] != "Interrumpido" || resolved[domain.ProgressCleared] != "Completed" {
+		t.Fatalf("overlay resolution = %#v", resolved)
+	}
+	resolved = ResolveProgressLabels(map[domain.ProgressState]string{
+		domain.ProgressWorking: "   ",
+	})
+	if resolved[domain.ProgressWorking] != "Working" {
+		t.Fatalf("empty configured label should keep the default: %#v", resolved)
+	}
+}
+
 func TestStandardPublisherRecoversProgressByExactMetadata(t *testing.T) {
 	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
 	client := &fakeStandardMessageClient{messages: []slackapi.Message{{Msg: slackapi.Msg{
