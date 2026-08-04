@@ -7,10 +7,30 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
+// Serializer identifiers for countable model request envelopes. Requests
+// without media keep the v1 representation; multimodal requests use v2, which
+// replaces binary payloads with fixed markers and carries order-preserving
+// media metadata. Counters must reject serializer IDs whose shape they cannot
+// interpret.
+const (
+	SerializerOpenAIChatCompletionsV1           = "openai-chat-completions-v1"
+	SerializerOpenAIChatCompletionsMultimodalV2 = "openai-chat-completions-multimodal-v2"
+)
+
+// ModelRequestMedia is provider-neutral metadata for one binary media part in
+// a countable envelope. It deliberately carries no bytes or data URL.
+type ModelRequestMedia struct {
+	MIMEType string
+	Width    int
+	Height   int
+	Detail   string
+}
+
 type ModelRequestEnvelope struct {
 	SerializerID string
 	ProfileID    string
 	Serialized   string
+	Media        []ModelRequestMedia
 }
 
 type TokenCount struct {

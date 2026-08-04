@@ -109,7 +109,7 @@ func (liveChecker) CheckModel(ctx context.Context, cfg config.ModelConfig, apiKe
 	if err != nil {
 		return err
 	}
-	counter, _ := tokencounter.New("byte_bound")
+	counter, _ := tokencounter.New("byte_bound", "")
 	budget, _ := domain.NewRequestBudget(domain.MaxSafeContextWindow, domain.RequestBudgetPolicy{MaxRequestPercent: 60})
 	if err := llm.ConfigureRequestGuard(counter, budget, "legacy-doctor-probe"); err != nil {
 		return err
@@ -267,6 +267,16 @@ func newModelFromResolved(resolved *agentdef.ResolvedModel, apiKey string) (*ope
 		return nil, err
 	}
 	return llm, nil
+}
+
+// counterChecker implements doctor.CounterChecker with the same factory the
+// startup path uses, so doctor offline and runtime composition can never
+// disagree about availability.
+type counterChecker struct{}
+
+func (counterChecker) CheckCounter(strategy, id string) error {
+	_, err := tokencounter.New(strategy, id)
+	return err
 }
 
 // cliProviderChecker implements doctor.CLIProviderChecker for agent_cli

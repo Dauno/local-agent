@@ -9,7 +9,56 @@
 - Documento predecesor: `docs/SLACK-FILES-ADK-ARTIFACTS-TRD.md`
 - Alcance: imagenes inbound de Slack procesadas por `attachment_analyzer`; texto y audio conservan su conducta actual.
 
-No se ejecutaron builds, tests ni llamadas live durante la elaboracion de este documento.
+### Ejecucion P0 (2026-08-04)
+
+Implementacion P0 completa en la worktree
+`.worktrees/slack-image-attachments-request-context-irreducible` (rama
+`feat/slack-image-attachments-multimodal`):
+
+- Normalizador interno `internal/adapter/adkartifact/image.go` con sniff
+  `image.DecodeConfig` antes de decode completo, limites FR-04 con aritmetica
+  `int64`, orientacion EXIF antes de resize, sin upscale, edge final 1.568 px,
+  canonizacion FR-07, reintentos por edges `1568,1344,1152,1024,768,512` y
+  limite 2 MiB. Dependencias pure Go fijadas: `github.com/disintegration/imaging
+  v1.6.2` y `golang.org/x/image v0.41.0` (sin CGO, sin encoder WebP).
+- Processor de `adkartifact` normaliza antes de `Artifact.Save`; el Artifact
+  visual contiene solo el derivado con MIME/extension canonicos; texto y audio
+  conservan su ruta. Errores typed en `internal/domain` con codigos
+  `attachment_image_invalid`, `attachment_image_format_unsupported`,
+  `attachment_image_dimensions_exceeded` y
+  `attachment_image_normalized_too_large`.
+- `ModelRequestEnvelope.Media` en `internal/port/model_context.go`; conversion
+  tipada de una pasada en `openaillm` con data URL real en el request HTTP y
+  proyeccion contable con marcador fijo `local-agent://media/omitted`;
+  serializer `openai-chat-completions-v1` sin media y
+  `openai-chat-completions-multimodal-v2` con media.
+- Factory `tokencounter.New(strategy, id)` con `byte_bound` (sin media) y
+  `estimator`/`visual-tile-conservative-v1` (FR-14, `Exact=false`);
+  combinaciones no implementadas fallan en startup y doctor sin fallback.
+  `attachment_analyzer` exige `estimator`/`visual-tile-conservative-v1`
+  (FR-18) via `agentdef.ValidateAttachmentModelCapability`.
+- Fixture sanitizado `internal/integration/testdata/attachment-screenshot-600k.jpg`
+  (1600x1200, 649.884 bytes) y regresion end-to-end
+  `internal/integration/attachment_image_test.go`: el request legacy base64+
+  byte-bound excede 65.536; la ruta nueva admite la peticion visual bajo el hard
+  limit con payload contable sin base64; el caso sobre presupuesto prueba cero
+  requests HTTP visuales.
+
+Comandos ejecutados en la worktree (todos verdes salvo indicacion):
+
+```sh
+go build -trimpath ./cmd/local-agent
+go test ./...
+go vet ./...
+git diff --check
+go mod tidy && go mod verify
+```
+
+`go test ./...` deja dos fallos preexistentes ajenos a P0
+(`internal/agentdef`: `TestTrackedDefinitionsLoad` y
+`TestTrackedWorkflowFixturesLoad`), que tambien fallan en `main`: el commit
+`3040fcc` elimino las definiciones trackeadas de `.local-agent/` que esos tests
+cargan; su restauracion queda fuera del alcance P0.
 
 ## Contexto y problema
 
