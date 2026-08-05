@@ -338,6 +338,7 @@ func TestJobsReconcileRendersSessionID(t *testing.T) {
 	backend := &reconciliationBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{
 		JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5,
 		ResultAvailable: true, ACPSessionID: "ses_reconciled_identity",
+		ResultSHA256: strings.Repeat("a", 64), ResultBytes: 1024, DeliveryMode: domain.JobResultDeliveryFile,
 	}}
 	var output, stderr bytes.Buffer
 	root, _ := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
@@ -347,10 +348,46 @@ func TestJobsReconcileRendersSessionID(t *testing.T) {
 	if !strings.Contains(output.String(), "acp_session_id: ses_reconciled_identity") {
 		t.Fatalf("reconcile output missing session ID:\n%s", output.String())
 	}
+	if !strings.Contains(output.String(), "result_available: true") {
+		t.Fatalf("reconcile output missing strict result availability:\n%s", output.String())
+	}
+}
+
+func TestJobsReconcileRendersStrictResultAvailability(t *testing.T) {
+	view := domain.ExternalAgentJobStatusView{JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5}
+	for _, tt := range []struct {
+		name string
+		view domain.ExternalAgentJobStatusView
+		want string
+	}{
+		{
+			name: "incomplete identity promises no result",
+			view: view,
+			want: "result_available: false",
+		},
+		{
+			name: "complete identity projects the result",
+			view: domain.ExternalAgentJobStatusView{JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5,
+				ResultAvailable: true, ResultSHA256: strings.Repeat("a", 64), ResultBytes: 1024, DeliveryMode: domain.JobResultDeliveryMarkdown},
+			want: "result_available: true",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := &reconciliationBackend{fakeBackend: setupBackend(), view: tt.view}
+			var output, stderr bytes.Buffer
+			root, _ := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+			if code := Execute(t.Context(), root, []string{"jobs", "reconcile", "job_123", "--expect-revision", "5", "--confirm"}, &stderr); code != 0 {
+				t.Fatalf("confirmed exit=%d stderr=%q", code, stderr.String())
+			}
+			if !strings.Contains(output.String(), tt.want) {
+				t.Fatalf("reconcile output missing %q:\n%s", tt.want, output.String())
+			}
+		})
+	}
 }
 
 func TestJobsReconcileRequiresConfirmationAndRevision(t *testing.T) {
-	backend := &reconciliationBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5, ResultAvailable: true}}
+	backend := &reconciliationBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5}}
 	var output, stderr bytes.Buffer
 	root, err := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
 	if err != nil {

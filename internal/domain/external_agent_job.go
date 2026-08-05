@@ -553,6 +553,48 @@ func ValidResultIdentity(sha256Hex string, bytes int64) (string, int64) {
 	return sha256Hex, bytes
 }
 
+// ValidInlineResult reports whether a completed job's inline result shape is
+// structurally coherent: a non-empty summary whose exact UTF-8 bytes match a
+// positive byte count and a valid SHA-256 identity over those same bytes. This
+// mirrors the inline branch of the verified result readers; any ambiguity
+// fails closed to false and no identity is fabricated for missing data.
+func ValidInlineResult(summary, sha256Hex string, bytes int64) bool {
+	if summary == "" || !utf8.ValidString(summary) {
+		return false
+	}
+	sha256Hex = strings.ToLower(sha256Hex)
+	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
+		return false
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return false
+	}
+	if int64(len([]byte(summary))) != bytes {
+		return false
+	}
+	digest := sha256.Sum256([]byte(summary))
+	return fmt.Sprintf("%x", digest) == sha256Hex
+}
+
+// ValidArtifactResult reports whether a completed job's file-mode result shape
+// is structurally coherent: a non-empty artifact reference that is a safe
+// filename component with a positive byte count and a valid SHA-256 identity.
+// Artifact bytes are verified by the artifact reader at read time; the status
+// projection can only check the structural identity. Fail-closed on ambiguity.
+func ValidArtifactResult(artifactRef, sha256Hex string, bytes int64) bool {
+	if artifactRef == "" || strings.ContainsAny(artifactRef, "/\\\x00\r\n") {
+		return false
+	}
+	sha256Hex = strings.ToLower(sha256Hex)
+	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
+		return false
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return false
+	}
+	return true
+}
+
 func sanitizeNotificationText(value string, maxRunes int) string {
 	var builder strings.Builder
 	for _, r := range value {
@@ -728,10 +770,21 @@ func (j ExternalAgentJob) StatusView() ExternalAgentJobStatusView {
 	} else if j.ResultSummary != "" {
 		mode = JobResultDeliveryMarkdown
 	}
+	available := false
+	if j.Status == JobCompleted {
+		// The artifact shape governs whenever an artifact reference exists,
+		// matching the readers' precedence; an incoherent artifact never falls
+		// back to the inline shape.
+		if j.ResultArtifact != "" {
+			available = ValidArtifactResult(j.ResultArtifact, j.ResultSHA256, j.ResultBytes)
+		} else {
+			available = ValidInlineResult(j.ResultSummary, j.ResultSHA256, j.ResultBytes)
+		}
+	}
 	return ExternalAgentJobStatusView{
 		JobID: j.ID, Status: j.Status, StatusRevision: j.StatusRevision,
 		ACPSessionID:    j.ACPSessionID,
-		ResultAvailable: j.Status == JobCompleted && (j.ResultSummary != "" || j.ResultArtifact != ""),
+		ResultAvailable: available,
 		ResultSHA256:    j.ResultSHA256, ResultBytes: j.ResultBytes, DeliveryMode: mode,
 		ErrorCode: j.ErrorCode, FinishedAt: j.FinishedAt,
 	}

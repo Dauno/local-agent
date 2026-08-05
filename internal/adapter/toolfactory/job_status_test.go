@@ -2,8 +2,11 @@ package toolfactory_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -122,6 +125,122 @@ func TestJobStatusQueuedSessionIsEmpty(t *testing.T) {
 	}
 	if result["phase"] != "" || result["health"] != "" {
 		t.Fatalf("queued projection = %v/%v", result["phase"], result["health"])
+	}
+}
+
+// runJobStatusTool invokes the bound job_status tool and returns the decoded
+// JSON response for the given reader fixture.
+func runJobStatusTool(t *testing.T, reader stubExternalJobReader, key domain.ConversationKey) map[string]any {
+	t.Helper()
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatalf("tools: %v", err)
+	}
+	var statusTool runnableFunctionTool
+	for _, candidate := range tools {
+		if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == "job_status" {
+			statusTool, _ = candidate.(runnableFunctionTool)
+		}
+	}
+	if statusTool == nil {
+		t.Fatal("job_status tool is unavailable")
+	}
+	value, err := statusTool.Run(&stubToolContext{}, map[string]any{"job_id": reader.job.ID})
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	raw, _ := json.Marshal(value)
+	var result map[string]any
+	if err := json.Unmarshal(raw, &result); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	return result
+}
+
+func TestJobStatusUsesStrictResultAvailability(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	summary := "safe &lt;complete&gt;"
+	summaryDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(summary)))
+	wrongDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("other")))
+	artifactDigest := strings.Repeat("a", 64)
+	tests := []struct {
+		name string
+		job  domain.ExternalAgentJob
+		want bool
+	}{
+		{
+			name: "completed inline with complete identity",
+			job:  domain.ExternalAgentJob{ID: "job_inline", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary)))},
+			want: true,
+		},
+		{
+			name: "completed file mode with complete identity",
+			job:  domain.ExternalAgentJob{ID: "job_file", Status: domain.JobCompleted, StatusRevision: 4, ResultArtifact: "job_file-delivery.result", ResultSHA256: artifactDigest, ResultBytes: 1024},
+			want: true,
+		},
+		{
+			name: "completed with empty summary",
+			job:  domain.ExternalAgentJob{ID: "job_empty", Status: domain.JobCompleted, StatusRevision: 4, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary)))},
+			want: false,
+		},
+		{
+			name: "completed with empty SHA",
+			job:  domain.ExternalAgentJob{ID: "job_nosha", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultBytes: int64(len([]byte(summary)))},
+			want: false,
+		},
+		{
+			name: "completed with wrong SHA value",
+			job:  domain.ExternalAgentJob{ID: "job_wrong", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: wrongDigest, ResultBytes: int64(len([]byte(summary)))},
+			want: false,
+		},
+		{
+			name: "completed with malformed SHA",
+			job:  domain.ExternalAgentJob{ID: "job_badsha", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: "digest", ResultBytes: int64(len([]byte(summary)))},
+			want: false,
+		},
+		{
+			name: "completed with zero result bytes",
+			job:  domain.ExternalAgentJob{ID: "job_zero", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: 0},
+			want: false,
+		},
+		{
+			name: "completed with mismatched byte count",
+			job:  domain.ExternalAgentJob{ID: "job_mismatch", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary))) + 1},
+			want: false,
+		},
+		{
+			name: "completed artifact with path-like reference",
+			job:  domain.ExternalAgentJob{ID: "job_badref", Status: domain.JobCompleted, StatusRevision: 4, ResultArtifact: "dir/job-delivery.result", ResultSHA256: artifactDigest, ResultBytes: 1024},
+			want: false,
+		},
+		{
+			name: "completed artifact with zero bytes",
+			job:  domain.ExternalAgentJob{ID: "job_artifactzero", Status: domain.JobCompleted, StatusRevision: 4, ResultArtifact: "job_artifactzero-delivery.result", ResultSHA256: artifactDigest, ResultBytes: 0},
+			want: false,
+		},
+		{
+			name: "incoherent artifact does not fall back to inline",
+			job:  domain.ExternalAgentJob{ID: "job_dual", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary))), ResultArtifact: "bad/ref.result"},
+			want: false,
+		},
+		{
+			name: "non-completed with complete inline identity",
+			job:  domain.ExternalAgentJob{ID: "job_failed", Status: domain.JobFailed, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary)))},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			reader := stubExternalJobReader{job: &tt.job}
+			result := runJobStatusTool(t, reader, key)
+			if result["result_available"] != tt.want {
+				t.Fatalf("result_available = %v, want %v", result["result_available"], tt.want)
+			}
+			if result["status"] != string(tt.job.Status) {
+				t.Fatalf("status = %v", result["status"])
+			}
+		})
 	}
 }
 
