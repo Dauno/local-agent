@@ -96,6 +96,61 @@ func TestMultipartNotificationActivatesOnce(t *testing.T) {
 	}
 }
 
+func TestPublicationActivationCountByModeAndPath(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		mode       domain.ExternalAgentJobMode
+		reconciled bool
+		want       int
+	}{
+		{"detached fresh publication", domain.JobDetached, false, 1},
+		{"detached reconciled publication", domain.JobDetached, true, 1},
+		{"foreground fresh publication", domain.JobForeground, false, 0},
+		{"foreground reconciled publication", domain.JobForeground, true, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store, jobs, now := newActivationTestStore(t)
+			job := activationTestJob("activation-"+tt.name, now)
+			job.Mode = tt.mode
+			terminalizeActivationTestJob(t, jobs, job, now)
+			notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+			if tt.reconciled {
+				if err := jobs.MarkNotificationUnknown(t.Context(), notification, "ambiguous"); err != nil {
+					t.Fatal(err)
+				}
+				var nextAttemptNanos int64
+				if err := store.DB().QueryRowContext(t.Context(), `SELECT next_attempt_at FROM external_agent_job_notifications WHERE job_id = ? AND status_revision = ? AND kind = ?`,
+					notification.JobID, notification.StatusRevision, notification.Kind).Scan(&nextAttemptNanos); err != nil {
+					t.Fatal(err)
+				}
+				var err error
+				notification, err = jobs.ClaimNextNotification(t.Context(), time.Unix(0, nextAttemptNanos), "reconciler", time.Minute)
+				if err != nil || notification == nil || !notification.NeedsReconciliation {
+					t.Fatalf("reconciled notification claim = %#v, err=%v", notification, err)
+				}
+			}
+			if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000001", now.Add(3*time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM external_agent_job_activations WHERE job_id = ?`, job.ID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != tt.want {
+				t.Fatalf("%s activation count = %d, want %d", tt.name, count, tt.want)
+			}
+			var state string
+			if err := store.DB().QueryRowContext(t.Context(), `SELECT publish_state FROM external_agent_job_notifications WHERE job_id = ? AND status_revision = ? AND kind = ?`,
+				job.ID, notification.StatusRevision, notification.Kind).Scan(&state); err != nil {
+				t.Fatal(err)
+			}
+			if state != string(domain.NotificationPublished) {
+				t.Fatalf("%s notification state = %q, want published", tt.name, state)
+			}
+		})
+	}
+}
+
 func TestActivationClaimsUseConversationOrderAndCAS(t *testing.T) {
 	_, jobs, now := newActivationTestStore(t)
 	first := activationTestJob("activation-order-a", now)
@@ -259,6 +314,7 @@ func activationTestJob(id string, now time.Time) domain.ExternalAgentJob {
 	job := testExternalAgentJob(now)
 	job.ID = id
 	job.OriginalCallID = id + "-call"
+	job.Mode = domain.JobDetached
 	return job
 }
 
