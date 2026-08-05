@@ -823,10 +823,10 @@ func insertV30JobRow(t *testing.T, db *sql.DB, id, mode, status, summary, artifa
 		job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 		task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 		conversation_key, status, result_summary, result_artifact, result_sha256, result_bytes,
-		timeout_at, created_at, updated_at)
+		status_revision, timeout_at, created_at, updated_at)
 		VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
 		'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
-		'slack:T12345678:dm:D12345678', ?, ?, ?, ?, ?, 2, 1, 1)`,
+		'slack:T12345678:dm:D12345678', ?, ?, ?, ?, ?, 1, 2, 1, 1)`,
 		id, mode, id+"-call", status, summary, artifact, sha, bytes); err != nil {
 		t.Fatal(err)
 	}
@@ -1212,10 +1212,10 @@ func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.
 		if _, err := raw.ExecContext(ctx, `INSERT INTO external_agent_jobs (
 			job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 			task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
-			conversation_key, status, result_sha256, result_bytes, timeout_at, created_at, updated_at)
+			conversation_key, status, result_sha256, result_bytes, status_revision, timeout_at, created_at, updated_at)
 			VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
 			'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
-			'slack:T12345678:dm:D12345678', ?, ?, ?, 2, 1, 1)`,
+			'slack:T12345678:dm:D12345678', ?, ?, ?, 1, 2, 1, 1)`,
 			id, mode, id+"-call", status, resultSHA, resultBytes); err != nil {
 			t.Fatal(err)
 		}
@@ -1259,6 +1259,9 @@ func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.
 	insertV30Job("matrix-invalid-result", "detached", "completed", "not-a-digest", int64(len("safe result")))
 	insertV30Notification("matrix-invalid-result", "completed", markdownText, resultDigest, "delivery_v1", "markdown", "", int64(len("safe result")))
 
+	insertV30Job("matrix-invalid-legacy", "detached", "completed", "not-a-digest", int64(len("safe result")))
+	insertV30Notification("matrix-invalid-legacy", "completed", legacyMarkdown, legacyDigest, "legacy_v1", "markdown", "", 0)
+
 	insertV30Job("matrix-empty-markdown", "detached", "completed", resultDigest, int64(len("safe result")))
 	insertV30Notification("matrix-empty-markdown", "completed", "   ", fmt.Sprintf("%x", sha256.Sum256([]byte("   "))), "legacy_v1", "markdown", "", 0)
 
@@ -1292,8 +1295,14 @@ func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.
 		"matrix-detached-failed":   {1, fmt.Sprintf("%x", sha256.Sum256([]byte(failedMarkdown))), int64(len([]byte(failedMarkdown))), "", 0},
 		"matrix-foreground":        {0, markdownDigest, int64(len([]byte(markdownText))), resultDigest, int64(len("safe result"))},
 		"matrix-legacy":            {0, legacyDigest, int64(len([]byte(legacyMarkdown))), resultDigest, int64(len("safe result"))},
-		"matrix-invalid-result":    {1, markdownDigest, int64(len([]byte(markdownText))), "", int64(len("safe result"))},
-		"matrix-empty-markdown":    {0, "", 0, resultDigest, int64(len("safe result"))},
+		// A delivery_v1 row always keeps its own complete content identity: a
+		// digest over the bytes it actually delivered, never the job's broken
+		// sha paired with stale bytes (CR2 atomic-pair fix).
+		"matrix-invalid-result": {1, markdownDigest, int64(len([]byte(markdownText))), resultDigest, int64(len("safe result"))},
+		// A legacy row with an unclassifiable job identity fails closed to the
+		// empty pair; bytes are never retained without a digest.
+		"matrix-invalid-legacy": {1, legacyDigest, int64(len([]byte(legacyMarkdown))), "", 0},
+		"matrix-empty-markdown": {0, "", 0, resultDigest, int64(len("safe result"))},
 	}
 	for jobID, want := range cases {
 		var got expected
@@ -1327,6 +1336,120 @@ func uploadStateForPolicy(policy, deliveryMode string) string {
 		return "completed"
 	}
 	return "not_applicable"
+}
+
+// TestMigrationV32ScopesIdentityBackfillToCompatibleSnapshots covers the CR2
+// multi-revision matrix: after a completion_unknown -> completed
+// reconciliation the job row carries only the newer revision's result
+// identity, so an older terminal notification must never receive it. A
+// notification that snapshots the job's current terminal event keeps its
+// identity, and the result identity pair is always written atomically.
+func TestMigrationV32ScopesIdentityBackfillToCompatibleSnapshots(t *testing.T) {
+	ctx := context.Background()
+	path, raw := createSchemaAtVersion(t, 30)
+
+	insertMultiRevJob := func(id, mode, status string, revision int, resultSHA string, resultBytes int64) {
+		t.Helper()
+		if _, err := raw.ExecContext(ctx, `INSERT INTO external_agent_jobs (
+			job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
+			task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
+			conversation_key, status, result_sha256, result_bytes, status_revision, timeout_at, created_at, updated_at)
+			VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+			'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
+			'slack:T12345678:dm:D12345678', ?, ?, ?, ?, 2, 1, 1)`,
+			id, mode, id+"-call", status, resultSHA, resultBytes, revision); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertMultiRevNotification := func(id string, revision int, terminalStatus, markdown, contentSHA string, policy, deliveryMode string, resultBytes int64) {
+		t.Helper()
+		if _, err := raw.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
+			job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,
+			renderer_version, channel_id, next_attempt_at, created_at, updated_at,
+			delivery_mode, policy_version, artifact_ref, result_bytes, max_markdown_parts, upload_state, published_at,
+			publish_state, recovered_slack_ts)
+			VALUES (?, ?, 'terminal', ?, ?, ?, 'markdown_v1', 'D12345678', 1, 1, 1, ?, ?, '', ?, 6, ?, 0,
+			'published', '1710000000.000003')`,
+			id, revision, terminalStatus, markdown, contentSHA, deliveryMode, policy, resultBytes, uploadStateForPolicy(policy, deliveryMode)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	newContent := "current result"
+	newDigest := contentSHA256Hex(newContent)
+	newMarkdown := "OpenCode job `legacy-old` completed.\n\ncurrent result"
+
+	// legacy-old: the job was reconciled to revision 2, so the row carries
+	// only the completed result identity of the newer event. The R1
+	// completion_unknown notification predates the reconciliation and must
+	// not receive the R2 identity. Its legacy row carries stale positive
+	// delivery bytes that the backfill must clear together with the empty
+	// digest (atomic pair).
+	insertMultiRevJob("legacy-old", "detached", "completed", 2, newDigest, int64(len(newContent)))
+	oldMarkdown := "OpenCode job `legacy-old` was interrupted after external actions may have occurred. It was not retried; reconciliation is required."
+	insertMultiRevNotification("legacy-old", 1, "completion_unknown", oldMarkdown, contentSHA256Hex(oldMarkdown), "legacy_v1", "markdown", 17)
+
+	// legacy-current: a legacy terminal notification that snapshots the
+	// job's current event does receive the mirrored job identity.
+	insertMultiRevJob("legacy-current", "detached", "completed", 2, newDigest, int64(len(newContent)))
+	insertMultiRevNotification("legacy-current", 2, "completed", newMarkdown, contentSHA256Hex(newMarkdown), "legacy_v1", "markdown", 0)
+
+	// delivery-current: a delivery_v1 row keeps its own complete content
+	// identity, never the job's later identity.
+	insertMultiRevJob("delivery-current", "detached", "completed", 2, newDigest, int64(len(newContent)))
+	insertMultiRevNotification("delivery-current", 2, "completed", newMarkdown, newDigest, "delivery_v1", "markdown", int64(len(newContent)))
+
+	// single-current: a job that never reconciled keeps its identity on the
+	// legacy terminal notification at the same revision.
+	singleContent := "safe result"
+	singleDigest := contentSHA256Hex(singleContent)
+	singleMarkdown := "OpenCode job `single-current` completed.\n\nsafe result"
+	insertMultiRevJob("single-current", "detached", "completed", 1, singleDigest, int64(len(singleContent)))
+	insertMultiRevNotification("single-current", 1, "completed", singleMarkdown, contentSHA256Hex(singleMarkdown), "legacy_v1", "markdown", 0)
+
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatalf("OpenExisting v30: %v", err)
+	}
+	defer store.Close()
+	var version int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("upgraded schema version = %d, want %d", version, SchemaVersion)
+	}
+
+	type expected struct {
+		root            int
+		notificationSHA string
+		resultSHA       string
+		resultBytes     int64
+	}
+	cases := map[string]expected{
+		// The R1 completion_unknown notification stays historical: empty
+		// identity pair, no R2 digest leak, and its stale positive bytes are
+		// cleared.
+		"legacy-old":       {1, contentSHA256Hex(oldMarkdown), "", 0},
+		"legacy-current":   {1, contentSHA256Hex(newMarkdown), newDigest, int64(len(newContent))},
+		"delivery-current": {1, contentSHA256Hex(newMarkdown), newDigest, int64(len(newContent))},
+		"single-current":   {1, contentSHA256Hex(singleMarkdown), singleDigest, int64(len(singleContent))},
+	}
+	for jobID, want := range cases {
+		var got expected
+		if err := store.db.QueryRowContext(ctx, `SELECT root_activation_required, notification_sha256, result_sha256, result_bytes
+			FROM external_agent_job_notifications WHERE job_id = ? AND kind = 'terminal'`, jobID).
+			Scan(&got.root, &got.notificationSHA, &got.resultSHA, &got.resultBytes); err != nil {
+			t.Fatalf("%s: %v", jobID, err)
+		}
+		if got != want {
+			t.Fatalf("%s backfill = %+v, want %+v", jobID, got, want)
+		}
+	}
 }
 
 func newTestStore(t *testing.T) (*Store, string) {
