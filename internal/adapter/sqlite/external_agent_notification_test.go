@@ -484,6 +484,55 @@ func TestNotificationHealthAndAdminInspectionAreContentFree(t *testing.T) {
 	}
 }
 
+// TestInspectJobPreservesBoundedResultErrorCodes proves InspectJob exposes
+// every bounded result error code the use case can persist, instead of
+// collapsing them to notification_publish_ambiguous, while still bounding
+// any unbounded raw value.
+func TestInspectJobPreservesBoundedResultErrorCodes(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "inspect-codes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	codes := []domain.ResultErrorCode{
+		domain.ResultErrorIdentityInvalid,
+		domain.ResultErrorArtifactMissing,
+		domain.ResultErrorArtifactOwnerRefMismatch,
+		domain.ResultErrorArtifactBytesMismatch,
+		domain.ResultErrorArtifactDigestMismatch,
+	}
+	for _, code := range codes {
+		jobID := "job_code_" + string(code)
+		job := testExternalAgentJob(base)
+		job.ID = jobID
+		job.OriginalCallID = jobID + "-call"
+		if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+			t.Fatalf("create %s = %v, err=%v", jobID, created, err)
+		}
+		claimed, err := jobs.ClaimNext(t.Context(), base, "worker-"+jobID, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := jobs.Transition(t.Context(), jobID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "safe summary"}, "", base.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications
+			SET last_error_code = ? WHERE job_id = ?`, string(code), jobID); err != nil {
+			t.Fatal(err)
+		}
+		inspection, err := jobs.InspectJob(t.Context(), jobID)
+		if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
+			t.Fatalf("%s inspection = %#v, err=%v", jobID, inspection, err)
+		}
+		if got := inspection.Deliveries[0].LastErrorCode; got != string(code) {
+			t.Fatalf("%s error code = %q, want %q", jobID, got, code)
+		}
+	}
+}
+
 func TestOpenReadOnlyDoesNotMigrateOrWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
 	store, err := Initialize(context.Background(), path)
