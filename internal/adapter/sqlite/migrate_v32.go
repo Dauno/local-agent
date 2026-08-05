@@ -76,14 +76,16 @@ func normalizeV32GrandfatheredDeliveries(ctx context.Context, tx *sql.Tx) error 
 }
 
 // backfillV32NotificationIdentities recomputes the notification identity over
-// canonical Markdown in Go and mirrors the job result identity where it is
-// complete. Rows that cannot be classified keep empty/zero identity and never
-// become activation-eligible (fail-closed). No content, digest, or binding is
-// ever logged per row.
+// canonical Markdown in Go and derives the result identity only from a
+// snapshot compatible with the notification row. Rows that cannot be
+// classified keep empty/zero identity and never become activation-eligible
+// (fail-closed). The result identity is written as an atomic pair: a row
+// never keeps bytes without a digest or a digest without bytes. No content,
+// digest, or binding is ever logged per row.
 func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx, `SELECT n.job_id, n.status_revision, n.kind, n.terminal_status, n.canonical_markdown,
-		j.mode, j.result_sha256, j.result_bytes,
-		n.policy_version, n.delivery_mode, n.upload_state
+		j.mode, j.status_revision, j.status, j.result_sha256, j.result_bytes,
+		n.policy_version, n.delivery_mode, n.upload_state, n.content_sha256, n.result_bytes
 		FROM external_agent_job_notifications n
 		JOIN external_agent_jobs j ON j.job_id = n.job_id`)
 	if err != nil {
@@ -92,7 +94,7 @@ func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 	defer rows.Close()
 	update, err := tx.PrepareContext(ctx, `UPDATE external_agent_job_notifications SET
 		notification_sha256 = ?, notification_bytes = ?, result_sha256 = ?,
-		result_bytes = CASE WHEN result_bytes = 0 THEN ? ELSE result_bytes END,
+		result_bytes = ?,
 		root_activation_required = ?
 		WHERE job_id = ? AND status_revision = ? AND kind = ?`)
 	if err != nil {
@@ -100,11 +102,12 @@ func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 	}
 	defer update.Close()
 	for rows.Next() {
-		var jobID, kind, terminalStatus, markdown, jobMode, jobResultSHA string
-		var revision int
+		var jobID, kind, terminalStatus, markdown, jobMode, jobStatus, jobResultSHA string
+		var revision, jobRevision int
 		var jobResultBytes int64
-		var policyVersion, deliveryMode, uploadState string
-		if err := rows.Scan(&jobID, &revision, &kind, &terminalStatus, &markdown, &jobMode, &jobResultSHA, &jobResultBytes, &policyVersion, &deliveryMode, &uploadState); err != nil {
+		var policyVersion, deliveryMode, uploadState, contentSHA string
+		var rowResultBytes int64
+		if err := rows.Scan(&jobID, &revision, &kind, &terminalStatus, &markdown, &jobMode, &jobRevision, &jobStatus, &jobResultSHA, &jobResultBytes, &policyVersion, &deliveryMode, &uploadState, &contentSHA, &rowResultBytes); err != nil {
 			return fmt.Errorf("scan external-agent notification identity: %w", err)
 		}
 		// Grandfathered file-mode rows that normalization could not repair
@@ -123,7 +126,22 @@ func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 			notificationSHA = fmt.Sprintf("%x", digest)
 			notificationBytes = int64(len([]byte(markdown)))
 		}
-		resultSHA, resultBytes := domain.ValidResultIdentity(jobResultSHA, jobResultBytes)
+		// delivery_v1 rows already carry their own complete content identity
+		// (content_sha256 over the delivered bytes); the job mirror can never
+		// diverge from it, so the identity is always self-consistent. Legacy
+		// rows mirror the job result identity only when the notification
+		// snapshots the job's current terminal event: same kind, same
+		// status_revision, and a terminal status that matches (or was never
+		// recorded pre-v29). A notification for an older event never receives
+		// the identity of a later result.
+		resultSHA, resultBytes := "", int64(0)
+		switch {
+		case policyVersion == string(domain.JobDeliveryPolicyV1):
+			resultSHA, resultBytes = domain.ValidResultIdentity(contentSHA, rowResultBytes)
+		case kind == domain.JobNotificationTerminal && revision == jobRevision &&
+			(terminalStatus == "" || terminalStatus == jobStatus):
+			resultSHA, resultBytes = domain.ValidResultIdentity(jobResultSHA, jobResultBytes)
+		}
 		rootRequired := 0
 		if terminalStatus != "" && jobMode == string(domain.JobDetached) && notificationSHA != "" {
 			rootRequired = 1
