@@ -288,11 +288,11 @@ func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification
 	} else {
 		content, err = p.artifacts.Get(ctx, notification.JobID+"-delivery", notification.ArtifactRef, resultDigest, resultBytes)
 		if err != nil {
-			return port.PublishedResponse{}, permanentUploadError("result_artifact_invalid")
+			return port.PublishedResponse{}, permanentUploadError(string(domain.ResultErrorCodeOf(err)))
 		}
 	}
 	if int64(len(content)) != resultBytes {
-		return port.PublishedResponse{}, permanentUploadError("result_artifact_invalid")
+		return port.PublishedResponse{}, permanentUploadError(string(domain.ResultErrorArtifactBytesMismatch))
 	}
 	if notification.HostResultText != "" {
 		digest := sha256.Sum256(content)

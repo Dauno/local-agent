@@ -397,7 +397,9 @@ func classifyActivationError(err error) (string, bool) {
 		"actor revoked", "actor_revoked", "access revoked", "access_revoked", "actor_not_allowed",
 		"access denied", "access_denied", "unauthorized", "forbidden", "destination invalid",
 		"destination_invalid", "result_destination_mismatch", "identity invalid", "identity_invalid",
-		"activation_identity_invalid", "artifact invalid", "artifact_invalid", "result_artifact_invalid",
+		"activation_identity_invalid", "result_identity_invalid", "artifact invalid", "artifact_invalid",
+		"result_artifact_missing", "result_artifact_owner_ref_mismatch", "result_artifact_bytes_mismatch",
+		"result_artifact_digest_mismatch", "result_artifact_invalid",
 		"activation_artifact_invalid", "confirmation not allowed", "confirmation_not_allowed",
 		"activation_confirmation_not_allowed", "pending confirmation", "pending_confirmation",
 	} {

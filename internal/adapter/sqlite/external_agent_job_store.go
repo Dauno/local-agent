@@ -259,7 +259,7 @@ func (s *ExternalAgentJobStore) NotificationHealth(ctx context.Context, now time
 	if err := rows.Close(); err != nil {
 		return health, fmt.Errorf("close external-agent notification state counts: %w", err)
 	}
-	permanentCodes := []string{"result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown"}
+	permanentCodes := []string{"result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch", "result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown"}
 	args := make([]any, 0, len(permanentCodes)+1)
 	args = append(args, domain.NotificationPublished)
 	for _, code := range permanentCodes {
@@ -700,7 +700,7 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		FROM external_agent_job_notifications
 		WHERE ((publish_state IN (?, ?) AND next_attempt_at <= ?) OR
 			(publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?))
-		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
+		AND last_error_code NOT IN ('result_identity_invalid', 'result_artifact_missing', 'result_artifact_owner_ref_mismatch', 'result_artifact_bytes_mismatch', 'result_artifact_digest_mismatch', 'result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
 		AND NOT (last_error_code = 'result_file_upload_unknown' AND publish_state = 'unknown')
 		ORDER BY next_attempt_at ASC, created_at ASC LIMIT 1`,
 		domain.NotificationPending, domain.NotificationUnknown, now.UnixNano(), domain.NotificationPublishing, now.UnixNano()).Scan(&jobID, &revision, &kind)
@@ -719,7 +719,7 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND
 		((publish_state IN (?, ?) AND next_attempt_at <= ?) OR
 		 (publish_state = ? AND lease_expiry > 0 AND lease_expiry <= ?))
-		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
+		AND last_error_code NOT IN ('result_identity_invalid', 'result_artifact_missing', 'result_artifact_owner_ref_mismatch', 'result_artifact_bytes_mismatch', 'result_artifact_digest_mismatch', 'result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
 		AND NOT (last_error_code = 'result_file_upload_unknown' AND publish_state = 'unknown')`,
 		domain.NotificationPublishing, owner, leaseExpiry.UnixNano(), now.UnixNano(), jobID, revision, kind,
 		domain.NotificationPending, domain.NotificationUnknown, now.UnixNano(), domain.NotificationPublishing, now.UnixNano())
@@ -853,7 +853,7 @@ func (s *ExternalAgentJobStore) IsArtifactReferenced(ctx context.Context, refere
 	var count int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_notifications
 		WHERE artifact_ref = ? AND publish_state != ?
-		AND last_error_code NOT IN ('result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
+		AND last_error_code NOT IN ('result_identity_invalid', 'result_artifact_missing', 'result_artifact_owner_ref_mismatch', 'result_artifact_bytes_mismatch', 'result_artifact_digest_mismatch', 'result_artifact_invalid', 'result_delivery_failed', 'result_destination_mismatch', 'notification_delivery_invalid')
 		AND NOT (last_error_code = 'result_file_upload_unknown' AND publish_state = ?)`, reference, domain.NotificationPublished, domain.NotificationUnknown).Scan(&count); err != nil {
 		return false, fmt.Errorf("inspect active result artifact reference: %w", err)
 	}
@@ -935,7 +935,9 @@ func notificationRetryDelay(attempt int, jitter float64) time.Duration {
 
 func permanentNotificationError(code string) bool {
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown":
+	case "result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid",
+		"result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown":
 		return true
 	default:
 		return false

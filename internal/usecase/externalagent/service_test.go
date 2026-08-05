@@ -360,7 +360,7 @@ func TestHostCompletionReadsOnlyAuthorizedCompleteResult(t *testing.T) {
 	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_jobs SET result_bytes = result_bytes + 1 WHERE job_id = ?`, created.ID); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ReadResult(t.Context(), created.ID, job.Actor, job.ConversationKey); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
+	if _, err := service.ReadResult(t.Context(), created.ID, job.Actor, job.ConversationKey); err == nil || !strings.Contains(err.Error(), string(domain.ResultErrorIdentityInvalid)) {
 		t.Fatalf("altered ResultBytes was accepted: %v", err)
 	}
 }
@@ -550,7 +550,7 @@ func TestReadResultChunkStreamsAndReverifiesFileModeArtifact(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "artifacts", artifact.Reference), []byte("file🔥tamper"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, 0, 5); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
+	if _, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, 0, 5); err == nil || !strings.Contains(err.Error(), string(domain.ResultErrorArtifactDigestMismatch)) {
 		t.Fatalf("tampered file-mode artifact error = %v", err)
 	}
 }
@@ -607,13 +607,14 @@ func TestStartAndWaitRejectsIncompleteForegroundIdentity(t *testing.T) {
 		name      string
 		result    domain.AcpInvocationResult
 		artifacts port.ResultArtifactStore
+		wantCode  string
 	}{
-		{name: "empty SHA", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content))}},
-		{name: "wrong SHA", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content)), ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other")))}},
-		{name: "altered bytes", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content)) + 1, ResultSHA256: fmt.Sprintf("%x", digest)}},
-		{name: "invalid UTF-8", result: domain.AcpInvocationResult{Text: invalid, Inline: true, ResultBytes: int64(len(invalid)), ResultSHA256: fmt.Sprintf("%x", invalidDigest)}},
-		{name: "absent artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", artifactDigest), ResultBytes: int64(len(artifactContent))}},
-		{name: "unverifiable artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", artifactDigest), ResultBytes: int64(len(artifactContent))}, artifacts: fakeResultArtifacts{}},
+		{name: "empty SHA", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content))}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "wrong SHA", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content)), ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other")))}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "altered bytes", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content)) + 1, ResultSHA256: fmt.Sprintf("%x", digest)}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "invalid UTF-8", result: domain.AcpInvocationResult{Text: invalid, Inline: true, ResultBytes: int64(len(invalid)), ResultSHA256: fmt.Sprintf("%x", invalidDigest)}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "absent artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", artifactDigest), ResultBytes: int64(len(artifactContent))}, wantCode: string(domain.ResultErrorArtifactMissing)},
+		{name: "unverifiable artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", artifactDigest), ResultBytes: int64(len(artifactContent))}, artifacts: fakeResultArtifacts{}, wantCode: string(domain.ResultErrorArtifactInvalid)},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
@@ -631,8 +632,8 @@ func TestStartAndWaitRejectsIncompleteForegroundIdentity(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			go service.Run(ctx)
-			if _, err := service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, time.Second)); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
-				t.Fatalf("error = %v", err)
+			if _, err := service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, time.Second)); err == nil || !strings.Contains(err.Error(), testCase.wantCode) {
+				t.Fatalf("error = %v, want code %s", err, testCase.wantCode)
 			}
 		})
 	}
@@ -695,14 +696,15 @@ func TestReadResultRejectsIncompleteIdentity(t *testing.T) {
 	invalid := string([]byte{0xff, 0xfe})
 	invalidDigest := sha256.Sum256([]byte(invalid))
 	for _, testCase := range []struct {
-		name   string
-		result domain.AcpInvocationResult
+		name     string
+		result   domain.AcpInvocationResult
+		wantCode string
 	}{
-		{name: "empty SHA", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content))}},
-		{name: "wrong SHA", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content)), ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other")))}},
-		{name: "altered bytes", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content)) + 1, ResultSHA256: fmt.Sprintf("%x", digest)}},
-		{name: "invalid UTF-8", result: domain.AcpInvocationResult{Text: invalid, ResultBytes: int64(len(invalid)), ResultSHA256: fmt.Sprintf("%x", invalidDigest)}},
-		{name: "absent artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content))}},
+		{name: "empty SHA", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content))}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "wrong SHA", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content)), ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other")))}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "altered bytes", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content)) + 1, ResultSHA256: fmt.Sprintf("%x", digest)}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "invalid UTF-8", result: domain.AcpInvocationResult{Text: invalid, ResultBytes: int64(len(invalid)), ResultSHA256: fmt.Sprintf("%x", invalidDigest)}, wantCode: string(domain.ResultErrorIdentityInvalid)},
+		{name: "absent artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content))}, wantCode: string(domain.ResultErrorArtifactMissing)},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
@@ -721,11 +723,226 @@ func TestReadResultRejectsIncompleteIdentity(t *testing.T) {
 				t.Fatalf("start = %#v, err = %v", created, err)
 			}
 			completeJobWithResult(t, jobStore, created, testCase.result)
-			if _, err := service.ReadResult(t.Context(), created.ID, request.Actor, request.ConversationKey); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
-				t.Fatalf("error = %v", err)
+			if _, err := service.ReadResult(t.Context(), created.ID, request.Actor, request.ConversationKey); err == nil || !strings.Contains(err.Error(), testCase.wantCode) {
+				t.Fatalf("error = %v, want code %s", err, testCase.wantCode)
 			}
 		})
 	}
+}
+
+func TestVerifiedResultFailuresAreBoundedAndRedacted(t *testing.T) {
+	const (
+		redactedContent      = "REDACTED-TOP-SECRET-RESULT-7f3c9a"
+		redactedRef          = "job_redacted7f3c-delivery.result"
+		redactedPath         = "/var/run/local-agent-redacted-7f3c/artifacts"
+		redactedActor        = "U-redacted-actor-7f3c"
+		redactedConversation = "slack:T-redacted-team-7f3c:dm:D-redacted-channel-7f3c"
+	)
+	redactedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(redactedContent)))
+	foreignDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("other-redacted-content")))
+	request := testRequestWithTimeout(domain.JobForeground, time.Minute)
+	request.Actor = redactedActor
+	request.ConversationKey = domain.ConversationKey(redactedConversation)
+	redactionForbidden := []string{redactedContent, redactedRef, redactedPath, redactedActor, redactedConversation, redactedDigest, foreignDigest}
+
+	readResult := func(service *Service, jobID string) error {
+		_, err := service.ReadResult(t.Context(), jobID, request.Actor, request.ConversationKey)
+		return err
+	}
+	readChunk := func(service *Service, jobID string) error {
+		_, err := service.ReadResultChunk(t.Context(), jobID, request.Actor, request.ConversationKey, 0, 16)
+		return err
+	}
+
+	tests := []struct {
+		name     string
+		newStore func(t *testing.T) port.ResultArtifactStore
+		complete func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T))
+		read     func(service *Service, jobID string) error
+		wantCode string
+	}{
+		{
+			name: "inline digest mismatch",
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				return domain.AcpInvocationResult{Text: redactedContent, ResultSHA256: foreignDigest, ResultBytes: int64(len(redactedContent))}, nil
+			},
+			read:     readResult,
+			wantCode: string(domain.ResultErrorIdentityInvalid),
+		},
+		{
+			name: "inline byte count mismatch",
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				return domain.AcpInvocationResult{Text: redactedContent, ResultSHA256: redactedDigest, ResultBytes: int64(len(redactedContent)) + 1}, nil
+			},
+			read:     readResult,
+			wantCode: string(domain.ResultErrorIdentityInvalid),
+		},
+		{
+			name: "inline digest mismatch through chunk reader",
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				return domain.AcpInvocationResult{Text: redactedContent, ResultSHA256: foreignDigest, ResultBytes: int64(len(redactedContent))}, nil
+			},
+			read:     readChunk,
+			wantCode: string(domain.ResultErrorIdentityInvalid),
+		},
+		{
+			name: "file artifact missing",
+			newStore: func(t *testing.T) port.ResultArtifactStore {
+				store, err := fsartifact.New(t.TempDir(), 4096)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return store
+			},
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: jobID + "-delivery.result", ResultSHA256: redactedDigest, ResultBytes: int64(len(redactedContent))}, nil
+			},
+			read:     readResult,
+			wantCode: string(domain.ResultErrorArtifactMissing),
+		},
+		{
+			name: "file owner and reference mismatch",
+			newStore: func(t *testing.T) port.ResultArtifactStore {
+				store, err := fsartifact.New(t.TempDir(), 4096)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return store
+			},
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				artifact, err := store.(*fsartifact.Store).Put(t.Context(), jobID+"-delivery", redactedContent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: redactedRef, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes}, nil
+			},
+			read:     readResult,
+			wantCode: string(domain.ResultErrorArtifactOwnerRefMismatch),
+		},
+		{
+			name: "file byte count mismatch",
+			newStore: func(t *testing.T) port.ResultArtifactStore {
+				store, err := fsartifact.New(t.TempDir(), 4096)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return store
+			},
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				artifact, err := store.(*fsartifact.Store).Put(t.Context(), jobID+"-delivery", redactedContent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes + 1}, nil
+			},
+			read:     readResult,
+			wantCode: string(domain.ResultErrorArtifactBytesMismatch),
+		},
+		{
+			name: "file digest mismatch",
+			newStore: func(t *testing.T) port.ResultArtifactStore {
+				store, err := fsartifact.New(t.TempDir(), 4096)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return store
+			},
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				artifact, err := store.(*fsartifact.Store).Put(t.Context(), jobID+"-delivery", redactedContent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: foreignDigest, ResultBytes: artifact.Bytes}, nil
+			},
+			read:     readResult,
+			wantCode: string(domain.ResultErrorArtifactDigestMismatch),
+		},
+		{
+			name: "file digest mismatch through chunk reader",
+			newStore: func(t *testing.T) port.ResultArtifactStore {
+				store, err := fsartifact.New(t.TempDir(), 4096)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return store
+			},
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				artifact, err := store.(*fsartifact.Store).Put(t.Context(), jobID+"-delivery", redactedContent)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: foreignDigest, ResultBytes: artifact.Bytes}, nil
+			},
+			read:     readChunk,
+			wantCode: string(domain.ResultErrorArtifactDigestMismatch),
+		},
+		{
+			name: "unmapped adapter error fails closed",
+			newStore: func(t *testing.T) port.ResultArtifactStore {
+				return leakyResultArtifacts{content: redactedContent}
+			},
+			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.AcpInvocationResult, func(t *testing.T)) {
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: jobID + "-delivery.result", ResultSHA256: redactedDigest, ResultBytes: int64(len(redactedContent))}, nil
+			},
+			read:     readResult,
+			wantCode: string(domain.ResultErrorArtifactInvalid),
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			db, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = db.Close() })
+			jobStore := sqlite.NewExternalAgentJobStore(db)
+			var artifacts port.ResultArtifactStore
+			if testCase.newStore != nil {
+				artifacts = testCase.newStore(t)
+			}
+			service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+				Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: artifacts, MaxResultBytes: 4096,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			created, err := service.Start(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result, tamper := testCase.complete(t, created.ID, artifacts)
+			completeJobWithResult(t, jobStore, created, result)
+			if tamper != nil {
+				tamper(t)
+			}
+			readErr := testCase.read(service, created.ID)
+			if readErr == nil {
+				t.Fatal("verified read accepted a broken identity")
+			}
+			if readErr.Error() != testCase.wantCode {
+				t.Fatalf("error = %q, want exact code %q", readErr.Error(), testCase.wantCode)
+			}
+			forbidden := append(append([]string(nil), redactionForbidden...), created.ID+"-delivery.result", created.ID)
+			for _, value := range forbidden {
+				if strings.Contains(readErr.Error(), value) {
+					t.Fatalf("error %q leaked %q", readErr.Error(), value)
+				}
+			}
+		})
+	}
+}
+
+// leakyResultArtifacts simulates a misbehaving adapter whose unmapped error
+// embeds synthetic sensitive values; the service must fail closed to the
+// generic bounded code and never surface them.
+type leakyResultArtifacts struct{ content string }
+
+func (f leakyResultArtifacts) Put(context.Context, string, string) (domain.ResultArtifact, error) {
+	return domain.ResultArtifact{}, errors.New("not used")
+}
+
+func (f leakyResultArtifacts) Get(context.Context, string, string, string, int64) ([]byte, error) {
+	return nil, errors.New("artifact read exploded: digest " + fmt.Sprintf("%x", sha256.Sum256([]byte(f.content))) + " ref job_redacted7f3c-delivery.result path /var/run/local-agent-redacted-7f3c/artifacts owner U-redacted-actor-7f3c conversation slack:T-redacted-team-7f3c:dm:D-redacted-channel-7f3c content " + f.content)
 }
 
 func TestStartAndWaitKeepsTerminalStatusErrors(t *testing.T) {

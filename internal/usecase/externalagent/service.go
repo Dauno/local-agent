@@ -322,7 +322,8 @@ func (s *Service) ReadResult(ctx context.Context, jobID, actor string, conversat
 // ReadResult and StartAndWait, so the synchronous path accepts and rejects
 // exactly the same identity as the durable reads: completed status, non-empty
 // exact UTF-8 bytes, a non-empty SHA-256 that matches the content, and a
-// coherent artifact read. Failures are closed and constant: the error never
+// coherent artifact read. Failures are closed and classified with a bounded
+// domain.ResultErrorCode; the error string is exactly the code and never
 // carries result content, digest, reference, actor or expected identity.
 func (s *Service) verifiedResultForJob(ctx context.Context, job *domain.ExternalAgentJob) (domain.ExternalAgentJobResult, error) {
 	if job == nil {
@@ -334,8 +335,9 @@ func (s *Service) verifiedResultForJob(ctx context.Context, job *domain.External
 	content := []byte(job.ResultSummary)
 	mode := domain.JobResultDeliveryMarkdown
 	if job.ResultArtifact != "" {
+		mode = domain.JobResultDeliveryFile
 		if s.artifacts == nil {
-			return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+			return domain.ExternalAgentJobResult{}, resultReadError(domain.ResultErrorArtifactMissing)
 		}
 		maxBytes := s.maxResultBytes
 		if job.ResultBytes > 0 && job.ResultBytes < maxBytes {
@@ -344,28 +346,54 @@ func (s *Service) verifiedResultForJob(ctx context.Context, job *domain.External
 		var err error
 		content, err = s.artifacts.Get(ctx, job.ID+"-delivery", job.ResultArtifact, job.ResultSHA256, maxBytes)
 		if err != nil {
-			return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+			return domain.ExternalAgentJobResult{}, mapArtifactReadError(err)
 		}
-		mode = domain.JobResultDeliveryFile
 	}
 	if len(content) == 0 || int64(len(content)) > s.maxResultBytes || !utf8.Valid(content) {
-		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactBytesMismatch)
 	}
 	if job.ResultBytes <= 0 || int64(len(content)) != job.ResultBytes {
-		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactBytesMismatch)
 	}
 	if strings.TrimSpace(job.ResultSHA256) == "" {
-		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactDigestMismatch)
 	}
 	digest := sha256.Sum256(content)
 	contentSHA := fmt.Sprintf("%x", digest)
 	if !strings.EqualFold(job.ResultSHA256, contentSHA) {
-		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactDigestMismatch)
 	}
 	return domain.ExternalAgentJobResult{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Text: string(content),
 		ContentSHA256: contentSHA, ContentBytes: int64(len(content)), DeliveryMode: mode,
 	}, nil
+}
+
+// resultReadError builds a bounded result-read failure whose string
+// representation is exactly the code.
+func resultReadError(code domain.ResultErrorCode) error {
+	return &domain.ResultError{Code: code}
+}
+
+// resultIdentityError classifies an identity failure by delivery mode: inline
+// rows collapse to the given inline code, file-mode rows to the artifact code,
+// so operators can distinguish the cause without ever seeing the values
+// involved.
+func resultIdentityError(mode domain.JobResultDeliveryMode, inline, file domain.ResultErrorCode) error {
+	if mode == domain.JobResultDeliveryFile {
+		return resultReadError(file)
+	}
+	return resultReadError(inline)
+}
+
+// mapArtifactReadError fails closed: an adapter error already carrying a
+// recognized bounded code keeps its code; anything else becomes the generic
+// result_artifact_invalid so no unmapped detail can leak.
+func mapArtifactReadError(err error) error {
+	if err == nil {
+		return nil
+	}
+	return resultReadError(domain.ResultErrorCodeOf(err))
 }
 
 // ReadResultChunk exposes only one verified UTF-8 range of a completed job.
@@ -400,14 +428,14 @@ func (s *Service) readResultChunkForJob(ctx context.Context, job *domain.Externa
 	maxBytes := s.resultChunkMax(requestedMaxBytes)
 	if job.ResultArtifact != "" {
 		if s.artifacts == nil {
-			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+			return domain.ResultChunk{}, resultReadError(domain.ResultErrorArtifactMissing)
 		}
 		verified, ok := s.artifacts.(port.ResultArtifactChunkReader)
 		if !ok {
-			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+			return domain.ResultChunk{}, resultReadError(domain.ResultErrorArtifactMissing)
 		}
 		if job.ResultBytes <= 0 || job.ResultBytes > s.maxResultBytes {
-			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+			return domain.ResultChunk{}, resultReadError(domain.ResultErrorArtifactBytesMismatch)
 		}
 		chunk, err := verified.ReadChunk(ctx, domain.ResultArtifactChunkRequest{
 			OwnerID:        job.ID + "-delivery",
@@ -418,12 +446,12 @@ func (s *Service) readResultChunkForJob(ctx context.Context, job *domain.Externa
 			MaxBytes:       maxBytes,
 		})
 		if err != nil {
-			return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+			return domain.ResultChunk{}, mapArtifactReadError(err)
 		}
 		return chunk, nil
 	}
 	if job.ResultSummary == "" {
-		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
 	}
 	return readInlineResultChunk(job.ResultSummary, job.ResultBytes, job.ResultSHA256, offsetBytes, maxBytes)
 }
@@ -438,21 +466,21 @@ func (s *Service) resultChunkMax(requested int64) int64 {
 func readInlineResultChunk(content string, expectedBytes int64, expectedSHA256 string, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
 	data := []byte(content)
 	if expectedBytes <= 0 || int64(len(data)) != expectedBytes || !utf8.Valid(data) || strings.TrimSpace(expectedSHA256) == "" {
-		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
 	}
 	digest := sha256.Sum256(data)
 	actualSHA256 := fmt.Sprintf("%x", digest)
 	if !strings.EqualFold(actualSHA256, expectedSHA256) {
-		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
 	}
 	if offsetBytes < 0 || offsetBytes > expectedBytes {
-		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
 	}
 	if offsetBytes == expectedBytes {
 		return domain.ResultChunk{OffsetBytes: offsetBytes, NextOffsetBytes: offsetBytes, EOF: true, SHA256: actualSHA256}, nil
 	}
 	if !utf8.RuneStart(data[offsetBytes]) {
-		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
 	}
 	end := offsetBytes + maxBytes
 	if end < offsetBytes || end > expectedBytes {
@@ -460,7 +488,7 @@ func readInlineResultChunk(content string, expectedBytes int64, expectedSHA256 s
 	}
 	completeBytes := completeUTF8Prefix(data[offsetBytes:end])
 	if completeBytes == 0 {
-		return domain.ResultChunk{}, errors.New("result_artifact_invalid")
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
 	}
 	nextOffset := offsetBytes + int64(completeBytes)
 	return domain.ResultChunk{

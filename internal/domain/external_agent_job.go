@@ -595,6 +595,82 @@ func ValidArtifactResult(artifactRef, sha256Hex string, bytes int64) bool {
 	return true
 }
 
+// ResultErrorCode is a bounded, host-owned classification for verified result
+// reads. A code is safe to expose in diagnostics, tool responses, and logs: it
+// never carries digest values, artifact references, paths, owners, actors,
+// conversations, or result content. The set is closed; unknown codes fail
+// closed to ResultErrorArtifactInvalid.
+type ResultErrorCode string
+
+const (
+	// ResultErrorIdentityInvalid classifies an inline result row whose stored
+	// identity is incoherent: empty or invalid UTF-8 content, a missing or
+	// malformed digest, or a byte count or SHA-256 that does not match the
+	// summary.
+	ResultErrorIdentityInvalid ResultErrorCode = "result_identity_invalid"
+	// ResultErrorArtifactMissing classifies a file-mode read that cannot
+	// obtain the artifact: store unavailable, file absent, unreadable,
+	// replaced, or outside the configured read bound.
+	ResultErrorArtifactMissing ResultErrorCode = "result_artifact_missing"
+	// ResultErrorArtifactOwnerRefMismatch classifies a file-mode reference
+	// that is not bound to the reading owner.
+	ResultErrorArtifactOwnerRefMismatch ResultErrorCode = "result_artifact_owner_ref_mismatch"
+	// ResultErrorArtifactBytesMismatch classifies a file-mode byte count that
+	// does not match the stored identity, the verified file size, or the
+	// requested UTF-8 range.
+	ResultErrorArtifactBytesMismatch ResultErrorCode = "result_artifact_bytes_mismatch"
+	// ResultErrorArtifactDigestMismatch classifies a file-mode SHA-256 that
+	// does not match the artifact bytes, is missing, or is not a valid digest
+	// identity.
+	ResultErrorArtifactDigestMismatch ResultErrorCode = "result_artifact_digest_mismatch"
+	// ResultErrorArtifactInvalid is the fail-closed fallback for unmapped or
+	// out-of-set errors. It predates the taxonomy and remains recognized by
+	// every classification layer.
+	ResultErrorArtifactInvalid ResultErrorCode = "result_artifact_invalid"
+)
+
+// ResultError carries a bounded classification and optional closed detail.
+// Error renders only the bounded code, so no sensitive value can ever reach
+// logs, tool responses, or operator diagnostics through this type.
+type ResultError struct {
+	Code ResultErrorCode
+	Err  error
+}
+
+func (e *ResultError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return string(e.Code)
+}
+
+func (e *ResultError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+var validResultErrorCodes = map[ResultErrorCode]bool{
+	ResultErrorIdentityInvalid:          true,
+	ResultErrorArtifactMissing:          true,
+	ResultErrorArtifactOwnerRefMismatch: true,
+	ResultErrorArtifactBytesMismatch:    true,
+	ResultErrorArtifactDigestMismatch:   true,
+	ResultErrorArtifactInvalid:          true,
+}
+
+// ResultErrorCodeOf extracts the bounded classification from an error. Any
+// error without a recognized ResultErrorCode fails closed to the generic
+// result_artifact_invalid code, so unmapped details can never leak.
+func ResultErrorCodeOf(err error) ResultErrorCode {
+	var classified *ResultError
+	if errors.As(err, &classified) && classified != nil && validResultErrorCodes[classified.Code] {
+		return classified.Code
+	}
+	return ResultErrorArtifactInvalid
+}
+
 func sanitizeNotificationText(value string, maxRunes int) string {
 	var builder strings.Builder
 	for _, r := range value {
