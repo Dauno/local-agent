@@ -143,19 +143,11 @@ func (p *JobNotificationPublisher) Reconcile(ctx context.Context, notification d
 		renderer, _ := payload["renderer_version"].(string)
 		mode, _ := payload["delivery_mode"].(string)
 		policy, _ := payload["policy_version"].(string)
-		digest, _ := payload["notification_sha256"].(string)
-		if digest == "" {
-			digest, _ = payload["content_sha256"].(string)
-		}
-		expectedDigest := notification.NotificationSHA256
-		if expectedDigest == "" {
-			expectedDigest = notification.ContentSHA256
-		}
 		partDigest, _ := payload["part_sha256"].(string)
 		revision, _ := metadataInt(payload["status_revision"])
 		index, _ := metadataInt(payload["part_index"])
 		count, _ := metadataInt(payload["part_count"])
-		if jobID != notification.JobID || kind != notification.Kind || renderer != notification.RendererVersion || digest != expectedDigest || (mode != "" && mode != string(notification.DeliveryMode)) || (policy != "" && policy != notification.PolicyVersion) {
+		if jobID != notification.JobID || kind != notification.Kind || renderer != notification.RendererVersion || !notificationEvidenceDigestMatch(payload, notification) || (mode != "" && mode != string(notification.DeliveryMode)) || (policy != "" && policy != notification.PolicyVersion) {
 			if jobID == notification.JobID {
 				return "", false, invalidNotificationError(errors.New("Slack job notification metadata is inconsistent"))
 			}
@@ -238,6 +230,35 @@ func notificationIdentity(notification domain.ExternalAgentJobNotification) (str
 		bytes = int64(len([]byte(notification.CanonicalMarkdown)))
 	}
 	return digest, bytes
+}
+
+// notificationEvidenceDigestMatch decides whether the Slack payload digest
+// matches the durable notification identity. v32 rows are verified against the
+// canonical-Markdown identity (notification_sha256) and fail closed on any
+// mismatch. Deliveries published before v32 wrote the result digest into both
+// notification_sha256 and content_sha256 and never carried the v32 metadata
+// fields (notification_bytes, result_sha256); such legacy evidence is accepted
+// only when those fields are absent and the digest equals the legacy content
+// identity. Rows that never received a v32 identity keep reconciling against
+// their legacy content identity alone.
+func notificationEvidenceDigestMatch(payload map[string]any, notification domain.ExternalAgentJobNotification) bool {
+	digest, _ := payload["notification_sha256"].(string)
+	if digest == "" {
+		digest, _ = payload["content_sha256"].(string)
+	}
+	expected := notification.NotificationSHA256
+	if expected == "" {
+		return digest != "" && notification.ContentSHA256 != "" && digest == notification.ContentSHA256
+	}
+	if digest != "" && digest == expected {
+		return true
+	}
+	_, hasNotificationBytes := payload["notification_bytes"]
+	_, hasResultSHA256 := payload["result_sha256"]
+	if hasNotificationBytes || hasResultSHA256 || digest == "" || notification.ContentSHA256 == "" {
+		return false
+	}
+	return digest == notification.ContentSHA256
 }
 
 // resultIdentity returns the complete sanitized result identity, falling back
@@ -557,20 +578,12 @@ func (p *JobNotificationPublisher) reconcileFile(ctx context.Context, notificati
 		fileID, _ := payload["file_id"].(string)
 		kind, _ := payload["kind"].(string)
 		renderer, _ := payload["renderer_version"].(string)
-		digest, _ := payload["notification_sha256"].(string)
-		if digest == "" {
-			digest, _ = payload["content_sha256"].(string)
-		}
-		expectedDigest := notification.NotificationSHA256
-		if expectedDigest == "" {
-			expectedDigest = notification.ContentSHA256
-		}
 		partDigest, _ := payload["part_sha256"].(string)
 		revision, _ := metadataInt(payload["status_revision"])
 		index, _ := metadataInt(payload["part_index"])
 		count, _ := metadataInt(payload["part_count"])
 		parts := renderMarkdownV1(notification.CanonicalMarkdown, false)
-		if jobID == notification.JobID && (mode != string(domain.JobResultDeliveryFile) || policy != notification.PolicyVersion || fileID != notification.SlackFileID || kind != notification.Kind || renderer != notification.RendererVersion || digest != expectedDigest || index != 1 || count != 1 || len(parts) != 1 || partDigest != contentSHA256(parts[0]) || revision != notification.StatusRevision || message.Timestamp == "") {
+		if jobID == notification.JobID && (mode != string(domain.JobResultDeliveryFile) || policy != notification.PolicyVersion || fileID != notification.SlackFileID || kind != notification.Kind || renderer != notification.RendererVersion || !notificationEvidenceDigestMatch(payload, notification) || index != 1 || count != 1 || len(parts) != 1 || partDigest != contentSHA256(parts[0]) || revision != notification.StatusRevision || message.Timestamp == "") {
 			if jobID == notification.JobID {
 				return "", false, invalidNotificationError(errors.New("file delivery status evidence is inconsistent"))
 			}
