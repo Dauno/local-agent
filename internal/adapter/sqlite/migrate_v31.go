@@ -27,13 +27,17 @@ func migrateV31(ctx context.Context, tx *sql.Tx) error {
 // repairV31ForegroundInlineIdentity recomputes the result identity of
 // completed foreground inline rows from the persisted summary after applying
 // host-owned control sanitization. Byte counts always use len([]byte(...)) in
-// Go, never SQLite length(TEXT). A summary that is not valid UTF-8 or that
-// sanitizes to empty stays unavailable with an empty identity; no digest is
-// ever fabricated and no row content is logged.
+// Go, never SQLite length(TEXT). The SELECT deliberately has no
+// length(result_summary) predicate: SQLite text functions stop at the first
+// NUL, so a historical summary starting with U+0000 reports length 0 and
+// would otherwise never be repaired. Validity, emptiness and sanitization are
+// decided in Go. A summary that is not valid UTF-8 or that sanitizes to empty
+// stays unavailable with an empty identity; no digest is ever fabricated and
+// no row content is logged.
 func repairV31ForegroundInlineIdentity(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx, `SELECT job_id, result_summary, result_sha256, result_bytes
 		FROM external_agent_jobs
-		WHERE status = 'completed' AND mode = 'foreground' AND result_artifact = '' AND length(result_summary) > 0`)
+		WHERE status = 'completed' AND mode = 'foreground' AND result_artifact = ''`)
 	if err != nil {
 		return fmt.Errorf("read historical foreground inline results: %w", err)
 	}
