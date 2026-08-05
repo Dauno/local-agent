@@ -3,8 +3,10 @@ package slack
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
@@ -232,33 +234,71 @@ func notificationIdentity(notification domain.ExternalAgentJobNotification) (str
 	return digest, bytes
 }
 
-// notificationEvidenceDigestMatch decides whether the Slack payload digest
-// matches the durable notification identity. v32 rows are verified against the
-// canonical-Markdown identity (notification_sha256) and fail closed on any
-// mismatch. Deliveries published before v32 wrote the result digest into both
-// notification_sha256 and content_sha256 and never carried the v32 metadata
-// fields (notification_bytes, result_sha256); such legacy evidence is accepted
-// only when those fields are absent and the digest equals the legacy content
-// identity. Rows that never received a v32 identity keep reconciling against
-// their legacy content identity alone.
+// notificationEvidenceDigestMatch decides whether the Slack payload evidence
+// matches the durable notification identity. Evidence published under the v32
+// contract declares the v32 identity fields (notification_bytes, result_sha256)
+// and must match all four identity fields — notification_sha256,
+// notification_bytes, result_sha256, result_bytes — with exact types; a
+// payload that declares only part of the v32 identity is corrupt, not legacy,
+// and fails closed. Deliveries published before v32 wrote the result identity
+// into both notification_sha256 and content_sha256 and never carried the v32
+// identity fields; such legacy evidence is accepted only when none of the v32
+// fields are present and the complete legacy content identity (both digest
+// slots and the byte count) matches. Rows that never received a v32 identity
+// keep reconciling against their legacy content identity alone. No single
+// identity field is ever sufficient.
 func notificationEvidenceDigestMatch(payload map[string]any, notification domain.ExternalAgentJobNotification) bool {
-	digest, _ := payload["notification_sha256"].(string)
-	if digest == "" {
-		digest, _ = payload["content_sha256"].(string)
+	notificationDigest, hasNotificationDigest := payload["notification_sha256"].(string)
+	notificationBytes, hasNotificationBytes := metadataBytes(payload["notification_bytes"])
+	resultDigest, hasResultDigest := payload["result_sha256"].(string)
+	resultBytes, hasResultBytes := metadataBytes(payload["result_bytes"])
+	_, declaresNotificationBytes := payload["notification_bytes"]
+	_, declaresResultSHA256 := payload["result_sha256"]
+	if declaresNotificationBytes || declaresResultSHA256 {
+		// v32 contract: a payload that declares any v32 identity field must
+		// declare and match all four identity fields with exact types.
+		if !hasNotificationDigest || !hasNotificationBytes || !hasResultDigest || !hasResultBytes {
+			return false
+		}
+		return notificationDigest == notification.NotificationSHA256 &&
+			notificationBytes == notification.NotificationBytes &&
+			resultDigest == notification.ResultSHA256 &&
+			resultBytes == notification.ResultBytes
 	}
-	expected := notification.NotificationSHA256
-	if expected == "" {
-		return digest != "" && notification.ContentSHA256 != "" && digest == notification.ContentSHA256
+	// Legacy contract: pre-v32 evidence wrote the content identity into both
+	// digest slots together with the byte count. The complete legacy identity
+	// must match; a single matching digest is never sufficient.
+	contentDigest, hasContentDigest := payload["content_sha256"].(string)
+	legacyBytes, hasLegacyBytes := metadataBytes(payload["result_bytes"])
+	return hasContentDigest && hasLegacyBytes && notification.ContentSHA256 != "" &&
+		contentDigest == notification.ContentSHA256 &&
+		notificationDigest == notification.ContentSHA256 &&
+		legacyBytes == notification.ContentBytes
+}
+
+// metadataBytes extracts a non-negative integral byte count from Slack
+// metadata. Numbers arrive as int64 in-process and as float64 or json.Number
+// after a JSON round trip; strings and non-integral values are never coerced.
+func metadataBytes(value any) (int64, bool) {
+	switch number := value.(type) {
+	case int64:
+		return number, number >= 0
+	case int:
+		return int64(number), number >= 0
+	case float64:
+		if number != math.Trunc(number) || number < 0 || number > float64(math.MaxInt64) {
+			return 0, false
+		}
+		return int64(number), true
+	case json.Number:
+		parsed, err := number.Int64()
+		if err != nil || parsed < 0 {
+			return 0, false
+		}
+		return parsed, true
+	default:
+		return 0, false
 	}
-	if digest != "" && digest == expected {
-		return true
-	}
-	_, hasNotificationBytes := payload["notification_bytes"]
-	_, hasResultSHA256 := payload["result_sha256"]
-	if hasNotificationBytes || hasResultSHA256 || digest == "" || notification.ContentSHA256 == "" {
-		return false
-	}
-	return digest == notification.ContentSHA256
 }
 
 // resultIdentity returns the complete sanitized result identity, falling back
