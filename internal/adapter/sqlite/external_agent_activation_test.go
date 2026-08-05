@@ -2,7 +2,9 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -24,7 +26,7 @@ func TestPublishedTerminalNotificationAtomicallyCreatesOneActivation(t *testing.
 	if err != nil || activation == nil {
 		t.Fatalf("activation = %#v, err = %v", activation, err)
 	}
-	if activation.TerminalStatus != domain.JobCompleted || activation.NotificationSHA256 != notification.ContentSHA256 ||
+	if activation.TerminalStatus != domain.JobCompleted || activation.NotificationSHA256 != notification.NotificationSHA256 ||
 		activation.SlackMessageTS != "1710000000.000001" || !activation.PublishedAt.Equal(publishedAt) || activation.State != domain.ActivationPending {
 		t.Fatalf("activation snapshot = %#v", activation)
 	}
@@ -146,6 +148,66 @@ func TestPublicationActivationCountByModeAndPath(t *testing.T) {
 			}
 			if state != string(domain.NotificationPublished) {
 				t.Fatalf("%s notification state = %q, want published", tt.name, state)
+			}
+		})
+	}
+}
+
+func TestPublicationActivationRequiresBothRouteAndDetachedMode(t *testing.T) {
+	for _, tt := range []struct {
+		name  string
+		mode  domain.ExternalAgentJobMode
+		route int
+		want  int
+	}{
+		{"detached with route", domain.JobDetached, 1, 1},
+		{"detached without route", domain.JobDetached, 0, 0},
+		{"foreground with route", domain.JobForeground, 1, 0},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			store, jobs, now := newActivationTestStore(t)
+			job := activationTestJob("activation-dual-"+tt.name, now)
+			job.Mode = tt.mode
+			terminalizeActivationTestJob(t, jobs, job, now)
+			markdown := "OpenCode job `" + job.ID + "` completed.\n\nresult"
+			digest := fmt.Sprintf("%x", sha256.Sum256([]byte(markdown)))
+			// The persisted route is immutable, so the matrix is exercised with
+			// explicit storage rows rather than constructor fixtures.
+			if _, err := store.DB().ExecContext(t.Context(), `DELETE FROM external_agent_job_notifications WHERE job_id = ?`, job.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := store.DB().ExecContext(t.Context(), `INSERT INTO external_agent_job_notifications (
+				job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,
+				renderer_version, channel_id, publish_state, next_attempt_at, created_at, updated_at,
+				delivery_mode, policy_version, max_markdown_parts, upload_state,
+				root_activation_required, notification_sha256, notification_bytes)
+				VALUES (?, 2, 'terminal', 'completed', ?, ?, 'markdown_v1', 'D12345678', 'pending', ?, 1, 1,
+					'markdown', 'legacy_v1', 1, 'not_applicable', ?, ?, ?)`,
+				job.ID, markdown, digest, now.UnixNano(), tt.route, digest, int64(len([]byte(markdown)))); err != nil {
+				t.Fatal(err)
+			}
+			notification, err := jobs.ClaimNextNotification(t.Context(), now, "publisher", time.Minute)
+			if err != nil || notification == nil {
+				t.Fatalf("notification claim = %#v, err=%v", notification, err)
+			}
+			if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000001", now.Add(time.Second)); err != nil {
+				t.Fatal(err)
+			}
+			var count int
+			if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM external_agent_job_activations WHERE job_id = ?`, job.ID).Scan(&count); err != nil {
+				t.Fatal(err)
+			}
+			if count != tt.want {
+				t.Fatalf("%s activation count = %d, want %d", tt.name, count, tt.want)
+			}
+			if count == 1 {
+				activation, err := jobs.GetActivation(t.Context(), domain.ExternalAgentJobActivationID(job.ID, notification.StatusRevision, notification.Kind))
+				if err != nil || activation == nil {
+					t.Fatalf("activation = %#v, err = %v", activation, err)
+				}
+				if activation.NotificationSHA256 != digest {
+					t.Fatalf("activation notification identity = %q, want %q", activation.NotificationSHA256, digest)
+				}
 			}
 		})
 	}

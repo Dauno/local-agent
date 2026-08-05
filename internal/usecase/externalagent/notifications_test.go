@@ -188,6 +188,8 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
 		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
 		ContentSHA256:     contentSHA256ForTest(content), ContentBytes: int64(len(content)),
+		NotificationSHA256: contentSHA256ForTest("OpenCode job `job-1` completed.\n\n" + content), NotificationBytes: int64(len([]byte("OpenCode job `job-1` completed.\n\n" + content))),
+		ResultSHA256: contentSHA256ForTest(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
 		MaxMarkdownParts: 1,
@@ -203,6 +205,39 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 	}
 	if completer.calls != 1 || !publisher.publishCalled || store.publishedTS == "" {
 		t.Fatalf("host completion calls=%d publish=%v timestamp=%q", completer.calls, publisher.publishCalled, store.publishedTS)
+	}
+}
+
+func TestNotificationWorkerRejectsHostCompletionResultIdentityMismatch(t *testing.T) {
+	content := "complete host-owned result"
+	notification := domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
+		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
+		ResultSHA256:      strings.Repeat("a", 64), ResultBytes: int64(len(content)),
+		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
+		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
+		MaxMarkdownParts: 1,
+	}
+	store := &fakeNotificationStore{notification: notification}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	completer := &fakeHostCompleter{turn: port.AgentTurn{Text: content}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, HostCompleter: completer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var classified *port.NotificationPublishError
+	if err := worker.verifyHostCompletion(t.Context(), &notification); !errors.As(err, &classified) || classified.Code != "result_delivery_failed" {
+		t.Fatalf("result identity mismatch error = %v", err)
+	}
+	if notification.HostResultText != "" {
+		t.Fatal("host result text was accepted on identity mismatch")
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.publishCalled || store.unknownCode != "result_delivery_failed" {
+		t.Fatalf("mismatched result bypassed verifier: publish=%v unknown_code=%q", publisher.publishCalled, store.unknownCode)
 	}
 }
 
