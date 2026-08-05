@@ -1013,13 +1013,20 @@ func safeAdminSessionID(value string) string {
 	return value
 }
 
+// safeAdminErrorCode passes through every bounded closed error code that
+// operations can legitimately observe, using the domain constants so the
+// bounded taxonomy can never drift from what the use case persists. Anything
+// outside the closed set collapses to notification_publish_ambiguous.
 func safeAdminErrorCode(value string) string {
 	if strings.TrimSpace(value) == "" {
 		return ""
 	}
 	code := safeNotificationError(value)
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch",
+	case string(domain.ResultErrorIdentityInvalid), string(domain.ResultErrorArtifactMissing),
+		string(domain.ResultErrorArtifactOwnerRefMismatch), string(domain.ResultErrorArtifactBytesMismatch),
+		string(domain.ResultErrorArtifactDigestMismatch), string(domain.ResultErrorArtifactInvalid),
+		"result_delivery_failed", "result_destination_mismatch",
 		"notification_delivery_invalid", "notification_publish_ambiguous", "result_file_upload_failed",
 		"result_file_upload_unknown", "result_file_completion_failed", "notification_state_conflict",
 		"notification_state_persist_failed":
