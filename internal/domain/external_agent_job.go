@@ -682,6 +682,12 @@ const (
 	// out-of-set errors. It predates the taxonomy and remains recognized by
 	// every classification layer.
 	ResultErrorArtifactInvalid ResultErrorCode = "result_artifact_invalid"
+	// ResultErrorChunkRequestInvalid classifies a client chunk-read request
+	// that cannot be served without reading result content: an out-of-bounds
+	// or non-UTF-8-aligned offset, or a max_bytes bound smaller than the next
+	// UTF-8 character. It is a request error, never durable corruption, and is
+	// excluded from the identity-failure counter.
+	ResultErrorChunkRequestInvalid ResultErrorCode = "result_chunk_request_invalid"
 )
 
 // ResultError carries a bounded classification and optional closed detail.
@@ -713,6 +719,7 @@ var validResultErrorCodes = map[ResultErrorCode]bool{
 	ResultErrorArtifactBytesMismatch:    true,
 	ResultErrorArtifactDigestMismatch:   true,
 	ResultErrorArtifactInvalid:          true,
+	ResultErrorChunkRequestInvalid:      true,
 }
 
 // ResultErrorCodeOf extracts the bounded classification from an error. Any

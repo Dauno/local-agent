@@ -504,14 +504,17 @@ func (s *Service) readInlineResultChunk(content string, expectedBytes int64, exp
 	if !strings.EqualFold(actualSHA256, expectedSHA256) {
 		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
 	}
+	// Range validation failures are client request errors, not identity
+	// corruption: they never increment the identity-failure counter because
+	// the stored result identity was verified complete and exact above.
 	if offsetBytes < 0 || offsetBytes > expectedBytes {
-		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorChunkRequestInvalid)
 	}
 	if offsetBytes == expectedBytes {
 		return domain.ResultChunk{OffsetBytes: offsetBytes, NextOffsetBytes: offsetBytes, EOF: true, SHA256: actualSHA256}, nil
 	}
 	if !utf8.RuneStart(data[offsetBytes]) {
-		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorChunkRequestInvalid)
 	}
 	end := offsetBytes + maxBytes
 	if end < offsetBytes || end > expectedBytes {
@@ -519,7 +522,7 @@ func (s *Service) readInlineResultChunk(content string, expectedBytes int64, exp
 	}
 	completeBytes := completeUTF8Prefix(data[offsetBytes:end])
 	if completeBytes == 0 {
-		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, resultReadError(domain.ResultErrorChunkRequestInvalid)
 	}
 	nextOffset := offsetBytes + int64(completeBytes)
 	return domain.ResultChunk{
