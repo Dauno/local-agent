@@ -137,6 +137,25 @@ func buildFreshDoctorFixture(t *testing.T) string {
 	return path
 }
 
+func buildDetachedTerminalNoResultDoctorFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "detached-terminal-no-result.db")
+	store, err := Initialize(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	db := store.DB()
+	for _, terminalStatus := range []string{"failed", "cancelled", "completion_unknown", "abandoned"} {
+		jobID := "detached-" + terminalStatus
+		insertIdentityJobRow(t, db, jobID, "detached", terminalStatus, "", 0)
+		insertIdentityActivationRowWithTerminalStatus(t, db, jobID, "failed", 0, "", terminalStatus)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // buildUpgradedDoctorFixture reproduces the real v30 -> v31 -> v32 matrix with
 // the same rows as the migration tests: foreground activations in every
 // claimable state, terminal activations preserved, the foreground inline
@@ -206,6 +225,17 @@ func TestDoctorResultIdentityFreshFixturePasses(t *testing.T) {
 		t.Fatalf("fresh identity result = %#v, want pass", result)
 	}
 	assertDoctorOutputIsContentFree(t, report, []string{"U12345678", "T12345678", "D12345678", "slack:"})
+}
+
+func TestDoctorDetachedTerminalActivationsWithoutResultPass(t *testing.T) {
+	report := runDoctorOnFixture(t, buildDetachedTerminalNoResultDoctorFixture(t))
+	if report.ExitCode() != 0 {
+		t.Fatalf("detached terminal no-result doctor exit code = %d, results = %#v", report.ExitCode(), report.Results)
+	}
+	result, ok := findDoctorResult(report, "external-agent result identity")
+	if !ok || result.Status != doctor.StatusPass {
+		t.Fatalf("detached terminal no-result identity result = %#v, want pass", result)
+	}
 }
 
 func TestDoctorResultIdentityUpgradedFixturePasses(t *testing.T) {
