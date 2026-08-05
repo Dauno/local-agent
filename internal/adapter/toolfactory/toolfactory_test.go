@@ -2,10 +2,12 @@ package toolfactory_test
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -284,9 +286,10 @@ func TestFactoryIgnoresTypedNilExternalAgentReader(t *testing.T) {
 
 func TestFactoryBindsJobInspectionToolsToTrustedInvocation(t *testing.T) {
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	complete := fmt.Sprintf("%x", sha256.Sum256([]byte("complete")))
 	reader := stubExternalJobReader{
-		job:    &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete", ResultSHA256: "digest", ResultBytes: 8},
-		result: domain.ExternalAgentJobResult{JobID: "job_1", StatusRevision: 4, Text: "complete", ContentSHA256: "digest", ContentBytes: 8, DeliveryMode: domain.JobResultDeliveryMarkdown},
+		job:    &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete", ResultSHA256: complete, ResultBytes: 8},
+		result: domain.ExternalAgentJobResult{JobID: "job_1", StatusRevision: 4, Text: "complete", ContentSHA256: complete, ContentBytes: 8, DeliveryMode: domain.JobResultDeliveryMarkdown},
 	}
 	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
 	tools, err := factory.ToolsForInvocation("U12345678", key)
@@ -393,10 +396,11 @@ func TestFactoryActivationScopeBindsRevisionAndContainsOnlyHostTools(t *testing.
 
 func TestFactoryDoesNotPlaceFileModeResultInToolResponse(t *testing.T) {
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	fileDigest := strings.Repeat("a", 64)
 	reader := stubExternalJobReader{
 		job: &domain.ExternalAgentJob{
 			ID: "job_file", Status: domain.JobCompleted, StatusRevision: 4,
-			ResultArtifact: "job_file-delivery.result", ResultSHA256: "digest", ResultBytes: 1024,
+			ResultArtifact: "job_file-delivery.result", ResultSHA256: fileDigest, ResultBytes: 1024,
 		},
 		result: domain.ExternalAgentJobResult{JobID: "job_file", StatusRevision: 4, Text: "must not enter ADK", ContentBytes: 1024, DeliveryMode: domain.JobResultDeliveryFile},
 	}
