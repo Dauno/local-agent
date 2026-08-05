@@ -3,6 +3,7 @@ package slack
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -185,10 +186,12 @@ func validateJobNotification(notification domain.ExternalAgentJobNotification) (
 			return nil, errors.New("result_destination_mismatch")
 		}
 	}
-	notificationDigest, notificationBytes := notificationIdentity(notification)
+	if err := validateNotificationIdentity(notification); err != nil {
+		return nil, err
+	}
 	if notification.DeliveryMode == domain.JobResultDeliveryFile {
 		resultDigest, resultBytes := resultIdentity(notification)
-		if notification.ArtifactRef == "" || resultBytes <= 0 || resultDigest == "" {
+		if notification.ArtifactRef == "" || resultBytes <= 0 || !validHexDigest(resultDigest) {
 			return nil, errors.New("file job notification delivery identity is invalid")
 		}
 		parts := renderMarkdownV1(notification.CanonicalMarkdown, false)
@@ -197,17 +200,9 @@ func validateJobNotification(notification domain.ExternalAgentJobNotification) (
 		}
 		return parts, nil
 	}
-	if notification.PolicyVersion == "legacy_v1" {
-		digest := sha256.Sum256([]byte(notification.CanonicalMarkdown))
-		if fmt.Sprintf("%x", digest) != notificationDigest {
-			return nil, errors.New("job notification digest does not match canonical Markdown")
-		}
-	} else {
-		if len(notificationDigest) != sha256.Size*2 || notificationBytes <= 0 {
-			return nil, errors.New("job notification identity is invalid")
-		}
+	if notification.PolicyVersion == domain.JobDeliveryPolicyV1 {
 		resultDigest, resultBytes := resultIdentity(notification)
-		if len(resultDigest) != sha256.Size*2 || resultBytes <= 0 {
+		if !validHexDigest(resultDigest) || resultBytes <= 0 {
 			return nil, errors.New("job notification result identity is invalid")
 		}
 	}
@@ -221,17 +216,50 @@ func validateJobNotification(notification domain.ExternalAgentJobNotification) (
 	return parts, nil
 }
 
-// notificationIdentity returns the notification identity over the canonical
-// Markdown, falling back to the legacy content storage columns for rows that
-// predate the v32 identity split. It never mixes the two identities.
-func notificationIdentity(notification domain.ExternalAgentJobNotification) (string, int64) {
-	digest := notification.NotificationSHA256
-	bytes := notification.NotificationBytes
-	if digest == "" || bytes <= 0 {
-		digest = notification.ContentSHA256
-		bytes = int64(len([]byte(notification.CanonicalMarkdown)))
+// validateNotificationIdentity verifies the persisted notification identity
+// against the canonical Markdown the publisher is about to send. A row with
+// any v32 identity field must carry both notification_sha256 and
+// notification_bytes, and both must equal the exact SHA-256 and byte count of
+// the canonical Markdown; a partial v32 pair is rejected, never degraded to
+// the legacy columns. Only a row with no v32 identity fields at all falls
+// back to the legacy content identity: legacy Markdown rows stored the
+// canonical-Markdown digest in content_sha256 and must still match it
+// exactly, while legacy file deliveries carry a content digest whose exact
+// bytes are re-verified against the artifact at publication time.
+func validateNotificationIdentity(notification domain.ExternalAgentJobNotification) error {
+	actual := sha256.Sum256([]byte(notification.CanonicalMarkdown))
+	actualDigest := fmt.Sprintf("%x", actual)
+	actualBytes := int64(len([]byte(notification.CanonicalMarkdown)))
+	if notification.NotificationSHA256 != "" || notification.NotificationBytes > 0 {
+		if notification.NotificationSHA256 == "" || notification.NotificationBytes <= 0 {
+			return errors.New("job notification identity is partially declared")
+		}
+		if !validHexDigest(notification.NotificationSHA256) || notification.NotificationSHA256 != actualDigest || notification.NotificationBytes != actualBytes {
+			return errors.New("job notification digest does not match canonical Markdown")
+		}
+		return nil
 	}
-	return digest, bytes
+	if notification.DeliveryMode == domain.JobResultDeliveryFile {
+		if !validHexDigest(notification.ContentSHA256) {
+			return errors.New("file job notification legacy content identity is invalid")
+		}
+		return nil
+	}
+	if !validHexDigest(notification.ContentSHA256) || notification.ContentSHA256 != actualDigest {
+		return errors.New("job notification digest does not match canonical Markdown")
+	}
+	return nil
+}
+
+// validHexDigest reports whether the value is exactly 64 lowercase
+// hexadecimal characters, the only digest shape any notification or result
+// identity may carry.
+func validHexDigest(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 // notificationEvidenceDigestMatch decides whether the Slack payload evidence
