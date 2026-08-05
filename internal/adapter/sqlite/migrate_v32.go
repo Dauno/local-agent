@@ -25,8 +25,14 @@ func migrateV32(ctx context.Context, tx *sql.Tx) error {
 	}); err != nil {
 		return err
 	}
-	// Backfill runs before the immutability triggers exist so historical rows
-	// can still receive their persisted identities.
+	// Grandfathered file-mode rows predate the v26 delivery-shape update
+	// trigger and must be normalized before the backfill UPDATEs them,
+	// otherwise the upgrade aborts permanently. Backfill runs before the v32
+	// immutability triggers exist so historical rows can still receive their
+	// persisted identities.
+	if err := normalizeV32GrandfatheredDeliveries(ctx, tx); err != nil {
+		return err
+	}
 	if err := backfillV32NotificationIdentities(ctx, tx); err != nil {
 		return err
 	}
@@ -49,6 +55,26 @@ func migrateV32(ctx context.Context, tx *sql.Tx) error {
 	})
 }
 
+// normalizeV32GrandfatheredDeliveries reclassifies the file-mode delivery_v1
+// rows the historical v25 insert trigger admitted with the column default
+// upload_state='not_applicable'. The v26 delivery-shape update trigger rejects
+// that shape on any UPDATE, so the rows must be normalized before the identity
+// backfill touches them; otherwise the whole upgrade transaction aborts on
+// every startup. Rows that already carry publication evidence are left
+// untouched (their upload state can never be re-derived) and are skipped by
+// the backfill: they remain historical audit rows and never block the upgrade.
+// No row is deleted and no notification content is changed.
+func normalizeV32GrandfatheredDeliveries(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `UPDATE external_agent_job_notifications
+		SET upload_state = 'unknown'
+		WHERE policy_version = 'delivery_v1' AND delivery_mode = 'file'
+			AND upload_state = 'not_applicable' AND publish_state != 'published'
+			AND length(artifact_ref) > 0`); err != nil {
+		return fmt.Errorf("normalize grandfathered external-agent deliveries: %w", err)
+	}
+	return nil
+}
+
 // backfillV32NotificationIdentities recomputes the notification identity over
 // canonical Markdown in Go and mirrors the job result identity where it is
 // complete. Rows that cannot be classified keep empty/zero identity and never
@@ -56,7 +82,8 @@ func migrateV32(ctx context.Context, tx *sql.Tx) error {
 // ever logged per row.
 func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 	rows, err := tx.QueryContext(ctx, `SELECT n.job_id, n.status_revision, n.kind, n.terminal_status, n.canonical_markdown,
-		j.mode, j.result_sha256, j.result_bytes
+		j.mode, j.result_sha256, j.result_bytes,
+		n.policy_version, n.delivery_mode, n.upload_state
 		FROM external_agent_job_notifications n
 		JOIN external_agent_jobs j ON j.job_id = n.job_id`)
 	if err != nil {
@@ -76,8 +103,18 @@ func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 		var jobID, kind, terminalStatus, markdown, jobMode, jobResultSHA string
 		var revision int
 		var jobResultBytes int64
-		if err := rows.Scan(&jobID, &revision, &kind, &terminalStatus, &markdown, &jobMode, &jobResultSHA, &jobResultBytes); err != nil {
+		var policyVersion, deliveryMode, uploadState string
+		if err := rows.Scan(&jobID, &revision, &kind, &terminalStatus, &markdown, &jobMode, &jobResultSHA, &jobResultBytes, &policyVersion, &deliveryMode, &uploadState); err != nil {
 			return fmt.Errorf("scan external-agent notification identity: %w", err)
+		}
+		// Grandfathered file-mode rows that normalization could not repair
+		// (published evidence or missing artifact reference) abort any UPDATE
+		// through the v26 shape trigger. They keep the v32 column defaults:
+		// historical audit rows without identity, never activation-eligible.
+		if policyVersion == string(domain.JobDeliveryPolicyV1) &&
+			deliveryMode == string(domain.JobResultDeliveryFile) &&
+			uploadState == string(domain.JobResultUploadNotApplicable) {
+			continue
 		}
 		notificationSHA := ""
 		notificationBytes := int64(0)
