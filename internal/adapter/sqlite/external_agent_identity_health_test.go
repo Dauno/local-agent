@@ -47,9 +47,13 @@ func insertIdentityNotificationRow(t *testing.T, db *sql.DB, id, notificationSHA
 	}
 }
 
-// insertIdentityActivationRow inserts one activation row owned by the given
-// job with the given state, content byte count, and error code.
+// insertIdentityActivationRow inserts one completed activation row owned by
+// the given job with the given state, content byte count, and error code.
 func insertIdentityActivationRow(t *testing.T, db *sql.DB, jobID, state string, contentBytes int64, errorCode string) {
+	insertIdentityActivationRowWithTerminalStatus(t, db, jobID, state, contentBytes, errorCode, "completed")
+}
+
+func insertIdentityActivationRowWithTerminalStatus(t *testing.T, db *sql.DB, jobID, state string, contentBytes int64, errorCode, terminalStatus string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO external_agent_job_activations (
 		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
@@ -57,10 +61,10 @@ func insertIdentityActivationRow(t *testing.T, db *sql.DB, jobID, state string, 
 		slack_message_ts, published_at, state, attempt, lease_owner, lease_expiry, next_attempt_at,
 		last_error_code, response_body, response_sha256, exchange_intent_id, correlation_id,
 		response_slack_ts, created_at, updated_at)
-		VALUES (?, 1, 'terminal', ?, 'completed', ?, 'U12345678', 'T12345678',
+		VALUES (?, 1, 'terminal', ?, ?, ?, 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', ?, 'markdown', ?, '1710000000.000002', 1, ?, 1, '', 0, 0,
 		?, '', '', '', '', '', 1, 1)`,
-		jobID, "activation_"+jobID, strings.Repeat("a", 64), jobID+"-call", contentBytes, state, errorCode); err != nil {
+		jobID, "activation_"+jobID, terminalStatus, strings.Repeat("a", 64), jobID+"-call", contentBytes, state, errorCode); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -82,6 +86,11 @@ func TestIdentityHealthDetectsIncompleteIdentityContentFree(t *testing.T) {
 	insertIdentityJobRow(t, store.DB(), "job_retired_owner", "foreground", "completed", strings.Repeat("d", 64), 5)
 	insertIdentityJobRow(t, store.DB(), "job_healthy_activation", "detached", "completed", strings.Repeat("e", 64), 5)
 	insertIdentityJobRow(t, store.DB(), "job_not_terminal", "foreground", "running", "", 0)
+	for _, terminalStatus := range []string{"failed", "cancelled", "completion_unknown", "abandoned"} {
+		jobID := "job_detached_" + terminalStatus
+		insertIdentityJobRow(t, store.DB(), jobID, "detached", terminalStatus, "", 0)
+		insertIdentityActivationRowWithTerminalStatus(t, store.DB(), jobID, "failed", 0, "", terminalStatus)
+	}
 
 	insertIdentityNotificationRow(t, store.DB(), "job_healthy_inline", strings.Repeat("f", 64), 17, "completed")
 	insertIdentityNotificationRow(t, store.DB(), "job_no_result_identity", "", 0, "completed")
@@ -109,6 +118,25 @@ func TestIdentityHealthDetectsIncompleteIdentityContentFree(t *testing.T) {
 	// from a different bucket: only the seeded defect rows are counted.
 	if health.RetiredForegroundActivations != 1 || health.ActivationsWithoutContent != 1 {
 		t.Fatalf("buckets misclassified: %+v", health)
+	}
+}
+
+func TestIdentityHealthCompletedActivationWithoutContentIsCorrupt(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "completed-empty.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	insertIdentityJobRow(t, store.DB(), "job_completed_empty", "detached", "completed", strings.Repeat("a", 64), 1)
+	insertIdentityActivationRow(t, store.DB(), "job_completed_empty", "failed", 0, "")
+
+	health, err := jobs.IdentityHealth(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.ActivationsWithoutContent != 1 {
+		t.Fatalf("activations without content = %d, want 1", health.ActivationsWithoutContent)
 	}
 }
 

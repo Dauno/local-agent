@@ -38,7 +38,7 @@ func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.Exte
 		{
 			name: "activations without content bytes",
 			query: `SELECT COUNT(*) FROM external_agent_job_activations
-				WHERE content_bytes <= 0`,
+				WHERE terminal_status = 'completed' AND content_bytes <= 0`,
 			target: &health.ActivationsWithoutContent,
 		},
 		{

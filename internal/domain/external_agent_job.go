@@ -305,9 +305,9 @@ type ExternalAgentJobIdentityHealth struct {
 	// notification identity (notification_sha256 + notification_bytes) is not
 	// complete. Every post-v32 delivery must carry a complete identity.
 	NotificationsWithoutIdentity int
-	// ActivationsWithoutContent counts activations whose content byte count
-	// is not positive. Every activation created from a published terminal
-	// notification must carry the delivered result byte count.
+	// ActivationsWithoutContent counts completed activations whose content byte
+	// count is not positive. Failed, cancelled, completion_unknown, and
+	// abandoned activations legitimately carry no result content.
 	ActivationsWithoutContent int
 	// ForegroundActivationsActive counts non-terminal activations owned by
 	// foreground jobs. This is the P0 contract violation: foreground
