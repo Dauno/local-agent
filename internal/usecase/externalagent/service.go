@@ -346,7 +346,7 @@ func (s *Service) verifiedResultForJob(ctx context.Context, job *domain.External
 		var err error
 		content, err = s.artifacts.Get(ctx, job.ID+"-delivery", job.ResultArtifact, job.ResultSHA256, maxBytes)
 		if err != nil {
-			return domain.ExternalAgentJobResult{}, mapArtifactReadError(err)
+			return domain.ExternalAgentJobResult{}, s.mapArtifactReadError(err)
 		}
 	}
 	if len(content) == 0 || int64(len(content)) > s.maxResultBytes || !utf8.Valid(content) {
@@ -375,29 +375,56 @@ func resultReadError(code domain.ResultErrorCode) error {
 	return &domain.ResultError{Code: code}
 }
 
+// identityFailureCode reports whether a bounded classification is an identity
+// failure: an incoherent inline identity or an artifact owner/ref, byte, or
+// digest mismatch. Availability failures (missing artifact, unavailable store)
+// and unmapped fallbacks are deliberately excluded: they are not identity
+// verification failures.
+func identityFailureCode(code domain.ResultErrorCode) bool {
+	switch code {
+	case domain.ResultErrorIdentityInvalid,
+		domain.ResultErrorArtifactOwnerRefMismatch,
+		domain.ResultErrorArtifactBytesMismatch,
+		domain.ResultErrorArtifactDigestMismatch:
+		return true
+	default:
+		return false
+	}
+}
+
+// classifiedResultError is the single counter point for verified result reads.
+// It returns the bounded classified error and, when the code is an identity
+// failure, increments the label-free identity-failure counter exactly once.
+// No job ID, digest, reference, path, owner, actor, conversation, or content
+// value is recorded.
+func (s *Service) classifiedResultError(code domain.ResultErrorCode) error {
+	if s != nil && s.metrics != nil && identityFailureCode(code) {
+		s.metrics.AddCounter(domain.MetricExternalAgentResultIdentityInvalidTotal, 1, nil)
+	}
+	return resultReadError(code)
+}
+
 // resultIdentityError classifies an identity failure by delivery mode: inline
 // rows collapse to the given inline code, file-mode rows to the artifact code,
 // so operators can distinguish the cause without ever seeing the values
-// involved. Every classification increments the bounded identity-failure
-// counter; no job ID, digest, reference, or content value is recorded.
+// involved. Classification flows through the shared identity-failure counter
+// point used by full reads, chunk reads, and classified adapter errors.
 func (s *Service) resultIdentityError(mode domain.JobResultDeliveryMode, inline, file domain.ResultErrorCode) error {
-	if s != nil && s.metrics != nil {
-		s.metrics.AddCounter(domain.MetricExternalAgentResultIdentityInvalidTotal, 1, nil)
-	}
 	if mode == domain.JobResultDeliveryFile {
-		return resultReadError(file)
+		return s.classifiedResultError(file)
 	}
-	return resultReadError(inline)
+	return s.classifiedResultError(inline)
 }
 
 // mapArtifactReadError fails closed: an adapter error already carrying a
 // recognized bounded code keeps its code; anything else becomes the generic
-// result_artifact_invalid so no unmapped detail can leak.
-func mapArtifactReadError(err error) error {
+// result_artifact_invalid so no unmapped detail can leak. Classified identity
+// failures are routed through the shared identity-failure counter point.
+func (s *Service) mapArtifactReadError(err error) error {
 	if err == nil {
 		return nil
 	}
-	return resultReadError(domain.ResultErrorCodeOf(err))
+	return s.classifiedResultError(domain.ResultErrorCodeOf(err))
 }
 
 // ReadResultChunk exposes only one verified UTF-8 range of a completed job.
@@ -432,14 +459,14 @@ func (s *Service) readResultChunkForJob(ctx context.Context, job *domain.Externa
 	maxBytes := s.resultChunkMax(requestedMaxBytes)
 	if job.ResultArtifact != "" {
 		if s.artifacts == nil {
-			return domain.ResultChunk{}, resultReadError(domain.ResultErrorArtifactMissing)
+			return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorArtifactMissing)
 		}
 		verified, ok := s.artifacts.(port.ResultArtifactChunkReader)
 		if !ok {
-			return domain.ResultChunk{}, resultReadError(domain.ResultErrorArtifactMissing)
+			return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorArtifactMissing)
 		}
 		if job.ResultBytes <= 0 || job.ResultBytes > s.maxResultBytes {
-			return domain.ResultChunk{}, resultReadError(domain.ResultErrorArtifactBytesMismatch)
+			return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorArtifactBytesMismatch)
 		}
 		chunk, err := verified.ReadChunk(ctx, domain.ResultArtifactChunkRequest{
 			OwnerID:        job.ID + "-delivery",
@@ -450,14 +477,14 @@ func (s *Service) readResultChunkForJob(ctx context.Context, job *domain.Externa
 			MaxBytes:       maxBytes,
 		})
 		if err != nil {
-			return domain.ResultChunk{}, mapArtifactReadError(err)
+			return domain.ResultChunk{}, s.mapArtifactReadError(err)
 		}
 		return chunk, nil
 	}
 	if job.ResultSummary == "" {
-		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
 	}
-	return readInlineResultChunk(job.ResultSummary, job.ResultBytes, job.ResultSHA256, offsetBytes, maxBytes)
+	return s.readInlineResultChunk(job.ResultSummary, job.ResultBytes, job.ResultSHA256, offsetBytes, maxBytes)
 }
 
 func (s *Service) resultChunkMax(requested int64) int64 {
@@ -467,24 +494,24 @@ func (s *Service) resultChunkMax(requested int64) int64 {
 	return requested
 }
 
-func readInlineResultChunk(content string, expectedBytes int64, expectedSHA256 string, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
+func (s *Service) readInlineResultChunk(content string, expectedBytes int64, expectedSHA256 string, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
 	data := []byte(content)
 	if expectedBytes <= 0 || int64(len(data)) != expectedBytes || !utf8.Valid(data) || strings.TrimSpace(expectedSHA256) == "" {
-		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
 	}
 	digest := sha256.Sum256(data)
 	actualSHA256 := fmt.Sprintf("%x", digest)
 	if !strings.EqualFold(actualSHA256, expectedSHA256) {
-		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
 	}
 	if offsetBytes < 0 || offsetBytes > expectedBytes {
-		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
 	}
 	if offsetBytes == expectedBytes {
 		return domain.ResultChunk{OffsetBytes: offsetBytes, NextOffsetBytes: offsetBytes, EOF: true, SHA256: actualSHA256}, nil
 	}
 	if !utf8.RuneStart(data[offsetBytes]) {
-		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
 	}
 	end := offsetBytes + maxBytes
 	if end < offsetBytes || end > expectedBytes {
@@ -492,7 +519,7 @@ func readInlineResultChunk(content string, expectedBytes int64, expectedSHA256 s
 	}
 	completeBytes := completeUTF8Prefix(data[offsetBytes:end])
 	if completeBytes == 0 {
-		return domain.ResultChunk{}, resultReadError(domain.ResultErrorIdentityInvalid)
+		return domain.ResultChunk{}, s.classifiedResultError(domain.ResultErrorIdentityInvalid)
 	}
 	nextOffset := offsetBytes + int64(completeBytes)
 	return domain.ResultChunk{

@@ -412,6 +412,159 @@ func TestIdentityVerificationFailureRecordsBoundedCounter(t *testing.T) {
 	}
 }
 
+// TestIdentityFailureCounterCoversFullChunkAndAdapterReads pins CR7: the
+// label-free identity-failure counter increments exactly once per classified
+// identity failure regardless of the read route (full inline read, chunk
+// reads, or classified artifact-adapter mismatches), and healthy reads never
+// increment it.
+func TestIdentityFailureCounterCoversFullChunkAndAdapterReads(t *testing.T) {
+	content := "complete sanitized result"
+	digest := sha256.Sum256([]byte(content))
+	tests := []struct {
+		name      string
+		mode      domain.ExternalAgentJobMode
+		complete  func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, jobStore port.ExternalAgentJobStore, artifacts port.ResultArtifactStore, stateDir string) domain.AcpInvocationResult
+		tamper    func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, stateDir string)
+		read      func(service *Service, job *domain.ExternalAgentJob) error
+		wantCount int64
+	}{
+		{
+			name: "full read inline identity failure",
+			mode: domain.JobForeground,
+			complete: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, jobStore port.ExternalAgentJobStore, artifacts port.ResultArtifactStore, stateDir string) domain.AcpInvocationResult {
+				return domain.AcpInvocationResult{Text: content, ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other"))), ResultBytes: int64(len(content))}
+			},
+			read: func(service *Service, job *domain.ExternalAgentJob) error {
+				_, err := service.ReadResult(t.Context(), job.ID, "U12345678", "slack:T12345678:dm:D12345678")
+				return err
+			},
+			wantCount: 1,
+		},
+		{
+			name: "full read artifact owner mismatch",
+			mode: domain.JobDetached,
+			complete: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, jobStore port.ExternalAgentJobStore, artifacts port.ResultArtifactStore, stateDir string) domain.AcpInvocationResult {
+				artifact, err := artifacts.(*fsartifact.Store).Put(t.Context(), job.ID+"-delivery", content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "foreign-delivery.result", ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes,
+					DeliveryArtifactRef: "foreign-delivery.result", DeliveryContentSHA256: artifact.SHA256, DeliveryContentBytes: artifact.Bytes, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6}
+			},
+			read: func(service *Service, job *domain.ExternalAgentJob) error {
+				_, err := service.ReadResult(t.Context(), job.ID, "U12345678", "slack:T12345678:dm:D12345678")
+				return err
+			},
+			wantCount: 1,
+		},
+		{
+			name: "chunk read inline identity failure",
+			mode: domain.JobForeground,
+			complete: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, jobStore port.ExternalAgentJobStore, artifacts port.ResultArtifactStore, stateDir string) domain.AcpInvocationResult {
+				return domain.AcpInvocationResult{Text: content, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content))}
+			},
+			tamper: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, stateDir string) {
+				if _, err := db.DB().ExecContext(t.Context(), `UPDATE external_agent_jobs SET result_bytes = result_bytes + 1 WHERE job_id = ?`, job.ID); err != nil {
+					t.Fatal(err)
+				}
+			},
+			read: func(service *Service, job *domain.ExternalAgentJob) error {
+				_, err := service.ReadResultChunk(t.Context(), job.ID, "U12345678", "slack:T12345678:dm:D12345678", 0, 4)
+				return err
+			},
+			wantCount: 1,
+		},
+		{
+			name: "chunk read artifact size mismatch",
+			mode: domain.JobDetached,
+			complete: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, jobStore port.ExternalAgentJobStore, artifacts port.ResultArtifactStore, stateDir string) domain.AcpInvocationResult {
+				artifact, err := artifacts.(*fsartifact.Store).Put(t.Context(), job.ID+"-delivery", content)
+				if err != nil {
+					t.Fatal(err)
+				}
+				return domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes,
+					DeliveryArtifactRef: artifact.Reference, DeliveryContentSHA256: artifact.SHA256, DeliveryContentBytes: artifact.Bytes, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6}
+			},
+			tamper: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, stateDir string) {
+				ref := domain.CanonicalArtifactReference(job.ID)
+				if err := os.WriteFile(filepath.Join(stateDir, "artifacts", ref), []byte("tampered"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+			read: func(service *Service, job *domain.ExternalAgentJob) error {
+				_, err := service.ReadResultChunk(t.Context(), job.ID, "U12345678", "slack:T12345678:dm:D12345678", 0, 4)
+				return err
+			},
+			wantCount: 1,
+		},
+		{
+			name: "healthy full and chunk reads do not increment",
+			mode: domain.JobForeground,
+			complete: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, jobStore port.ExternalAgentJobStore, artifacts port.ResultArtifactStore, stateDir string) domain.AcpInvocationResult {
+				return domain.AcpInvocationResult{Text: content, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content))}
+			},
+			read: func(service *Service, job *domain.ExternalAgentJob) error {
+				if _, err := service.ReadResult(t.Context(), job.ID, "U12345678", "slack:T12345678:dm:D12345678"); err != nil {
+					return err
+				}
+				_, err := service.ReadResultChunk(t.Context(), job.ID, "U12345678", "slack:T12345678:dm:D12345678", 0, 4)
+				return err
+			},
+			wantCount: 0,
+		},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			stateDir := t.TempDir()
+			store, err := sqlite.Initialize(t.Context(), filepath.Join(stateDir, "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			metrics := &recordingNotificationMetrics{}
+			jobStore := sqlite.NewExternalAgentJobStore(store)
+			artifacts, err := fsartifact.New(filepath.Join(stateDir, "artifacts"), 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+				Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: artifacts, MaxResultBytes: 4096, Metrics: metrics,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := testRequest(testCase.mode)
+			created, err := service.Start(t.Context(), request)
+			if err != nil || created == nil {
+				t.Fatalf("start = %#v, err = %v", created, err)
+			}
+			result := testCase.complete(t, created, store, jobStore, artifacts, stateDir)
+			completeJobWithResult(t, jobStore, created, result)
+			if testCase.tamper != nil {
+				testCase.tamper(t, created, store, stateDir)
+			}
+			readErr := testCase.read(service, created)
+			if readErr != nil {
+				if testCase.wantCount == 0 {
+					t.Fatalf("healthy read failed: %v", readErr)
+				}
+				if !strings.Contains(readErr.Error(), string(domain.ResultErrorIdentityInvalid)) && !strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactOwnerRefMismatch)) && !strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactBytesMismatch)) && !strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactDigestMismatch)) {
+					t.Fatalf("read error = %q, want an identity-class code", readErr.Error())
+				}
+			}
+			count := int64(0)
+			for _, sample := range metrics.samples {
+				if sample.Name == domain.MetricExternalAgentResultIdentityInvalidTotal && len(sample.Labels) == 0 {
+					count += int64(sample.Value)
+				}
+			}
+			if count != testCase.wantCount {
+				t.Fatalf("identity failure counter = %d, want %d; samples = %#v", count, testCase.wantCount, metrics.samples)
+			}
+		})
+	}
+}
+
 func TestStatusMismatchSignalsDoNotRevealComparedBindings(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
