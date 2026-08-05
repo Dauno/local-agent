@@ -144,6 +144,11 @@ const (
 	JobActivationCompleted         = ActivationCompleted
 	JobActivationCompletionUnknown = ActivationCompletionUnknown
 	JobActivationFailed            = ActivationFailed
+
+	// ActivationForegroundRetiredCode is the bounded error code stamped by the
+	// v31 repair migration on foreground activations retired without model
+	// execution or response publication. It is not a worker classification.
+	ActivationForegroundRetiredCode = "foreground_activation_retired"
 )
 
 // ExternalAgentJobActivation is the durable host-originated root-turn outbox
