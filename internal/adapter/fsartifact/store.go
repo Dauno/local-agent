@@ -200,7 +200,7 @@ func (s *Store) ReadChunk(ctx context.Context, req domain.ResultArtifactChunkReq
 		return domain.ResultChunk{}, artifactError(domain.ResultErrorArtifactDigestMismatch, "result artifact digest is invalid")
 	}
 	if req.OffsetBytes < 0 || req.OffsetBytes > req.ExpectedBytes {
-		return domain.ResultChunk{}, artifactError(domain.ResultErrorArtifactBytesMismatch, "result artifact offset is invalid")
+		return domain.ResultChunk{}, artifactError(domain.ResultErrorChunkRequestInvalid, "result artifact offset is invalid")
 	}
 	maxBytes := req.MaxBytes
 	if maxBytes <= 0 || maxBytes > artifactChunkMaxBytes {
@@ -287,14 +287,14 @@ func (s *Store) ReadChunk(ctx context.Context, req domain.ResultArtifactChunkReq
 		return domain.ResultChunk{OffsetBytes: req.OffsetBytes, NextOffsetBytes: req.OffsetBytes, EOF: true, SHA256: actualSHA256}, nil
 	}
 	if len(chunk) == 0 || !utf8.RuneStart(chunk[0]) {
-		return domain.ResultChunk{}, artifactError(domain.ResultErrorArtifactBytesMismatch, "result artifact offset is not a UTF-8 boundary")
+		return domain.ResultChunk{}, artifactError(domain.ResultErrorChunkRequestInvalid, "result artifact offset is not a UTF-8 boundary")
 	}
 	completeBytes, err := completeUTF8Prefix(chunk)
 	if err != nil {
 		return domain.ResultChunk{}, artifactError(domain.ResultErrorArtifactDigestMismatch, err.Error())
 	}
 	if completeBytes == 0 {
-		return domain.ResultChunk{}, artifactError(domain.ResultErrorArtifactBytesMismatch, "result artifact read bound is smaller than one UTF-8 character")
+		return domain.ResultChunk{}, artifactError(domain.ResultErrorChunkRequestInvalid, "result artifact read bound is smaller than one UTF-8 character")
 	}
 	chunk = chunk[:completeBytes]
 	nextOffset := req.OffsetBytes + int64(len(chunk))

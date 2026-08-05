@@ -305,6 +305,42 @@ func TestResultArtifactErrorsCarryBoundedCodesWithoutValues(t *testing.T) {
 	})
 }
 
+// TestResultArtifactChunkRejectsMisalignedRequestRanges pins CR11: offsets
+// that are out of bounds or not on a UTF-8 boundary, and read bounds smaller
+// than the next UTF-8 character, are client request errors, never durable
+// identity mismatches.
+func TestResultArtifactChunkRejectsMisalignedRequestRanges(t *testing.T) {
+	store, err := fsartifact.New(t.TempDir(), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const content = "a🔥bc"
+	artifact, err := store.Put(t.Context(), "job_ranges-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(offset, max int64) error {
+		t.Helper()
+		_, err := store.ReadChunk(t.Context(), domain.ResultArtifactChunkRequest{
+			OwnerID: "job_ranges-delivery", Reference: artifact.Reference, ExpectedBytes: artifact.Bytes,
+			ExpectedSHA256: artifact.SHA256, OffsetBytes: offset, MaxBytes: max,
+		})
+		if err == nil {
+			t.Fatalf("read at %d/%d succeeded, want %s", offset, max, domain.ResultErrorChunkRequestInvalid)
+		}
+		var classified *domain.ResultError
+		if !errors.As(err, &classified) || classified.Code != domain.ResultErrorChunkRequestInvalid {
+			t.Fatalf("read at %d/%d error = %v, want %s", offset, max, err, domain.ResultErrorChunkRequestInvalid)
+		}
+		return err
+	}
+	read(artifact.Bytes+1, 4)
+	read(1, 1)
+	read(2, 4)
+	read(3, 4)
+	read(4, 4)
+}
+
 func TestResultArtifactStoreRejectsChunkBindingAndTampering(t *testing.T) {
 	dir := t.TempDir()
 	store, err := fsartifact.New(dir, 256*1024)

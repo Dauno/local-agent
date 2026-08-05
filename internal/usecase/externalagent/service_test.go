@@ -565,6 +565,144 @@ func TestIdentityFailureCounterCoversFullChunkAndAdapterReads(t *testing.T) {
 	}
 }
 
+// TestReadResultChunkRangeErrorsAreRequestErrorsNotIdentityFailures pins
+// CR11: client range errors (out-of-bounds or misaligned offsets, a max_bytes
+// bound smaller than the next UTF-8 character) are bounded request errors that
+// never increment the identity-failure counter in either delivery mode, while
+// real durable corruption still does.
+func TestReadResultChunkRangeErrorsAreRequestErrorsNotIdentityFailures(t *testing.T) {
+	const content = "a🔥bc"
+	digest := sha256.Sum256([]byte(content))
+	identityCount := func(metrics *recordingNotificationMetrics) int64 {
+		var count int64
+		for _, sample := range metrics.samples {
+			if sample.Name == domain.MetricExternalAgentResultIdentityInvalidTotal && len(sample.Labels) == 0 {
+				count += int64(sample.Value)
+			}
+		}
+		return count
+	}
+	run := func(t *testing.T, mode domain.ExternalAgentJobMode, read func(*Service, *domain.ExternalAgentJob) error) *recordingNotificationMetrics {
+		t.Helper()
+		stateDir := t.TempDir()
+		store, err := sqlite.Initialize(t.Context(), filepath.Join(stateDir, "jobs.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = store.Close() })
+		metrics := &recordingNotificationMetrics{}
+		jobStore := sqlite.NewExternalAgentJobStore(store)
+		artifacts, err := fsartifact.New(filepath.Join(stateDir, "artifacts"), 256*1024)
+		if err != nil {
+			t.Fatal(err)
+		}
+		service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+			Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: artifacts, MaxResultBytes: 256 * 1024, MaxResultChunkBytes: int64(len(content)), Metrics: metrics,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		request := testRequest(mode)
+		created, err := service.Start(t.Context(), request)
+		if err != nil || created == nil {
+			t.Fatalf("start = %#v, err = %v", created, err)
+		}
+		var result domain.AcpInvocationResult
+		if mode == domain.JobDetached {
+			artifact, err := artifacts.Put(t.Context(), created.ID+"-delivery", content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			result = domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes}
+		} else {
+			result = domain.AcpInvocationResult{Text: content, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown}
+		}
+		completeJobWithResult(t, jobStore, created, result)
+		if err := read(service, created); err == nil {
+			t.Fatal("expected a bounded request error")
+		}
+		return metrics
+	}
+
+	// Inline mode: misaligned offset, a bound smaller than the next rune, and
+	// an out-of-bounds offset are all request errors that never count.
+	metrics := run(t, domain.JobForeground, func(service *Service, job *domain.ExternalAgentJob) error {
+		_, err := service.ReadResultChunk(t.Context(), job.ID, job.Actor, job.ConversationKey, 2, 4)
+		assertRequestError := func(err error, step string) {
+			if err == nil || !strings.Contains(err.Error(), string(domain.ResultErrorChunkRequestInvalid)) {
+				t.Fatalf("%s error = %v, want %s", step, err, domain.ResultErrorChunkRequestInvalid)
+			}
+		}
+		assertRequestError(err, "misaligned offset")
+		_, err = service.ReadResultChunk(t.Context(), job.ID, job.Actor, job.ConversationKey, 1, 1)
+		assertRequestError(err, "bound smaller than next rune")
+		_, err = service.ReadResultChunk(t.Context(), job.ID, job.Actor, job.ConversationKey, int64(len(content))+1, 4)
+		assertRequestError(err, "out-of-bounds offset")
+		return err
+	})
+	if got := identityCount(metrics); got != 0 {
+		t.Fatalf("inline request errors counted as identity failures: %d", got)
+	}
+
+	// File mode: the same three ranges are request errors that never count.
+	metrics = run(t, domain.JobDetached, func(service *Service, job *domain.ExternalAgentJob) error {
+		assertRequestError := func(err error, step string) {
+			if err == nil || !strings.Contains(err.Error(), string(domain.ResultErrorChunkRequestInvalid)) {
+				t.Fatalf("%s error = %v, want %s", step, err, domain.ResultErrorChunkRequestInvalid)
+			}
+		}
+		_, err := service.ReadResultChunk(t.Context(), job.ID, job.Actor, job.ConversationKey, 2, 4)
+		assertRequestError(err, "misaligned offset")
+		_, err = service.ReadResultChunk(t.Context(), job.ID, job.Actor, job.ConversationKey, 1, 1)
+		assertRequestError(err, "bound smaller than next rune")
+		_, err = service.ReadResultChunk(t.Context(), job.ID, job.Actor, job.ConversationKey, int64(len(content))+1, 4)
+		assertRequestError(err, "out-of-bounds offset")
+		return err
+	})
+	if got := identityCount(metrics); got != 0 {
+		t.Fatalf("file-mode request errors counted as identity failures: %d", got)
+	}
+
+	// Real durable corruption still increments the identity-failure counter.
+	stateDir := t.TempDir()
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(stateDir, "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	corruptionMetrics := &recordingNotificationMetrics{}
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	artifacts, err := fsartifact.New(filepath.Join(stateDir, "artifacts"), 256*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+		Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: artifacts, MaxResultBytes: 256 * 1024, MaxResultChunkBytes: int64(len(content)), Metrics: corruptionMetrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequest(domain.JobDetached)
+	created, err := service.Start(t.Context(), request)
+	if err != nil || created == nil {
+		t.Fatalf("start = %#v, err = %v", created, err)
+	}
+	artifact, err := artifacts.Put(t.Context(), created.ID+"-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completeJobWithResult(t, jobStore, created, domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes})
+	if err := os.WriteFile(filepath.Join(stateDir, "artifacts", artifact.Reference), []byte("tampered!"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReadResultChunk(t.Context(), created.ID, request.Actor, request.ConversationKey, 0, 4); err == nil || !strings.Contains(err.Error(), string(domain.ResultErrorArtifactBytesMismatch)) {
+		t.Fatalf("tampered artifact error = %v", err)
+	}
+	if got := identityCount(corruptionMetrics); got != 1 {
+		t.Fatalf("identity failure counter = %d, want 1 for real corruption", got)
+	}
+}
+
 func TestStatusMismatchSignalsDoNotRevealComparedBindings(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
