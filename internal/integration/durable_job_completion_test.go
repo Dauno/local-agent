@@ -159,8 +159,16 @@ func TestDetachedJobCompletionPublishesDurableSlackDelivery(t *testing.T) {
 	if !ok {
 		t.Fatalf("Slack metadata payload = %#v", request.Metadata)
 	}
-	if payload["job_id"] != job.ID || payload["status_revision"] != float64(delivery.StatusRevision) || payload["notification_sha256"] != digest {
+	canonical := "OpenCode job `job_integration_1` completed.\n\n" + content
+	canonicalDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
+	if payload["job_id"] != job.ID || payload["status_revision"] != float64(delivery.StatusRevision) || payload["notification_sha256"] != canonicalDigest {
 		t.Fatalf("Slack job metadata = %#v", payload)
+	}
+	if payload["result_sha256"] != digest || payload["result_bytes"] != float64(len(content)) {
+		t.Fatalf("Slack result identity metadata = %#v", payload)
+	}
+	if payload["notification_sha256"] == payload["result_sha256"] {
+		t.Fatalf("Slack notification and result identities collide: %#v", payload)
 	}
 }
 

@@ -2,8 +2,10 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -188,8 +190,8 @@ func TestOpenExistingUpgradesV28WithoutBackfillingActivations(t *testing.T) {
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if version != 30 {
-		t.Fatalf("upgraded schema version = %d, want 30", version)
+	if version != 32 {
+		t.Fatalf("upgraded schema version = %d, want 32", version)
 	}
 	rows, err := store.db.QueryContext(ctx, `SELECT role, source FROM messages ORDER BY id`)
 	if err != nil {
@@ -789,6 +791,171 @@ func TestOpenExistingUpgradesV8PersonTopicWithUnambiguousOwner(t *testing.T) {
 	if ownerKey != "slack:T12345678:user:U12345678" {
 		t.Fatalf("legacy topic owner_key = %q, want inferred owner", ownerKey)
 	}
+}
+
+func TestMigrationV32AddsExplicitRouteAndIdentityColumnsOnFreshSchema(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "v32.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(external_agent_job_notifications)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := make(map[string]bool)
+	for rows.Next() {
+		var cid, notNull, primaryKey int
+		var name, kind string
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &kind, &notNull, &defaultValue, &primaryKey); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"root_activation_required", "notification_sha256", "notification_bytes", "result_sha256", "content_sha256", "result_bytes"} {
+		if !columns[name] {
+			t.Fatalf("fresh schema missing %s", name)
+		}
+	}
+	var triggerCount int
+	if err := store.db.QueryRowContext(context.Background(), `SELECT COUNT(*) FROM sqlite_schema
+		WHERE type = 'trigger' AND name LIKE 'external_agent_job_notifications_%' AND (name LIKE '%route%' OR name LIKE '%identity%')`).Scan(&triggerCount); err != nil {
+		t.Fatal(err)
+	}
+	if triggerCount != 3 {
+		t.Fatalf("v32 trigger count = %d, want 3", triggerCount)
+	}
+}
+
+func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.T) {
+	ctx := context.Background()
+	path, raw := createSchemaAtVersion(t, 30)
+
+	insertV30Job := func(id, mode, status, resultSHA string, resultBytes int64) {
+		t.Helper()
+		if _, err := raw.ExecContext(ctx, `INSERT INTO external_agent_jobs (
+			job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
+			task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
+			conversation_key, status, result_sha256, result_bytes, timeout_at, created_at, updated_at)
+			VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+			'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
+			'slack:T12345678:dm:D12345678', ?, ?, ?, 2, 1, 1)`,
+			id, mode, id+"-call", status, resultSHA, resultBytes); err != nil {
+			t.Fatal(err)
+		}
+	}
+	insertV30Notification := func(id, terminalStatus, markdown, contentSHA string, policy, deliveryMode, artifactRef string, resultBytes int64) {
+		t.Helper()
+		if _, err := raw.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
+			job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,
+			renderer_version, channel_id, next_attempt_at, created_at, updated_at,
+			delivery_mode, policy_version, artifact_ref, result_bytes, max_markdown_parts, upload_state, published_at)
+			VALUES (?, 1, 'terminal', ?, ?, ?, 'markdown_v1', 'D12345678', 1, 1, 1, ?, ?, ?, ?, 6, ?, 0)`,
+			id, terminalStatus, markdown, contentSHA, deliveryMode, policy, artifactRef, resultBytes, uploadStateForPolicy(policy, deliveryMode)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	markdownText := "OpenCode job `matrix-detached` completed.\n\nsafe result"
+	markdownDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(markdownText)))
+	resultDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("safe result")))
+	legacyMarkdown := "legacy summary"
+	legacyDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(legacyMarkdown)))
+
+	insertV30Job("matrix-detached-markdown", "detached", "completed", resultDigest, int64(len("safe result")))
+	insertV30Notification("matrix-detached-markdown", "completed", markdownText, resultDigest, "delivery_v1", "markdown", "", int64(len("safe result")))
+
+	fileMarkdown := "OpenCode job `matrix-detached-file` completed. The complete result was attached."
+	fileDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("file bytes")))
+	insertV30Job("matrix-detached-file", "detached", "completed", fileDigest, int64(len("file bytes")))
+	insertV30Notification("matrix-detached-file", "completed", fileMarkdown, fileDigest, "delivery_v1", "file", "matrix-detached-file-delivery.result", int64(len("file bytes")))
+
+	failedMarkdown := "OpenCode job `matrix-detached-failed` failed."
+	insertV30Job("matrix-detached-failed", "detached", "failed", "", 0)
+	insertV30Notification("matrix-detached-failed", "failed", failedMarkdown, fmt.Sprintf("%x", sha256.Sum256([]byte(failedMarkdown))), "legacy_v1", "markdown", "", 0)
+
+	insertV30Job("matrix-foreground", "foreground", "completed", resultDigest, int64(len("safe result")))
+	insertV30Notification("matrix-foreground", "completed", markdownText, resultDigest, "delivery_v1", "markdown", "", int64(len("safe result")))
+
+	insertV30Job("matrix-legacy", "detached", "completed", resultDigest, int64(len("safe result")))
+	insertV30Notification("matrix-legacy", "", legacyMarkdown, legacyDigest, "legacy_v1", "markdown", "", 0)
+
+	insertV30Job("matrix-invalid-result", "detached", "completed", "not-a-digest", int64(len("safe result")))
+	insertV30Notification("matrix-invalid-result", "completed", markdownText, resultDigest, "delivery_v1", "markdown", "", int64(len("safe result")))
+
+	insertV30Job("matrix-empty-markdown", "detached", "completed", resultDigest, int64(len("safe result")))
+	insertV30Notification("matrix-empty-markdown", "completed", "   ", fmt.Sprintf("%x", sha256.Sum256([]byte("   "))), "legacy_v1", "markdown", "", 0)
+
+	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err := OpenExisting(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	var version int
+	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	if version != SchemaVersion {
+		t.Fatalf("upgraded schema version = %d, want %d", version, SchemaVersion)
+	}
+
+	type expected struct {
+		root            int
+		notificationSHA string
+		notificationB   int64
+		resultSHA       string
+		resultBytes     int64
+	}
+	cases := map[string]expected{
+		"matrix-detached-markdown": {1, markdownDigest, int64(len([]byte(markdownText))), resultDigest, int64(len("safe result"))},
+		"matrix-detached-file":     {1, fmt.Sprintf("%x", sha256.Sum256([]byte(fileMarkdown))), int64(len([]byte(fileMarkdown))), fileDigest, int64(len("file bytes"))},
+		"matrix-detached-failed":   {1, fmt.Sprintf("%x", sha256.Sum256([]byte(failedMarkdown))), int64(len([]byte(failedMarkdown))), "", 0},
+		"matrix-foreground":        {0, markdownDigest, int64(len([]byte(markdownText))), resultDigest, int64(len("safe result"))},
+		"matrix-legacy":            {0, legacyDigest, int64(len([]byte(legacyMarkdown))), resultDigest, int64(len("safe result"))},
+		"matrix-invalid-result":    {1, markdownDigest, int64(len([]byte(markdownText))), "", int64(len("safe result"))},
+		"matrix-empty-markdown":    {0, "", 0, resultDigest, int64(len("safe result"))},
+	}
+	for jobID, want := range cases {
+		var got expected
+		if err := store.db.QueryRowContext(ctx, `SELECT root_activation_required, notification_sha256, notification_bytes, result_sha256, result_bytes
+			FROM external_agent_job_notifications WHERE job_id = ?`, jobID).
+			Scan(&got.root, &got.notificationSHA, &got.notificationB, &got.resultSHA, &got.resultBytes); err != nil {
+			t.Fatalf("%s: %v", jobID, err)
+		}
+		if got != want {
+			t.Fatalf("%s backfill = %+v, want %+v", jobID, got, want)
+		}
+	}
+
+	if _, err := store.db.ExecContext(ctx, `UPDATE external_agent_job_notifications
+		SET root_activation_required = 0 WHERE job_id = 'matrix-detached-markdown'`); err == nil {
+		t.Fatal("completion route was mutable")
+	}
+	if _, err := store.db.ExecContext(ctx, `UPDATE external_agent_job_notifications
+		SET notification_sha256 = ? WHERE job_id = 'matrix-detached-markdown'`, strings.Repeat("0", 64)); err == nil {
+		t.Fatal("notification identity was mutable")
+	}
+	if _, err := store.db.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
+		job_id, status_revision, kind, canonical_markdown, renderer_version, channel_id, next_attempt_at, created_at, updated_at, root_activation_required)
+		VALUES ('matrix-detached-markdown', 2, 'terminal', 'x', 'markdown_v1', 'D12345678', 1, 1, 1, 2)`); err == nil {
+		t.Fatal("non-boolean completion route was accepted")
+	}
+}
+
+func uploadStateForPolicy(policy, deliveryMode string) string {
+	if policy == "delivery_v1" && deliveryMode == "file" {
+		return "completed"
+	}
+	return "not_applicable"
 }
 
 func newTestStore(t *testing.T) (*Store, string) {

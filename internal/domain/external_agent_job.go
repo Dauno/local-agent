@@ -87,9 +87,24 @@ type ExternalAgentJobNotification struct {
 	ConversationKey ConversationKey
 	// HostResultText is ephemeral completion data. It is never written to the
 	// notification row or exposed through an ADK function response.
-	HostResultText      string
-	CanonicalMarkdown   string
-	ContentSHA256       string
+	HostResultText string
+	// RootActivationRequired is the explicit, immutable completion disposition.
+	// It is set by mode at construction and backfilled for historical detached
+	// terminal snapshots; MarkNotificationPublished never infers it.
+	RootActivationRequired bool
+	CanonicalMarkdown      string
+	// ContentSHA256 is the legacy storage column. New contracts use the
+	// notification/result identity pair below; this field is preserved only
+	// for rows persisted before v32 and is never a routing input.
+	ContentSHA256 string
+	// NotificationSHA256 and NotificationBytes are the notification identity
+	// over the canonical Markdown bytes (SHA-256 lowercase hex).
+	NotificationSHA256 string
+	NotificationBytes  int64
+	// ResultSHA256 is the identity of the complete sanitized result, distinct
+	// from the notification identity. Empty together with zero ResultBytes
+	// means the terminal status carried no result (fail-closed).
+	ResultSHA256        string
 	RendererVersion     string
 	Target              ReplyTarget
 	PublishState        NotificationPublishState
@@ -357,12 +372,17 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 	}
 	markdown = sanitizeNotificationText(markdown, 8000)
 	digest := sha256.Sum256([]byte(markdown))
+	notificationSHA := fmt.Sprintf("%x", digest)
+	resultSHA, resultBytes := ValidResultIdentity(job.ResultSHA256, job.ResultBytes)
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
-		CanonicalMarkdown: markdown, ContentSHA256: fmt.Sprintf("%x", digest),
+		CanonicalMarkdown: markdown, ContentSHA256: notificationSHA,
+		RootActivationRequired: job.Mode == JobDetached,
+		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
+		ResultSHA256: resultSHA, ResultBytes: resultBytes,
 		RendererVersion: JobNotificationRenderer, Target: target,
 		PublishState: NotificationPending,
 		DeliveryMode: JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
@@ -459,14 +479,21 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	if !utf8.ValidString(markdown) || strings.TrimSpace(markdown) == "" {
 		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown is invalid")
 	}
+	notificationSHA := NotificationIdentitySHA256(markdown)
+	if notificationSHA == "" {
+		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown is invalid")
+	}
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: contentDigest, RendererVersion: JobNotificationRenderer,
+		RootActivationRequired: job.Mode == JobDetached,
+		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
+		ResultSHA256: contentDigest, ResultBytes: contentBytes,
 		Target: target, PublishState: NotificationPending, DeliveryMode: mode, PolicyVersion: policyVersion,
-		ArtifactRef: artifactRef, ResultBytes: contentBytes, MaxMarkdownParts: maxParts,
+		ArtifactRef: artifactRef, MaxMarkdownParts: maxParts,
 		ContentBytes: contentBytes,
 		UploadState:  uploadState,
 	}, nil
@@ -494,6 +521,31 @@ func SanitizeResultText(value string) (string, error) {
 		return "", errors.New("result text is empty after sanitization")
 	}
 	return result, nil
+}
+
+// NotificationIdentitySHA256 returns the lowercase hex SHA-256 of the
+// canonical notification Markdown, or empty when the Markdown is not a valid
+// notification body (fail-closed).
+func NotificationIdentitySHA256(markdown string) string {
+	if !utf8.ValidString(markdown) || strings.TrimSpace(markdown) == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(markdown))
+	return fmt.Sprintf("%x", digest)
+}
+
+// ValidResultIdentity returns a lowercase 64-hex digest and positive byte
+// count only when both form a complete result identity. Anything else fails
+// closed to empty values; no digest is ever fabricated for missing data.
+func ValidResultIdentity(sha256Hex string, bytes int64) (string, int64) {
+	sha256Hex = strings.ToLower(sha256Hex)
+	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
+		return "", 0
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return "", 0
+	}
+	return sha256Hex, bytes
 }
 
 func sanitizeNotificationText(value string, maxRunes int) string {

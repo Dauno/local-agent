@@ -1,6 +1,8 @@
 package domain_test
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -95,6 +97,134 @@ func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing
 	}
 	if file.DeliveryMode != domain.JobResultDeliveryFile || file.ArtifactRef == "" || file.ContentBytes != 20000 || strings.Contains(file.CanonicalMarkdown, resultText) {
 		t.Fatalf("file notification = %+v", file)
+	}
+}
+
+func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testing.T) {
+	job := domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678"}
+	resultText := "safe &lt;result>"
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(resultText)))
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+		Text: resultText, ResultSHA256: digest, ResultBytes: int64(len([]byte(resultText))),
+		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
+		DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(resultText))),
+		DeliveryCanonicalMarkdown: "OpenCode job `job_1` completed.\n\n" + resultText, DeliveryMaxMarkdownParts: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedNotification := domain.NotificationIdentitySHA256(notification.CanonicalMarkdown)
+	if notification.NotificationSHA256 != expectedNotification || notification.NotificationBytes != int64(len([]byte(notification.CanonicalMarkdown))) {
+		t.Fatalf("notification identity = %q/%d, want %q/%d", notification.NotificationSHA256, notification.NotificationBytes, expectedNotification, len([]byte(notification.CanonicalMarkdown)))
+	}
+	if notification.NotificationSHA256 == notification.ResultSHA256 {
+		t.Fatal("notification and result identity collide")
+	}
+	if notification.ResultSHA256 != digest || notification.ResultBytes != int64(len([]byte(resultText))) {
+		t.Fatalf("result identity = %q/%d, want %q/%d", notification.ResultSHA256, notification.ResultBytes, digest, len([]byte(resultText)))
+	}
+	if !notification.RootActivationRequired {
+		t.Fatal("detached delivery is not marked activation-required")
+	}
+
+	foreground := job
+	foreground.Mode = domain.JobForeground
+	foregroundNotification, err := domain.NewExternalAgentJobDelivery(foreground, domain.AcpInvocationResult{
+		Text: resultText, ResultSHA256: digest, ResultBytes: int64(len([]byte(resultText))),
+		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
+		DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(resultText))),
+		DeliveryCanonicalMarkdown: "OpenCode job `job_1` completed.\n\n" + resultText, DeliveryMaxMarkdownParts: 6,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foregroundNotification.RootActivationRequired {
+		t.Fatal("foreground delivery is marked activation-required")
+	}
+}
+
+func TestLegacyNotificationConstructorSetsRouteAndIdentityByMode(t *testing.T) {
+	now := time.Now().UTC()
+	base := domain.ExternalAgentJob{ID: "job_1", Status: domain.JobFailed, StatusRevision: 1, ConversationKey: "slack:T12345678:dm:D12345678", ErrorCode: "acp_process_exit", CreatedAt: now, UpdatedAt: now}
+
+	foreground := base
+	foreground.Mode = domain.JobForeground
+	foregroundNotification, err := domain.NewExternalAgentJobNotification(foreground)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foregroundNotification.RootActivationRequired {
+		t.Fatal("foreground notification is marked activation-required")
+	}
+	if foregroundNotification.NotificationSHA256 != domain.NotificationIdentitySHA256(foregroundNotification.CanonicalMarkdown) || foregroundNotification.NotificationBytes != int64(len([]byte(foregroundNotification.CanonicalMarkdown))) {
+		t.Fatalf("foreground notification identity = %q/%d", foregroundNotification.NotificationSHA256, foregroundNotification.NotificationBytes)
+	}
+	if foregroundNotification.ResultSHA256 != "" || foregroundNotification.ResultBytes != 0 {
+		t.Fatalf("failure notification carries a result identity: %q/%d", foregroundNotification.ResultSHA256, foregroundNotification.ResultBytes)
+	}
+
+	detached := base
+	detached.Mode = domain.JobDetached
+	detachedNotification, err := domain.NewExternalAgentJobNotification(detached)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !detachedNotification.RootActivationRequired {
+		t.Fatal("detached notification is not marked activation-required")
+	}
+
+	completed := base
+	completed.Mode = domain.JobForeground
+	completed.Status = domain.JobCompleted
+	completed.ResultSummary = "summary"
+	completed.ResultSHA256 = fmt.Sprintf("%x", sha256.Sum256([]byte("summary")))
+	completed.ResultBytes = int64(len([]byte("summary")))
+	completedNotification, err := domain.NewExternalAgentJobNotification(completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completedNotification.ResultSHA256 != completed.ResultSHA256 || completedNotification.ResultBytes != completed.ResultBytes {
+		t.Fatalf("completed result identity = %q/%d, want %q/%d", completedNotification.ResultSHA256, completedNotification.ResultBytes, completed.ResultSHA256, completed.ResultBytes)
+	}
+}
+
+func TestValidResultIdentityFailsClosedOnIncompleteInput(t *testing.T) {
+	valid := fmt.Sprintf("%x", sha256.Sum256([]byte("safe")))
+	digest, bytes := domain.ValidResultIdentity(valid, 4)
+	if digest != valid || bytes != 4 {
+		t.Fatalf("valid identity = %q/%d", digest, bytes)
+	}
+	for _, candidate := range []struct {
+		digest string
+		bytes  int64
+	}{
+		{"", 4},
+		{valid, 0},
+		{valid, -1},
+		{strings.Repeat("a", 63), 4},
+		{strings.Repeat("g", 64), 4},
+		{" " + valid, 4},
+	} {
+		digest, bytes := domain.ValidResultIdentity(candidate.digest, candidate.bytes)
+		if digest != "" || bytes != 0 {
+			t.Fatalf("invalid identity %q/%d = %q/%d", candidate.digest, candidate.bytes, digest, bytes)
+		}
+	}
+}
+
+func TestNotificationIdentitySHA256FailsClosedOnInvalidMarkdown(t *testing.T) {
+	if digest := domain.NotificationIdentitySHA256(""); digest != "" {
+		t.Fatalf("empty Markdown identity = %q", digest)
+	}
+	if digest := domain.NotificationIdentitySHA256("   \n"); digest != "" {
+		t.Fatalf("blank Markdown identity = %q", digest)
+	}
+	if digest := domain.NotificationIdentitySHA256(string([]byte{0xff, 0xfe})); digest != "" {
+		t.Fatalf("invalid UTF-8 Markdown identity = %q", digest)
+	}
+	expected := fmt.Sprintf("%x", sha256.Sum256([]byte("safe")))
+	if digest := domain.NotificationIdentitySHA256("safe"); digest != expected {
+		t.Fatalf("Markdown identity = %q, want %q", digest, expected)
 	}
 }
 

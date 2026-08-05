@@ -17,7 +17,7 @@ import (
 )
 
 func TestJobNotificationPublisherUsesDeterministicMetadata(t *testing.T) {
-	job := domain.ExternalAgentJob{ID: "job-1", Status: domain.JobCompleted, StatusRevision: 3, ResultSummary: "safe", ConversationKey: "slack:T12345678:dm:D12345678", UpdatedAt: time.Now().UTC()}
+	job := domain.ExternalAgentJob{ID: "job-1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 3, ResultSummary: "safe", ConversationKey: "slack:T12345678:dm:D12345678", UpdatedAt: time.Now().UTC()}
 	notification, err := domain.NewExternalAgentJobNotification(job)
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +34,53 @@ func TestJobNotificationPublisherUsesDeterministicMetadata(t *testing.T) {
 	req := recorder.requests[0]
 	if req.eventType != jobNotificationMetadataEventType || req.extraMetadata["job_id"] != "job-1" || req.extraMetadata["status_revision"] != 3 || req.extraMetadata["content_sha256"] != notification.ContentSHA256 {
 		t.Fatalf("metadata = %#v", req)
+	}
+	if req.extraMetadata["notification_sha256"] != notification.NotificationSHA256 || req.extraMetadata["notification_bytes"] != int64(len([]byte(notification.CanonicalMarkdown))) {
+		t.Fatalf("notification identity metadata = %#v", req.extraMetadata)
+	}
+	if req.extraMetadata["result_sha256"] != notification.ResultSHA256 || req.extraMetadata["result_bytes"] != notification.ResultBytes {
+		t.Fatalf("result identity metadata = %#v", req.extraMetadata)
+	}
+	if req.extraMetadata["notification_sha256"] == req.extraMetadata["result_sha256"] && req.extraMetadata["result_sha256"] != "" {
+		t.Fatal("notification and result identity metadata collide")
+	}
+}
+
+func TestJobNotificationPublisherEmitsDistinctIdentityPairsForDeliveredResult(t *testing.T) {
+	text := "safe delivered result"
+	job := domain.ExternalAgentJob{ID: "job-1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 3, ConversationKey: "slack:T12345678:dm:D12345678"}
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+		Text: text, ResultSHA256: contentSHA256(text), ResultBytes: int64(len([]byte(text))),
+		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
+		DeliveryContentSHA256: contentSHA256(text), DeliveryContentBytes: int64(len([]byte(text))),
+		DeliveryCanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + text, DeliveryMaxMarkdownParts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &jobNotificationPostRecorder{}
+	publisher := newPublisher(recorder, 0, nil, false)
+	publisher.pace = 0
+	if _, err := NewJobNotificationPublisher(publisher, nil).Publish(t.Context(), notification); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.requests) != 1 {
+		t.Fatalf("requests = %d", len(recorder.requests))
+	}
+	metadata := recorder.requests[0].extraMetadata
+	notificationDigest, _ := metadata["notification_sha256"].(string)
+	resultDigest, _ := metadata["result_sha256"].(string)
+	if notificationDigest != notification.NotificationSHA256 || resultDigest != notification.ResultSHA256 {
+		t.Fatalf("identity pairs = notification %q / result %q", notificationDigest, resultDigest)
+	}
+	if notificationDigest == resultDigest {
+		t.Fatal("delivered notification and result identities are not distinct")
+	}
+	if notificationDigest == contentSHA256(text) {
+		t.Fatal("notification identity leaked the result digest")
+	}
+	if resultDigest != contentSHA256(text) {
+		t.Fatal("result identity does not match the sanitized result digest")
 	}
 }
 
@@ -265,7 +312,7 @@ func jobEvidenceMessage(notification domain.ExternalAgentJobNotification, index,
 		User: "BOT", Timestamp: timestamp,
 		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: map[string]any{
 			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
-			"renderer_version": notification.RendererVersion, "notification_sha256": notification.ContentSHA256,
+			"renderer_version": notification.RendererVersion, "notification_sha256": notification.NotificationSHA256,
 			"part_sha256": contentSHA256(part), "part_index": index, "part_count": count,
 		}},
 	}}
