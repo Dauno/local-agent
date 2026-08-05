@@ -66,6 +66,7 @@ func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.Exte
 						AND NOT EXISTS (
 							SELECT 1 FROM external_agent_job_events e
 							WHERE e.job_id = external_agent_job_notifications.job_id
+								AND e.status_revision = external_agent_job_notifications.status_revision
 								AND e.event_kind = ?
 						)
 						AND (result_bytes <= 0 OR length(result_sha256) != 64 OR result_sha256 GLOB '*[^0-9a-f]*'))`,
