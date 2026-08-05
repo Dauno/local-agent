@@ -36,6 +36,17 @@ func migrateV32(ctx context.Context, tx *sql.Tx) error {
 	if err := backfillV32NotificationIdentities(ctx, tx); err != nil {
 		return err
 	}
+	// Preserve the distinction between pre-v32 fail-closed rows and rows
+	// created after the upgrade. Reusing the existing event ledger avoids a v33
+	// schema change while keeping the marker content-free and idempotent.
+	if _, err := tx.ExecContext(ctx, `INSERT INTO external_agent_job_events
+		(job_id, status_revision, event_kind, created_at)
+		SELECT job_id, status_revision, ?, updated_at
+		FROM external_agent_jobs
+		WHERE status = 'completed' AND result_sha256 = '' AND result_bytes = 0
+		ON CONFLICT DO NOTHING`, legacyResultIdentityEvent); err != nil {
+		return fmt.Errorf("mark legacy result identities: %w", err)
+	}
 	return execMigration(ctx, tx, 32, []string{
 		`CREATE TRIGGER external_agent_job_notifications_route_insert
 			BEFORE INSERT ON external_agent_job_notifications

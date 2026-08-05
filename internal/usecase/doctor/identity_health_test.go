@@ -32,11 +32,13 @@ func TestDoctorResultIdentityOperationalDecision(t *testing.T) {
 	}{
 		{name: "complete identity passes", identity: domain.ExternalAgentJobIdentityHealth{}, wantPass: true},
 		{name: "informational counts pass", identity: domain.ExternalAgentJobIdentityHealth{
-			JobsCompletedWithoutResultIdentity: 3,
-			RetiredForegroundActivations:       4,
+			JobsCompletedWithoutResultIdentityLegacy: 3,
+			RetiredForegroundActivations:             4,
 		}, wantPass: true},
+		{name: "current completed identity fails", identity: domain.ExternalAgentJobIdentityHealth{JobsCompletedWithoutResultIdentity: 1}, wantPass: false},
 		{name: "notification without identity fails", identity: domain.ExternalAgentJobIdentityHealth{NotificationsWithoutIdentity: 1}, wantPass: false},
 		{name: "activation without content fails", identity: domain.ExternalAgentJobIdentityHealth{ActivationsWithoutContent: 1}, wantPass: false},
+		{name: "activation without identity fails", identity: domain.ExternalAgentJobIdentityHealth{ActivationsWithoutIdentity: 1}, wantPass: false},
 		{name: "non-terminal foreground activation fails", identity: domain.ExternalAgentJobIdentityHealth{ForegroundActivationsActive: 1}, wantPass: false},
 	} {
 		t.Run(test.name, func(t *testing.T) {

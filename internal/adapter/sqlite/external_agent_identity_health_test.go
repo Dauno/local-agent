@@ -33,6 +33,16 @@ func insertIdentityJobRow(t *testing.T, db *sql.DB, id, mode, status, sha string
 // notification identity shape. Empty notificationSHA yields an incomplete
 // identity (legacy/unclassifiable rows keep it after v32 backfill).
 func insertIdentityNotificationRow(t *testing.T, db *sql.DB, id, notificationSHA string, notificationBytes int64, terminalStatus string) {
+	resultSHA := ""
+	resultBytes := int64(0)
+	if terminalStatus == "completed" {
+		resultSHA = strings.Repeat("b", 64)
+		resultBytes = 1
+	}
+	insertIdentityNotificationRowWithResult(t, db, id, notificationSHA, notificationBytes, terminalStatus, resultSHA, resultBytes)
+}
+
+func insertIdentityNotificationRowWithResult(t *testing.T, db *sql.DB, id, notificationSHA string, notificationBytes int64, terminalStatus, resultSHA string, resultBytes int64) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO external_agent_job_notifications (
 		job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,
@@ -40,9 +50,9 @@ func insertIdentityNotificationRow(t *testing.T, db *sql.DB, id, notificationSHA
 		delivery_mode, policy_version, artifact_ref, result_bytes, max_markdown_parts, upload_state,
 		notification_sha256, notification_bytes, result_sha256, root_activation_required, published_at, publish_state)
 		VALUES (?, 1, 'terminal', ?, 'OpenCode job `+id+` completed.', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
-		'markdown_v1', 'D12345678', 1, 1, 1, 'markdown', 'legacy_v1', '', 0, 1, 'not_applicable',
-		?, ?, '', 0, 1, 'published')`,
-		id, terminalStatus, notificationSHA, notificationBytes); err != nil {
+		'markdown_v1', 'D12345678', 1, 1, 1, 'markdown', 'legacy_v1', '', ?, 1, 'not_applicable',
+		?, ?, ?, 0, 1, 'published')`,
+		id, terminalStatus, resultBytes, notificationSHA, notificationBytes, resultSHA); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -54,6 +64,10 @@ func insertIdentityActivationRow(t *testing.T, db *sql.DB, jobID, state string, 
 }
 
 func insertIdentityActivationRowWithTerminalStatus(t *testing.T, db *sql.DB, jobID, state string, contentBytes int64, errorCode, terminalStatus string) {
+	insertIdentityActivationRowWithTerminalStatusAndSHA(t, db, jobID, state, contentBytes, errorCode, terminalStatus, strings.Repeat("a", 64))
+}
+
+func insertIdentityActivationRowWithTerminalStatusAndSHA(t *testing.T, db *sql.DB, jobID, state string, contentBytes int64, errorCode, terminalStatus, notificationSHA string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO external_agent_job_activations (
 		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
@@ -64,7 +78,7 @@ func insertIdentityActivationRowWithTerminalStatus(t *testing.T, db *sql.DB, job
 		VALUES (?, 1, 'terminal', ?, ?, ?, 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', ?, 'markdown', ?, '1710000000.000002', 1, ?, 1, '', 0, 0,
 		?, '', '', '', '', '', 1, 1)`,
-		jobID, "activation_"+jobID, terminalStatus, strings.Repeat("a", 64), jobID+"-call", contentBytes, state, errorCode); err != nil {
+		jobID, "activation_"+jobID, terminalStatus, notificationSHA, jobID+"-call", contentBytes, state, errorCode); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -137,6 +151,69 @@ func TestIdentityHealthCompletedActivationWithoutContentIsCorrupt(t *testing.T) 
 	}
 	if health.ActivationsWithoutContent != 1 {
 		t.Fatalf("activations without content = %d, want 1", health.ActivationsWithoutContent)
+	}
+}
+
+func TestIdentityHealthRejectsNonHexDigestShapes(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "hex.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	cases := []struct {
+		name string
+		sha  string
+	}{
+		{name: "non-hex", sha: strings.Repeat("g", 64)},
+		{name: "uppercase", sha: strings.Repeat("A", 64)},
+		{name: "wrong length", sha: strings.Repeat("a", 63)},
+	}
+	for _, test := range cases {
+		jobID := "job_hex_" + strings.ReplaceAll(test.name, " ", "_")
+		insertIdentityJobRow(t, store.DB(), jobID, "detached", "completed", test.sha, 1)
+		insertIdentityNotificationRow(t, store.DB(), jobID, strings.Repeat("c", 64), 1, "failed")
+	}
+
+	health, err := jobs.IdentityHealth(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.JobsCompletedWithoutResultIdentity != len(cases) {
+		t.Fatalf("current incomplete jobs = %d, want %d", health.JobsCompletedWithoutResultIdentity, len(cases))
+	}
+}
+
+func TestIdentityHealthRejectsInvalidNotificationAndActivationDigests(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "delivery-hex.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	invalidDigests := []string{strings.Repeat("G", 64), strings.Repeat("A", 64), strings.Repeat("a", 63)}
+	for i, digest := range invalidDigests {
+		notificationJobID := fmt.Sprintf("job_invalid_notification_%d", i)
+		insertIdentityJobRow(t, store.DB(), notificationJobID, "detached", "failed", "", 0)
+		insertIdentityNotificationRow(t, store.DB(), notificationJobID, digest, 1, "failed")
+	}
+	for i, digest := range invalidDigests[:2] {
+		activationJobID := fmt.Sprintf("job_invalid_activation_%d", i)
+		insertIdentityJobRow(t, store.DB(), activationJobID, "detached", "failed", "", 0)
+		insertIdentityActivationRowWithTerminalStatusAndSHA(t, store.DB(), activationJobID, "failed", 0, "", "failed", digest)
+	}
+	insertIdentityJobRow(t, store.DB(), "job_invalid_notification_result", "detached", "failed", "", 0)
+	insertIdentityNotificationRowWithResult(t, store.DB(), "job_invalid_notification_result", strings.Repeat("c", 64), 1, "failed", strings.Repeat("G", 64), 1)
+
+	health, err := jobs.IdentityHealth(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.NotificationsWithoutIdentity != len(invalidDigests)+1 {
+		t.Fatalf("notifications without identity = %d, want %d", health.NotificationsWithoutIdentity, len(invalidDigests)+1)
+	}
+	if health.ActivationsWithoutIdentity != len(invalidDigests[:2]) {
+		t.Fatalf("activations without identity = %d, want %d", health.ActivationsWithoutIdentity, len(invalidDigests[:2]))
 	}
 }
 
