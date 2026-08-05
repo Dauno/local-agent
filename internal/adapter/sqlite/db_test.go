@@ -897,6 +897,9 @@ func TestMigrationV31RepairsForegroundInlineIdentityMatrix(t *testing.T) {
 		{"fg-multibyte", "foreground", "completed", "héllo 世界", "", "", 0},
 		{"fg-invalid-utf8", "foreground", "completed", "\xff\xfe", "", "", 0},
 		{"fg-whitespace", "foreground", "completed", "  \t", "", "", 0},
+		{"fg-empty", "foreground", "completed", "", "", "", 0},
+		{"fg-nul-prefixed", "foreground", "completed", "\x00abc", "", "", 0},
+		{"fg-nul-empty-after-sanitize", "foreground", "completed", "\x00\x00", "", digest("x"), 5},
 		{"fg-consistent", "foreground", "completed", "ok", "", digest("ok"), 2},
 		{"fg-unsanitized-identity", "foreground", "completed", "raw <x>", "", digest("raw <x>"), int64(len("raw <x>"))},
 		{"detached-inline", "detached", "completed", "d", "", "", 0},
@@ -927,17 +930,20 @@ func TestMigrationV31RepairsForegroundInlineIdentityMatrix(t *testing.T) {
 		bytes        int64
 	}
 	expected := map[string]want{
-		"fg-ascii":                {"plain summary", digest("plain summary"), int64(len("plain summary"))},
-		"fg-less":                 {"use a &lt; b", digest("use a &lt; b"), int64(len("use a &lt; b"))},
-		"fg-controls":             {"abc", digest("abc"), int64(len("abc"))},
-		"fg-multibyte":            {"héllo 世界", digest("héllo 世界"), int64(len([]byte("héllo 世界")))},
-		"fg-invalid-utf8":         {"\xff\xfe", "", 0},
-		"fg-whitespace":           {"  \t", "", 0},
-		"fg-consistent":           {"ok", digest("ok"), 2},
-		"fg-unsanitized-identity": {"raw &lt;x>", digest("raw &lt;x>"), int64(len("raw &lt;x>"))},
-		"detached-inline":         {"d", "", 0},
-		"fg-artifact":             {"a", "", 0},
-		"fg-failed":               {"f", "", 0},
+		"fg-ascii":                    {"plain summary", digest("plain summary"), int64(len("plain summary"))},
+		"fg-less":                     {"use a &lt; b", digest("use a &lt; b"), int64(len("use a &lt; b"))},
+		"fg-controls":                 {"abc", digest("abc"), int64(len("abc"))},
+		"fg-multibyte":                {"héllo 世界", digest("héllo 世界"), int64(len([]byte("héllo 世界")))},
+		"fg-invalid-utf8":             {"\xff\xfe", "", 0},
+		"fg-whitespace":               {"  \t", "", 0},
+		"fg-empty":                    {"", "", 0},
+		"fg-nul-prefixed":             {"abc", digest("abc"), int64(len("abc"))},
+		"fg-nul-empty-after-sanitize": {"\x00\x00", "", 0},
+		"fg-consistent":               {"ok", digest("ok"), 2},
+		"fg-unsanitized-identity":     {"raw &lt;x>", digest("raw &lt;x>"), int64(len("raw &lt;x>"))},
+		"detached-inline":             {"d", "", 0},
+		"fg-artifact":                 {"a", "", 0},
+		"fg-failed":                   {"f", "", 0},
 	}
 	for jobID, w := range expected {
 		var got want
