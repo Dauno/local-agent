@@ -174,6 +174,7 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 				w.recordCASConflict(err, notification)
 				return wrapNotificationError(notification, err)
 			}
+			w.recordActivationSuppression(notification)
 			w.metrics.AddCounter(domain.MetricExternalAgentNotificationPublishTotal, 1, port.MetricLabels{
 				"delivery_mode": boundedDeliveryMode(notification.DeliveryMode),
 			})
@@ -194,10 +195,22 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 		w.recordCASConflict(err, notification)
 		return wrapNotificationError(notification, err)
 	}
+	w.recordActivationSuppression(notification)
 	w.metrics.AddCounter(domain.MetricExternalAgentNotificationPublishTotal, 1, port.MetricLabels{
 		"delivery_mode": boundedDeliveryMode(notification.DeliveryMode),
 	})
 	return nil
+}
+
+// recordActivationSuppression counts a terminal publication that was
+// deliberately suppressed from creating a root activation: foreground
+// completions must never activate the root. The counter is label-free and
+// carries no job, actor, conversation, digest, or content value.
+func (w *NotificationWorker) recordActivationSuppression(notification *domain.ExternalAgentJobNotification) {
+	if w == nil || notification == nil || notification.RootActivationRequired || notification.TerminalStatus == "" {
+		return
+	}
+	w.metrics.AddCounter(domain.MetricExternalAgentActivationSuppressionTotal, 1, nil)
 }
 
 // SnapshotHealth returns the current content-free outbox health and updates

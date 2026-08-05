@@ -324,6 +324,16 @@ func (jobStoreChecker) CheckExternalAgentActivationHealth(ctx context.Context, p
 	return jobs.ActivationHealth(ctx, time.Now().UTC(), 5*time.Minute)
 }
 
+func (jobStoreChecker) CheckExternalAgentResultIdentityHealth(ctx context.Context, path string) (domain.ExternalAgentJobIdentityHealth, error) {
+	store, err := adaptersqlite.OpenExisting(ctx, path)
+	if err != nil {
+		return domain.ExternalAgentJobIdentityHealth{}, err
+	}
+	defer store.Close()
+	jobs := adaptersqlite.NewExternalAgentJobStore(store)
+	return jobs.IdentityHealth(ctx)
+}
+
 func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
 	store, err := adaptersqlite.OpenExisting(ctx, path)
 	if err != nil {

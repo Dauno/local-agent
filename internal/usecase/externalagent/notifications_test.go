@@ -473,3 +473,54 @@ func TestNotificationWorkerMetricsUseOnlyBoundedLabels(t *testing.T) {
 		}
 	}
 }
+
+func TestNotificationWorkerRecordsForegroundActivationSuppression(t *testing.T) {
+	metrics := &recordingNotificationMetrics{}
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		TerminalStatus: domain.JobCompleted, RootActivationRequired: false,
+		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if store.notification.PublishState != domain.NotificationPublished {
+		t.Fatalf("foreground notification was not published: %#v", store.notification)
+	}
+	found := false
+	for _, sample := range metrics.samples {
+		if sample.Name == domain.MetricExternalAgentActivationSuppressionTotal && sample.Value == 1 && len(sample.Labels) == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("suppression metric missing or labeled: %#v", metrics.samples)
+	}
+}
+
+func TestNotificationWorkerDoesNotRecordSuppressionForDetachedActivationEligible(t *testing.T) {
+	metrics := &recordingNotificationMetrics{}
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "job-2", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+		TerminalStatus: domain.JobCompleted, RootActivationRequired: true,
+		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range metrics.samples {
+		if sample.Name == domain.MetricExternalAgentActivationSuppressionTotal {
+			t.Fatalf("detached activation-eligible publication was counted as suppressed: %#v", sample)
+		}
+	}
+}

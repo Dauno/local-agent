@@ -365,6 +365,53 @@ func TestHostCompletionReadsOnlyAuthorizedCompleteResult(t *testing.T) {
 	}
 }
 
+func TestIdentityVerificationFailureRecordsBoundedCounter(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	metrics := &recordingNotificationMetrics{}
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+		Store: jobStore, Runtime: &fakeJobRuntime{}, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "complete sanitized result"
+	digest := sha256.Sum256([]byte(content))
+	request := testRequest(domain.JobDetached)
+	created, err := service.Start(t.Context(), request)
+	if err != nil || created == nil {
+		t.Fatalf("start = %#v, err = %v", created, err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "worker", time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.Transition(t.Context(), created.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{
+		Text: content, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_jobs SET result_bytes = result_bytes + 1 WHERE job_id = ?`, created.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ReadResult(t.Context(), created.ID, request.Actor, request.ConversationKey); err == nil {
+		t.Fatal("altered identity was accepted")
+	}
+	count := int64(0)
+	for _, sample := range metrics.samples {
+		if sample.Name == domain.MetricExternalAgentResultIdentityInvalidTotal && len(sample.Labels) == 0 {
+			count += int64(sample.Value)
+		}
+	}
+	if count != 1 {
+		t.Fatalf("identity failure counter = %d, want 1; samples = %#v", count, metrics.samples)
+	}
+}
+
 func TestStatusMismatchSignalsDoNotRevealComparedBindings(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {

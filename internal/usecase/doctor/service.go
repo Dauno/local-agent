@@ -46,6 +46,14 @@ type JobStoreHealthChecker interface {
 	CheckExternalAgentActivationHealth(ctx context.Context, path string) (domain.ExternalAgentJobActivationHealth, error)
 }
 
+// JobStoreIdentityChecker is optional so doctor keeps the original checker
+// contract while identity-aware stores expose bounded, content-free result
+// identity health. The aggregate carries counts only; job IDs, actor,
+// conversation, digest, reference, and content values are forbidden.
+type JobStoreIdentityChecker interface {
+	CheckExternalAgentResultIdentityHealth(ctx context.Context, path string) (domain.ExternalAgentJobIdentityHealth, error)
+}
+
 type RemediableError interface {
 	error
 	Remediation() string
@@ -521,6 +529,28 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 					report.fail("external-agent activations", fmt.Sprintf("activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)", health.Stuck, health.Pending, health.Processed, health.CompletionUnknown), "Inspect the activation worker and let expired leases become reclaimable.", false)
 				} else {
 					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
+				}
+			}
+			// Operational decision (P2-02): a non-terminal foreground
+			// activation is the P0 contract violation and fails doctor; an
+			// incomplete delivery identity (notification or activation) also
+			// fails because every post-v32 delivery must carry bytes and a
+			// SHA-256. Retired foreground activations are expected v31 repair
+			// evidence and completed jobs without result identity are
+			// historical fail-closed rows: both are informational counts and
+			// never a failure. Only counts are emitted; no job ID, actor,
+			// conversation, digest, reference, or content value.
+			if identityChecker, ok := s.deps.Jobs.(JobStoreIdentityChecker); ok {
+				identity, identityErr := identityChecker.CheckExternalAgentResultIdentityHealth(ctx, paths.DatabaseFile)
+				switch {
+				case identityErr != nil:
+					report.fail("external-agent result identity", redactor.String(identityErr.Error()), "Repair the configured database so every durable result carries a complete identity, or reset state after backup.", false)
+				case identity.ForegroundActivationsActive > 0:
+					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d non-terminal foreground activations (defect), %d notifications without identity, %d activations without content, %d retired foreground activations, %d completed jobs without result identity", identity.ForegroundActivationsActive, identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity), "Stop the agent and restore the foreground-suppression build: foreground jobs must never produce claimable activations.", false)
+				case identity.NotificationsWithoutIdentity > 0 || identity.ActivationsWithoutContent > 0:
+					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d notifications without identity, %d activations without content, %d non-terminal foreground activations, %d retired foreground activations, %d completed jobs without result identity", identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ForegroundActivationsActive, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity), "Do not start the agent until incomplete delivery identity is repaired; results must carry bytes and SHA-256 after transformation.", false)
+				default:
+					report.pass("external-agent result identity", fmt.Sprintf("result identity is complete (informational: %d completed jobs without result identity, %d retired foreground activations)", identity.JobsCompletedWithoutResultIdentity, identity.RetiredForegroundActivations))
 				}
 			}
 		}

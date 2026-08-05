@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -79,5 +80,51 @@ func TestRecorderBoundsAndSortsObservations(t *testing.T) {
 	}
 	if snapshot[0].Value != 1 || snapshot[len(snapshot)-1].Value != maxObservationSamples {
 		t.Fatalf("bounded observations retained stale values: first=%v last=%v", snapshot[0].Value, snapshot[len(snapshot)-1].Value)
+	}
+}
+
+// TestIdentityAndSuppressionCountersAreAllowlistedAndSensitiveFree pins the
+// P2-02 contract: both new counters record through the bounded recorder, drop
+// forbidden label keys, and their names carry no job, actor, conversation,
+// digest, reference, or content value.
+func TestIdentityAndSuppressionCountersAreAllowlistedAndSensitiveFree(t *testing.T) {
+	recorder := NewRecorder()
+	recorder.AddCounter(domain.MetricExternalAgentResultIdentityInvalidTotal, 3, port.MetricLabels{
+		"job_id":           "secret-job",
+		"actor":            "secret-actor",
+		"conversation":     "secret-conversation",
+		"result_sha256":    "secret-digest",
+		"artifact_ref":     "secret-ref",
+		"failure_category": "validation",
+	})
+	recorder.AddCounter(domain.MetricExternalAgentActivationSuppressionTotal, 2, port.MetricLabels{
+		"job_id": "secret-job",
+	})
+
+	snapshot := recorder.Snapshot()
+	byName := make(map[string]float64, len(snapshot))
+	for _, sample := range snapshot {
+		byName[sample.Name] += sample.Value
+		for key, value := range sample.Labels {
+			if key != "failure_category" {
+				t.Fatalf("forbidden label key %q=%q survived in %s", key, value, sample.Name)
+			}
+		}
+		if strings.Contains(sample.Name, "secret") {
+			t.Fatalf("metric name carries a sensitive value: %q", sample.Name)
+		}
+	}
+	if byName[domain.MetricExternalAgentResultIdentityInvalidTotal] != 3 {
+		t.Fatalf("identity counter = %v, want 3", byName[domain.MetricExternalAgentResultIdentityInvalidTotal])
+	}
+	if byName[domain.MetricExternalAgentActivationSuppressionTotal] != 2 {
+		t.Fatalf("suppression counter = %v, want 2", byName[domain.MetricExternalAgentActivationSuppressionTotal])
+	}
+	for _, name := range []string{domain.MetricExternalAgentResultIdentityInvalidTotal, domain.MetricExternalAgentActivationSuppressionTotal} {
+		for _, token := range []string{"job", "actor", "conversation", "digest", "sha256", "ref", "content", "slack:"} {
+			if strings.Contains(name, token) {
+				t.Fatalf("metric name %q contains sensitive token %q", name, token)
+			}
+		}
 	}
 }

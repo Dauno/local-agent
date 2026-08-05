@@ -350,18 +350,18 @@ func (s *Service) verifiedResultForJob(ctx context.Context, job *domain.External
 		}
 	}
 	if len(content) == 0 || int64(len(content)) > s.maxResultBytes || !utf8.Valid(content) {
-		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactBytesMismatch)
+		return domain.ExternalAgentJobResult{}, s.resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactBytesMismatch)
 	}
 	if job.ResultBytes <= 0 || int64(len(content)) != job.ResultBytes {
-		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactBytesMismatch)
+		return domain.ExternalAgentJobResult{}, s.resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactBytesMismatch)
 	}
 	if strings.TrimSpace(job.ResultSHA256) == "" {
-		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactDigestMismatch)
+		return domain.ExternalAgentJobResult{}, s.resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactDigestMismatch)
 	}
 	digest := sha256.Sum256(content)
 	contentSHA := fmt.Sprintf("%x", digest)
 	if !strings.EqualFold(job.ResultSHA256, contentSHA) {
-		return domain.ExternalAgentJobResult{}, resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactDigestMismatch)
+		return domain.ExternalAgentJobResult{}, s.resultIdentityError(mode, domain.ResultErrorIdentityInvalid, domain.ResultErrorArtifactDigestMismatch)
 	}
 	return domain.ExternalAgentJobResult{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Text: string(content),
@@ -378,8 +378,12 @@ func resultReadError(code domain.ResultErrorCode) error {
 // resultIdentityError classifies an identity failure by delivery mode: inline
 // rows collapse to the given inline code, file-mode rows to the artifact code,
 // so operators can distinguish the cause without ever seeing the values
-// involved.
-func resultIdentityError(mode domain.JobResultDeliveryMode, inline, file domain.ResultErrorCode) error {
+// involved. Every classification increments the bounded identity-failure
+// counter; no job ID, digest, reference, or content value is recorded.
+func (s *Service) resultIdentityError(mode domain.JobResultDeliveryMode, inline, file domain.ResultErrorCode) error {
+	if s != nil && s.metrics != nil {
+		s.metrics.AddCounter(domain.MetricExternalAgentResultIdentityInvalidTotal, 1, nil)
+	}
 	if mode == domain.JobResultDeliveryFile {
 		return resultReadError(file)
 	}
