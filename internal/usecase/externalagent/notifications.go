@@ -374,7 +374,10 @@ func wrapNotificationError(notification *domain.ExternalAgentJobNotification, er
 
 func permanentNotificationCode(code string) bool {
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown":
+	case string(domain.ResultErrorIdentityInvalid), string(domain.ResultErrorArtifactMissing),
+		string(domain.ResultErrorArtifactOwnerRefMismatch), string(domain.ResultErrorArtifactBytesMismatch),
+		string(domain.ResultErrorArtifactDigestMismatch), string(domain.ResultErrorArtifactInvalid),
+		"result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown":
 		return true
 	default:
 		return false
@@ -419,7 +422,9 @@ func notificationErrorCode(err error) string {
 	}
 	message := strings.ToLower(err.Error())
 	for _, code := range []string{
-		"result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch",
+		"result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid",
+		"result_delivery_failed", "result_destination_mismatch",
 		"notification_delivery_invalid", "result_file_upload_failed", "result_file_upload_unknown",
 		"result_file_completion_failed",
 	} {
@@ -438,7 +443,9 @@ func notificationErrorCode(err error) string {
 
 func safeNotificationErrorCode(code string) string {
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch",
+	case "result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid",
+		"result_delivery_failed", "result_destination_mismatch",
 		"notification_delivery_invalid", "notification_publish_ambiguous", "result_file_upload_failed",
 		"result_file_upload_unknown", "result_file_completion_failed", "notification_state_conflict",
 		"notification_state_persist_failed":
@@ -468,7 +475,9 @@ func boundedDeliveryMode(mode domain.JobResultDeliveryMode) string {
 
 func notificationFailureCategory(code string) string {
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid":
+	case "result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid",
+		"result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid":
 		return "validation"
 	case "result_file_upload_failed", "result_file_upload_unknown", "result_file_completion_failed":
 		return "file_upload"

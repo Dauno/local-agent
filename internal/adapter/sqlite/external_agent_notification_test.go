@@ -174,6 +174,11 @@ func TestNotificationRetryDelayJitterIsBounded(t *testing.T) {
 
 func TestPermanentNotificationErrorsAreNotRescheduledOrRetried(t *testing.T) {
 	for _, code := range []string{
+		"result_identity_invalid",
+		"result_artifact_missing",
+		"result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch",
+		"result_artifact_digest_mismatch",
 		"result_artifact_invalid",
 		"result_delivery_failed",
 		"result_destination_mismatch",

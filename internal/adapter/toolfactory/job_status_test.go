@@ -128,6 +128,85 @@ func TestJobStatusQueuedSessionIsEmpty(t *testing.T) {
 	}
 }
 
+// resultErrorExternalJobReader surfaces a bounded result-read failure from the
+// read tools, simulating the closed errors the external-agent service returns.
+type resultErrorExternalJobReader struct {
+	stubExternalJobReader
+	err error
+}
+
+func (r resultErrorExternalJobReader) ReadResult(context.Context, string, string, domain.ConversationKey) (domain.ExternalAgentJobResult, error) {
+	return domain.ExternalAgentJobResult{}, r.err
+}
+
+func (r resultErrorExternalJobReader) ReadResultChunk(context.Context, string, string, domain.ConversationKey, int64, int64) (domain.ResultChunk, error) {
+	return domain.ResultChunk{}, r.err
+}
+
+// TestJobResultToolsSurfaceOnlyBoundedResultErrorCodes verifies that the read
+// tools propagate a service-produced ResultError as exactly its bounded code:
+// no job ID, actor, conversation, digest, reference, path, or detail text is
+// ever appended by the tool layer.
+func TestJobResultToolsSurfaceOnlyBoundedResultErrorCodes(t *testing.T) {
+	const (
+		redactedContent = "REDACTED-TOOL-SECRET-4d91"
+		redactedRef     = "job_redacted4d91-delivery.result"
+		redactedPath    = "/var/run/local-agent-redacted-4d91/artifacts"
+	)
+	redactedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(redactedContent)))
+	forbidden := []string{redactedContent, redactedRef, redactedPath, redactedDigest, "synthetic detail"}
+	for _, toolName := range []string{"read_job_result", "read_job_result_chunk"} {
+		t.Run(toolName, func(t *testing.T) {
+			for _, testCase := range []struct {
+				name     string
+				err      error
+				wantCode string
+			}{
+				{
+					name:     "bounded digest code with closed detail",
+					err:      &domain.ResultError{Code: domain.ResultErrorArtifactDigestMismatch, Err: errors.New("synthetic detail")},
+					wantCode: string(domain.ResultErrorArtifactDigestMismatch),
+				},
+				{
+					name:     "bounded identity code",
+					err:      &domain.ResultError{Code: domain.ResultErrorIdentityInvalid},
+					wantCode: string(domain.ResultErrorIdentityInvalid),
+				},
+			} {
+				t.Run(testCase.name, func(t *testing.T) {
+					reader := resultErrorExternalJobReader{stubExternalJobReader: stubExternalJobReader{job: &domain.ExternalAgentJob{ID: "job_tool", Status: domain.JobCompleted, StatusRevision: 4}}, err: testCase.err}
+					factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+					tools, err := factory.ToolsForInvocation("U12345678", domain.ConversationKey("slack:T12345678:dm:D12345678"))
+					if err != nil {
+						t.Fatalf("tools: %v", err)
+					}
+					var tool runnableFunctionTool
+					for _, candidate := range tools {
+						if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == toolName {
+							tool, _ = candidate.(runnableFunctionTool)
+						}
+					}
+					if tool == nil {
+						t.Fatalf("%s tool is unavailable", toolName)
+					}
+					_, err = tool.Run(&stubToolContext{}, map[string]any{"job_id": "job_tool"})
+					if err == nil {
+						t.Fatalf("%s accepted a failing result read", toolName)
+					}
+					if err.Error() != testCase.wantCode {
+						t.Fatalf("%s error = %q, want exact bounded code %q", toolName, err.Error(), testCase.wantCode)
+					}
+					for _, value := range forbidden {
+						if strings.Contains(err.Error(), value) {
+							t.Fatalf("%s error %q leaked %q", toolName, err.Error(), value)
+						}
+					}
+				})
+			}
+		})
+	}
+}
+
 // runJobStatusTool invokes the bound job_status tool and returns the decoded
 // JSON response for the given reader fixture.
 func runJobStatusTool(t *testing.T, reader stubExternalJobReader, key domain.ConversationKey) map[string]any {
