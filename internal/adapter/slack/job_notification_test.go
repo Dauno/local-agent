@@ -243,6 +243,93 @@ func TestFileNotificationRestartAfterCompletionPublishesOnlyStatus(t *testing.T)
 	}
 }
 
+func TestJobNotificationValidationVerifiesCanonicalMarkdownIdentity(t *testing.T) {
+	markdown := "OpenCode job `job-1` completed.\n\nsafe result"
+	fileMarkdown := "OpenCode job `job-1` completed. The complete result was attached."
+	otherDigest := contentSHA256("some other result")
+	build := func(mode domain.JobResultDeliveryMode, mutate func(*domain.ExternalAgentJobNotification)) domain.ExternalAgentJobNotification {
+		t.Helper()
+		var notification domain.ExternalAgentJobNotification
+		if mode == domain.JobResultDeliveryFile {
+			notification = preV32DeliveryNotification(mode, fileMarkdown, "file bytes", "job-1-delivery.result")
+			notification.HostResultText = "file bytes"
+		} else {
+			notification = preV32DeliveryNotification(mode, markdown, "safe result", "")
+			notification.UploadState = domain.JobResultUploadNotApplicable
+			notification.SlackFileID = ""
+		}
+		if mutate != nil {
+			mutate(&notification)
+		}
+		return notification
+	}
+	publish := func(notification domain.ExternalAgentJobNotification) error {
+		recorder := &jobNotificationPostRecorder{}
+		publisher := newPublisher(recorder, 0, nil, false)
+		publisher.pace = 0
+		_, err := NewDurableJobNotificationPublisher(publisher, nil, &jobNotificationUploader{}, &jobNotificationArtifacts{}, &jobNotificationDeliveryStore{}, nil).Publish(t.Context(), notification)
+		if err == nil && len(recorder.requests) != 1 {
+			t.Fatalf("published requests = %d, want 1", len(recorder.requests))
+		}
+		return err
+	}
+	cases := []struct {
+		name      string
+		mode      domain.JobResultDeliveryMode
+		mutate    func(*domain.ExternalAgentJobNotification)
+		wantError bool
+	}{
+		{name: "v32 exact match publishes", mode: domain.JobResultDeliveryMarkdown},
+		{name: "v32 exact match publishes", mode: domain.JobResultDeliveryFile},
+		{name: "non-hex notification digest rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = strings.Repeat("g", 64) }, wantError: true},
+		{name: "non-hex notification digest rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = strings.Repeat("g", 64) }, wantError: true},
+		{name: "uppercase notification digest rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = strings.Repeat("A", 64) }, wantError: true},
+		{name: "mismatched notification digest rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = otherDigest }, wantError: true},
+		{name: "mismatched notification digest rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = otherDigest }, wantError: true},
+		{name: "mismatched notification bytes rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes++ }, wantError: true},
+		{name: "mismatched notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes++ }, wantError: true},
+		{name: "partial v32 digest only rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes = 0 }, wantError: true},
+		{name: "partial v32 bytes only rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = "" }, wantError: true},
+		{name: "partial v32 digest only rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes = 0 }, wantError: true},
+		{name: "partial v32 bytes only rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = "" }, wantError: true},
+		{name: "legacy fallback markdown must match content digest", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) {
+			n.NotificationSHA256, n.NotificationBytes, n.ContentSHA256 = "", 0, otherDigest
+		}, wantError: true},
+	}
+	for _, scenario := range cases {
+		t.Run(scenario.name+" "+string(scenario.mode), func(t *testing.T) {
+			notification := build(scenario.mode, scenario.mutate)
+			err := publish(notification)
+			if (err != nil) != scenario.wantError {
+				t.Fatalf("publish = %v, wantError %v", err, scenario.wantError)
+			}
+		})
+	}
+
+	// Legacy markdown rows (no v32 identity fields at all) keep the fallback
+	// contract: content_sha256 must equal the digest of the canonical
+	// Markdown they will deliver.
+	markdownDigest := domain.NotificationIdentitySHA256(markdown)
+	legacy := domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+		CanonicalMarkdown: markdown, ContentSHA256: markdownDigest, ContentBytes: int64(len([]byte(markdown))),
+		RendererVersion: domain.JobNotificationRenderer,
+		Target:          domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678",
+		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
+		UploadState: domain.JobResultUploadNotApplicable, MaxMarkdownParts: 6,
+	}
+	if err := publish(legacy); err != nil {
+		t.Fatalf("legacy markdown fallback publish = %v", err)
+	}
+	// Legacy file rows (no v32 identity fields at all) keep the fallback
+	// contract: the content identity shape is validated here and the exact
+	// bytes against the delivered content at publication time.
+	fileLegacy := build(domain.JobResultDeliveryFile, func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", 0 })
+	if err := publish(fileLegacy); err != nil {
+		t.Fatalf("legacy file fallback publish = %v", err)
+	}
+}
+
 func TestJobNotificationMarkdownRecoveryBoundariesAndEvidence(t *testing.T) {
 	for _, wantParts := range []int{2, 6} {
 		t.Run(fmt.Sprintf("%d_parts", wantParts), func(t *testing.T) {
