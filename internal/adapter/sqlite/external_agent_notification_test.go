@@ -501,3 +501,104 @@ func TestOpenReadOnlyDoesNotMigrateOrWrite(t *testing.T) {
 		t.Fatal("read-only database accepted a write")
 	}
 }
+
+// assertTerminalNotificationRows checks the row-level activation disposition of
+// every terminal notification row of the job: one row per status revision in
+// order, matching terminal statuses, pending publication, and a
+// root_activation_required that follows the job mode.
+func assertTerminalNotificationRows(t *testing.T, store *Store, jobs *ExternalAgentJobStore, jobID string, mode domain.ExternalAgentJobMode, wantStatuses ...domain.ExternalAgentJobStatus) {
+	t.Helper()
+	rows := terminalNotificationRowsForJob(t, store, jobID)
+	if len(rows) != len(wantStatuses) {
+		t.Fatalf("job %s has %d terminal notification rows, want %d", jobID, len(rows), len(wantStatuses))
+	}
+	current, err := jobs.GetJob(t.Context(), jobID)
+	if err != nil || current == nil {
+		t.Fatalf("load job %s: %v", jobID, err)
+	}
+	seen := map[int]bool{}
+	for index, row := range rows {
+		if row.TerminalStatus != wantStatuses[index] {
+			t.Fatalf("row %d terminal status = %s, want %s", index, row.TerminalStatus, wantStatuses[index])
+		}
+		if row.PublishState != domain.NotificationPending {
+			t.Fatalf("row %d publish state = %s, want %s", index, row.PublishState, domain.NotificationPending)
+		}
+		if row.RootActivationRequired != (mode == domain.JobDetached) {
+			t.Fatalf("row %d root activation = %t, mode = %s", index, row.RootActivationRequired, mode)
+		}
+		if seen[row.StatusRevision] {
+			t.Fatalf("duplicate terminal notification revision %d", row.StatusRevision)
+		}
+		seen[row.StatusRevision] = true
+	}
+	if rows[len(rows)-1].StatusRevision != current.StatusRevision {
+		t.Fatalf("last terminal row revision %d != job revision %d", rows[len(rows)-1].StatusRevision, current.StatusRevision)
+	}
+}
+
+func TestTerminalPathNotificationRowDisposition(t *testing.T) {
+	statuses := []domain.ExternalAgentJobStatus{
+		domain.JobCompleted, domain.JobFailed, domain.JobCancelled,
+		domain.JobCompletionUnknown, domain.JobAbandoned,
+	}
+	for _, mode := range []domain.ExternalAgentJobMode{domain.JobForeground, domain.JobDetached} {
+		for _, status := range statuses {
+			t.Run(fmt.Sprintf("transition/%s/%s", status, mode), func(t *testing.T) {
+				store, jobs, now := newActivationTestStore(t)
+				job := activationTestJob("notification-transition-"+string(status)+"-"+string(mode), now)
+				job.Mode = mode
+				terminalizeActivationTestJobByStatus(t, jobs, job, now, status)
+				wantStatuses := []domain.ExternalAgentJobStatus{status}
+				if status == domain.JobAbandoned {
+					wantStatuses = []domain.ExternalAgentJobStatus{domain.JobCompletionUnknown, domain.JobAbandoned}
+				}
+				assertTerminalNotificationRows(t, store, jobs, job.ID, mode, wantStatuses...)
+			})
+		}
+		t.Run(fmt.Sprintf("queued-cancellation/%s", mode), func(t *testing.T) {
+			store, jobs, now := newActivationTestStore(t)
+			job := activationTestJob("notification-cancellation-"+string(mode), now)
+			job.Mode = mode
+			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+				t.Fatalf("create = %v, err = %v", created, err)
+			}
+			cancelled, err := jobs.RequestCancellation(t.Context(), job.ID, job.Actor)
+			if err != nil || cancelled == nil || cancelled.Status != domain.JobCancelled {
+				t.Fatalf("cancellation = %#v, err = %v", cancelled, err)
+			}
+			assertTerminalNotificationRows(t, store, jobs, job.ID, mode, domain.JobCancelled)
+		})
+		for _, outcome := range []struct {
+			name        string
+			status      domain.ExternalAgentJobStatus
+			errorCode   string
+			sideEffects bool
+		}{
+			{"failed", domain.JobFailed, "job_lease_lost", false},
+			{"completion_unknown", domain.JobCompletionUnknown, "completion_unknown", true},
+		} {
+			t.Run(fmt.Sprintf("expired-recovery/%s/%s", outcome.name, mode), func(t *testing.T) {
+				store, jobs, now := newActivationTestStore(t)
+				job := activationTestJob("notification-recovered-"+outcome.name+"-"+string(mode), now)
+				job.Mode = mode
+				if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+					t.Fatalf("create = %v, err = %v", created, err)
+				}
+				claimed, err := jobs.ClaimNext(t.Context(), now, "job-worker-"+job.ID, time.Minute)
+				if err != nil || claimed == nil {
+					t.Fatalf("claim = %#v, err = %v", claimed, err)
+				}
+				if outcome.sideEffects {
+					if err := jobs.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := jobs.RecoverExpired(t.Context(), job.ID, claimed.Attempt, claimed.StatusRevision, now.Add(2*time.Minute), outcome.status, outcome.errorCode); err != nil {
+					t.Fatal(err)
+				}
+				assertTerminalNotificationRows(t, store, jobs, job.ID, mode, outcome.status)
+			})
+		}
+	}
+}
