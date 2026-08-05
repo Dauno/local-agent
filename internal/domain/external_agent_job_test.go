@@ -280,6 +280,35 @@ func TestValidArtifactResultFailsClosedOnIncoherentShape(t *testing.T) {
 	}
 }
 
+func TestValidArtifactResultForJobBindsReferenceToJob(t *testing.T) {
+	digest := strings.Repeat("a", 64)
+	if got := domain.CanonicalArtifactReference("job_1"); got != "job_1-delivery.result" {
+		t.Fatalf("canonical reference = %q, want %q", got, "job_1-delivery.result")
+	}
+	tests := []struct {
+		name string
+		ref  string
+		want bool
+	}{
+		{name: "canonical reference of this job", ref: "job_1-delivery.result", want: true},
+		{name: "foreign job reference", ref: "job_2-delivery.result", want: false},
+		{name: "safe but non-canonical reference", ref: "job_1.result", want: false},
+		{name: "safe but non-canonical suffix reference", ref: "job_1-delivery.result.txt", want: false},
+		{name: "path-like reference", ref: "dir/job_1-delivery.result", want: false},
+		{name: "empty reference", ref: "", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := domain.ValidArtifactResultForJob("job_1", tt.ref, digest, 1024); got != tt.want {
+				t.Fatalf("ValidArtifactResultForJob = %v, want %v", got, tt.want)
+			}
+		})
+	}
+	if domain.ValidArtifactResultForJob("job_1", "job_1-delivery.result", "digest", 1024) {
+		t.Fatal("incoherent identity on the canonical reference was accepted")
+	}
+}
+
 func TestStatusViewPromisesResultOnlyForStrictIdentity(t *testing.T) {
 	summary := "safe result"
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(summary)))
@@ -330,6 +359,16 @@ func TestStatusViewPromisesResultOnlyForStrictIdentity(t *testing.T) {
 		{
 			name: "completed artifact with path-like reference",
 			job:  domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultArtifact: "dir/job_1-delivery.result", ResultSHA256: artifactDigest, ResultBytes: 1024},
+			want: false, wantMode: domain.JobResultDeliveryFile,
+		},
+		{
+			name: "completed artifact with foreign job reference",
+			job:  domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultArtifact: "job_2-delivery.result", ResultSHA256: artifactDigest, ResultBytes: 1024},
+			want: false, wantMode: domain.JobResultDeliveryFile,
+		},
+		{
+			name: "completed artifact with safe non-canonical reference",
+			job:  domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultArtifact: "job_1.result", ResultSHA256: artifactDigest, ResultBytes: 1024},
 			want: false, wantMode: domain.JobResultDeliveryFile,
 		},
 		{

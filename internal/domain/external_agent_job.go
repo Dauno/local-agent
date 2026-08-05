@@ -629,6 +629,27 @@ func ValidArtifactResult(artifactRef, sha256Hex string, bytes int64) bool {
 	return true
 }
 
+// CanonicalArtifactReference returns the exact artifact filename bound to a
+// job. Result readers derive the owner from the job and the artifact adapter
+// accepts only the canonical owner-derived name, so this is the single name a
+// completed job may carry to be readable at all.
+func CanonicalArtifactReference(jobID string) string {
+	return jobID + "-delivery.result"
+}
+
+// ValidArtifactResultForJob reports whether a completed job's file-mode result
+// shape is coherent AND the stored artifact reference is the exact canonical
+// name bound to this job. The artifact reader derives the owner from the job
+// and rejects any other reference, so a foreign job's reference or an
+// arbitrary safe filename must never project as available; it would fail the
+// read closed with an owner/ref mismatch.
+func ValidArtifactResultForJob(jobID, artifactRef, sha256Hex string, bytes int64) bool {
+	if artifactRef != CanonicalArtifactReference(jobID) {
+		return false
+	}
+	return ValidArtifactResult(artifactRef, sha256Hex, bytes)
+}
+
 // ResultErrorCode is a bounded, host-owned classification for verified result
 // reads. A code is safe to expose in diagnostics, tool responses, and logs: it
 // never carries digest values, artifact references, paths, owners, actors,
@@ -886,7 +907,7 @@ func (j ExternalAgentJob) StatusView() ExternalAgentJobStatusView {
 		// matching the readers' precedence; an incoherent artifact never falls
 		// back to the inline shape.
 		if j.ResultArtifact != "" {
-			available = ValidArtifactResult(j.ResultArtifact, j.ResultSHA256, j.ResultBytes)
+			available = ValidArtifactResultForJob(j.ID, j.ResultArtifact, j.ResultSHA256, j.ResultBytes)
 		} else {
 			available = ValidInlineResult(j.ResultSummary, j.ResultSHA256, j.ResultBytes)
 		}
