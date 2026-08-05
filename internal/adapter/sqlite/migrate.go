@@ -39,6 +39,7 @@ var migrations = map[int]migrationFunc{
 	28: migrateV28,
 	29: migrateV29,
 	30: migrateV30,
+	31: migrateV31,
 	32: migrateV32,
 }
 
@@ -58,8 +59,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	}
 	// V15 is an additive runtime-state migration and is safe for V14 state.
 	// V20 is an additive draft migration and is safe for V19 state.
-	// V30-V32 are additive delivery-contract migrations; V31 is the pending
-	// P0-02 repair slot and is safe for V30 state once it lands.
+	// V30-V32 are delivery-contract migrations; V31 repairs historical
+	// foreground identity and retires claimable foreground activations on V30
+	// state, and V32 applies its defensive backfills after V30 or V31.
 	// Older schemas retain the existing explicit-reset requirement.
 	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 && current != 24 && current != 25 && current != 26 && current != 27 && current != 28 && current != 29 && current != 30 && current != 31 {
 		return &StateResetNeededError{Found: current, Supported: SchemaVersion}
@@ -68,12 +70,7 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	for version := current + 1; version <= SchemaVersion; version++ {
 		fn, ok := migrations[version]
 		if !ok {
-			// v31 is the pending P0-02 repair migration on this branch; until
-			// it lands, the compilable chain advances v30 -> v32 without it.
-			if version != 31 {
-				return fmt.Errorf("no SQLite migration registered for version %d", version)
-			}
-			continue
+			return fmt.Errorf("no SQLite migration registered for version %d", version)
 		}
 		if err := fn(ctx, tx); err != nil {
 			return err
