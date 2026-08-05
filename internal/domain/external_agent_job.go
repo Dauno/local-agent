@@ -289,6 +289,35 @@ type ExternalAgentJobActivationHealth struct {
 	Stuck             int
 }
 
+// ExternalAgentJobIdentityHealth is a content-free aggregate of durable result
+// identity completeness. Every field is a count; no job ID, actor,
+// conversation, digest, reference, path, or result content value is ever
+// exposed. Retired foreground activations are the bounded v31 repair evidence
+// (terminal rows stamped with ActivationForegroundRetiredCode): they are
+// expected after an upgrade and must never be treated as a defect.
+type ExternalAgentJobIdentityHealth struct {
+	// JobsCompletedWithoutResultIdentity counts completed jobs whose result
+	// identity (SHA-256 + byte count) is not complete. Historical fail-closed
+	// rows intentionally keep an empty identity after v31/v32; the count is
+	// informational, never a defect.
+	JobsCompletedWithoutResultIdentity int
+	// NotificationsWithoutIdentity counts notification rows whose
+	// notification identity (notification_sha256 + notification_bytes) is not
+	// complete. Every post-v32 delivery must carry a complete identity.
+	NotificationsWithoutIdentity int
+	// ActivationsWithoutContent counts activations whose content byte count
+	// is not positive. Every activation created from a published terminal
+	// notification must carry the delivered result byte count.
+	ActivationsWithoutContent int
+	// ForegroundActivationsActive counts non-terminal activations owned by
+	// foreground jobs. This is the P0 contract violation: foreground
+	// completions must never produce claimable root activations.
+	ForegroundActivationsActive int
+	// RetiredForegroundActivations counts terminal activations stamped with
+	// the bounded foreground_activation_retired code. Informational only.
+	RetiredForegroundActivations int
+}
+
 // NotificationHealthSnapshot is kept as a descriptive alias for callers that
 // expose the aggregate as a health snapshot.
 type NotificationHealthSnapshot = ExternalAgentJobNotificationHealth

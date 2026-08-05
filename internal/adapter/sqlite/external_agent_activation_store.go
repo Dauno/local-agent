@@ -41,7 +41,10 @@ func (s *ExternalAgentJobStore) GetActivation(ctx context.Context, activationID 
 
 // ActivationHealth returns content-free activation counts. An expired lease
 // or a retry overdue by the stuck threshold is reported as stuck without
-// loading any job task, result, or artifact data.
+// loading any job task, result, or artifact data. Retired foreground
+// activations (terminal rows stamped with the bounded
+// foreground_activation_retired code) are explicitly excluded from the stuck
+// count: they are expected v31 repair evidence, never a defect.
 func (s *ExternalAgentJobStore) ActivationHealth(ctx context.Context, now time.Time, stuckThreshold time.Duration) (domain.ExternalAgentJobActivationHealth, error) {
 	if s == nil || s.db == nil {
 		return domain.ExternalAgentJobActivationHealth{}, errors.New("external-agent activation health store is not configured")
@@ -93,11 +96,12 @@ func (s *ExternalAgentJobStore) ActivationHealth(ctx context.Context, now time.T
 	health.Processed = health.Completed + health.Failed
 	cutoff := now.Add(-stuckThreshold).UnixNano()
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_activations
-		WHERE state NOT IN (?, ?, ?) AND (
+		WHERE state NOT IN (?, ?, ?) AND last_error_code != ? AND (
 			(state = ? AND next_attempt_at > 0 AND next_attempt_at <= ?) OR
 			(state IN (?, ?, ?) AND lease_expiry > 0 AND lease_expiry <= ?)
 		)`,
 		domain.ActivationCompleted, domain.ActivationCompletionUnknown, domain.ActivationFailed,
+		domain.ActivationForegroundRetiredCode,
 		domain.ActivationPending, cutoff,
 		domain.ActivationProcessing, domain.ActivationModelStarted, domain.ActivationResponsePrepared, now.UnixNano(),
 	).Scan(&health.Stuck); err != nil {
