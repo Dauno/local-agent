@@ -775,7 +775,7 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 			'', '', '', '', '', '', n.published_at, n.published_at
 		FROM external_agent_job_notifications n
 		JOIN external_agent_jobs j ON j.job_id = n.job_id
-		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ? AND n.terminal_status != ''
+		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ? AND n.terminal_status != '' AND j.mode = 'detached'
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 		activationID, notification.JobID, notification.StatusRevision, notification.Kind); err != nil {
 		return fmt.Errorf("insert external-agent activation: %w", err)
