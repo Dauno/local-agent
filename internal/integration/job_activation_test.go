@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/model"
@@ -30,6 +31,15 @@ import (
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 )
 
+// TestJobCompletionActivationEndToEnd proves the detached root awareness
+// contract (FR-02, FR-12): a detached job executes exactly once through the
+// durable ACP runtime, its multibyte result is consumed by the scripted root
+// model in bounded verified UTF-8 chunks (per-chunk SHA-256 against the
+// status identity and a recomputed total digest) and only then answered with
+// a single root synthesis. Exactly one notification, one activation, one ACP
+// execution and one root response are asserted. The test fails when the chunk
+// reader is broken even though the read_job_result_chunk tool is registered,
+// because every model-side verification failure fails the activation turn.
 func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "activation.db"))
 	if err != nil {
@@ -52,21 +62,52 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if err != nil || !created {
 		t.Fatalf("create job = %v, err=%v", created, err)
 	}
-	claimed, err := jobs.ClaimNext(t.Context(), now, "execution-worker", time.Minute)
-	if err != nil || claimed == nil {
-		t.Fatalf("claim job = %#v, err=%v", claimed, err)
-	}
-	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, integrationMarkdownResult(job.ID, "result available to root"), "", now.Add(time.Second)); err != nil {
-		t.Fatal(err)
-	}
 
-	jobService, err := externalagent.New(externalagent.Config{
-		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
-		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
-	}, externalagent.Dependencies{Store: jobs, Runtime: &activationJobRuntime{}})
+	// The provider returns multibyte UTF-8 content (accents, emoji, CJK,
+	// symbols). The persisted identity is computed over the sanitized text,
+	// so the root model must reconstruct and verify exactly that text through
+	// the activation-scoped chunk reader.
+	const rawResult = "café ☕ síntesis — áéíóú ñ ü 漢字 🔥 done ✓"
+	expectedText, err := domain.SanitizeResultText(rawResult)
 	if err != nil {
 		t.Fatal(err)
 	}
+	if !utf8.ValidString(expectedText) || len([]byte(expectedText)) <= 7 {
+		t.Fatalf("fixture must be multibyte and exceed one 7-byte chunk: %q", expectedText)
+	}
+	expectedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(expectedText)))
+
+	acp := &detachedFakeACP{raw: rawResult}
+	jobService, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+	}, externalagent.Dependencies{
+		Store: jobs, Runtime: &detachedDispatcherRuntime{acp: acp},
+		MaxResultBytes: 1 << 20, MaxResultChunkBytes: 7, Logger: integrationLogger{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	t.Cleanup(stopWorker)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		jobService.Run(workerCtx)
+	}()
+	t.Cleanup(func() {
+		stopWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("durable job worker did not stop")
+		}
+	})
+	waitForJobStatus(t, jobs, job.ID, domain.JobCompleted)
+	if calls, jobID := acp.callStats(); calls != 1 || jobID != job.ID {
+		t.Fatalf("detached ACP executions = %d with jobID %q, want exactly 1 with %q", calls, jobID, job.ID)
+	}
+
 	metrics := metricsadapter.NewRecorder()
 	notificationPublisher := &jobActivationNotificationPublisher{}
 	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{
@@ -98,7 +139,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 		t.Fatalf("activation after publication = %#v", activation)
 	}
 
-	rootModel := &activationRootModel{}
+	rootModel := newActivationRootModel(job.ID, expectedText, expectedDigest, int64(len([]byte(expectedText))), 7)
 	toolFactory := toolfactory.New(store, nil, nil, nil).WithExternalAgentJobs(jobService)
 	sessionService := adaptersqlite.NewAdkSessionService(store)
 	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
@@ -145,6 +186,17 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 		t.Fatalf("root delivery = %#v", responsePublisher.calls)
 	}
 
+	var foregroundActivations, detachedActivations int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM external_agent_job_activations a JOIN external_agent_jobs j ON j.job_id = a.job_id WHERE j.mode = 'foreground'`).Scan(&foregroundActivations); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM external_agent_job_activations a JOIN external_agent_jobs j ON j.job_id = a.job_id WHERE j.mode = 'detached'`).Scan(&detachedActivations); err != nil {
+		t.Fatal(err)
+	}
+	if foregroundActivations != 0 || detachedActivations != 1 {
+		t.Fatalf("activation rows = %d foreground, %d detached, want 0 and 1", foregroundActivations, detachedActivations)
+	}
+
 	messages, err := store.RecentMessages(t.Context(), key, 10)
 	if err != nil {
 		t.Fatal(err)
@@ -166,8 +218,26 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded == nil || loaded.Session == nil || loaded.Session.Events().Len() != 2 {
-		t.Fatalf("durable ADK session = %#v", loaded)
+	_, _, _, calls := rootModel.snapshot()
+	chunkCalls, reconstructed, verified, failures := rootModel.chunkStats()
+	if !verified {
+		t.Fatalf("root model chunk verification failed: %#v", failures)
+	}
+	if chunkCalls < 2 {
+		t.Fatalf("root model chunk calls = %d, want more than one chunk", chunkCalls)
+	}
+	if reconstructed != expectedText || len([]byte(reconstructed)) != len([]byte(expectedText)) {
+		t.Fatalf("root model reconstructed %d chunks into %q, want %q", chunkCalls, reconstructed, expectedText)
+	}
+	// One user envelope, one status call/response, one call/response per
+	// chunk and one final root response.
+	expectedEvents := 4 + 2*chunkCalls
+	if loaded == nil || loaded.Session == nil || loaded.Session.Events().Len() != expectedEvents {
+		t.Fatalf("durable ADK session = %#v, want %d events", loaded, expectedEvents)
+	}
+	finalEvent := loaded.Session.Events().At(expectedEvents - 1)
+	if finalEvent == nil || finalEvent.Content == nil || len(finalEvent.Content.Parts) == 0 || finalEvent.Content.Parts[0].Text != "root synthesis" {
+		t.Fatalf("final session event = %#v, want the root synthesis text", finalEvent)
 	}
 	for index := 0; index < loaded.Session.Events().Len(); index++ {
 		metadata := loaded.Session.Events().At(index).CustomMetadata
@@ -175,9 +245,12 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 			t.Fatalf("event %d origin metadata = %#v", index, metadata)
 		}
 	}
-	modelRequest, modelContext, contextOK, calls := rootModel.snapshot()
-	if !contextOK || modelContext.Origin.Kind != port.AgentTurnOriginJobCompletion || modelContext.Origin.Actor != job.Actor || modelContext.Origin.ActivationID != activationID || calls != 1 {
-		t.Fatalf("root model context = %#v, present=%t, calls=%d", modelContext, contextOK, calls)
+	modelRequest, modelContext, contextOK, _ := rootModel.snapshot()
+	if !contextOK || modelContext.Origin.Kind != port.AgentTurnOriginJobCompletion || modelContext.Origin.Actor != job.Actor || modelContext.Origin.ActivationID != activationID || calls != 2+chunkCalls {
+		t.Fatalf("root model context = %#v, present=%t, calls=%d (want 2+%d)", modelContext, contextOK, calls, chunkCalls)
+	}
+	if got := rootModel.statusRevisionSnapshot(); got != statusRevision {
+		t.Fatalf("root model status revision = %d, want notification revision %d", got, statusRevision)
 	}
 	if modelRequest == nil || len(modelRequest.Tools) != 2 {
 		t.Fatalf("activation model tools = %#v, want job_status and read_job_result_chunk", modelRequest)
@@ -473,12 +546,39 @@ func TestActivationWorkerShutdownDrainsCurrentActivation(t *testing.T) {
 	}
 }
 
+// activationRootModel scripts the root activation turn with real result
+// consumption (FR-02, FR-12): call 1 emits job_status to bind the terminal
+// revision and capture the persisted result identity; then it emits
+// read_job_result_chunk calls at server-provided UTF-8 continuation offsets
+// until EOF, verifying each reported per-chunk SHA-256 against the status
+// identity, the offset progression and the total digest recomputed over the
+// reconstructed text; only then does it return the root synthesis. Every
+// verification failure fails the turn loudly, so the E2E test fails when the
+// chunk reader is broken even though the tool is registered.
 type activationRootModel struct {
-	mu        sync.Mutex
-	request   *model.LLMRequest
-	context   port.AgentTurnContext
-	contextOK bool
-	calls     int
+	mu             sync.Mutex
+	jobID          string
+	expectedText   string
+	expectedDigest string
+	expectedBytes  int64
+	chunkMaxBytes  int64
+
+	request       *model.LLMRequest
+	context       port.AgentTurnContext
+	contextOK     bool
+	calls         int
+	chunkCalls    int
+	reconstructed strings.Builder
+	revision      int
+	verified      bool
+	failures      []string
+}
+
+func newActivationRootModel(jobID, expectedText, expectedDigest string, expectedBytes, chunkMaxBytes int64) *activationRootModel {
+	return &activationRootModel{
+		jobID: jobID, expectedText: expectedText, expectedDigest: expectedDigest,
+		expectedBytes: expectedBytes, chunkMaxBytes: chunkMaxBytes,
+	}
 }
 
 func (*activationRootModel) Name() string { return "activation-root-model" }
@@ -491,9 +591,91 @@ func (m *activationRootModel) GenerateContent(ctx context.Context, request *mode
 		m.context = turnContext
 		m.contextOK = contextOK
 		m.calls++
+		call := m.calls
 		m.mu.Unlock()
-		yield(&model.LLMResponse{Content: genai.NewContentFromText("root synthesis", genai.RoleModel), TurnComplete: true}, nil)
+		if call == 1 {
+			yield(functionCallResponse("call_job_status_001", "job_status", map[string]any{"job_id": m.jobID}), nil)
+			return
+		}
+		if call == 2 {
+			m.mu.Lock()
+			m.reconstructed.Reset()
+			m.verified = false
+			m.mu.Unlock()
+			status, revision, available, resultSHA, resultBytes, deliveryMode, ok := jobStatusFromResponse(lastFunctionResponse(request, "job_status"))
+			if !ok {
+				m.failLoud(yield, "job_status response missing on model call %d", call)
+				return
+			}
+			if status != string(domain.JobCompleted) || !available || deliveryMode != string(domain.JobResultDeliveryMarkdown) || revision <= 0 || resultBytes <= 0 || !isLowerHexSHA256(resultSHA) {
+				m.failLoud(yield, "job_status identity mismatch: status=%q available=%t mode=%q revision=%d bytes=%d sha=%q", status, available, deliveryMode, revision, resultBytes, resultSHA)
+				return
+			}
+			if resultSHA != m.expectedDigest || resultBytes != m.expectedBytes {
+				m.failLoud(yield, "job_status identity differs from the host fixture: sha=%q want %q bytes=%d want %d", resultSHA, m.expectedDigest, resultBytes, m.expectedBytes)
+				return
+			}
+			m.mu.Lock()
+			m.revision = revision
+			m.mu.Unlock()
+			yield(functionCallResponse("call_chunk_001", "read_job_result_chunk", map[string]any{"job_id": m.jobID, "offset_bytes": int64(0), "max_bytes": m.chunkMaxBytes}), nil)
+			return
+		}
+		m.mu.Lock()
+		m.chunkCalls++
+		chunkNumber := m.chunkCalls
+		m.mu.Unlock()
+		content, offset, nextOffset, eof, chunkSHA, ok := chunkFromResponse(lastFunctionResponse(request, "read_job_result_chunk"))
+		if !ok {
+			m.failLoud(yield, "read_job_result_chunk response missing on model call %d", call)
+			return
+		}
+		m.mu.Lock()
+		wantOffset := int64(len([]byte(m.reconstructed.String())))
+		m.mu.Unlock()
+		if chunkSHA != m.expectedDigest {
+			m.failLoud(yield, "chunk %d digest %q does not match the status identity %q", chunkNumber, chunkSHA, m.expectedDigest)
+			return
+		}
+		if !utf8.ValidString(content) || offset != wantOffset || nextOffset <= offset {
+			m.failLoud(yield, "chunk %d range invalid: offset=%d want %d next=%d valid=%t", chunkNumber, offset, wantOffset, nextOffset, utf8.ValidString(content))
+			return
+		}
+		if nextOffset > m.expectedBytes {
+			m.failLoud(yield, "chunk %d next offset %d exceeds the identity size %d", chunkNumber, nextOffset, m.expectedBytes)
+			return
+		}
+		m.mu.Lock()
+		m.reconstructed.WriteString(content)
+		reconstructed := m.reconstructed.String()
+		m.mu.Unlock()
+		if eof {
+			if nextOffset != m.expectedBytes {
+				m.failLoud(yield, "chunk %d reports EOF at %d, want %d", chunkNumber, nextOffset, m.expectedBytes)
+				return
+			}
+			totalDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(reconstructed)))
+			if totalDigest != m.expectedDigest || reconstructed != m.expectedText {
+				m.failLoud(yield, "reconstructed result digest %q or text %q does not match the identity %q / %q", totalDigest, reconstructed, m.expectedDigest, m.expectedText)
+				return
+			}
+			m.mu.Lock()
+			m.verified = true
+			m.mu.Unlock()
+			yield(&model.LLMResponse{Content: genai.NewContentFromText("root synthesis", genai.RoleModel), TurnComplete: true}, nil)
+			return
+		}
+		yield(functionCallResponse(fmt.Sprintf("call_chunk_%03d", chunkNumber+1), "read_job_result_chunk", map[string]any{"job_id": m.jobID, "offset_bytes": nextOffset, "max_bytes": m.chunkMaxBytes}), nil)
 	}
+}
+
+// failLoud records the verification failure and fails the ADK turn so the
+// activation cannot complete while the chunk reader is broken.
+func (m *activationRootModel) failLoud(yield func(*model.LLMResponse, error) bool, format string, args ...any) {
+	m.mu.Lock()
+	m.failures = append(m.failures, fmt.Sprintf(format, args...))
+	m.mu.Unlock()
+	yield(nil, fmt.Errorf(format, args...))
 }
 
 func (m *activationRootModel) snapshot() (*model.LLMRequest, port.AgentTurnContext, bool, int) {
@@ -502,10 +684,203 @@ func (m *activationRootModel) snapshot() (*model.LLMRequest, port.AgentTurnConte
 	return m.request, m.context, m.contextOK, m.calls
 }
 
-type activationJobRuntime struct{}
+func (m *activationRootModel) chunkStats() (chunkCalls int, reconstructed string, verified bool, failures []string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.chunkCalls, m.reconstructed.String(), m.verified, append([]string(nil), m.failures...)
+}
 
-func (*activationJobRuntime) Run(context.Context, domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
-	return domain.AcpInvocationResult{}, errors.New("ACP runtime must not run during host completion")
+func (m *activationRootModel) statusRevisionSnapshot() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.revision
+}
+
+// functionCallResponse builds one complete model turn that requests a tool.
+func functionCallResponse(id, name string, args map[string]any) *model.LLMResponse {
+	return &model.LLMResponse{Content: &genai.Content{
+		Role: genai.RoleModel,
+		Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+			ID: id, Name: name, Args: args,
+		}}},
+	}, TurnComplete: true}
+}
+
+// lastFunctionResponse returns the response map of the most recent function
+// response with the given tool name in the request contents.
+func lastFunctionResponse(request *model.LLMRequest, name string) (map[string]any, bool) {
+	if request == nil {
+		return nil, false
+	}
+	for index := len(request.Contents) - 1; index >= 0; index-- {
+		content := request.Contents[index]
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil && part.FunctionResponse != nil && part.FunctionResponse.Name == name {
+				return part.FunctionResponse.Response, true
+			}
+		}
+	}
+	return nil, false
+}
+
+func isLowerHexSHA256(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	for _, r := range value {
+		if (r < '0' || r > '9') && (r < 'a' || r > 'f') {
+			return false
+		}
+	}
+	return true
+}
+
+// jobStatusFromResponse decodes the activation job_status tool response. JSON
+// numbers arrive as float64; the response is only accepted when every field
+// the scripted model must verify is present with its expected type.
+func jobStatusFromResponse(response map[string]any, ok bool) (status string, revision int, available bool, resultSHA string, resultBytes int64, deliveryMode string, valid bool) {
+	if !ok {
+		return "", 0, false, "", 0, "", false
+	}
+	status, ok1 := response["status"].(string)
+	revisionF, ok2 := response["status_revision"].(float64)
+	available, ok3 := response["result_available"].(bool)
+	resultSHA, ok4 := response["result_sha256"].(string)
+	bytesF, ok5 := response["result_bytes"].(float64)
+	deliveryMode, ok6 := response["delivery_mode"].(string)
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 || !ok6 {
+		return "", 0, false, "", 0, "", false
+	}
+	return status, int(revisionF), available, resultSHA, int64(bytesF), deliveryMode, true
+}
+
+// chunkFromResponse decodes one activation read_job_result_chunk tool
+// response. JSON numbers arrive as float64; the response is only accepted
+// when every field the scripted model must verify is present.
+func chunkFromResponse(response map[string]any, ok bool) (content string, offset, nextOffset int64, eof bool, chunkSHA string, valid bool) {
+	if !ok {
+		return "", 0, 0, false, "", false
+	}
+	content, ok1 := response["content"].(string)
+	offsetF, ok2 := response["offset_bytes"].(float64)
+	nextF, ok3 := response["next_offset_bytes"].(float64)
+	eof, ok4 := response["eof"].(bool)
+	chunkSHA, ok5 := response["sha256"].(string)
+	if !ok1 || !ok2 || !ok3 || !ok4 || !ok5 {
+		return "", 0, 0, false, "", false
+	}
+	return content, int64(offsetF), int64(nextF), eof, chunkSHA, true
+}
+
+// detachedFakeACP is the direct ACP runtime behind the detached dispatcher.
+// It returns raw multibyte provider text and records exactly how many
+// invocations ran and with which durable job ID.
+type detachedFakeACP struct {
+	mu        sync.Mutex
+	raw       string
+	calls     int
+	lastJobID string
+}
+
+func (r *detachedFakeACP) Run(_ context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.calls++
+	r.lastJobID = request.JobID
+	return domain.AcpInvocationResult{Text: r.raw}, nil
+}
+
+func (*detachedFakeACP) Probe(context.Context, string, []string, []domain.ACPConfigOption) error {
+	return nil
+}
+
+func (*detachedFakeACP) Describe(context.Context) (domain.ACPInitResult, error) {
+	return domain.ACPInitResult{}, nil
+}
+
+func (r *detachedFakeACP) callStats() (int, string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.calls, r.lastJobID
+}
+
+// detachedDispatcherRuntime mirrors the detached branch of the real
+// acpJobDispatcher.Run: the durable worker executes the job exactly once
+// through the direct ACP runtime carrying the job ID and then normalizes the
+// raw text into the complete detached delivery identity (host redactor,
+// domain.SanitizeResultText, exact UTF-8 bytes, lowercase hex SHA-256,
+// canonical Markdown, policy fields). It is the test twin of the detached
+// materialize path and produces the same persisted identity as the real host.
+type detachedDispatcherRuntime struct {
+	acp    port.ExternalAgentRuntime
+	redact func(string) string
+}
+
+func (d *detachedDispatcherRuntime) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+	if job.Mode != domain.JobDetached {
+		return domain.AcpInvocationResult{}, errors.New("detached dispatcher runtime received a non-detached job")
+	}
+	result, err := d.acp.Run(ctx, domain.AcpInvocationRequest{
+		JobID: job.ID, PrimaryProject: job.PrimaryProject,
+		ProfileName: job.Profile, ProviderName: job.Provider, Task: job.Task,
+		Timeout: time.Until(job.TimeoutAt), Actor: job.Actor, TeamID: job.TeamID,
+		ConversationKey: job.ConversationKey,
+	})
+	if err != nil {
+		return result, err
+	}
+	text := result.Text
+	if d.redact != nil {
+		text = d.redact(text)
+	}
+	text, err = domain.SanitizeResultText(text)
+	if err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
+	size := int64(len([]byte(text)))
+	if size <= 0 {
+		return domain.AcpInvocationResult{}, errors.New("detached dispatcher result is empty")
+	}
+	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
+	result.Text = text
+	result.Inline = true
+	result.ArtifactRef = ""
+	result.ResultSHA256 = digest
+	result.ResultBytes = size
+	result.DeliveryMode = domain.JobResultDeliveryMarkdown
+	result.DeliveryCanonicalMarkdown = fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text)
+	result.DeliveryPolicyVersion = domain.JobDeliveryPolicyV1
+	result.DeliveryMaxMarkdownParts = 6
+	result.DeliveryContentSHA256 = digest
+	result.DeliveryContentBytes = size
+	return result, nil
+}
+
+// waitForJobStatus polls the durable store until the job reaches the wanted
+// terminal status or fails loudly.
+func waitForJobStatus(t *testing.T, jobs *adaptersqlite.ExternalAgentJobStore, jobID string, want domain.ExternalAgentJobStatus) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		current, err := jobs.GetJob(t.Context(), jobID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if current == nil {
+			t.Fatalf("job %q disappeared while waiting for %q", jobID, want)
+		}
+		if current.Status == want {
+			return
+		}
+		if current.Status == domain.JobFailed || current.Status == domain.JobCancelled || current.Status == domain.JobAbandoned {
+			t.Fatalf("job %q ended with %q (error %q) before %q", jobID, current.Status, current.ErrorCode, want)
+		}
+		time.Sleep(time.Millisecond)
+	}
+	t.Fatalf("job %q did not reach %q", jobID, want)
 }
 
 type jobActivationNotificationPublisher struct {
@@ -918,7 +1293,8 @@ func (*drainActivationHandler) ReconcileJobCompletion(context.Context, domain.Ex
 }
 
 var _ model.LLM = (*activationRootModel)(nil)
-var _ port.ExternalAgentJobRuntime = (*activationJobRuntime)(nil)
+var _ port.ExternalAgentJobRuntime = (*detachedDispatcherRuntime)(nil)
+var _ port.ExternalAgentRuntime = (*detachedFakeACP)(nil)
 var _ port.JobNotificationPublisher = (*jobActivationNotificationPublisher)(nil)
 var _ port.ResponsePublisher = (*jobActivationResponsePublisher)(nil)
 var _ port.ExternalAgentJobActivationStore = (*drainActivationStore)(nil)
