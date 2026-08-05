@@ -97,6 +97,8 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		})
 		if runErr == nil && d.artifacts != nil && job.Mode == domain.JobDetached {
 			result, runErr = d.materialize(ctx, job, result)
+		} else if runErr == nil && job.Mode == domain.JobForeground {
+			result, runErr = d.normalizeForegroundResult(result)
 		} else if runErr == nil && d.sanitize != nil {
 			result.Text = d.sanitize(result.Text)
 		}
@@ -106,6 +108,46 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		return domain.AcpInvocationResult{}, errors.New("durable ACP job scope revision does not match current configuration")
 	}
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
+}
+
+// normalizeForegroundResult produces the complete persisted identity for a
+// foreground result without creating detached delivery metadata. Only the
+// final post-transformation text, its exact UTF-8 byte count and lowercase
+// hex SHA-256 digest are set; Delivery* fields, artifact refs and policy
+// fields stay empty for the synchronous path.
+func (d *acpJobDispatcher) normalizeForegroundResult(result domain.AcpInvocationResult) (domain.AcpInvocationResult, error) {
+	text, size, digest, err := d.normalizeResultText(result.Text, d.policy.MaxInlineResultBytes)
+	if err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
+	result.Text = text
+	result.ResultBytes = size
+	result.ResultSHA256 = digest
+	return result, nil
+}
+
+// normalizeResultText applies the host redactor and domain control
+// sanitization to produce the exact final text, its UTF-8 byte count and
+// lowercase hex SHA-256 digest. maxBytes bounds the final UTF-8 bytes.
+// Failures are typed and never include result content.
+func (d *acpJobDispatcher) normalizeResultText(text string, maxBytes int64) (string, int64, string, error) {
+	if d.sanitize != nil {
+		text = d.sanitize(text)
+	}
+	var err error
+	text, err = domain.SanitizeResultText(text)
+	if err != nil {
+		return "", 0, "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
+	}
+	size := int64(len([]byte(text)))
+	if size <= 0 {
+		return "", 0, "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
+	}
+	if size > maxBytes {
+		return "", 0, "", &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("ACP result exceeds the configured delivery bound")}
+	}
+	digest := sha256.Sum256([]byte(text))
+	return text, size, fmt.Sprintf("%x", digest), nil
 }
 
 // newRecorder installs the host-owned progress recorder for one job attempt.
@@ -136,19 +178,12 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 		content = []byte(result.Text)
 	}
 	text := string(content)
-	if d.sanitize != nil {
-		text = d.sanitize(text)
-	}
-	text, err = domain.SanitizeResultText(text)
+	var size int64
+	var contentSHA string
+	text, size, contentSHA, err = d.normalizeResultText(text, d.policy.MaxFileBytes)
 	if err != nil {
-		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultDeliveryFailed, Err: errors.New("ACP result sanitization failed")}
+		return domain.AcpInvocationResult{}, err
 	}
-	safeBytes := []byte(text)
-	if int64(len(safeBytes)) > d.policy.MaxFileBytes {
-		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("sanitized ACP result exceeds configured delivery bound")}
-	}
-	digest := sha256.Sum256(safeBytes)
-	contentSHA := fmt.Sprintf("%x", digest)
 	canonical := fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text)
 	parts := slackadapter.RenderMarkdownParts(canonical, d.partLabels)
 	mode := domain.JobResultDeliveryMarkdown
@@ -165,9 +200,9 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 			if _, readErr := verified.Get(ctx, ownerID, ownerID+".result", contentSHA, d.policy.MaxFileBytes); readErr != nil {
 				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
 			}
-			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: int64(len(safeBytes))}
+			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: size}
 		}
-		if artifact.Reference == "" || !strings.EqualFold(artifact.SHA256, contentSHA) || artifact.Bytes != int64(len(safeBytes)) {
+		if artifact.Reference == "" || !strings.EqualFold(artifact.SHA256, contentSHA) || artifact.Bytes != size {
 			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultDeliveryFailed, Err: errors.New("sanitized ACP result artifact identity is invalid")}
 		}
 		artifactRef = artifact.Reference
@@ -176,13 +211,13 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 	result.Inline = mode == domain.JobResultDeliveryMarkdown
 	result.ArtifactRef = artifactRef
 	result.ResultSHA256 = contentSHA
-	result.ResultBytes = int64(len(safeBytes))
+	result.ResultBytes = size
 	result.DeliveryMode = mode
 	result.DeliveryCanonicalMarkdown = canonical
 	result.DeliveryPolicyVersion = domain.JobDeliveryPolicyV1
 	result.DeliveryMaxMarkdownParts = d.policy.MaxMarkdownParts
 	result.DeliveryContentSHA256 = contentSHA
-	result.DeliveryContentBytes = int64(len(safeBytes))
+	result.DeliveryContentBytes = size
 	result.DeliveryArtifactRef = artifactRef
 	if mode == domain.JobResultDeliveryFile {
 		// File-mode content lives only in the verified private artifact.
@@ -224,8 +259,10 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 			GlobalInstruction: d.global, AgentInstruction: child.definition.Instruction,
 			PermissionOptionKind: child.acpResolved.PermissionOptionKind, Timeout: recoveryTimeout,
 		}, job.ACPSessionID)
-		if runErr == nil && d.artifacts != nil {
+		if runErr == nil && d.artifacts != nil && job.Mode == domain.JobDetached {
 			result, runErr = d.materialize(ctx, job, result)
+		} else if runErr == nil && job.Mode == domain.JobForeground {
+			result, runErr = d.normalizeForegroundResult(result)
 		} else if runErr == nil && d.sanitize != nil {
 			result.Text = d.sanitize(result.Text)
 		}
