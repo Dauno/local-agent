@@ -64,11 +64,11 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 
 ### Durable external-agent result delivery
 
-- SQLite schema v22 adds immutable result-delivery fields to
-  `external_agent_job_notifications`, keyed by
-  `(job_id, status_revision, kind)`. Terminal job CAS and outbox insertion are
-  one transaction. Existing v19-v21 rows remain `legacy_v1` and are never
-  replayed or regenerated.
+- The external-agent delivery contract is versioned in schema v30 → v31 → v32
+  (see "Completion routes" below). Terminal job CAS and outbox insertion are
+  one transaction. Result-delivery fields introduced at v22 remain keyed by
+  `(job_id, status_revision, kind)`; pre-v22 rows remain `legacy_v1` and are
+  never replayed or regenerated.
 - Durable ACP results are redacted and control-sanitized before mode selection.
   Results use complete `markdown_v1` multipart delivery up to
   `acp.delivery.max_markdown_parts` (1-8), otherwise use a private verified
@@ -91,6 +91,34 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
   `CancelForConversation`, and `Reconcile` require actor/conversation binding;
   reconciliation uses capability-negotiated ACP sessions and remains
   actionable when the provider cannot load/resume.
+
+### Completion routes
+
+Execution mode decides the terminal completion route. Root activation exists
+**only** for detached jobs; no terminal job state, cancellation path, or
+recovery ever activates the root for a foreground job.
+
+- `foreground` — synchronous: the durable result verified against its
+  identity (final redacted and control-sanitized text, exact UTF-8 bytes, and
+  SHA-256 computed over those final bytes) is returned through the original
+  tool response, producing exactly one root response. The terminal
+  notification is still published, but it never creates a root activation.
+- `detached` — notification + activation: `accepted` + job ID, then a durable
+  terminal notification, then root activation (only when
+  `root_activation_required = 1` and `j.mode = 'detached'`), then verified
+  chunk reads, then a root synthesis.
+
+Result identity is complete since v32: notification identity
+(`notification_sha256` / `notification_bytes`) is computed over canonical
+Markdown; result identity (`result_sha256` / `result_bytes`) over the complete
+sanitized result. No field changes meaning depending on policy or mode.
+
+Schema versions for this contract: v30 was the pre-fix baseline; v31 (P0)
+repairs historical foreground inline identity and retires foreground
+activations while preserving terminal rows as audit; v32 (P1) persists the
+explicit completion route (`root_activation_required`) and the full
+notification/result identities, with `j.mode = 'detached'` kept as defense in
+depth.
 
 ### ADK durable runtime
 
@@ -139,11 +167,11 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - **Dedupe**: at-most-once by event + message keys. Ephemeral Slack history recovery is not persisted.
 - **Canonical keys**: `slack:{team}:dm:{channel}` or `slack:{team}:channel:{channel}:thread:{root_ts}`.
 - **ADK session IDs**: `adk:{canonical-conversation-key}` — deterministic, opaque, never derived from untrusted text.
-- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 22.
+- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 32 (external-agent contract chain: v30 → v31 → v32).
 - **Memory**: curated entity memory stored in SQLite; `.local-agent/memory/` holds OKF file projections. Memory retrieval is deterministic (no LLM routing) and runs before each model call. Memory failure is non-fatal.
 - **Ephemeral context**: Slack enrichment and memory snippets are injected per-turn via the user message text; they must never become durable ADK events.
 - **Sandbox**: workspace inspection is enabled by default for the registered application root through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env` and `.git` at every depth (including symlinks).
-- **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, verified owner/digest reads, and are cleaned by `acp.artifact_retention_days` only when no unpublished delivery references them. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, delivery policy, and v22 job/outbox fields without reading result content or secrets. Durable ACP file fallback requires Slack `files:write`.
+- **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, verified owner/digest reads, and are cleaned by `acp.artifact_retention_days` only when no unpublished delivery references them. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, delivery policy, and v32 job/outbox fields without reading result content or secrets. Durable ACP file fallback requires Slack `files:write`.
 - **Worktrees**: new worktrees live under `.worktrees/<name>` relative to the repo root (gitignored). Use the repo alias `git wtadd <name> [git-worktree-add args...]`, which resolves to `git worktree add .worktrees/<name> <args...>`.
 
 ## OpenCode config
