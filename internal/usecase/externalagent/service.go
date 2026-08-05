@@ -170,7 +170,7 @@ func (s *Service) StartAndWait(ctx context.Context, request domain.ExternalAgent
 		}
 		switch current.Status {
 		case domain.JobCompleted:
-			return domain.AcpInvocationResult{Text: current.ResultSummary, ArtifactRef: current.ResultArtifact, ResultSHA256: current.ResultSHA256, ResultBytes: current.ResultBytes, Inline: current.ResultArtifact == ""}, nil
+			return s.verifiedForegroundResult(ctx, current, request.Actor, request.ConversationKey)
 		case domain.JobFailed, domain.JobCancelled, domain.JobAbandoned, domain.JobCompletionUnknown:
 			if current.ErrorCode == "" {
 				return domain.AcpInvocationResult{}, fmt.Errorf("external-agent job ended with status %s", current.Status)
@@ -197,6 +197,27 @@ func (s *Service) StartAndWait(ctx context.Context, request domain.ExternalAgent
 
 func (s *Service) Cancel(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error) {
 	return s.store.RequestCancellation(ctx, jobID, actor)
+}
+
+// verifiedForegroundResult maps a completed row to the synchronous invocation
+// shape only after the row passes the request binding and the same verified
+// identity as the durable readers. Content with an incomplete or tampered
+// identity is never returned.
+func (s *Service) verifiedForegroundResult(ctx context.Context, job *domain.ExternalAgentJob, actor string, conversationKey domain.ConversationKey) (domain.AcpInvocationResult, error) {
+	if job.Actor != actor || job.ConversationKey != conversationKey {
+		return domain.AcpInvocationResult{}, errors.New("external-agent job operation is not authorized")
+	}
+	verified, err := s.verifiedResultForJob(ctx, job)
+	if err != nil {
+		return domain.AcpInvocationResult{}, err
+	}
+	return domain.AcpInvocationResult{
+		Text:         verified.Text,
+		Inline:       job.ResultArtifact == "",
+		ArtifactRef:  job.ResultArtifact,
+		ResultSHA256: job.ResultSHA256,
+		ResultBytes:  job.ResultBytes,
+	}, nil
 }
 
 func (s *Service) Status(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error) {
@@ -294,10 +315,22 @@ func (s *Service) ReadResult(ctx context.Context, jobID, actor string, conversat
 	if job == nil {
 		return domain.ExternalAgentJobResult{}, errors.New("external-agent job was not found")
 	}
+	return s.verifiedResultForJob(ctx, job)
+}
+
+// verifiedResultForJob is the common verified identity reader shared by
+// ReadResult and StartAndWait, so the synchronous path accepts and rejects
+// exactly the same identity as the durable reads: completed status, non-empty
+// exact UTF-8 bytes, a non-empty SHA-256 that matches the content, and a
+// coherent artifact read. Failures are closed and constant: the error never
+// carries result content, digest, reference, actor or expected identity.
+func (s *Service) verifiedResultForJob(ctx context.Context, job *domain.ExternalAgentJob) (domain.ExternalAgentJobResult, error) {
+	if job == nil {
+		return domain.ExternalAgentJobResult{}, errors.New("external-agent job was not found")
+	}
 	if job.Status != domain.JobCompleted {
 		return domain.ExternalAgentJobResult{}, fmt.Errorf("external-agent job is not completed: %s", job.Status)
 	}
-
 	content := []byte(job.ResultSummary)
 	mode := domain.JobResultDeliveryMarkdown
 	if job.ResultArtifact != "" {
@@ -308,21 +341,25 @@ func (s *Service) ReadResult(ctx context.Context, jobID, actor string, conversat
 		if job.ResultBytes > 0 && job.ResultBytes < maxBytes {
 			maxBytes = job.ResultBytes
 		}
+		var err error
 		content, err = s.artifacts.Get(ctx, job.ID+"-delivery", job.ResultArtifact, job.ResultSHA256, maxBytes)
 		if err != nil {
 			return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
 		}
 		mode = domain.JobResultDeliveryFile
 	}
-	if len(content) == 0 || int64(len(content)) > s.maxResultBytes {
+	if len(content) == 0 || int64(len(content)) > s.maxResultBytes || !utf8.Valid(content) {
 		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
 	}
 	if job.ResultBytes <= 0 || int64(len(content)) != job.ResultBytes {
 		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
 	}
+	if strings.TrimSpace(job.ResultSHA256) == "" {
+		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
+	}
 	digest := sha256.Sum256(content)
 	contentSHA := fmt.Sprintf("%x", digest)
-	if job.ResultSHA256 != "" && !strings.EqualFold(job.ResultSHA256, contentSHA) {
+	if !strings.EqualFold(job.ResultSHA256, contentSHA) {
 		return domain.ExternalAgentJobResult{}, errors.New("result_artifact_invalid")
 	}
 	return domain.ExternalAgentJobResult{

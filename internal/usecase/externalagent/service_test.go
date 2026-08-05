@@ -555,6 +555,238 @@ func TestReadResultChunkStreamsAndReverifiesFileModeArtifact(t *testing.T) {
 	}
 }
 
+func TestStartAndWaitReturnsVerifiedForegroundResult(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	content := "foreground 🔥 result"
+	digest := sha256.Sum256([]byte(content))
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	runtime := &fakeJobRuntime{result: domain.AcpInvocationResult{
+		Text: content, Inline: true, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)),
+	}}
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequestWithTimeout(domain.JobForeground, time.Second)
+	created, err := service.Start(t.Context(), request)
+	if err != nil || created == nil {
+		t.Fatalf("start = %#v, err = %v", created, err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	go service.Run(ctx)
+	result, err := service.StartAndWait(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Text != content || !result.Inline || result.ResultSHA256 != fmt.Sprintf("%x", digest) || result.ResultBytes != int64(len(content)) {
+		t.Fatalf("synchronous result = %#v", result)
+	}
+	read, err := service.ReadResult(t.Context(), created.ID, request.Actor, request.ConversationKey)
+	if err != nil || read.Text != content || read.ContentSHA256 != fmt.Sprintf("%x", digest) || read.ContentBytes != int64(len(content)) {
+		t.Fatalf("verified read = %#v, err = %v", read, err)
+	}
+	chunk, err := service.ReadResultChunk(t.Context(), created.ID, request.Actor, request.ConversationKey, 0, 0)
+	if err != nil || chunk.Content != content || !chunk.EOF || chunk.SHA256 != fmt.Sprintf("%x", digest) {
+		t.Fatalf("verified chunk = %#v, err = %v", chunk, err)
+	}
+}
+
+func TestStartAndWaitRejectsIncompleteForegroundIdentity(t *testing.T) {
+	content := "done"
+	digest := sha256.Sum256([]byte(content))
+	invalid := string([]byte{0xff, 0xfe})
+	invalidDigest := sha256.Sum256([]byte(invalid))
+	artifactContent := "x"
+	artifactDigest := sha256.Sum256([]byte(artifactContent))
+	for _, testCase := range []struct {
+		name      string
+		result    domain.AcpInvocationResult
+		artifacts port.ResultArtifactStore
+	}{
+		{name: "empty SHA", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content))}},
+		{name: "wrong SHA", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content)), ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other")))}},
+		{name: "altered bytes", result: domain.AcpInvocationResult{Text: content, Inline: true, ResultBytes: int64(len(content)) + 1, ResultSHA256: fmt.Sprintf("%x", digest)}},
+		{name: "invalid UTF-8", result: domain.AcpInvocationResult{Text: invalid, Inline: true, ResultBytes: int64(len(invalid)), ResultSHA256: fmt.Sprintf("%x", invalidDigest)}},
+		{name: "absent artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", artifactDigest), ResultBytes: int64(len(artifactContent))}},
+		{name: "unverifiable artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", artifactDigest), ResultBytes: int64(len(artifactContent))}, artifacts: fakeResultArtifacts{}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			jobStore := sqlite.NewExternalAgentJobStore(store)
+			service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{
+				Store: jobStore, Runtime: &fakeJobRuntime{result: testCase.result}, Artifacts: testCase.artifacts,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			go service.Run(ctx)
+			if _, err := service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, time.Second)); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestStartAndWaitRejectsTamperedForegroundBinding(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := "bound result"
+	digest := sha256.Sum256([]byte(content))
+	validResult := domain.AcpInvocationResult{Text: content, Inline: true, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content))}
+	for _, testCase := range []struct {
+		name  string
+		query string
+		value string
+	}{
+		{name: "actor tampered", query: `UPDATE external_agent_jobs SET actor = ? WHERE job_id = ?`, value: "U-tampered"},
+		{name: "conversation tampered", query: `UPDATE external_agent_jobs SET conversation_key = ? WHERE job_id = ?`, value: "slack:T12345678:dm:D99999999"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := testRequestWithTimeout(domain.JobForeground, time.Second)
+			request.OriginalCallID = "tampered-" + testCase.name
+			created, err := service.Start(t.Context(), request)
+			if err != nil || created == nil {
+				t.Fatalf("start = %#v, err = %v", created, err)
+			}
+			completeJobWithResult(t, jobStore, created, validResult)
+			if _, err := store.DB().ExecContext(t.Context(), testCase.query, testCase.value, created.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := service.StartAndWait(t.Context(), request); err == nil || !strings.Contains(err.Error(), "not authorized") {
+				t.Fatalf("tampered binding error = %v", err)
+			}
+		})
+	}
+	request := testRequestWithTimeout(domain.JobForeground, time.Second)
+	request.OriginalCallID = "tampered-control"
+	created, err := service.Start(t.Context(), request)
+	if err != nil || created == nil {
+		t.Fatalf("start = %#v, err = %v", created, err)
+	}
+	completeJobWithResult(t, jobStore, created, validResult)
+	result, err := service.StartAndWait(t.Context(), request)
+	if err != nil || result.Text != content {
+		t.Fatalf("untampered control = %#v, err = %v", result, err)
+	}
+}
+
+func TestReadResultRejectsIncompleteIdentity(t *testing.T) {
+	content := "sanitized result"
+	digest := sha256.Sum256([]byte(content))
+	invalid := string([]byte{0xff, 0xfe})
+	invalidDigest := sha256.Sum256([]byte(invalid))
+	for _, testCase := range []struct {
+		name   string
+		result domain.AcpInvocationResult
+	}{
+		{name: "empty SHA", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content))}},
+		{name: "wrong SHA", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content)), ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other")))}},
+		{name: "altered bytes", result: domain.AcpInvocationResult{Text: content, ResultBytes: int64(len(content)) + 1, ResultSHA256: fmt.Sprintf("%x", digest)}},
+		{name: "invalid UTF-8", result: domain.AcpInvocationResult{Text: invalid, ResultBytes: int64(len(invalid)), ResultSHA256: fmt.Sprintf("%x", invalidDigest)}},
+		{name: "absent artifact", result: domain.AcpInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job-delivery.result", ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content))}},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			jobStore := sqlite.NewExternalAgentJobStore(store)
+			service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := testRequest(domain.JobForeground)
+			created, err := service.Start(t.Context(), request)
+			if err != nil || created == nil {
+				t.Fatalf("start = %#v, err = %v", created, err)
+			}
+			completeJobWithResult(t, jobStore, created, testCase.result)
+			if _, err := service.ReadResult(t.Context(), created.ID, request.Actor, request.ConversationKey); err == nil || !strings.Contains(err.Error(), "result_artifact_invalid") {
+				t.Fatalf("error = %v", err)
+			}
+		})
+	}
+}
+
+func TestStartAndWaitKeepsTerminalStatusErrors(t *testing.T) {
+	for _, testCase := range []struct {
+		name        string
+		transitions []struct {
+			status    domain.ExternalAgentJobStatus
+			errorCode string
+		}
+		want string
+	}{
+		{name: "failed", transitions: []struct {
+			status    domain.ExternalAgentJobStatus
+			errorCode string
+		}{{status: domain.JobFailed, errorCode: "acp_job_timeout"}}, want: "external-agent job ended with status failed: acp_job_timeout"},
+		{name: "cancelled", transitions: []struct {
+			status    domain.ExternalAgentJobStatus
+			errorCode string
+		}{{status: domain.JobCancelRequested}, {status: domain.JobCancelled}}, want: "external-agent job ended with status cancelled"},
+		{name: "abandoned", transitions: []struct {
+			status    domain.ExternalAgentJobStatus
+			errorCode string
+		}{{status: domain.JobCompletionUnknown, errorCode: "completion_unknown"}, {status: domain.JobAbandoned}}, want: "external-agent job ended with status abandoned"},
+		{name: "completion_unknown", transitions: []struct {
+			status    domain.ExternalAgentJobStatus
+			errorCode string
+		}{{status: domain.JobCompletionUnknown, errorCode: "completion_unknown"}}, want: "external-agent job ended with status completion_unknown: completion_unknown"},
+	} {
+		t.Run(testCase.name, func(t *testing.T) {
+			store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "jobs.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			jobStore := sqlite.NewExternalAgentJobStore(store)
+			service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			request := testRequestWithTimeout(domain.JobForeground, time.Second)
+			created, err := service.Start(t.Context(), request)
+			if err != nil || created == nil {
+				t.Fatalf("start = %#v, err = %v", created, err)
+			}
+			claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "worker-test", time.Minute)
+			if err != nil || claimed == nil {
+				t.Fatalf("claim = %#v, err = %v", claimed, err)
+			}
+			now := time.Now().UTC()
+			for _, transition := range testCase.transitions {
+				if err := jobStore.Transition(t.Context(), created.ID, claimed.LeaseOwner, claimed.Attempt, transition.status, nil, transition.errorCode, now); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if _, err := service.StartAndWait(t.Context(), request); err == nil || err.Error() != testCase.want {
+				t.Fatalf("error = %v, want %q", err, testCase.want)
+			}
+		})
+	}
+}
+
 type fakeResultArtifacts struct{ data []byte }
 
 func (f fakeResultArtifacts) Put(context.Context, string, string) (domain.ResultArtifact, error) {
@@ -660,6 +892,17 @@ func (r *fakeJobRuntime) Run(ctx context.Context, _ domain.ExternalAgentJob) (do
 		return domain.AcpInvocationResult{}, r.errs[call-1]
 	}
 	return r.result, nil
+}
+
+func completeJobWithResult(t *testing.T, store port.ExternalAgentJobStore, job *domain.ExternalAgentJob, result domain.AcpInvocationResult) {
+	t.Helper()
+	claimed, err := store.ClaimNext(t.Context(), time.Now().UTC(), "worker-test", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	if err := store.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &result, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func testRequest(mode domain.ExternalAgentJobMode) domain.ExternalAgentJobRequest {
