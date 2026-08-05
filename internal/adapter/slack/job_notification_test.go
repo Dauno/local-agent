@@ -288,6 +288,119 @@ func TestJobNotificationMarkdownRecoveryBoundariesAndEvidence(t *testing.T) {
 	}
 }
 
+// preV32DeliveryNotification returns a v32-identity row whose Slack delivery
+// was published by the v30 binary: the payload carries the result digest in
+// both notification_sha256 and content_sha256 and never carries the v32
+// metadata fields (notification_bytes, result_sha256).
+func preV32DeliveryNotification(mode domain.JobResultDeliveryMode, canonicalMarkdown, resultContent, artifactRef string) domain.ExternalAgentJobNotification {
+	return domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+		CanonicalMarkdown:  canonicalMarkdown,
+		NotificationSHA256: domain.NotificationIdentitySHA256(canonicalMarkdown),
+		NotificationBytes:  int64(len([]byte(canonicalMarkdown))),
+		ContentSHA256:      contentSHA256(resultContent), ContentBytes: int64(len([]byte(resultContent))),
+		ResultSHA256: contentSHA256(resultContent), ResultBytes: int64(len([]byte(resultContent))),
+		RendererVersion: domain.JobNotificationRenderer,
+		Target:          domain.ReplyTarget{ChannelID: "D12345678"},
+		ConversationKey: "slack:T12345678:dm:D12345678",
+		DeliveryMode:    mode, PolicyVersion: domain.JobDeliveryPolicyV1,
+		ArtifactRef: artifactRef, MaxMarkdownParts: 6,
+		UploadState: domain.JobResultUploadCompleted, SlackFileID: "F123",
+	}
+}
+
+func preV32EvidencePayload(notification domain.ExternalAgentJobNotification) map[string]any {
+	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
+	payload := map[string]any{
+		"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
+		"renderer_version": notification.RendererVersion, "delivery_mode": string(notification.DeliveryMode),
+		"policy_version": notification.PolicyVersion, "notification_sha256": notification.ContentSHA256,
+		"content_sha256": notification.ContentSHA256, "result_bytes": notification.ContentBytes,
+		"max_markdown_parts": notification.MaxMarkdownParts, "upload_state": string(notification.UploadState),
+		"part_sha256": contentSHA256(part), "part_index": 1, "part_count": 1,
+	}
+	if notification.SlackFileID != "" {
+		payload["file_id"] = notification.SlackFileID
+	}
+	return payload
+}
+
+func TestJobNotificationReconcileAcceptsPreV32MarkdownEvidence(t *testing.T) {
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
+		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+	notification.UploadState = domain.JobResultUploadNotApplicable
+	notification.SlackFileID = ""
+	message := slackapi.Message{Msg: slackapi.Msg{
+		User: "BOT", Timestamp: "1710000000.000001",
+		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)},
+	}}
+	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{message}}, "BOT", 0, nil, false)
+	got, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+	if err != nil || !found || got != "1710000000.000001" {
+		t.Fatalf("pre-v32 markdown evidence = %q, found=%v, err=%v", got, found, err)
+	}
+}
+
+func TestJobNotificationReconcileAcceptsPreV32FileEvidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/files.info" {
+			http.NotFound(w, request)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"ok":true,"file":{"id":"F123","name":"opencode-job-1.md","size":10,"user":"BOT","channels":["D12345678"]}}`)
+	}))
+	t.Cleanup(server.Close)
+	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryFile,
+		"OpenCode job `job-1` completed. The complete result was attached.", "file bytes", "job-1-delivery.result")
+	message := slackapi.Message{Msg: slackapi.Msg{
+		User: "BOT", Timestamp: "1710000000.000001",
+		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)},
+	}}
+	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{message}}, "BOT", 0, nil, false)
+	got, found, err := NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, fileClient).Reconcile(t.Context(), notification)
+	if err != nil || !found || got != "1710000000.000001" {
+		t.Fatalf("pre-v32 file evidence = %q, found=%v, err=%v", got, found, err)
+	}
+}
+
+func TestJobNotificationReconcileFailsClosedOnEvidenceIdentityMismatch(t *testing.T) {
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
+		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+	notification.UploadState = domain.JobResultUploadNotApplicable
+	notification.SlackFileID = ""
+	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
+	makeMessage := func(payload map[string]any) slackapi.Message {
+		return slackapi.Message{Msg: slackapi.Msg{
+			User: "BOT", Timestamp: "1710000000.000001",
+			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload},
+		}}
+	}
+	// A v32 payload whose notification_sha256 mismatches stays inconsistent
+	// even when its content_sha256 matches the legacy content identity.
+	v32Mismatch := preV32EvidencePayload(notification)
+	v32Mismatch["notification_sha256"] = strings.Repeat("a", 64)
+	v32Mismatch["notification_bytes"] = int64(len([]byte(notification.CanonicalMarkdown)))
+	v32Mismatch["result_sha256"] = notification.ContentSHA256
+	for name, payload := range map[string]map[string]any{
+		"v32_digest_mismatch": v32Mismatch,
+		"legacy_digest_mismatch": {
+			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
+			"renderer_version": notification.RendererVersion, "delivery_mode": "markdown", "policy_version": "delivery_v1",
+			"notification_sha256": strings.Repeat("b", 64), "content_sha256": strings.Repeat("b", 64),
+			"part_sha256": contentSHA256(part), "part_index": 1, "part_count": 1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{makeMessage(payload)}}, "BOT", 0, nil, false)
+			_, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+			if err == nil || found {
+				t.Fatalf("mismatched evidence found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
 func markdownTestNotification(t *testing.T, wantParts int) domain.ExternalAgentJobNotification {
 	t.Helper()
 	text := strings.Repeat("界", domain.SlackMarkdownChunkRunes*(wantParts-1)-20)
