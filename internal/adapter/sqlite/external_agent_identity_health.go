@@ -13,12 +13,22 @@ import (
 // table predates v32, so this preserves provenance without requiring v33.
 const legacyResultIdentityEvent = "legacy_result_identity"
 
+// invalidDigestPredicate builds a SQL predicate that reports whether a digest
+// column is not exactly 64 lowercase hexadecimal characters. SQLite's
+// length(), GLOB, and LIKE all stop at the first NUL byte, so the length is
+// measured over the octet-safe BLOB representation and any embedded NUL is
+// detected byte-wise; the GLOB check then rejects visible non-hex characters
+// exactly as the Go readers do over the complete stored bytes.
+func invalidDigestPredicate(column string) string {
+	return fmt.Sprintf(`length(CAST(%s AS BLOB)) != 64 OR instr(CAST(%s AS BLOB), char(0)) > 0 OR %s GLOB '*[^0-9a-f]*'`, column, column, column)
+}
+
 // IdentityHealth returns a content-free aggregate of durable result identity
 // completeness. Every query is an aggregate COUNT that never loads job rows,
 // notification rows, activation rows, digest values, references, or content.
-// Digest predicates use SQLite's negated GLOB class plus an exact length check;
-// this enforces lowercase hexadecimal without selecting digest values into Go.
-// The only activation identity it inspects is the bounded
+// Digest predicates use SQLite's negated GLOB class plus an octet-safe length
+// check; this enforces lowercase hexadecimal without selecting digest values
+// into Go. The only activation identity it inspects is the bounded
 // foreground_activation_retired error code and the non-terminal state set.
 func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.ExternalAgentJobIdentityHealth, error) {
 	if s == nil || s.db == nil {
@@ -41,7 +51,7 @@ func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.Exte
 							AND e.status_revision = external_agent_jobs.status_revision
 							AND e.event_kind = ?
 					)
-					AND (result_bytes <= 0 OR length(result_sha256) != 64 OR result_sha256 GLOB '*[^0-9a-f]*')`,
+					AND (result_bytes <= 0 OR ` + invalidDigestPredicate("result_sha256") + `)`,
 			target: &health.JobsCompletedWithoutResultIdentity,
 			args:   []any{legacyResultIdentityEvent},
 		},
@@ -59,9 +69,9 @@ func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.Exte
 		{
 			name: "notifications without notification identity",
 			query: `SELECT COUNT(*) FROM external_agent_job_notifications
-				WHERE length(notification_sha256) != 64 OR notification_sha256 GLOB '*[^0-9a-f]*' OR notification_bytes <= 0
+				WHERE ` + invalidDigestPredicate("notification_sha256") + ` OR notification_bytes <= 0
 					OR ((result_sha256 != '' OR result_bytes != 0) AND
-						(result_bytes <= 0 OR length(result_sha256) != 64 OR result_sha256 GLOB '*[^0-9a-f]*'))
+						(result_bytes <= 0 OR ` + invalidDigestPredicate("result_sha256") + `))
 					OR (terminal_status = 'completed'
 						AND NOT EXISTS (
 							SELECT 1 FROM external_agent_job_events e
@@ -69,7 +79,7 @@ func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.Exte
 								AND e.status_revision = external_agent_job_notifications.status_revision
 								AND e.event_kind = ?
 						)
-						AND (result_bytes <= 0 OR length(result_sha256) != 64 OR result_sha256 GLOB '*[^0-9a-f]*'))`,
+						AND (result_bytes <= 0 OR ` + invalidDigestPredicate("result_sha256") + `))`,
 			target: &health.NotificationsWithoutIdentity,
 			args:   []any{legacyResultIdentityEvent},
 		},
@@ -82,7 +92,7 @@ func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.Exte
 		{
 			name: "activations without notification identity",
 			query: `SELECT COUNT(*) FROM external_agent_job_activations
-				WHERE length(notification_sha256) != 64 OR notification_sha256 GLOB '*[^0-9a-f]*'`,
+				WHERE ` + invalidDigestPredicate("notification_sha256"),
 			target: &health.ActivationsWithoutIdentity,
 		},
 		{
