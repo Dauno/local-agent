@@ -279,6 +279,81 @@ func TestIdentityHealthNotificationLegacyMarkerIsRevisionScoped(t *testing.T) {
 	}
 }
 
+// TestIdentityHealthRejectsNULSuffixedDigests proves the digest shape
+// predicates are octet-safe: SQLite length() and GLOB stop at the first NUL
+// byte, so a digest followed by a NUL suffix (or with a NUL inside) must still
+// count as a defect exactly as the Go readers classify it. Clean lowercase
+// digests stay healthy.
+func TestIdentityHealthRejectsNULSuffixedDigests(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "nul.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	clean := strings.Repeat("a", 64)
+	nulSuffix := clean + "\x00x"
+	nulInside := strings.Repeat("a", 32) + "\x00" + strings.Repeat("b", 31)
+	for _, digest := range []string{nulSuffix, nulInside} {
+		jobID := "job_nul_" + fmt.Sprintf("%x", len(digest))
+		insertIdentityJobRow(t, store.DB(), jobID, "detached", "completed", digest, 1)
+		insertIdentityNotificationRow(t, store.DB(), jobID, digest, 1, "completed")
+	}
+	// The v29 activation CHECK (length(notification_sha256) = 64) already
+	// rejects a digest with a NUL inside (SQLite length stops at the NUL), so
+	// only the NUL-suffixed digest is storable in an activation row; it must
+	// still surface as an identity defect in doctor.
+	insertIdentityActivationRowWithTerminalStatusAndSHA(t, store.DB(), "job_nul_"+fmt.Sprintf("%x", len(nulSuffix)), "failed", 0, "", "failed", nulSuffix)
+	insertIdentityJobRow(t, store.DB(), "job_nul_clean", "detached", "completed", clean, 1)
+	insertIdentityNotificationRow(t, store.DB(), "job_nul_clean", clean, 1, "completed")
+
+	health, err := jobs.IdentityHealth(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.JobsCompletedWithoutResultIdentity != 2 {
+		t.Fatalf("current incomplete jobs = %d, want 2", health.JobsCompletedWithoutResultIdentity)
+	}
+	if health.NotificationsWithoutIdentity != 2 {
+		t.Fatalf("notifications without identity = %d, want 2", health.NotificationsWithoutIdentity)
+	}
+	if health.ActivationsWithoutIdentity != 1 {
+		t.Fatalf("activations without identity = %d, want 1", health.ActivationsWithoutIdentity)
+	}
+}
+
+// TestV32RouteTriggerRejectsNULSuffixedDigest proves the completion-route
+// trigger uses the same octet-safe digest length as the health predicates: a
+// root activation requiring a NUL-suffixed notification digest is rejected,
+// while a clean lowercase digest with a terminal status is accepted.
+func TestV32RouteTriggerRejectsNULSuffixedDigest(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "route-nul.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	insertIdentityJobRow(t, store.DB(), "route-nul-job", "detached", "completed", strings.Repeat("a", 64), 1)
+	insert := func(digest string) error {
+		_, err := store.DB().ExecContext(t.Context(), `INSERT INTO external_agent_job_notifications (
+			job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256, renderer_version,
+			channel_id, next_attempt_at, created_at, updated_at, root_activation_required,
+			notification_sha256, notification_bytes)
+			VALUES ('route-nul-job', 1, 'terminal', 'completed', 'OpenCode job route-nul-job completed.',
+			'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'markdown_v1',
+			'D12345678', 1, 1, 1, 1, ?, 1)`, digest)
+		return err
+	}
+	if err := insert(strings.Repeat("a", 64) + "\x00x"); err == nil {
+		t.Fatal("completion route accepted a NUL-suffixed notification digest")
+	}
+	if err := insert(strings.Repeat("a", 32) + "\x00" + strings.Repeat("b", 31)); err == nil {
+		t.Fatal("completion route accepted a NUL-padded notification digest")
+	}
+	if err := insert(strings.Repeat("a", 64)); err != nil {
+		t.Fatalf("completion route rejected a clean notification digest: %v", err)
+	}
+}
+
 // TestActivationHealthStuckExcludesRetiredForegroundActivations proves the
 // stuck count never includes terminal retired rows and keeps counting
 // genuinely overdue non-terminal rows.

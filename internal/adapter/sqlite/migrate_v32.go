@@ -51,7 +51,7 @@ func migrateV32(ctx context.Context, tx *sql.Tx) error {
 		`CREATE TRIGGER external_agent_job_notifications_route_insert
 			BEFORE INSERT ON external_agent_job_notifications
 			WHEN NEW.root_activation_required NOT IN (0, 1) OR
-				(NEW.root_activation_required = 1 AND (length(NEW.terminal_status) = 0 OR length(NEW.notification_sha256) != 64 OR NEW.notification_bytes <= 0))
+				(NEW.root_activation_required = 1 AND (length(NEW.terminal_status) = 0 OR ` + invalidDigestPredicate("NEW.notification_sha256") + ` OR NEW.notification_bytes <= 0))
 			BEGIN SELECT RAISE(ABORT, 'invalid external-agent completion route'); END`,
 		`CREATE TRIGGER external_agent_job_notifications_route_update
 			BEFORE UPDATE OF root_activation_required ON external_agent_job_notifications
