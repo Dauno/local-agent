@@ -156,6 +156,20 @@ func buildDetachedTerminalNoResultDoctorFixture(t *testing.T) string {
 	return path
 }
 
+func buildCurrentIncompleteIdentityDoctorFixture(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "current-incomplete.db")
+	store, err := Initialize(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	insertIdentityJobRow(t, store.DB(), "current-incomplete", "detached", "completed", "", 0)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
 // buildUpgradedDoctorFixture reproduces the real v30 -> v31 -> v32 matrix with
 // the same rows as the migration tests: foreground activations in every
 // claimable state, terminal activations preserved, the foreground inline
@@ -238,6 +252,17 @@ func TestDoctorDetachedTerminalActivationsWithoutResultPass(t *testing.T) {
 	}
 }
 
+func TestDoctorCurrentCompletedIdentityDoesNotPass(t *testing.T) {
+	report := runDoctorOnFixture(t, buildCurrentIncompleteIdentityDoctorFixture(t))
+	if report.ExitCode() != 1 {
+		t.Fatalf("current incomplete identity doctor exit code = %d, results = %#v", report.ExitCode(), report.Results)
+	}
+	result, ok := findDoctorResult(report, "external-agent result identity")
+	if !ok || result.Status != doctor.StatusFail || !strings.Contains(result.Detail, "1 current completed jobs without result identity") {
+		t.Fatalf("current incomplete identity result = %#v", result)
+	}
+}
+
 func TestDoctorResultIdentityUpgradedFixturePasses(t *testing.T) {
 	report := runDoctorOnFixture(t, buildUpgradedDoctorFixture(t))
 	if report.ExitCode() != 0 {
@@ -252,6 +277,9 @@ func TestDoctorResultIdentityUpgradedFixturePasses(t *testing.T) {
 	// them without failing the upgrade gate.
 	if !strings.Contains(result.Detail, "4 retired foreground activations") {
 		t.Fatalf("upgraded identity detail missing retired count: %q", result.Detail)
+	}
+	if !strings.Contains(result.Detail, "3 historical completed jobs without result identity") {
+		t.Fatalf("upgraded identity detail missing historical count: %q", result.Detail)
 	}
 	if result, ok := findDoctorResult(report, "external-agent activations"); !ok || result.Status != doctor.StatusPass {
 		t.Fatalf("upgraded activation health must pass: %#v", result)

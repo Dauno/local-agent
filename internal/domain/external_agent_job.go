@@ -297,10 +297,12 @@ type ExternalAgentJobActivationHealth struct {
 // expected after an upgrade and must never be treated as a defect.
 type ExternalAgentJobIdentityHealth struct {
 	// JobsCompletedWithoutResultIdentity counts completed jobs whose result
-	// identity (SHA-256 + byte count) is not complete. Historical fail-closed
-	// rows intentionally keep an empty identity after v31/v32; the count is
-	// informational, never a defect.
+	// identity (SHA-256 + byte count) is not complete and that were not marked
+	// as historical during the v32 upgrade.
 	JobsCompletedWithoutResultIdentity int
+	// JobsCompletedWithoutResultIdentityLegacy counts historical v32 rows whose
+	// unavailable result identity is informational rather than a current defect.
+	JobsCompletedWithoutResultIdentityLegacy int
 	// NotificationsWithoutIdentity counts notification rows whose
 	// notification identity (notification_sha256 + notification_bytes) is not
 	// complete. Every post-v32 delivery must carry a complete identity.
@@ -309,6 +311,9 @@ type ExternalAgentJobIdentityHealth struct {
 	// count is not positive. Failed, cancelled, completion_unknown, and
 	// abandoned activations legitimately carry no result content.
 	ActivationsWithoutContent int
+	// ActivationsWithoutIdentity counts activations whose notification digest is
+	// not lowercase hexadecimal SHA-256.
+	ActivationsWithoutIdentity int
 	// ForegroundActivationsActive counts non-terminal activations owned by
 	// foreground jobs. This is the P0 contract violation: foreground
 	// completions must never produce claimable root activations.
