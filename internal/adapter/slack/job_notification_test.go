@@ -401,6 +401,95 @@ func TestJobNotificationReconcileFailsClosedOnEvidenceIdentityMismatch(t *testin
 	}
 }
 
+// v32EvidencePayload reproduces the complete Slack metadata the v32 binary
+// publishes for a single-part Markdown delivery: all four identity fields.
+func v32EvidencePayload(notification domain.ExternalAgentJobNotification) map[string]any {
+	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
+	return map[string]any{
+		"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
+		"renderer_version": notification.RendererVersion, "delivery_mode": string(notification.DeliveryMode),
+		"policy_version": notification.PolicyVersion, "notification_sha256": notification.NotificationSHA256,
+		"notification_bytes": notification.NotificationBytes, "result_sha256": notification.ResultSHA256,
+		"result_bytes": notification.ResultBytes, "max_markdown_parts": notification.MaxMarkdownParts,
+		"upload_state": string(notification.UploadState), "part_sha256": contentSHA256(part),
+		"part_index": 1, "part_count": 1,
+	}
+}
+
+// tamperEvidencePayload returns a copy of the payload with one value replaced.
+func tamperEvidencePayload(payload map[string]any, key string, value any) map[string]any {
+	clone := make(map[string]any, len(payload)+1)
+	for name, existing := range payload {
+		clone[name] = existing
+	}
+	clone[key] = value
+	return clone
+}
+
+// onlyIdentityField returns a payload declaring just one of the identity
+// fields (notification_sha256, notification_bytes, result_sha256,
+// result_bytes); the other identity fields are removed.
+func onlyIdentityField(payload map[string]any, keep string) map[string]any {
+	clone := make(map[string]any, len(payload))
+	for name, existing := range payload {
+		clone[name] = existing
+	}
+	for _, field := range []string{"notification_sha256", "notification_bytes", "result_sha256", "result_bytes", "content_sha256"} {
+		if field != keep {
+			delete(clone, field)
+		}
+	}
+	return clone
+}
+
+// TestJobNotificationReconcileRequiresAllIdentityFields proves the CR5
+// correction: v32 evidence is published only when all four identity fields
+// match with exact types, tampering any single field fails closed, a payload
+// declaring a partial v32 identity is rejected instead of treated as legacy,
+// and legacy evidence must match its complete legacy identity (both digest
+// slots and the byte count) rather than a single digest.
+func TestJobNotificationReconcileRequiresAllIdentityFields(t *testing.T) {
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
+		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+	notification.UploadState = domain.JobResultUploadNotApplicable
+	notification.SlackFileID = ""
+	makeMessage := func(payload map[string]any) slackapi.Message {
+		return slackapi.Message{Msg: slackapi.Msg{
+			User: "BOT", Timestamp: "1710000000.000001",
+			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload},
+		}}
+	}
+	v32 := v32EvidencePayload(notification)
+	legacy := preV32EvidencePayload(notification)
+	cases := map[string]struct {
+		payload   map[string]any
+		wantFound bool
+		wantError bool
+	}{
+		"v32_all_four_fields_match":             {v32, true, false},
+		"v32_tampered_notification_digest_only": {tamperEvidencePayload(v32, "notification_sha256", strings.Repeat("a", 64)), false, true},
+		"v32_tampered_notification_bytes_only":  {tamperEvidencePayload(v32, "notification_bytes", notification.NotificationBytes+1), false, true},
+		"v32_tampered_result_digest_only":       {tamperEvidencePayload(v32, "result_sha256", strings.Repeat("b", 64)), false, true},
+		"v32_tampered_result_bytes_only":        {tamperEvidencePayload(v32, "result_bytes", notification.ResultBytes+1), false, true},
+		"v32_partial_only_notification_digest":  {onlyIdentityField(v32, "notification_sha256"), false, true},
+		"v32_partial_only_notification_bytes":   {onlyIdentityField(v32, "notification_bytes"), false, true},
+		"v32_partial_only_result_digest":        {onlyIdentityField(v32, "result_sha256"), false, true},
+		"v32_partial_only_result_bytes":         {onlyIdentityField(v32, "result_bytes"), false, true},
+		"legacy_all_legacy_fields_match":        {legacy, true, false},
+		"legacy_tampered_result_bytes_only":     {tamperEvidencePayload(legacy, "result_bytes", notification.ContentBytes+1), false, true},
+		"legacy_tampered_content_digest_only":   {tamperEvidencePayload(legacy, "content_sha256", strings.Repeat("c", 64)), false, true},
+	}
+	for name, scenario := range cases {
+		t.Run(name, func(t *testing.T) {
+			history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{makeMessage(scenario.payload)}}, "BOT", 0, nil, false)
+			got, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+			if found != scenario.wantFound || (err != nil) != scenario.wantError || (scenario.wantFound && got == "") {
+				t.Fatalf("reconcile = %q, found=%v, err=%v; want found=%v err=%v", got, found, err, scenario.wantFound, scenario.wantError)
+			}
+		})
+	}
+}
+
 func markdownTestNotification(t *testing.T, wantParts int) domain.ExternalAgentJobNotification {
 	t.Helper()
 	text := strings.Repeat("界", domain.SlackMarkdownChunkRunes*(wantParts-1)-20)
@@ -426,7 +515,9 @@ func jobEvidenceMessage(notification domain.ExternalAgentJobNotification, index,
 		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: map[string]any{
 			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
 			"renderer_version": notification.RendererVersion, "notification_sha256": notification.NotificationSHA256,
-			"part_sha256": contentSHA256(part), "part_index": index, "part_count": count,
+			"notification_bytes": notification.NotificationBytes, "result_sha256": notification.ResultSHA256,
+			"result_bytes": notification.ResultBytes,
+			"part_sha256":  contentSHA256(part), "part_index": index, "part_count": count,
 		}},
 	}}
 }
