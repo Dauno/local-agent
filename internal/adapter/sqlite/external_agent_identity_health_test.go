@@ -43,16 +43,34 @@ func insertIdentityNotificationRow(t *testing.T, db *sql.DB, id, notificationSHA
 }
 
 func insertIdentityNotificationRowWithResult(t *testing.T, db *sql.DB, id, notificationSHA string, notificationBytes int64, terminalStatus, resultSHA string, resultBytes int64) {
+	insertIdentityNotificationRowWithResultAtRevision(t, db, id, notificationSHA, notificationBytes, terminalStatus, resultSHA, resultBytes, 1)
+}
+
+// insertIdentityNotificationRowWithResultAtRevision is the revision-scoped
+// variant used to prove that legacy provenance markers bind to the exact
+// (job_id, status_revision) of a notification row.
+func insertIdentityNotificationRowWithResultAtRevision(t *testing.T, db *sql.DB, id, notificationSHA string, notificationBytes int64, terminalStatus, resultSHA string, resultBytes int64, revision int) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO external_agent_job_notifications (
 		job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,
 		renderer_version, channel_id, next_attempt_at, created_at, updated_at,
 		delivery_mode, policy_version, artifact_ref, result_bytes, max_markdown_parts, upload_state,
 		notification_sha256, notification_bytes, result_sha256, root_activation_required, published_at, publish_state)
-		VALUES (?, 1, 'terminal', ?, 'OpenCode job `+id+` completed.', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+		VALUES (?, ?, 'terminal', ?, 'OpenCode job `+id+` completed.', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 		'markdown_v1', 'D12345678', 1, 1, 1, 'markdown', 'legacy_v1', '', ?, 1, 'not_applicable',
 		?, ?, ?, 0, 1, 'published')`,
-		id, terminalStatus, resultBytes, notificationSHA, notificationBytes, resultSHA); err != nil {
+		id, revision, terminalStatus, resultBytes, notificationSHA, notificationBytes, resultSHA); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// insertIdentityLegacyEvent inserts one legacy provenance marker on the exact
+// (job_id, status_revision) event key.
+func insertIdentityLegacyEvent(t *testing.T, db *sql.DB, id string, revision int) {
+	t.Helper()
+	if _, err := db.ExecContext(context.Background(), `INSERT INTO external_agent_job_events
+		(job_id, status_revision, event_kind, created_at)
+		VALUES (?, ?, ?, 1)`, id, revision, legacyResultIdentityEvent); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -214,6 +232,50 @@ func TestIdentityHealthRejectsInvalidNotificationAndActivationDigests(t *testing
 	}
 	if health.ActivationsWithoutIdentity != len(invalidDigests[:2]) {
 		t.Fatalf("activations without identity = %d, want %d", health.ActivationsWithoutIdentity, len(invalidDigests[:2]))
+	}
+}
+
+// TestIdentityHealthNotificationLegacyMarkerIsRevisionScoped proves a legacy
+// provenance marker exonerates only the completed notification row of its own
+// status revision: a completed notification of another revision with an
+// incomplete result identity still counts as a defect, and the marker never
+// hides a healthy row.
+func TestIdentityHealthNotificationLegacyMarkerIsRevisionScoped(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "legacy-revision.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+
+	completeSHA := strings.Repeat("f", 64)
+	for _, id := range []string{
+		"job_legacy_other_revision", "job_legacy_same_revision", "job_legacy_healthy",
+	} {
+		insertIdentityJobRow(t, store.DB(), id, "detached", "completed", strings.Repeat("e", 64), 5)
+	}
+	// Every notification has a complete notification identity but an empty
+	// result identity: only the legacy marker decides their disposition.
+	insertIdentityNotificationRowWithResult(t, store.DB(), "job_legacy_other_revision", completeSHA, 17, "completed", "", 0)
+	insertIdentityNotificationRowWithResult(t, store.DB(), "job_legacy_same_revision", completeSHA, 17, "completed", "", 0)
+	insertIdentityNotificationRowWithResult(t, store.DB(), "job_legacy_healthy", completeSHA, 17, "completed", strings.Repeat("b", 64), 1)
+
+	// A marker on a different revision must never exonerate the revision-1 row.
+	insertIdentityLegacyEvent(t, store.DB(), "job_legacy_other_revision", 2)
+	// A marker on the exact row revision exonerates it; a healthy row stays
+	// healthy regardless of the marker.
+	insertIdentityLegacyEvent(t, store.DB(), "job_legacy_same_revision", 1)
+	insertIdentityLegacyEvent(t, store.DB(), "job_legacy_healthy", 1)
+
+	health, err := jobs.IdentityHealth(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if health.NotificationsWithoutIdentity != 1 {
+		t.Fatalf("notifications without identity = %d, want 1 (only the other-revision row)", health.NotificationsWithoutIdentity)
+	}
+	if health.JobsCompletedWithoutResultIdentity != 0 || health.JobsCompletedWithoutResultIdentityLegacy != 0 {
+		t.Fatalf("job buckets must stay clean: %+v", health)
 	}
 }
 
