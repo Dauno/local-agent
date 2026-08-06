@@ -174,6 +174,11 @@ func TestNotificationRetryDelayJitterIsBounded(t *testing.T) {
 
 func TestPermanentNotificationErrorsAreNotRescheduledOrRetried(t *testing.T) {
 	for _, code := range []string{
+		"result_identity_invalid",
+		"result_artifact_missing",
+		"result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch",
+		"result_artifact_digest_mismatch",
 		"result_artifact_invalid",
 		"result_delivery_failed",
 		"result_destination_mismatch",
@@ -479,6 +484,55 @@ func TestNotificationHealthAndAdminInspectionAreContentFree(t *testing.T) {
 	}
 }
 
+// TestInspectJobPreservesBoundedResultErrorCodes proves InspectJob exposes
+// every bounded result error code the use case can persist, instead of
+// collapsing them to notification_publish_ambiguous, while still bounding
+// any unbounded raw value.
+func TestInspectJobPreservesBoundedResultErrorCodes(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "inspect-codes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	base := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+
+	codes := []domain.ResultErrorCode{
+		domain.ResultErrorIdentityInvalid,
+		domain.ResultErrorArtifactMissing,
+		domain.ResultErrorArtifactOwnerRefMismatch,
+		domain.ResultErrorArtifactBytesMismatch,
+		domain.ResultErrorArtifactDigestMismatch,
+	}
+	for _, code := range codes {
+		jobID := "job_code_" + string(code)
+		job := testExternalAgentJob(base)
+		job.ID = jobID
+		job.OriginalCallID = jobID + "-call"
+		if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+			t.Fatalf("create %s = %v, err=%v", jobID, created, err)
+		}
+		claimed, err := jobs.ClaimNext(t.Context(), base, "worker-"+jobID, time.Minute)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := jobs.Transition(t.Context(), jobID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "safe summary"}, "", base.Add(time.Second)); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications
+			SET last_error_code = ? WHERE job_id = ?`, string(code), jobID); err != nil {
+			t.Fatal(err)
+		}
+		inspection, err := jobs.InspectJob(t.Context(), jobID)
+		if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
+			t.Fatalf("%s inspection = %#v, err=%v", jobID, inspection, err)
+		}
+		if got := inspection.Deliveries[0].LastErrorCode; got != string(code) {
+			t.Fatalf("%s error code = %q, want %q", jobID, got, code)
+		}
+	}
+}
+
 func TestOpenReadOnlyDoesNotMigrateOrWrite(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "jobs.db")
 	store, err := Initialize(context.Background(), path)
@@ -499,5 +553,106 @@ func TestOpenReadOnlyDoesNotMigrateOrWrite(t *testing.T) {
 	}
 	if _, err := readOnly.DB().ExecContext(t.Context(), `UPDATE external_agent_jobs SET task = 'should fail'`); err == nil {
 		t.Fatal("read-only database accepted a write")
+	}
+}
+
+// assertTerminalNotificationRows checks the row-level activation disposition of
+// every terminal notification row of the job: one row per status revision in
+// order, matching terminal statuses, pending publication, and a
+// root_activation_required that follows the job mode.
+func assertTerminalNotificationRows(t *testing.T, store *Store, jobs *ExternalAgentJobStore, jobID string, mode domain.ExternalAgentJobMode, wantStatuses ...domain.ExternalAgentJobStatus) {
+	t.Helper()
+	rows := terminalNotificationRowsForJob(t, store, jobID)
+	if len(rows) != len(wantStatuses) {
+		t.Fatalf("job %s has %d terminal notification rows, want %d", jobID, len(rows), len(wantStatuses))
+	}
+	current, err := jobs.GetJob(t.Context(), jobID)
+	if err != nil || current == nil {
+		t.Fatalf("load job %s: %v", jobID, err)
+	}
+	seen := map[int]bool{}
+	for index, row := range rows {
+		if row.TerminalStatus != wantStatuses[index] {
+			t.Fatalf("row %d terminal status = %s, want %s", index, row.TerminalStatus, wantStatuses[index])
+		}
+		if row.PublishState != domain.NotificationPending {
+			t.Fatalf("row %d publish state = %s, want %s", index, row.PublishState, domain.NotificationPending)
+		}
+		if row.RootActivationRequired != (mode == domain.JobDetached) {
+			t.Fatalf("row %d root activation = %t, mode = %s", index, row.RootActivationRequired, mode)
+		}
+		if seen[row.StatusRevision] {
+			t.Fatalf("duplicate terminal notification revision %d", row.StatusRevision)
+		}
+		seen[row.StatusRevision] = true
+	}
+	if rows[len(rows)-1].StatusRevision != current.StatusRevision {
+		t.Fatalf("last terminal row revision %d != job revision %d", rows[len(rows)-1].StatusRevision, current.StatusRevision)
+	}
+}
+
+func TestTerminalPathNotificationRowDisposition(t *testing.T) {
+	statuses := []domain.ExternalAgentJobStatus{
+		domain.JobCompleted, domain.JobFailed, domain.JobCancelled,
+		domain.JobCompletionUnknown, domain.JobAbandoned,
+	}
+	for _, mode := range []domain.ExternalAgentJobMode{domain.JobForeground, domain.JobDetached} {
+		for _, status := range statuses {
+			t.Run(fmt.Sprintf("transition/%s/%s", status, mode), func(t *testing.T) {
+				store, jobs, now := newActivationTestStore(t)
+				job := activationTestJob("notification-transition-"+string(status)+"-"+string(mode), now)
+				job.Mode = mode
+				terminalizeActivationTestJobByStatus(t, jobs, job, now, status)
+				wantStatuses := []domain.ExternalAgentJobStatus{status}
+				if status == domain.JobAbandoned {
+					wantStatuses = []domain.ExternalAgentJobStatus{domain.JobCompletionUnknown, domain.JobAbandoned}
+				}
+				assertTerminalNotificationRows(t, store, jobs, job.ID, mode, wantStatuses...)
+			})
+		}
+		t.Run(fmt.Sprintf("queued-cancellation/%s", mode), func(t *testing.T) {
+			store, jobs, now := newActivationTestStore(t)
+			job := activationTestJob("notification-cancellation-"+string(mode), now)
+			job.Mode = mode
+			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+				t.Fatalf("create = %v, err = %v", created, err)
+			}
+			cancelled, err := jobs.RequestCancellation(t.Context(), job.ID, job.Actor)
+			if err != nil || cancelled == nil || cancelled.Status != domain.JobCancelled {
+				t.Fatalf("cancellation = %#v, err = %v", cancelled, err)
+			}
+			assertTerminalNotificationRows(t, store, jobs, job.ID, mode, domain.JobCancelled)
+		})
+		for _, outcome := range []struct {
+			name        string
+			status      domain.ExternalAgentJobStatus
+			errorCode   string
+			sideEffects bool
+		}{
+			{"failed", domain.JobFailed, "job_lease_lost", false},
+			{"completion_unknown", domain.JobCompletionUnknown, "completion_unknown", true},
+		} {
+			t.Run(fmt.Sprintf("expired-recovery/%s/%s", outcome.name, mode), func(t *testing.T) {
+				store, jobs, now := newActivationTestStore(t)
+				job := activationTestJob("notification-recovered-"+outcome.name+"-"+string(mode), now)
+				job.Mode = mode
+				if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+					t.Fatalf("create = %v, err = %v", created, err)
+				}
+				claimed, err := jobs.ClaimNext(t.Context(), now, "job-worker-"+job.ID, time.Minute)
+				if err != nil || claimed == nil {
+					t.Fatalf("claim = %#v, err = %v", claimed, err)
+				}
+				if outcome.sideEffects {
+					if err := jobs.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err != nil {
+						t.Fatal(err)
+					}
+				}
+				if err := jobs.RecoverExpired(t.Context(), job.ID, claimed.Attempt, claimed.StatusRevision, now.Add(2*time.Minute), outcome.status, outcome.errorCode); err != nil {
+					t.Fatal(err)
+				}
+				assertTerminalNotificationRows(t, store, jobs, job.ID, mode, outcome.status)
+			})
+		}
 	}
 }

@@ -87,9 +87,24 @@ type ExternalAgentJobNotification struct {
 	ConversationKey ConversationKey
 	// HostResultText is ephemeral completion data. It is never written to the
 	// notification row or exposed through an ADK function response.
-	HostResultText      string
-	CanonicalMarkdown   string
-	ContentSHA256       string
+	HostResultText string
+	// RootActivationRequired is the explicit, immutable completion disposition.
+	// It is set by mode at construction and backfilled for historical detached
+	// terminal snapshots; MarkNotificationPublished never infers it.
+	RootActivationRequired bool
+	CanonicalMarkdown      string
+	// ContentSHA256 is the legacy storage column. New contracts use the
+	// notification/result identity pair below; this field is preserved only
+	// for rows persisted before v32 and is never a routing input.
+	ContentSHA256 string
+	// NotificationSHA256 and NotificationBytes are the notification identity
+	// over the canonical Markdown bytes (SHA-256 lowercase hex).
+	NotificationSHA256 string
+	NotificationBytes  int64
+	// ResultSHA256 is the identity of the complete sanitized result, distinct
+	// from the notification identity. Empty together with zero ResultBytes
+	// means the terminal status carried no result (fail-closed).
+	ResultSHA256        string
 	RendererVersion     string
 	Target              ReplyTarget
 	PublishState        NotificationPublishState
@@ -129,6 +144,11 @@ const (
 	JobActivationCompleted         = ActivationCompleted
 	JobActivationCompletionUnknown = ActivationCompletionUnknown
 	JobActivationFailed            = ActivationFailed
+
+	// ActivationForegroundRetiredCode is the bounded error code stamped by the
+	// v31 repair migration on foreground activations retired without model
+	// execution or response publication. It is not a worker classification.
+	ActivationForegroundRetiredCode = "foreground_activation_retired"
 )
 
 // ExternalAgentJobActivation is the durable host-originated root-turn outbox
@@ -269,6 +289,40 @@ type ExternalAgentJobActivationHealth struct {
 	Stuck             int
 }
 
+// ExternalAgentJobIdentityHealth is a content-free aggregate of durable result
+// identity completeness. Every field is a count; no job ID, actor,
+// conversation, digest, reference, path, or result content value is ever
+// exposed. Retired foreground activations are the bounded v31 repair evidence
+// (terminal rows stamped with ActivationForegroundRetiredCode): they are
+// expected after an upgrade and must never be treated as a defect.
+type ExternalAgentJobIdentityHealth struct {
+	// JobsCompletedWithoutResultIdentity counts completed jobs whose result
+	// identity (SHA-256 + byte count) is not complete and that were not marked
+	// as historical during the v32 upgrade.
+	JobsCompletedWithoutResultIdentity int
+	// JobsCompletedWithoutResultIdentityLegacy counts historical v32 rows whose
+	// unavailable result identity is informational rather than a current defect.
+	JobsCompletedWithoutResultIdentityLegacy int
+	// NotificationsWithoutIdentity counts notification rows whose
+	// notification identity (notification_sha256 + notification_bytes) is not
+	// complete. Every post-v32 delivery must carry a complete identity.
+	NotificationsWithoutIdentity int
+	// ActivationsWithoutContent counts completed activations whose content byte
+	// count is not positive. Failed, cancelled, completion_unknown, and
+	// abandoned activations legitimately carry no result content.
+	ActivationsWithoutContent int
+	// ActivationsWithoutIdentity counts activations whose notification digest is
+	// not lowercase hexadecimal SHA-256.
+	ActivationsWithoutIdentity int
+	// ForegroundActivationsActive counts non-terminal activations owned by
+	// foreground jobs. This is the P0 contract violation: foreground
+	// completions must never produce claimable root activations.
+	ForegroundActivationsActive int
+	// RetiredForegroundActivations counts terminal activations stamped with
+	// the bounded foreground_activation_retired code. Informational only.
+	RetiredForegroundActivations int
+}
+
 // NotificationHealthSnapshot is kept as a descriptive alias for callers that
 // expose the aggregate as a health snapshot.
 type NotificationHealthSnapshot = ExternalAgentJobNotificationHealth
@@ -357,12 +411,17 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 	}
 	markdown = sanitizeNotificationText(markdown, 8000)
 	digest := sha256.Sum256([]byte(markdown))
+	notificationSHA := fmt.Sprintf("%x", digest)
+	resultSHA, resultBytes := ValidResultIdentity(job.ResultSHA256, job.ResultBytes)
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
-		CanonicalMarkdown: markdown, ContentSHA256: fmt.Sprintf("%x", digest),
+		CanonicalMarkdown: markdown, ContentSHA256: notificationSHA,
+		RootActivationRequired: job.Mode == JobDetached,
+		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
+		ResultSHA256: resultSHA, ResultBytes: resultBytes,
 		RendererVersion: JobNotificationRenderer, Target: target,
 		PublishState: NotificationPending,
 		DeliveryMode: JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
@@ -459,14 +518,21 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	if !utf8.ValidString(markdown) || strings.TrimSpace(markdown) == "" {
 		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown is invalid")
 	}
+	notificationSHA := NotificationIdentitySHA256(markdown)
+	if notificationSHA == "" {
+		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown is invalid")
+	}
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
 		CanonicalMarkdown: markdown, ContentSHA256: contentDigest, RendererVersion: JobNotificationRenderer,
+		RootActivationRequired: job.Mode == JobDetached,
+		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
+		ResultSHA256: contentDigest, ResultBytes: contentBytes,
 		Target: target, PublishState: NotificationPending, DeliveryMode: mode, PolicyVersion: policyVersion,
-		ArtifactRef: artifactRef, ResultBytes: contentBytes, MaxMarkdownParts: maxParts,
+		ArtifactRef: artifactRef, MaxMarkdownParts: maxParts,
 		ContentBytes: contentBytes,
 		UploadState:  uploadState,
 	}, nil
@@ -494,6 +560,177 @@ func SanitizeResultText(value string) (string, error) {
 		return "", errors.New("result text is empty after sanitization")
 	}
 	return result, nil
+}
+
+// NotificationIdentitySHA256 returns the lowercase hex SHA-256 of the
+// canonical notification Markdown, or empty when the Markdown is not a valid
+// notification body (fail-closed).
+func NotificationIdentitySHA256(markdown string) string {
+	if !utf8.ValidString(markdown) || strings.TrimSpace(markdown) == "" {
+		return ""
+	}
+	digest := sha256.Sum256([]byte(markdown))
+	return fmt.Sprintf("%x", digest)
+}
+
+// ValidResultIdentity returns a lowercase 64-hex digest and positive byte
+// count only when both form a complete result identity. Anything else fails
+// closed to empty values; no digest is ever fabricated for missing data.
+func ValidResultIdentity(sha256Hex string, bytes int64) (string, int64) {
+	sha256Hex = strings.ToLower(sha256Hex)
+	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
+		return "", 0
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return "", 0
+	}
+	return sha256Hex, bytes
+}
+
+// ValidInlineResult reports whether a completed job's inline result shape is
+// structurally coherent: a non-empty summary whose exact UTF-8 bytes match a
+// positive byte count and a valid SHA-256 identity over those same bytes. This
+// mirrors the inline branch of the verified result readers; any ambiguity
+// fails closed to false and no identity is fabricated for missing data.
+func ValidInlineResult(summary, sha256Hex string, bytes int64) bool {
+	if summary == "" || !utf8.ValidString(summary) {
+		return false
+	}
+	sha256Hex = strings.ToLower(sha256Hex)
+	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
+		return false
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return false
+	}
+	if int64(len([]byte(summary))) != bytes {
+		return false
+	}
+	digest := sha256.Sum256([]byte(summary))
+	return fmt.Sprintf("%x", digest) == sha256Hex
+}
+
+// ValidArtifactResult reports whether a completed job's file-mode result shape
+// is structurally coherent: a non-empty artifact reference that is a safe
+// filename component with a positive byte count and a valid SHA-256 identity.
+// Artifact bytes are verified by the artifact reader at read time; the status
+// projection can only check the structural identity. Fail-closed on ambiguity.
+func ValidArtifactResult(artifactRef, sha256Hex string, bytes int64) bool {
+	if artifactRef == "" || strings.ContainsAny(artifactRef, "/\\\x00\r\n") {
+		return false
+	}
+	sha256Hex = strings.ToLower(sha256Hex)
+	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
+		return false
+	}
+	if _, err := hex.DecodeString(sha256Hex); err != nil {
+		return false
+	}
+	return true
+}
+
+// CanonicalArtifactReference returns the exact artifact filename bound to a
+// job. Result readers derive the owner from the job and the artifact adapter
+// accepts only the canonical owner-derived name, so this is the single name a
+// completed job may carry to be readable at all.
+func CanonicalArtifactReference(jobID string) string {
+	return jobID + "-delivery.result"
+}
+
+// ValidArtifactResultForJob reports whether a completed job's file-mode result
+// shape is coherent AND the stored artifact reference is the exact canonical
+// name bound to this job. The artifact reader derives the owner from the job
+// and rejects any other reference, so a foreign job's reference or an
+// arbitrary safe filename must never project as available; it would fail the
+// read closed with an owner/ref mismatch.
+func ValidArtifactResultForJob(jobID, artifactRef, sha256Hex string, bytes int64) bool {
+	if artifactRef != CanonicalArtifactReference(jobID) {
+		return false
+	}
+	return ValidArtifactResult(artifactRef, sha256Hex, bytes)
+}
+
+// ResultErrorCode is a bounded, host-owned classification for verified result
+// reads. A code is safe to expose in diagnostics, tool responses, and logs: it
+// never carries digest values, artifact references, paths, owners, actors,
+// conversations, or result content. The set is closed; unknown codes fail
+// closed to ResultErrorArtifactInvalid.
+type ResultErrorCode string
+
+const (
+	// ResultErrorIdentityInvalid classifies an inline result row whose stored
+	// identity is incoherent: empty or invalid UTF-8 content, a missing or
+	// malformed digest, or a byte count or SHA-256 that does not match the
+	// summary.
+	ResultErrorIdentityInvalid ResultErrorCode = "result_identity_invalid"
+	// ResultErrorArtifactMissing classifies a file-mode read that cannot
+	// obtain the artifact: store unavailable, file absent, unreadable,
+	// replaced, or outside the configured read bound.
+	ResultErrorArtifactMissing ResultErrorCode = "result_artifact_missing"
+	// ResultErrorArtifactOwnerRefMismatch classifies a file-mode reference
+	// that is not bound to the reading owner.
+	ResultErrorArtifactOwnerRefMismatch ResultErrorCode = "result_artifact_owner_ref_mismatch"
+	// ResultErrorArtifactBytesMismatch classifies a file-mode byte count that
+	// does not match the stored identity, the verified file size, or the
+	// requested UTF-8 range.
+	ResultErrorArtifactBytesMismatch ResultErrorCode = "result_artifact_bytes_mismatch"
+	// ResultErrorArtifactDigestMismatch classifies a file-mode SHA-256 that
+	// does not match the artifact bytes, is missing, or is not a valid digest
+	// identity.
+	ResultErrorArtifactDigestMismatch ResultErrorCode = "result_artifact_digest_mismatch"
+	// ResultErrorArtifactInvalid is the fail-closed fallback for unmapped or
+	// out-of-set errors. It predates the taxonomy and remains recognized by
+	// every classification layer.
+	ResultErrorArtifactInvalid ResultErrorCode = "result_artifact_invalid"
+	// ResultErrorChunkRequestInvalid classifies a client chunk-read request
+	// that cannot be served without reading result content: an out-of-bounds
+	// or non-UTF-8-aligned offset, or a max_bytes bound smaller than the next
+	// UTF-8 character. It is a request error, never durable corruption, and is
+	// excluded from the identity-failure counter.
+	ResultErrorChunkRequestInvalid ResultErrorCode = "result_chunk_request_invalid"
+)
+
+// ResultError carries a bounded classification and optional closed detail.
+// Error renders only the bounded code, so no sensitive value can ever reach
+// logs, tool responses, or operator diagnostics through this type.
+type ResultError struct {
+	Code ResultErrorCode
+	Err  error
+}
+
+func (e *ResultError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return string(e.Code)
+}
+
+func (e *ResultError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+var validResultErrorCodes = map[ResultErrorCode]bool{
+	ResultErrorIdentityInvalid:          true,
+	ResultErrorArtifactMissing:          true,
+	ResultErrorArtifactOwnerRefMismatch: true,
+	ResultErrorArtifactBytesMismatch:    true,
+	ResultErrorArtifactDigestMismatch:   true,
+	ResultErrorArtifactInvalid:          true,
+	ResultErrorChunkRequestInvalid:      true,
+}
+
+// ResultErrorCodeOf extracts the bounded classification from an error. Any
+// error without a recognized ResultErrorCode fails closed to the generic
+// result_artifact_invalid code, so unmapped details can never leak.
+func ResultErrorCodeOf(err error) ResultErrorCode {
+	var classified *ResultError
+	if errors.As(err, &classified) && classified != nil && validResultErrorCodes[classified.Code] {
+		return classified.Code
+	}
+	return ResultErrorArtifactInvalid
 }
 
 func sanitizeNotificationText(value string, maxRunes int) string {
@@ -671,10 +908,21 @@ func (j ExternalAgentJob) StatusView() ExternalAgentJobStatusView {
 	} else if j.ResultSummary != "" {
 		mode = JobResultDeliveryMarkdown
 	}
+	available := false
+	if j.Status == JobCompleted {
+		// The artifact shape governs whenever an artifact reference exists,
+		// matching the readers' precedence; an incoherent artifact never falls
+		// back to the inline shape.
+		if j.ResultArtifact != "" {
+			available = ValidArtifactResultForJob(j.ID, j.ResultArtifact, j.ResultSHA256, j.ResultBytes)
+		} else {
+			available = ValidInlineResult(j.ResultSummary, j.ResultSHA256, j.ResultBytes)
+		}
+	}
 	return ExternalAgentJobStatusView{
 		JobID: j.ID, Status: j.Status, StatusRevision: j.StatusRevision,
 		ACPSessionID:    j.ACPSessionID,
-		ResultAvailable: j.Status == JobCompleted && (j.ResultSummary != "" || j.ResultArtifact != ""),
+		ResultAvailable: available,
 		ResultSHA256:    j.ResultSHA256, ResultBytes: j.ResultBytes, DeliveryMode: mode,
 		ErrorCode: j.ErrorCode, FinishedAt: j.FinishedAt,
 	}

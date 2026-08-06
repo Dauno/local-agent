@@ -83,6 +83,15 @@ const (
 	MetricExternalAgentActivationReconcileTotal     = "external_agent_activation_reconcile_total"
 	MetricExternalAgentActivationCASConflictTotal   = "external_agent_activation_cas_conflict_total"
 	MetricExternalAgentActivationStuck              = "external_agent_activation_stuck"
+	// MetricExternalAgentResultIdentityInvalidTotal counts durable result
+	// identity verification failures (invalid identity, byte mismatch, or
+	// digest mismatch). It is label-free: no job ID, actor, conversation,
+	// digest, reference, or content value is ever recorded.
+	MetricExternalAgentResultIdentityInvalidTotal = "external_agent_result_identity_invalid_total"
+	// MetricExternalAgentActivationSuppressionTotal counts terminal
+	// foreground publications that were deliberately suppressed from creating
+	// a root activation. It is label-free and carries no delivery identity.
+	MetricExternalAgentActivationSuppressionTotal = "external_agent_activation_suppression_total"
 )
 
 // ACP live progress observability metrics. Labels are restricted to bounded

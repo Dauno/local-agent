@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
@@ -16,6 +17,8 @@ const (
 	maxObservationSamples = 4096
 )
 
+// allowedLabelKeys is the global allowlist of label keys accepted by metrics
+// that are not listed in perMetricAllowedLabelKeys.
 var allowedLabelKeys = map[string]struct{}{
 	"counter_strategy":   {},
 	"guard_outcome":      {},
@@ -33,6 +36,15 @@ var allowedLabelKeys = map[string]struct{}{
 	"query_id":           {},
 	"activation_outcome": {},
 	"terminal_status":    {},
+}
+
+// perMetricAllowedLabelKeys restricts label keys by metric name. A metric
+// listed here accepts exactly the keys in its set; an empty set forces
+// label-free recording at the recorder boundary rather than by call-site
+// convention. Metrics not listed fall back to the global allowlist.
+var perMetricAllowedLabelKeys = map[string]map[string]struct{}{
+	domain.MetricExternalAgentResultIdentityInvalidTotal: {},
+	domain.MetricExternalAgentActivationSuppressionTotal: {},
 }
 
 type key struct {
@@ -66,7 +78,7 @@ func (r *Recorder) AddCounter(name string, delta int64, labels port.MetricLabels
 	if r == nil || strings.TrimSpace(name) == "" || delta < 0 {
 		return
 	}
-	clean := sanitizeLabels(labels)
+	clean := sanitizeLabels(name, labels)
 	k := metricKey(name, port.MetricKindCounter, clean)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -82,7 +94,7 @@ func (r *Recorder) SetGauge(name string, value int64, labels port.MetricLabels) 
 	if r == nil || strings.TrimSpace(name) == "" {
 		return
 	}
-	clean := sanitizeLabels(labels)
+	clean := sanitizeLabels(name, labels)
 	k := metricKey(name, port.MetricKindGauge, clean)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -93,7 +105,7 @@ func (r *Recorder) Observe(name string, value float64, labels port.MetricLabels)
 	if r == nil || strings.TrimSpace(name) == "" || math.IsNaN(value) || math.IsInf(value, 0) {
 		return
 	}
-	clean := sanitizeLabels(labels)
+	clean := sanitizeLabels(name, labels)
 	r.mu.Lock()
 	if len(r.observed) < maxObservationSamples {
 		r.observed = append(r.observed, sample{name: name, kind: port.MetricKindObservation, labels: clean, value: value})
@@ -138,13 +150,20 @@ func (r *Recorder) Snapshot() []port.MetricSample {
 	return result
 }
 
-func sanitizeLabels(labels port.MetricLabels) port.MetricLabels {
+// sanitizeLabels filters labels by metric: metrics with a per-metric allowlist
+// accept exactly those keys (an empty set rejects every key, forcing
+// label-free recording), all other metrics accept the global allowlist.
+func sanitizeLabels(name string, labels port.MetricLabels) port.MetricLabels {
 	if len(labels) == 0 {
 		return nil
 	}
+	allowed, ok := perMetricAllowedLabelKeys[name]
+	if !ok {
+		allowed = allowedLabelKeys
+	}
 	clean := make(port.MetricLabels)
 	for key, value := range labels {
-		if _, ok := allowedLabelKeys[key]; !ok {
+		if _, ok := allowed[key]; !ok {
 			continue
 		}
 		value = strings.TrimSpace(value)

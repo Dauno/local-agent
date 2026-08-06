@@ -1,6 +1,7 @@
 package metrics
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -79,5 +80,73 @@ func TestRecorderBoundsAndSortsObservations(t *testing.T) {
 	}
 	if snapshot[0].Value != 1 || snapshot[len(snapshot)-1].Value != maxObservationSamples {
 		t.Fatalf("bounded observations retained stale values: first=%v last=%v", snapshot[0].Value, snapshot[len(snapshot)-1].Value)
+	}
+}
+
+// TestIdentityAndSuppressionCountersAreAllowlistedAndSensitiveFree pins the
+// P2-02 contract: both new counters are forced label-free at the recorder
+// boundary (per-metric empty allowlist), so even globally-allowed label keys
+// such as failure_category or delivery_mode are rejected, and their names
+// carry no job, actor, conversation, digest, reference, or content value.
+func TestIdentityAndSuppressionCountersAreAllowlistedAndSensitiveFree(t *testing.T) {
+	recorder := NewRecorder()
+	recorder.AddCounter(domain.MetricExternalAgentResultIdentityInvalidTotal, 3, port.MetricLabels{
+		"job_id":           "secret-job",
+		"actor":            "secret-actor",
+		"conversation":     "secret-conversation",
+		"result_sha256":    "secret-digest",
+		"artifact_ref":     "secret-ref",
+		"failure_category": "validation",
+		"delivery_mode":    "markdown",
+	})
+	recorder.AddCounter(domain.MetricExternalAgentActivationSuppressionTotal, 2, port.MetricLabels{
+		"job_id": "secret-job",
+	})
+
+	snapshot := recorder.Snapshot()
+	byName := make(map[string]float64, len(snapshot))
+	for _, sample := range snapshot {
+		byName[sample.Name] += sample.Value
+		for key, value := range sample.Labels {
+			t.Fatalf("label key %q=%q survived in %s; identity counters must be label-free", key, value, sample.Name)
+		}
+		if strings.Contains(sample.Name, "secret") {
+			t.Fatalf("metric name carries a sensitive value: %q", sample.Name)
+		}
+	}
+	if byName[domain.MetricExternalAgentResultIdentityInvalidTotal] != 3 {
+		t.Fatalf("identity counter = %v, want 3", byName[domain.MetricExternalAgentResultIdentityInvalidTotal])
+	}
+	if byName[domain.MetricExternalAgentActivationSuppressionTotal] != 2 {
+		t.Fatalf("suppression counter = %v, want 2", byName[domain.MetricExternalAgentActivationSuppressionTotal])
+	}
+	for _, name := range []string{domain.MetricExternalAgentResultIdentityInvalidTotal, domain.MetricExternalAgentActivationSuppressionTotal} {
+		for _, token := range []string{"job", "actor", "conversation", "digest", "sha256", "ref", "content", "slack:"} {
+			if strings.Contains(name, token) {
+				t.Fatalf("metric name %q contains sensitive token %q", name, token)
+			}
+		}
+	}
+}
+
+// TestIdentityCountersRejectAnyLabelAtTheBoundary pins CR8: the empty
+// per-metric allowlist is enforced by the recorder itself, so an attempt to
+// record labels on the P2-02 counters (including keys allowed globally for
+// other metrics) is rejected and the counter stays label-free.
+func TestIdentityCountersRejectAnyLabelAtTheBoundary(t *testing.T) {
+	recorder := NewRecorder()
+	for _, name := range []string{domain.MetricExternalAgentResultIdentityInvalidTotal, domain.MetricExternalAgentActivationSuppressionTotal} {
+		recorder.AddCounter(name, 1, port.MetricLabels{"failure_category": "validation"})
+		recorder.AddCounter(name, 1, port.MetricLabels{"delivery_mode": "file"})
+		recorder.AddCounter(name, 1, port.MetricLabels{"future_reason": "integrity"})
+	}
+	snapshot := recorder.Snapshot()
+	if len(snapshot) != 2 {
+		t.Fatalf("snapshot length = %d, want 2 label-free samples; snapshot = %#v", len(snapshot), snapshot)
+	}
+	for _, sample := range snapshot {
+		if len(sample.Labels) != 0 {
+			t.Fatalf("sample %s kept labels %#v; the per-metric allowlist must be empty", sample.Name, sample.Labels)
+		}
 	}
 }
