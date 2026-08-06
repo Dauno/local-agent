@@ -137,3 +137,36 @@ func testExternalAgentJob(now time.Time) domain.ExternalAgentJob {
 		CreatedAt: now, UpdatedAt: now,
 	}
 }
+
+func TestExpiredRecoveryToQueuedRetryCreatesNoTerminalNotification(t *testing.T) {
+	for _, mode := range []domain.ExternalAgentJobMode{domain.JobForeground, domain.JobDetached} {
+		t.Run(string(mode), func(t *testing.T) {
+			store, jobs, now := newActivationTestStore(t)
+			job := activationTestJob("activation-retry-"+string(mode), now)
+			job.Mode = mode
+			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+				t.Fatalf("create = %v, err = %v", created, err)
+			}
+			claimed, err := jobs.ClaimNext(t.Context(), now, "job-worker-"+job.ID, time.Minute)
+			if err != nil || claimed == nil {
+				t.Fatalf("claim = %#v, err = %v", claimed, err)
+			}
+			if err := jobs.RecoverExpired(t.Context(), job.ID, claimed.Attempt, claimed.StatusRevision, now.Add(2*time.Minute), domain.JobQueued, ""); err != nil {
+				t.Fatal(err)
+			}
+			current, err := jobs.GetJob(t.Context(), job.ID)
+			if err != nil || current == nil || current.Status != domain.JobQueued || current.LeaseOwner != "" || !current.LeaseExpiry.IsZero() || !current.HeartbeatAt.IsZero() {
+				t.Fatalf("recovered job = %#v, err = %v", current, err)
+			}
+			if rows := terminalNotificationRowsForJob(t, store, job.ID); len(rows) != 0 {
+				t.Fatalf("queued retry enqueued terminal notifications: %#v", rows)
+			}
+			if got := activationCountForJob(t, store, job.ID); got != 0 {
+				t.Fatalf("queued retry activation count = %d", got)
+			}
+			if retried, err := jobs.ClaimNext(t.Context(), now.Add(2*time.Minute+time.Second), "worker-retry", time.Minute); err != nil || retried == nil || retried.Status != domain.JobRunning {
+				t.Fatalf("recovered job not claimable: %#v, err = %v", retried, err)
+			}
+		})
+	}
+}

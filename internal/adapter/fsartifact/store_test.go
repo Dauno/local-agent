@@ -3,6 +3,7 @@ package fsartifact_test
 import (
 	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -181,6 +182,163 @@ func TestResultArtifactStoreReadsVerifiedUTF8Chunks(t *testing.T) {
 	if third.Content != "bc" || third.NextOffsetBytes != artifact.Bytes || !third.EOF {
 		t.Fatalf("third chunk = %#v", third)
 	}
+}
+
+func TestResultArtifactErrorsCarryBoundedCodesWithoutValues(t *testing.T) {
+	const (
+		content      = "REDACTED-ARTIFACT-CONTENT-9c41"
+		redactedRef  = "job_redacted9c41-delivery.result"
+		redactedPath = "/var/run/local-agent-redacted-9c41/artifacts"
+	)
+	digest := sha256.Sum256([]byte(content))
+	digestHex := fmt.Sprintf("%x", digest)
+	forbidden := []string{content, redactedRef, redactedPath, digestHex}
+	dir := t.TempDir()
+	store, err := fsartifact.New(dir, 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := store.Put(context.Background(), "job_9c41-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, artifact.Reference)
+
+	assertBounded := func(t *testing.T, err error, want domain.ResultErrorCode) {
+		t.Helper()
+		if err == nil {
+			t.Fatalf("expected error code %s", want)
+		}
+		var classified *domain.ResultError
+		if !errors.As(err, &classified) || classified.Code != want {
+			t.Fatalf("error = %v, want code %s", err, want)
+		}
+		if err.Error() != string(want) {
+			t.Fatalf("error string = %q, want exact bounded code %q", err.Error(), want)
+		}
+		for _, value := range forbidden {
+			if strings.Contains(err.Error(), value) {
+				t.Fatalf("error %q leaked %q", err.Error(), value)
+			}
+		}
+	}
+
+	t.Run("Get", func(t *testing.T) {
+		t.Run("missing file", func(t *testing.T) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			_, err := store.Get(context.Background(), "job_9c41-delivery", artifact.Reference, artifact.SHA256, 1024)
+			assertBounded(t, err, domain.ResultErrorArtifactMissing)
+			restored, err := store.Put(context.Background(), "job_9c41-delivery", content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			artifact = restored
+		})
+		t.Run("reference not bound to owner", func(t *testing.T) {
+			_, err := store.Get(context.Background(), "other-delivery", artifact.Reference, artifact.SHA256, 1024)
+			assertBounded(t, err, domain.ResultErrorArtifactOwnerRefMismatch)
+		})
+		t.Run("digest missing", func(t *testing.T) {
+			_, err := store.Get(context.Background(), "job_9c41-delivery", artifact.Reference, "", 1024)
+			assertBounded(t, err, domain.ResultErrorArtifactDigestMismatch)
+		})
+		t.Run("digest mismatch", func(t *testing.T) {
+			_, err := store.Get(context.Background(), "job_9c41-delivery", artifact.Reference, strings.Repeat("0", 64), 1024)
+			assertBounded(t, err, domain.ResultErrorArtifactDigestMismatch)
+		})
+		t.Run("content exceeds read bound", func(t *testing.T) {
+			_, err := store.Get(context.Background(), "job_9c41-delivery", artifact.Reference, artifact.SHA256, 4)
+			assertBounded(t, err, domain.ResultErrorArtifactBytesMismatch)
+		})
+		t.Run("symlink replaced", func(t *testing.T) {
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Symlink(filepath.Join(dir, "outside"), path); err != nil {
+				t.Fatal(err)
+			}
+			_, err := store.Get(context.Background(), "job_9c41-delivery", artifact.Reference, artifact.SHA256, 1024)
+			assertBounded(t, err, domain.ResultErrorArtifactMissing)
+			if err := os.Remove(path); err != nil {
+				t.Fatal(err)
+			}
+			restored, err := store.Put(context.Background(), "job_9c41-delivery", content)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = restored
+		})
+	})
+
+	request := domain.ResultArtifactChunkRequest{
+		OwnerID: "job_9c41-delivery", Reference: artifact.Reference, ExpectedBytes: artifact.Bytes,
+		ExpectedSHA256: artifact.SHA256, OffsetBytes: 0, MaxBytes: 32,
+	}
+	t.Run("ReadChunk", func(t *testing.T) {
+		t.Run("reference not bound to owner", func(t *testing.T) {
+			wrong := request
+			wrong.OwnerID = "other-delivery"
+			_, err := store.ReadChunk(context.Background(), wrong)
+			assertBounded(t, err, domain.ResultErrorArtifactOwnerRefMismatch)
+		})
+		t.Run("expected size mismatch", func(t *testing.T) {
+			wrong := request
+			wrong.ExpectedBytes++
+			_, err := store.ReadChunk(context.Background(), wrong)
+			assertBounded(t, err, domain.ResultErrorArtifactBytesMismatch)
+		})
+		t.Run("expected digest mismatch", func(t *testing.T) {
+			wrong := request
+			wrong.ExpectedSHA256 = strings.Repeat("0", 64)
+			_, err := store.ReadChunk(context.Background(), wrong)
+			assertBounded(t, err, domain.ResultErrorArtifactDigestMismatch)
+		})
+		t.Run("tampered file content", func(t *testing.T) {
+			if err := os.WriteFile(path, []byte(strings.Repeat("y", len(content))), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			_, err := store.ReadChunk(context.Background(), request)
+			assertBounded(t, err, domain.ResultErrorArtifactDigestMismatch)
+		})
+	})
+}
+
+// TestResultArtifactChunkRejectsMisalignedRequestRanges pins CR11: offsets
+// that are out of bounds or not on a UTF-8 boundary, and read bounds smaller
+// than the next UTF-8 character, are client request errors, never durable
+// identity mismatches.
+func TestResultArtifactChunkRejectsMisalignedRequestRanges(t *testing.T) {
+	store, err := fsartifact.New(t.TempDir(), 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const content = "a🔥bc"
+	artifact, err := store.Put(t.Context(), "job_ranges-delivery", content)
+	if err != nil {
+		t.Fatal(err)
+	}
+	read := func(offset, max int64) error {
+		t.Helper()
+		_, err := store.ReadChunk(t.Context(), domain.ResultArtifactChunkRequest{
+			OwnerID: "job_ranges-delivery", Reference: artifact.Reference, ExpectedBytes: artifact.Bytes,
+			ExpectedSHA256: artifact.SHA256, OffsetBytes: offset, MaxBytes: max,
+		})
+		if err == nil {
+			t.Fatalf("read at %d/%d succeeded, want %s", offset, max, domain.ResultErrorChunkRequestInvalid)
+		}
+		var classified *domain.ResultError
+		if !errors.As(err, &classified) || classified.Code != domain.ResultErrorChunkRequestInvalid {
+			t.Fatalf("read at %d/%d error = %v, want %s", offset, max, err, domain.ResultErrorChunkRequestInvalid)
+		}
+		return err
+	}
+	read(artifact.Bytes+1, 4)
+	read(1, 1)
+	read(2, 4)
+	read(3, 4)
+	read(4, 4)
 }
 
 func TestResultArtifactStoreRejectsChunkBindingAndTampering(t *testing.T) {

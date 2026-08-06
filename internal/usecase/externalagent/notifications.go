@@ -174,6 +174,7 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 				w.recordCASConflict(err, notification)
 				return wrapNotificationError(notification, err)
 			}
+			w.recordActivationSuppression(notification)
 			w.metrics.AddCounter(domain.MetricExternalAgentNotificationPublishTotal, 1, port.MetricLabels{
 				"delivery_mode": boundedDeliveryMode(notification.DeliveryMode),
 			})
@@ -194,10 +195,22 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 		w.recordCASConflict(err, notification)
 		return wrapNotificationError(notification, err)
 	}
+	w.recordActivationSuppression(notification)
 	w.metrics.AddCounter(domain.MetricExternalAgentNotificationPublishTotal, 1, port.MetricLabels{
 		"delivery_mode": boundedDeliveryMode(notification.DeliveryMode),
 	})
 	return nil
+}
+
+// recordActivationSuppression counts a terminal publication that was
+// deliberately suppressed from creating a root activation: foreground
+// completions must never activate the root. The counter is label-free and
+// carries no job, actor, conversation, digest, or content value.
+func (w *NotificationWorker) recordActivationSuppression(notification *domain.ExternalAgentJobNotification) {
+	if w == nil || notification == nil || notification.RootActivationRequired || notification.TerminalStatus == "" {
+		return
+	}
+	w.metrics.AddCounter(domain.MetricExternalAgentActivationSuppressionTotal, 1, nil)
 }
 
 // SnapshotHealth returns the current content-free outbox health and updates
@@ -243,7 +256,15 @@ func (w *NotificationWorker) verifyHostCompletion(ctx context.Context, notificat
 		return port.NewNotificationPublishError("result_delivery_failed", false, false, errors.New("host completion did not return a result"))
 	}
 	digest := sha256.Sum256([]byte(turn.Text))
-	if notification.ContentBytes != int64(len([]byte(turn.Text))) || !strings.EqualFold(notification.ContentSHA256, hex.EncodeToString(digest[:])) {
+	resultBytes := notification.ResultBytes
+	resultDigest := notification.ResultSHA256
+	if resultDigest == "" || resultBytes <= 0 {
+		// Rows written before v32 carry the result identity in the legacy
+		// content storage columns.
+		resultBytes = notification.ContentBytes
+		resultDigest = notification.ContentSHA256
+	}
+	if resultBytes != int64(len([]byte(turn.Text))) || !strings.EqualFold(resultDigest, hex.EncodeToString(digest[:])) {
 		return port.NewNotificationPublishError("result_delivery_failed", false, false, errors.New("host completion result identity does not match durable delivery"))
 	}
 	notification.HostResultText = turn.Text
@@ -366,7 +387,10 @@ func wrapNotificationError(notification *domain.ExternalAgentJobNotification, er
 
 func permanentNotificationCode(code string) bool {
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown":
+	case string(domain.ResultErrorIdentityInvalid), string(domain.ResultErrorArtifactMissing),
+		string(domain.ResultErrorArtifactOwnerRefMismatch), string(domain.ResultErrorArtifactBytesMismatch),
+		string(domain.ResultErrorArtifactDigestMismatch), string(domain.ResultErrorArtifactInvalid),
+		"result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown":
 		return true
 	default:
 		return false
@@ -411,7 +435,9 @@ func notificationErrorCode(err error) string {
 	}
 	message := strings.ToLower(err.Error())
 	for _, code := range []string{
-		"result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch",
+		"result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid",
+		"result_delivery_failed", "result_destination_mismatch",
 		"notification_delivery_invalid", "result_file_upload_failed", "result_file_upload_unknown",
 		"result_file_completion_failed",
 	} {
@@ -430,7 +456,9 @@ func notificationErrorCode(err error) string {
 
 func safeNotificationErrorCode(code string) string {
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch",
+	case "result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid",
+		"result_delivery_failed", "result_destination_mismatch",
 		"notification_delivery_invalid", "notification_publish_ambiguous", "result_file_upload_failed",
 		"result_file_upload_unknown", "result_file_completion_failed", "notification_state_conflict",
 		"notification_state_persist_failed":
@@ -460,7 +488,9 @@ func boundedDeliveryMode(mode domain.JobResultDeliveryMode) string {
 
 func notificationFailureCategory(code string) string {
 	switch code {
-	case "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid":
+	case "result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid",
+		"result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid":
 		return "validation"
 	case "result_file_upload_failed", "result_file_upload_unknown", "result_file_completion_failed":
 		return "file_upload"

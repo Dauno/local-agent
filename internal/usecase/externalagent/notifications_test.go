@@ -131,10 +131,14 @@ func (p *fakeNotificationPublisher) Reconcile(context.Context, domain.ExternalAg
 type fakeHostCompleter struct {
 	calls int
 	turn  port.AgentTurn
+	err   error
 }
 
 func (c *fakeHostCompleter) HostCompletionTurn(context.Context, string, string, domain.ConversationKey) (port.AgentTurn, error) {
 	c.calls++
+	if c.err != nil {
+		return port.AgentTurn{}, c.err
+	}
 	return c.turn, nil
 }
 
@@ -188,6 +192,8 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
 		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
 		ContentSHA256:     contentSHA256ForTest(content), ContentBytes: int64(len(content)),
+		NotificationSHA256: contentSHA256ForTest("OpenCode job `job-1` completed.\n\n" + content), NotificationBytes: int64(len([]byte("OpenCode job `job-1` completed.\n\n" + content))),
+		ResultSHA256: contentSHA256ForTest(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
 		MaxMarkdownParts: 1,
@@ -203,6 +209,81 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 	}
 	if completer.calls != 1 || !publisher.publishCalled || store.publishedTS == "" {
 		t.Fatalf("host completion calls=%d publish=%v timestamp=%q", completer.calls, publisher.publishCalled, store.publishedTS)
+	}
+}
+
+func TestNotificationWorkerPreservesBoundedResultErrorCodes(t *testing.T) {
+	codes := []string{
+		string(domain.ResultErrorIdentityInvalid),
+		string(domain.ResultErrorArtifactMissing),
+		string(domain.ResultErrorArtifactOwnerRefMismatch),
+		string(domain.ResultErrorArtifactBytesMismatch),
+		string(domain.ResultErrorArtifactDigestMismatch),
+		string(domain.ResultErrorArtifactInvalid),
+	}
+	for _, code := range codes {
+		t.Run(code, func(t *testing.T) {
+			if !permanentNotificationCode(code) {
+				t.Fatalf("code %s is not classified permanent", code)
+			}
+			notification := domain.ExternalAgentJobNotification{
+				JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+				Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
+				CanonicalMarkdown: "OpenCode job `job-1` completed.",
+				RendererVersion:   domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
+				DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
+				MaxMarkdownParts: 1,
+			}
+			completer := &fakeHostCompleter{err: &domain.ResultError{Code: domain.ResultErrorCode(code), Err: errors.New("synthetic detail that must never surface")}}
+			worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: &fakeNotificationStore{}, Publisher: &fakeNotificationPublisher{}, HostCompleter: completer})
+			if err != nil {
+				t.Fatal(err)
+			}
+			var classified *port.NotificationPublishError
+			verifyErr := worker.verifyHostCompletion(t.Context(), &notification)
+			if !errors.As(verifyErr, &classified) || classified.Code != code {
+				t.Fatalf("verifyHostCompletion error = %v, want code %s", verifyErr, code)
+			}
+			if got := notificationErrorCode(verifyErr); got != code {
+				t.Fatalf("notificationErrorCode = %s, want %s", got, code)
+			}
+			if strings.Contains(verifyErr.Error(), "synthetic detail") {
+				t.Fatalf("bounded error leaked its detail: %v", verifyErr)
+			}
+		})
+	}
+}
+
+func TestNotificationWorkerRejectsHostCompletionResultIdentityMismatch(t *testing.T) {
+	content := "complete host-owned result"
+	notification := domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
+		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
+		ResultSHA256:      strings.Repeat("a", 64), ResultBytes: int64(len(content)),
+		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
+		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
+		MaxMarkdownParts: 1,
+	}
+	store := &fakeNotificationStore{notification: notification}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	completer := &fakeHostCompleter{turn: port.AgentTurn{Text: content}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, HostCompleter: completer})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var classified *port.NotificationPublishError
+	if err := worker.verifyHostCompletion(t.Context(), &notification); !errors.As(err, &classified) || classified.Code != "result_delivery_failed" {
+		t.Fatalf("result identity mismatch error = %v", err)
+	}
+	if notification.HostResultText != "" {
+		t.Fatal("host result text was accepted on identity mismatch")
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if publisher.publishCalled || store.unknownCode != "result_delivery_failed" {
+		t.Fatalf("mismatched result bypassed verifier: publish=%v unknown_code=%q", publisher.publishCalled, store.unknownCode)
 	}
 }
 
@@ -389,6 +470,57 @@ func TestNotificationWorkerMetricsUseOnlyBoundedLabels(t *testing.T) {
 			if strings.Contains(value, "secret-") {
 				t.Fatalf("sensitive metric label %q=%q", key, value)
 			}
+		}
+	}
+}
+
+func TestNotificationWorkerRecordsForegroundActivationSuppression(t *testing.T) {
+	metrics := &recordingNotificationMetrics{}
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
+		TerminalStatus: domain.JobCompleted, RootActivationRequired: false,
+		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if store.notification.PublishState != domain.NotificationPublished {
+		t.Fatalf("foreground notification was not published: %#v", store.notification)
+	}
+	found := false
+	for _, sample := range metrics.samples {
+		if sample.Name == domain.MetricExternalAgentActivationSuppressionTotal && sample.Value == 1 && len(sample.Labels) == 0 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("suppression metric missing or labeled: %#v", metrics.samples)
+	}
+}
+
+func TestNotificationWorkerDoesNotRecordSuppressionForDetachedActivationEligible(t *testing.T) {
+	metrics := &recordingNotificationMetrics{}
+	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
+		JobID: "job-2", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+		TerminalStatus: domain.JobCompleted, RootActivationRequired: true,
+		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown,
+	}}
+	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
+	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, Metrics: metrics})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	for _, sample := range metrics.samples {
+		if sample.Name == domain.MetricExternalAgentActivationSuppressionTotal {
+			t.Fatalf("detached activation-eligible publication was counted as suppressed: %#v", sample)
 		}
 	}
 }

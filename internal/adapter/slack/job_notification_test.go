@@ -17,7 +17,7 @@ import (
 )
 
 func TestJobNotificationPublisherUsesDeterministicMetadata(t *testing.T) {
-	job := domain.ExternalAgentJob{ID: "job-1", Status: domain.JobCompleted, StatusRevision: 3, ResultSummary: "safe", ConversationKey: "slack:T12345678:dm:D12345678", UpdatedAt: time.Now().UTC()}
+	job := domain.ExternalAgentJob{ID: "job-1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 3, ResultSummary: "safe", ConversationKey: "slack:T12345678:dm:D12345678", UpdatedAt: time.Now().UTC()}
 	notification, err := domain.NewExternalAgentJobNotification(job)
 	if err != nil {
 		t.Fatal(err)
@@ -34,6 +34,53 @@ func TestJobNotificationPublisherUsesDeterministicMetadata(t *testing.T) {
 	req := recorder.requests[0]
 	if req.eventType != jobNotificationMetadataEventType || req.extraMetadata["job_id"] != "job-1" || req.extraMetadata["status_revision"] != 3 || req.extraMetadata["content_sha256"] != notification.ContentSHA256 {
 		t.Fatalf("metadata = %#v", req)
+	}
+	if req.extraMetadata["notification_sha256"] != notification.NotificationSHA256 || req.extraMetadata["notification_bytes"] != int64(len([]byte(notification.CanonicalMarkdown))) {
+		t.Fatalf("notification identity metadata = %#v", req.extraMetadata)
+	}
+	if req.extraMetadata["result_sha256"] != notification.ResultSHA256 || req.extraMetadata["result_bytes"] != notification.ResultBytes {
+		t.Fatalf("result identity metadata = %#v", req.extraMetadata)
+	}
+	if req.extraMetadata["notification_sha256"] == req.extraMetadata["result_sha256"] && req.extraMetadata["result_sha256"] != "" {
+		t.Fatal("notification and result identity metadata collide")
+	}
+}
+
+func TestJobNotificationPublisherEmitsDistinctIdentityPairsForDeliveredResult(t *testing.T) {
+	text := "safe delivered result"
+	job := domain.ExternalAgentJob{ID: "job-1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 3, ConversationKey: "slack:T12345678:dm:D12345678"}
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+		Text: text, ResultSHA256: contentSHA256(text), ResultBytes: int64(len([]byte(text))),
+		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
+		DeliveryContentSHA256: contentSHA256(text), DeliveryContentBytes: int64(len([]byte(text))),
+		DeliveryCanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + text, DeliveryMaxMarkdownParts: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recorder := &jobNotificationPostRecorder{}
+	publisher := newPublisher(recorder, 0, nil, false)
+	publisher.pace = 0
+	if _, err := NewJobNotificationPublisher(publisher, nil).Publish(t.Context(), notification); err != nil {
+		t.Fatal(err)
+	}
+	if len(recorder.requests) != 1 {
+		t.Fatalf("requests = %d", len(recorder.requests))
+	}
+	metadata := recorder.requests[0].extraMetadata
+	notificationDigest, _ := metadata["notification_sha256"].(string)
+	resultDigest, _ := metadata["result_sha256"].(string)
+	if notificationDigest != notification.NotificationSHA256 || resultDigest != notification.ResultSHA256 {
+		t.Fatalf("identity pairs = notification %q / result %q", notificationDigest, resultDigest)
+	}
+	if notificationDigest == resultDigest {
+		t.Fatal("delivered notification and result identities are not distinct")
+	}
+	if notificationDigest == contentSHA256(text) {
+		t.Fatal("notification identity leaked the result digest")
+	}
+	if resultDigest != contentSHA256(text) {
+		t.Fatal("result identity does not match the sanitized result digest")
 	}
 }
 
@@ -196,6 +243,97 @@ func TestFileNotificationRestartAfterCompletionPublishesOnlyStatus(t *testing.T)
 	}
 }
 
+func TestJobNotificationValidationVerifiesCanonicalMarkdownIdentity(t *testing.T) {
+	markdown := "OpenCode job `job-1` completed.\n\nsafe result"
+	fileMarkdown := "OpenCode job `job-1` completed. The complete result was attached."
+	otherDigest := contentSHA256("some other result")
+	build := func(mode domain.JobResultDeliveryMode, mutate func(*domain.ExternalAgentJobNotification)) domain.ExternalAgentJobNotification {
+		t.Helper()
+		var notification domain.ExternalAgentJobNotification
+		if mode == domain.JobResultDeliveryFile {
+			notification = preV32DeliveryNotification(mode, fileMarkdown, "file bytes", "job-1-delivery.result")
+			notification.HostResultText = "file bytes"
+		} else {
+			notification = preV32DeliveryNotification(mode, markdown, "safe result", "")
+			notification.UploadState = domain.JobResultUploadNotApplicable
+			notification.SlackFileID = ""
+		}
+		if mutate != nil {
+			mutate(&notification)
+		}
+		return notification
+	}
+	publish := func(notification domain.ExternalAgentJobNotification) error {
+		recorder := &jobNotificationPostRecorder{}
+		publisher := newPublisher(recorder, 0, nil, false)
+		publisher.pace = 0
+		_, err := NewDurableJobNotificationPublisher(publisher, nil, &jobNotificationUploader{}, &jobNotificationArtifacts{}, &jobNotificationDeliveryStore{}, nil).Publish(t.Context(), notification)
+		if err == nil && len(recorder.requests) != 1 {
+			t.Fatalf("published requests = %d, want 1", len(recorder.requests))
+		}
+		return err
+	}
+	cases := []struct {
+		name      string
+		mode      domain.JobResultDeliveryMode
+		mutate    func(*domain.ExternalAgentJobNotification)
+		wantError bool
+	}{
+		{name: "v32 exact match publishes", mode: domain.JobResultDeliveryMarkdown},
+		{name: "v32 exact match publishes", mode: domain.JobResultDeliveryFile},
+		{name: "non-hex notification digest rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = strings.Repeat("g", 64) }, wantError: true},
+		{name: "non-hex notification digest rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = strings.Repeat("g", 64) }, wantError: true},
+		{name: "uppercase notification digest rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = strings.Repeat("A", 64) }, wantError: true},
+		{name: "mismatched notification digest rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = otherDigest }, wantError: true},
+		{name: "mismatched notification digest rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = otherDigest }, wantError: true},
+		{name: "mismatched notification bytes rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes++ }, wantError: true},
+		{name: "mismatched notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes++ }, wantError: true},
+		{name: "partial v32 digest only rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes = 0 }, wantError: true},
+		{name: "partial v32 bytes only rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = "" }, wantError: true},
+		{name: "partial v32 digest only rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes = 0 }, wantError: true},
+		{name: "partial v32 bytes only rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = "" }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -1 }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -1 }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -5 }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -5 }, wantError: true},
+		{name: "legacy fallback markdown must match content digest", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) {
+			n.NotificationSHA256, n.NotificationBytes, n.ContentSHA256 = "", 0, otherDigest
+		}, wantError: true},
+	}
+	for _, scenario := range cases {
+		t.Run(scenario.name+" "+string(scenario.mode), func(t *testing.T) {
+			notification := build(scenario.mode, scenario.mutate)
+			err := publish(notification)
+			if (err != nil) != scenario.wantError {
+				t.Fatalf("publish = %v, wantError %v", err, scenario.wantError)
+			}
+		})
+	}
+
+	// Legacy markdown rows (no v32 identity fields at all) keep the fallback
+	// contract: content_sha256 must equal the digest of the canonical
+	// Markdown they will deliver.
+	markdownDigest := domain.NotificationIdentitySHA256(markdown)
+	legacy := domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+		CanonicalMarkdown: markdown, ContentSHA256: markdownDigest, ContentBytes: int64(len([]byte(markdown))),
+		RendererVersion: domain.JobNotificationRenderer,
+		Target:          domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678",
+		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
+		UploadState: domain.JobResultUploadNotApplicable, MaxMarkdownParts: 6,
+	}
+	if err := publish(legacy); err != nil {
+		t.Fatalf("legacy markdown fallback publish = %v", err)
+	}
+	// Legacy file rows (no v32 identity fields at all) keep the fallback
+	// contract: the content identity shape is validated here and the exact
+	// bytes against the delivered content at publication time.
+	fileLegacy := build(domain.JobResultDeliveryFile, func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", 0 })
+	if err := publish(fileLegacy); err != nil {
+		t.Fatalf("legacy file fallback publish = %v", err)
+	}
+}
+
 func TestJobNotificationMarkdownRecoveryBoundariesAndEvidence(t *testing.T) {
 	for _, wantParts := range []int{2, 6} {
 		t.Run(fmt.Sprintf("%d_parts", wantParts), func(t *testing.T) {
@@ -241,6 +379,248 @@ func TestJobNotificationMarkdownRecoveryBoundariesAndEvidence(t *testing.T) {
 	}
 }
 
+// preV32DeliveryNotification returns a v32-identity row whose Slack delivery
+// was published by the v30 binary: the payload carries the result digest in
+// both notification_sha256 and content_sha256 and never carries the v32
+// metadata fields (notification_bytes, result_sha256).
+func preV32DeliveryNotification(mode domain.JobResultDeliveryMode, canonicalMarkdown, resultContent, artifactRef string) domain.ExternalAgentJobNotification {
+	return domain.ExternalAgentJobNotification{
+		JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+		CanonicalMarkdown:  canonicalMarkdown,
+		NotificationSHA256: domain.NotificationIdentitySHA256(canonicalMarkdown),
+		NotificationBytes:  int64(len([]byte(canonicalMarkdown))),
+		ContentSHA256:      contentSHA256(resultContent), ContentBytes: int64(len([]byte(resultContent))),
+		ResultSHA256: contentSHA256(resultContent), ResultBytes: int64(len([]byte(resultContent))),
+		RendererVersion: domain.JobNotificationRenderer,
+		Target:          domain.ReplyTarget{ChannelID: "D12345678"},
+		ConversationKey: "slack:T12345678:dm:D12345678",
+		DeliveryMode:    mode, PolicyVersion: domain.JobDeliveryPolicyV1,
+		ArtifactRef: artifactRef, MaxMarkdownParts: 6,
+		UploadState: domain.JobResultUploadCompleted, SlackFileID: "F123",
+	}
+}
+
+func preV32EvidencePayload(notification domain.ExternalAgentJobNotification) map[string]any {
+	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
+	payload := map[string]any{
+		"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
+		"renderer_version": notification.RendererVersion, "delivery_mode": string(notification.DeliveryMode),
+		"policy_version": notification.PolicyVersion, "notification_sha256": notification.ContentSHA256,
+		"content_sha256": notification.ContentSHA256, "result_bytes": notification.ContentBytes,
+		"max_markdown_parts": notification.MaxMarkdownParts, "upload_state": string(notification.UploadState),
+		"part_sha256": contentSHA256(part), "part_index": 1, "part_count": 1,
+	}
+	if notification.SlackFileID != "" {
+		payload["file_id"] = notification.SlackFileID
+	}
+	return payload
+}
+
+func TestJobNotificationReconcileAcceptsPreV32MarkdownEvidence(t *testing.T) {
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
+		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+	notification.UploadState = domain.JobResultUploadNotApplicable
+	notification.SlackFileID = ""
+	message := slackapi.Message{Msg: slackapi.Msg{
+		User: "BOT", Timestamp: "1710000000.000001",
+		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)},
+	}}
+	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{message}}, "BOT", 0, nil, false)
+	got, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+	if err != nil || !found || got != "1710000000.000001" {
+		t.Fatalf("pre-v32 markdown evidence = %q, found=%v, err=%v", got, found, err)
+	}
+}
+
+func TestJobNotificationReconcileAcceptsPreV32FileEvidence(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/files.info" {
+			http.NotFound(w, request)
+			return
+		}
+		_, _ = fmt.Fprint(w, `{"ok":true,"file":{"id":"F123","name":"opencode-job-1.md","size":10,"user":"BOT","channels":["D12345678"]}}`)
+	}))
+	t.Cleanup(server.Close)
+	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryFile,
+		"OpenCode job `job-1` completed. The complete result was attached.", "file bytes", "job-1-delivery.result")
+	message := slackapi.Message{Msg: slackapi.Msg{
+		User: "BOT", Timestamp: "1710000000.000001",
+		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)},
+	}}
+	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{message}}, "BOT", 0, nil, false)
+	got, found, err := NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, fileClient).Reconcile(t.Context(), notification)
+	if err != nil || !found || got != "1710000000.000001" {
+		t.Fatalf("pre-v32 file evidence = %q, found=%v, err=%v", got, found, err)
+	}
+}
+
+func TestJobNotificationReconcileFailsClosedOnEvidenceIdentityMismatch(t *testing.T) {
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
+		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+	notification.UploadState = domain.JobResultUploadNotApplicable
+	notification.SlackFileID = ""
+	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
+	makeMessage := func(payload map[string]any) slackapi.Message {
+		return slackapi.Message{Msg: slackapi.Msg{
+			User: "BOT", Timestamp: "1710000000.000001",
+			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload},
+		}}
+	}
+	// A v32 payload whose notification_sha256 mismatches stays inconsistent
+	// even when its content_sha256 matches the legacy content identity.
+	v32Mismatch := preV32EvidencePayload(notification)
+	v32Mismatch["notification_sha256"] = strings.Repeat("a", 64)
+	v32Mismatch["notification_bytes"] = int64(len([]byte(notification.CanonicalMarkdown)))
+	v32Mismatch["result_sha256"] = notification.ContentSHA256
+	for name, payload := range map[string]map[string]any{
+		"v32_digest_mismatch": v32Mismatch,
+		"legacy_digest_mismatch": {
+			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
+			"renderer_version": notification.RendererVersion, "delivery_mode": "markdown", "policy_version": "delivery_v1",
+			"notification_sha256": strings.Repeat("b", 64), "content_sha256": strings.Repeat("b", 64),
+			"part_sha256": contentSHA256(part), "part_index": 1, "part_count": 1,
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{makeMessage(payload)}}, "BOT", 0, nil, false)
+			_, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+			if err == nil || found {
+				t.Fatalf("mismatched evidence found=%v err=%v", found, err)
+			}
+		})
+	}
+}
+
+// v32EvidencePayload reproduces the complete Slack metadata the v32 binary
+// publishes for a single-part Markdown delivery: all four identity fields.
+func v32EvidencePayload(notification domain.ExternalAgentJobNotification) map[string]any {
+	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
+	return map[string]any{
+		"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
+		"renderer_version": notification.RendererVersion, "delivery_mode": string(notification.DeliveryMode),
+		"policy_version": notification.PolicyVersion, "notification_sha256": notification.NotificationSHA256,
+		"notification_bytes": notification.NotificationBytes, "result_sha256": notification.ResultSHA256,
+		"result_bytes": notification.ResultBytes, "max_markdown_parts": notification.MaxMarkdownParts,
+		"upload_state": string(notification.UploadState), "part_sha256": contentSHA256(part),
+		"part_index": 1, "part_count": 1,
+	}
+}
+
+// tamperEvidencePayload returns a copy of the payload with one value replaced.
+func tamperEvidencePayload(payload map[string]any, key string, value any) map[string]any {
+	clone := make(map[string]any, len(payload)+1)
+	for name, existing := range payload {
+		clone[name] = existing
+	}
+	clone[key] = value
+	return clone
+}
+
+// onlyIdentityField returns a payload declaring just one of the identity
+// fields (notification_sha256, notification_bytes, result_sha256,
+// result_bytes); the other identity fields are removed.
+func onlyIdentityField(payload map[string]any, keep string) map[string]any {
+	clone := make(map[string]any, len(payload))
+	for name, existing := range payload {
+		clone[name] = existing
+	}
+	for _, field := range []string{"notification_sha256", "notification_bytes", "result_sha256", "result_bytes", "content_sha256"} {
+		if field != keep {
+			delete(clone, field)
+		}
+	}
+	return clone
+}
+
+// TestJobNotificationReconcileRequiresAllIdentityFields proves the CR5
+// correction: v32 evidence is published only when all four identity fields
+// match with exact types, tampering any single field fails closed, a payload
+// declaring a partial v32 identity is rejected instead of treated as legacy,
+// and legacy evidence must match its complete legacy identity (both digest
+// slots and the byte count) rather than a single digest.
+func TestJobNotificationReconcileRequiresAllIdentityFields(t *testing.T) {
+	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
+		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+	notification.UploadState = domain.JobResultUploadNotApplicable
+	notification.SlackFileID = ""
+	makeMessage := func(payload map[string]any) slackapi.Message {
+		return slackapi.Message{Msg: slackapi.Msg{
+			User: "BOT", Timestamp: "1710000000.000001",
+			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload},
+		}}
+	}
+	v32 := v32EvidencePayload(notification)
+	legacy := preV32EvidencePayload(notification)
+	cases := map[string]struct {
+		payload   map[string]any
+		wantFound bool
+		wantError bool
+	}{
+		"v32_all_four_fields_match":             {v32, true, false},
+		"v32_tampered_notification_digest_only": {tamperEvidencePayload(v32, "notification_sha256", strings.Repeat("a", 64)), false, true},
+		"v32_tampered_notification_bytes_only":  {tamperEvidencePayload(v32, "notification_bytes", notification.NotificationBytes+1), false, true},
+		"v32_tampered_result_digest_only":       {tamperEvidencePayload(v32, "result_sha256", strings.Repeat("b", 64)), false, true},
+		"v32_tampered_result_bytes_only":        {tamperEvidencePayload(v32, "result_bytes", notification.ResultBytes+1), false, true},
+		"v32_partial_only_notification_digest":  {onlyIdentityField(v32, "notification_sha256"), false, true},
+		"v32_partial_only_notification_bytes":   {onlyIdentityField(v32, "notification_bytes"), false, true},
+		"v32_partial_only_result_digest":        {onlyIdentityField(v32, "result_sha256"), false, true},
+		"v32_partial_only_result_bytes":         {onlyIdentityField(v32, "result_bytes"), false, true},
+		"legacy_all_legacy_fields_match":        {legacy, true, false},
+		"legacy_tampered_result_bytes_only":     {tamperEvidencePayload(legacy, "result_bytes", notification.ContentBytes+1), false, true},
+		"legacy_tampered_content_digest_only":   {tamperEvidencePayload(legacy, "content_sha256", strings.Repeat("c", 64)), false, true},
+	}
+	for name, scenario := range cases {
+		t.Run(name, func(t *testing.T) {
+			history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{makeMessage(scenario.payload)}}, "BOT", 0, nil, false)
+			got, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+			if found != scenario.wantFound || (err != nil) != scenario.wantError || (scenario.wantFound && got == "") {
+				t.Fatalf("reconcile = %q, found=%v, err=%v; want found=%v err=%v", got, found, err, scenario.wantFound, scenario.wantError)
+			}
+		})
+	}
+}
+
+// TestJobNotificationReconcileRejectsNegativeNotificationBytes proves the
+// CR12 correction reaches the reconciliation gate too: Reconcile validates
+// through the same validateJobNotification as Publish, so a row declaring a
+// malformed v32 identity (empty digest with negative notification bytes) is
+// rejected in both delivery modes before any history lookup instead of being
+// reconciled as legacy.
+func TestJobNotificationReconcileRejectsNegativeNotificationBytes(t *testing.T) {
+	markdown := "OpenCode job `job-1` completed.\n\nsafe result"
+	fileMarkdown := "OpenCode job `job-1` completed. The complete result was attached."
+	history := newHistoryReader(&jobNotificationHistoryRecorder{}, "BOT", 0, nil, false)
+	for _, mode := range []domain.JobResultDeliveryMode{domain.JobResultDeliveryMarkdown, domain.JobResultDeliveryFile} {
+		for _, negative := range []int64{-1, -5} {
+			t.Run(fmt.Sprintf("%s_bytes=%d", mode, negative), func(t *testing.T) {
+				var notification domain.ExternalAgentJobNotification
+				if mode == domain.JobResultDeliveryFile {
+					notification = preV32DeliveryNotification(mode, fileMarkdown, "file bytes", "job-1-delivery.result")
+				} else {
+					// A legacy-consistent markdown row would reconcile as
+					// legacy when the negative bytes are ignored; the hardened
+					// gate must reject it before any history lookup.
+					notification = domain.ExternalAgentJobNotification{
+						JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+						CanonicalMarkdown: markdown, ContentSHA256: domain.NotificationIdentitySHA256(markdown),
+						ContentBytes: int64(len([]byte(markdown))), RendererVersion: domain.JobNotificationRenderer,
+						Target: domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678",
+						DeliveryMode: mode, PolicyVersion: domain.JobDeliveryPolicyV1,
+						UploadState: domain.JobResultUploadNotApplicable, MaxMarkdownParts: 6,
+					}
+				}
+				notification.NotificationSHA256 = ""
+				notification.NotificationBytes = negative
+				_, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+				if err == nil || found {
+					t.Fatalf("malformed v32 identity found=%v err=%v", found, err)
+				}
+			})
+		}
+	}
+}
+
 func markdownTestNotification(t *testing.T, wantParts int) domain.ExternalAgentJobNotification {
 	t.Helper()
 	text := strings.Repeat("界", domain.SlackMarkdownChunkRunes*(wantParts-1)-20)
@@ -265,8 +645,10 @@ func jobEvidenceMessage(notification domain.ExternalAgentJobNotification, index,
 		User: "BOT", Timestamp: timestamp,
 		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: map[string]any{
 			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
-			"renderer_version": notification.RendererVersion, "notification_sha256": notification.ContentSHA256,
-			"part_sha256": contentSHA256(part), "part_index": index, "part_count": count,
+			"renderer_version": notification.RendererVersion, "notification_sha256": notification.NotificationSHA256,
+			"notification_bytes": notification.NotificationBytes, "result_sha256": notification.ResultSHA256,
+			"result_bytes": notification.ResultBytes,
+			"part_sha256":  contentSHA256(part), "part_index": index, "part_count": count,
 		}},
 	}}
 }

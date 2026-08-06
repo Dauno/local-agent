@@ -75,6 +75,11 @@ func (f *fakeExternalRuntime) Run(_ context.Context, request domain.AcpInvocatio
 	return f.result, f.err
 }
 
+func (f *fakeExternalRuntime) ReconcileInvocation(context.Context, domain.AcpInvocationRequest, string) (domain.AcpInvocationResult, error) {
+	f.runs++
+	return f.result, f.err
+}
+
 type acpCallingRootModel struct{}
 
 func (*acpCallingRootModel) Name() string { return "acp-caller" }
