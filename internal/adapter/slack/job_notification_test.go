@@ -292,6 +292,10 @@ func TestJobNotificationValidationVerifiesCanonicalMarkdownIdentity(t *testing.T
 		{name: "partial v32 bytes only rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = "" }, wantError: true},
 		{name: "partial v32 digest only rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationBytes = 0 }, wantError: true},
 		{name: "partial v32 bytes only rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256 = "" }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -1 }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -1 }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -5 }, wantError: true},
+		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -5 }, wantError: true},
 		{name: "legacy fallback markdown must match content digest", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) {
 			n.NotificationSHA256, n.NotificationBytes, n.ContentSHA256 = "", 0, otherDigest
 		}, wantError: true},
@@ -574,6 +578,46 @@ func TestJobNotificationReconcileRequiresAllIdentityFields(t *testing.T) {
 				t.Fatalf("reconcile = %q, found=%v, err=%v; want found=%v err=%v", got, found, err, scenario.wantFound, scenario.wantError)
 			}
 		})
+	}
+}
+
+// TestJobNotificationReconcileRejectsNegativeNotificationBytes proves the
+// CR12 correction reaches the reconciliation gate too: Reconcile validates
+// through the same validateJobNotification as Publish, so a row declaring a
+// malformed v32 identity (empty digest with negative notification bytes) is
+// rejected in both delivery modes before any history lookup instead of being
+// reconciled as legacy.
+func TestJobNotificationReconcileRejectsNegativeNotificationBytes(t *testing.T) {
+	markdown := "OpenCode job `job-1` completed.\n\nsafe result"
+	fileMarkdown := "OpenCode job `job-1` completed. The complete result was attached."
+	history := newHistoryReader(&jobNotificationHistoryRecorder{}, "BOT", 0, nil, false)
+	for _, mode := range []domain.JobResultDeliveryMode{domain.JobResultDeliveryMarkdown, domain.JobResultDeliveryFile} {
+		for _, negative := range []int64{-1, -5} {
+			t.Run(fmt.Sprintf("%s_bytes=%d", mode, negative), func(t *testing.T) {
+				var notification domain.ExternalAgentJobNotification
+				if mode == domain.JobResultDeliveryFile {
+					notification = preV32DeliveryNotification(mode, fileMarkdown, "file bytes", "job-1-delivery.result")
+				} else {
+					// A legacy-consistent markdown row would reconcile as
+					// legacy when the negative bytes are ignored; the hardened
+					// gate must reject it before any history lookup.
+					notification = domain.ExternalAgentJobNotification{
+						JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
+						CanonicalMarkdown: markdown, ContentSHA256: domain.NotificationIdentitySHA256(markdown),
+						ContentBytes: int64(len([]byte(markdown))), RendererVersion: domain.JobNotificationRenderer,
+						Target: domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678",
+						DeliveryMode: mode, PolicyVersion: domain.JobDeliveryPolicyV1,
+						UploadState: domain.JobResultUploadNotApplicable, MaxMarkdownParts: 6,
+					}
+				}
+				notification.NotificationSHA256 = ""
+				notification.NotificationBytes = negative
+				_, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
+				if err == nil || found {
+					t.Fatalf("malformed v32 identity found=%v err=%v", found, err)
+				}
+			})
+		}
 	}
 }
 

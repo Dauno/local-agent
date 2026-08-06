@@ -221,16 +221,19 @@ func validateJobNotification(notification domain.ExternalAgentJobNotification) (
 // any v32 identity field must carry both notification_sha256 and
 // notification_bytes, and both must equal the exact SHA-256 and byte count of
 // the canonical Markdown; a partial v32 pair is rejected, never degraded to
-// the legacy columns. Only a row with no v32 identity fields at all falls
-// back to the legacy content identity: legacy Markdown rows stored the
-// canonical-Markdown digest in content_sha256 and must still match it
-// exactly, while legacy file deliveries carry a content digest whose exact
-// bytes are re-verified against the artifact at publication time.
+// the legacy columns. The legacy fallback exists only for rows with no v32
+// identity fields at all — notification_sha256 empty and notification_bytes
+// exactly zero. Any other combination, including an empty digest with
+// negative or positive bytes, is a malformed v32 declaration and fails
+// closed. Legacy Markdown rows stored the canonical-Markdown digest in
+// content_sha256 and must still match it exactly, while legacy file
+// deliveries carry a content digest whose exact bytes are re-verified
+// against the artifact at publication time.
 func validateNotificationIdentity(notification domain.ExternalAgentJobNotification) error {
 	actual := sha256.Sum256([]byte(notification.CanonicalMarkdown))
 	actualDigest := fmt.Sprintf("%x", actual)
 	actualBytes := int64(len([]byte(notification.CanonicalMarkdown)))
-	if notification.NotificationSHA256 != "" || notification.NotificationBytes > 0 {
+	if notification.NotificationSHA256 != "" || notification.NotificationBytes != 0 {
 		if notification.NotificationSHA256 == "" || notification.NotificationBytes <= 0 {
 			return errors.New("job notification identity is partially declared")
 		}
