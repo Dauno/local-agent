@@ -258,12 +258,6 @@ func (w *NotificationWorker) verifyHostCompletion(ctx context.Context, notificat
 	digest := sha256.Sum256([]byte(turn.Text))
 	resultBytes := notification.ResultBytes
 	resultDigest := notification.ResultSHA256
-	if resultDigest == "" || resultBytes <= 0 {
-		// Rows written before v32 carry the result identity in the legacy
-		// content storage columns.
-		resultBytes = notification.ContentBytes
-		resultDigest = notification.ContentSHA256
-	}
 	if resultBytes != int64(len([]byte(turn.Text))) || !strings.EqualFold(resultDigest, hex.EncodeToString(digest[:])) {
 		return port.NewNotificationPublishError("result_delivery_failed", false, false, errors.New("host completion result identity does not match durable delivery"))
 	}

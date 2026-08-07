@@ -76,7 +76,7 @@ func (p *JobNotificationPublisher) Publish(ctx context.Context, notification dom
 			extraMetadata: map[string]any{
 				"job_id": notification.JobID, "status_revision": notification.StatusRevision,
 				"kind": notification.Kind, "renderer_version": notification.RendererVersion,
-				"notification_sha256": notification.NotificationSHA256, "content_sha256": notification.ContentSHA256,
+				"notification_sha256": notification.NotificationSHA256, "content_sha256": legacyNotificationDigest(notification),
 				"notification_bytes": notification.NotificationBytes,
 				"delivery_mode":      string(notification.DeliveryMode),
 				"policy_version":     notification.PolicyVersion,
@@ -220,15 +220,10 @@ func validateJobNotification(notification domain.ExternalAgentJobNotification) (
 // against the canonical Markdown the publisher is about to send. A row with
 // any v32 identity field must carry both notification_sha256 and
 // notification_bytes, and both must equal the exact SHA-256 and byte count of
-// the canonical Markdown; a partial v32 pair is rejected, never degraded to
-// the legacy columns. The legacy fallback exists only for rows with no v32
-// identity fields at all — notification_sha256 empty and notification_bytes
-// exactly zero. Any other combination, including an empty digest with
-// negative or positive bytes, is a malformed v32 declaration and fails
-// closed. Legacy Markdown rows stored the canonical-Markdown digest in
-// content_sha256 and must still match it exactly, while legacy file
-// deliveries carry a content digest whose exact bytes are re-verified
-// against the artifact at publication time.
+// the canonical Markdown; a partial v32 pair is rejected. Rows without v32
+// identity fields are accepted only when their result identity (file mode) or
+// notification identity (Markdown mode) is complete. Any other combination,
+// including an empty digest with negative or positive bytes, fails closed.
 func validateNotificationIdentity(notification domain.ExternalAgentJobNotification) error {
 	actual := sha256.Sum256([]byte(notification.CanonicalMarkdown))
 	actualDigest := fmt.Sprintf("%x", actual)
@@ -243,12 +238,13 @@ func validateNotificationIdentity(notification domain.ExternalAgentJobNotificati
 		return nil
 	}
 	if notification.DeliveryMode == domain.JobResultDeliveryFile {
-		if !validHexDigest(notification.ContentSHA256) {
+		resultDigest, resultBytes := resultIdentity(notification)
+		if resultBytes <= 0 || !validHexDigest(resultDigest) {
 			return errors.New("file job notification legacy content identity is invalid")
 		}
 		return nil
 	}
-	if !validHexDigest(notification.ContentSHA256) || notification.ContentSHA256 != actualDigest {
+	if !validHexDigest(notification.NotificationSHA256) || notification.NotificationSHA256 != actualDigest {
 		return errors.New("job notification digest does not match canonical Markdown")
 	}
 	return nil
@@ -271,13 +267,9 @@ func validHexDigest(value string) bool {
 // and must match all four identity fields — notification_sha256,
 // notification_bytes, result_sha256, result_bytes — with exact types; a
 // payload that declares only part of the v32 identity is corrupt, not legacy,
-// and fails closed. Deliveries published before v32 wrote the result identity
-// into both notification_sha256 and content_sha256 and never carried the v32
-// identity fields; such legacy evidence is accepted only when none of the v32
-// fields are present and the complete legacy content identity (both digest
-// slots and the byte count) matches. Rows that never received a v32 identity
-// keep reconciling against their legacy content identity alone. No single
-// identity field is ever sufficient.
+// and fails closed. Pre-v32 evidence carries one digest in both legacy slots;
+// it is compared with the persisted result identity, or with the notification
+// identity when no result exists. No single identity field is ever sufficient.
 func notificationEvidenceDigestMatch(payload map[string]any, notification domain.ExternalAgentJobNotification) bool {
 	notificationDigest, hasNotificationDigest := payload["notification_sha256"].(string)
 	notificationBytes, hasNotificationBytes := metadataBytes(payload["notification_bytes"])
@@ -301,10 +293,14 @@ func notificationEvidenceDigestMatch(payload map[string]any, notification domain
 	// must match; a single matching digest is never sufficient.
 	contentDigest, hasContentDigest := payload["content_sha256"].(string)
 	legacyBytes, hasLegacyBytes := metadataBytes(payload["result_bytes"])
-	return hasContentDigest && hasLegacyBytes && notification.ContentSHA256 != "" &&
-		contentDigest == notification.ContentSHA256 &&
-		notificationDigest == notification.ContentSHA256 &&
-		legacyBytes == notification.ContentBytes
+	legacyDigest, expectedBytes := notification.ResultSHA256, notification.ResultBytes
+	if legacyDigest == "" || expectedBytes <= 0 {
+		legacyDigest, expectedBytes = notification.NotificationSHA256, notification.NotificationBytes
+	}
+	return hasContentDigest && hasLegacyBytes && legacyDigest != "" &&
+		contentDigest == legacyDigest &&
+		notificationDigest == legacyDigest &&
+		legacyBytes == expectedBytes
 }
 
 // metadataBytes extracts a non-negative integral byte count from Slack
@@ -332,19 +328,16 @@ func metadataBytes(value any) (int64, bool) {
 	}
 }
 
-// resultIdentity returns the complete sanitized result identity, falling back
-// to the legacy content storage columns for rows written before v32.
+// resultIdentity returns the complete sanitized result identity.
 func resultIdentity(notification domain.ExternalAgentJobNotification) (string, int64) {
-	digest := notification.ResultSHA256
-	bytes := notification.ResultBytes
-	if digest == "" || bytes <= 0 {
-		digest = notification.ContentSHA256
-		bytes = notification.ContentBytes
-		if bytes <= 0 {
-			bytes = notification.ResultBytes
-		}
+	return notification.ResultSHA256, notification.ResultBytes
+}
+
+func legacyNotificationDigest(notification domain.ExternalAgentJobNotification) string {
+	if notification.ResultSHA256 != "" {
+		return notification.ResultSHA256
 	}
-	return digest, bytes
+	return notification.NotificationSHA256
 }
 
 func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification domain.ExternalAgentJobNotification) (port.PublishedResponse, error) {
@@ -481,7 +474,7 @@ func (p *JobNotificationPublisher) publishParts(ctx context.Context, notificatio
 			"job_id": notification.JobID, "status_revision": notification.StatusRevision,
 			"kind": notification.Kind, "renderer_version": notification.RendererVersion,
 			"delivery_mode": string(notification.DeliveryMode), "policy_version": notification.PolicyVersion,
-			"notification_sha256": notification.NotificationSHA256, "content_sha256": notification.ContentSHA256,
+			"notification_sha256": notification.NotificationSHA256, "content_sha256": legacyNotificationDigest(notification),
 			"notification_bytes": notification.NotificationBytes,
 			"result_sha256":      notification.ResultSHA256,
 			"result_bytes":       notification.ResultBytes,

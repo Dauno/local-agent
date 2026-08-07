@@ -24,6 +24,7 @@ const (
 	JobNotificationRenderer = "markdown_v1"
 	JobDeliveryPolicyV1     = "delivery_v1"
 	SlackMarkdownChunkRunes = 11900
+	maxMarkdownParts        = 8
 )
 
 type NotificationPublishState string
@@ -61,8 +62,8 @@ type ResultDeliveryPolicy struct {
 }
 
 func (p ResultDeliveryPolicy) Validate() error {
-	if p.MaxMarkdownParts < 1 || p.MaxMarkdownParts > 8 {
-		return errors.New("result delivery max Markdown parts must be between 1 and 8")
+	if p.MaxMarkdownParts < 1 || p.MaxMarkdownParts > maxMarkdownParts {
+		return fmt.Errorf("result delivery max Markdown parts must be between 1 and %d", maxMarkdownParts)
 	}
 	if p.MaxFileBytes <= 0 || p.MaxFileBytes > p.MaxResultArtifactBytes {
 		return errors.New("result delivery max file bytes must be positive and within the artifact bound")
@@ -93,10 +94,6 @@ type ExternalAgentJobNotification struct {
 	// terminal snapshots; MarkNotificationPublished never infers it.
 	RootActivationRequired bool
 	CanonicalMarkdown      string
-	// ContentSHA256 is the legacy storage column. New contracts use the
-	// notification/result identity pair below; this field is preserved only
-	// for rows persisted before v32 and is never a routing input.
-	ContentSHA256 string
 	// NotificationSHA256 and NotificationBytes are the notification identity
 	// over the canonical Markdown bytes (SHA-256 lowercase hex).
 	NotificationSHA256 string
@@ -135,15 +132,6 @@ const (
 	ActivationCompleted         ExternalAgentJobActivationState = "completed"
 	ActivationCompletionUnknown ExternalAgentJobActivationState = "completion_unknown"
 	ActivationFailed            ExternalAgentJobActivationState = "failed"
-
-	// Job-prefixed aliases mirror the existing external-agent job constants.
-	JobActivationPending           = ActivationPending
-	JobActivationProcessing        = ActivationProcessing
-	JobActivationModelStarted      = ActivationModelStarted
-	JobActivationResponsePrepared  = ActivationResponsePrepared
-	JobActivationCompleted         = ActivationCompleted
-	JobActivationCompletionUnknown = ActivationCompletionUnknown
-	JobActivationFailed            = ActivationFailed
 
 	// ActivationForegroundRetiredCode is the bounded error code stamped by the
 	// v31 repair migration on foreground activations retired without model
@@ -199,10 +187,7 @@ func (a ExternalAgentJobActivation) Validate() error {
 	if !validActivationTerminalStatus(a.TerminalStatus) {
 		return fmt.Errorf("invalid external-agent activation terminal status %q", a.TerminalStatus)
 	}
-	if len(a.NotificationSHA256) != sha256.Size*2 {
-		return errors.New("external-agent activation notification digest is invalid")
-	}
-	if _, err := hex.DecodeString(a.NotificationSHA256); err != nil {
+	if !validSHA256Hex(a.NotificationSHA256) {
 		return errors.New("external-agent activation notification digest is invalid")
 	}
 	if a.DeliveryMode != JobResultDeliveryMarkdown && a.DeliveryMode != JobResultDeliveryFile {
@@ -323,10 +308,6 @@ type ExternalAgentJobIdentityHealth struct {
 	RetiredForegroundActivations int
 }
 
-// NotificationHealthSnapshot is kept as a descriptive alias for callers that
-// expose the aggregate as a health snapshot.
-type NotificationHealthSnapshot = ExternalAgentJobNotificationHealth
-
 // ExternalAgentJobDeliveryInspection is the redacted administrative view of a
 // single delivery. Artifact references, canonical content, actor identity and
 // conversation keys are intentionally absent.
@@ -374,14 +355,6 @@ type ExternalAgentJobInspection struct {
 	ProcessAlive *bool `json:"process_alive"`
 }
 
-// ExternalAgentJobAdminView is an explicit name for the same safe view used by
-// the local jobs inspect command.
-type ExternalAgentJobAdminView = ExternalAgentJobInspection
-
-// ExternalAgentJobDelivery is the durable, immutable delivery identity. The
-// notification name remains as the compatibility-facing store type.
-type ExternalAgentJobDelivery = ExternalAgentJobNotification
-
 func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNotification, error) {
 	target, err := ConversationReplyTarget(job.ConversationKey)
 	if err != nil {
@@ -410,15 +383,17 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 		markdown += " The operation was explicitly abandoned; external state was not asserted to be reverted."
 	}
 	markdown = sanitizeNotificationText(markdown, 8000)
-	digest := sha256.Sum256([]byte(markdown))
-	notificationSHA := fmt.Sprintf("%x", digest)
+	notificationSHA := NotificationIdentitySHA256(markdown)
+	if notificationSHA == "" {
+		return ExternalAgentJobNotification{}, errors.New("external-agent notification Markdown is invalid")
+	}
 	resultSHA, resultBytes := ValidResultIdentity(job.ResultSHA256, job.ResultBytes)
 	target.CorrelationID = fmt.Sprintf("job:%s:%d:%s", job.ID, job.StatusRevision, JobNotificationTerminal)
 	return ExternalAgentJobNotification{
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
-		CanonicalMarkdown: markdown, ContentSHA256: notificationSHA,
+		CanonicalMarkdown:      markdown,
 		RootActivationRequired: job.Mode == JobDetached,
 		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
 		ResultSHA256: resultSHA, ResultBytes: resultBytes,
@@ -457,7 +432,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	if maxParts <= 0 {
 		maxParts = 1
 	}
-	if maxParts > 8 {
+	if maxParts > maxMarkdownParts {
 		return ExternalAgentJobNotification{}, errors.New("result delivery Markdown part policy is invalid")
 	}
 	contentDigest := strings.ToLower(result.DeliveryContentSHA256)
@@ -478,7 +453,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	if contentBytes <= 0 {
 		return ExternalAgentJobNotification{}, errors.New("result delivery content size is invalid")
 	}
-	if _, err := hex.DecodeString(contentDigest); err != nil || len(contentDigest) != sha256.Size*2 {
+	if !validSHA256Hex(contentDigest) {
 		return ExternalAgentJobNotification{}, errors.New("result delivery digest is invalid")
 	}
 	if mode == JobResultDeliveryMarkdown && result.Text != "" {
@@ -527,7 +502,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
-		CanonicalMarkdown: markdown, ContentSHA256: contentDigest, RendererVersion: JobNotificationRenderer,
+		CanonicalMarkdown: markdown, RendererVersion: JobNotificationRenderer,
 		RootActivationRequired: job.Mode == JobDetached,
 		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
 		ResultSHA256: contentDigest, ResultBytes: contentBytes,
@@ -573,15 +548,20 @@ func NotificationIdentitySHA256(markdown string) string {
 	return fmt.Sprintf("%x", digest)
 }
 
+func validSHA256Hex(value string) bool {
+	if len(value) != sha256.Size*2 {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
 // ValidResultIdentity returns a lowercase 64-hex digest and positive byte
 // count only when both form a complete result identity. Anything else fails
 // closed to empty values; no digest is ever fabricated for missing data.
 func ValidResultIdentity(sha256Hex string, bytes int64) (string, int64) {
 	sha256Hex = strings.ToLower(sha256Hex)
-	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
-		return "", 0
-	}
-	if _, err := hex.DecodeString(sha256Hex); err != nil {
+	if !validSHA256Hex(sha256Hex) || bytes <= 0 {
 		return "", 0
 	}
 	return sha256Hex, bytes
@@ -597,10 +577,7 @@ func ValidInlineResult(summary, sha256Hex string, bytes int64) bool {
 		return false
 	}
 	sha256Hex = strings.ToLower(sha256Hex)
-	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
-		return false
-	}
-	if _, err := hex.DecodeString(sha256Hex); err != nil {
+	if !validSHA256Hex(sha256Hex) || bytes <= 0 {
 		return false
 	}
 	if int64(len([]byte(summary))) != bytes {
@@ -620,10 +597,7 @@ func ValidArtifactResult(artifactRef, sha256Hex string, bytes int64) bool {
 		return false
 	}
 	sha256Hex = strings.ToLower(sha256Hex)
-	if len(sha256Hex) != sha256.Size*2 || bytes <= 0 {
-		return false
-	}
-	if _, err := hex.DecodeString(sha256Hex); err != nil {
+	if !validSHA256Hex(sha256Hex) || bytes <= 0 {
 		return false
 	}
 	return true
@@ -699,27 +673,11 @@ type ResultError struct {
 }
 
 func (e *ResultError) Error() string {
-	if e == nil {
-		return ""
-	}
 	return string(e.Code)
 }
 
 func (e *ResultError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
 	return e.Err
-}
-
-var validResultErrorCodes = map[ResultErrorCode]bool{
-	ResultErrorIdentityInvalid:          true,
-	ResultErrorArtifactMissing:          true,
-	ResultErrorArtifactOwnerRefMismatch: true,
-	ResultErrorArtifactBytesMismatch:    true,
-	ResultErrorArtifactDigestMismatch:   true,
-	ResultErrorArtifactInvalid:          true,
-	ResultErrorChunkRequestInvalid:      true,
 }
 
 // ResultErrorCodeOf extracts the bounded classification from an error. Any
@@ -727,25 +685,26 @@ var validResultErrorCodes = map[ResultErrorCode]bool{
 // result_artifact_invalid code, so unmapped details can never leak.
 func ResultErrorCodeOf(err error) ResultErrorCode {
 	var classified *ResultError
-	if errors.As(err, &classified) && classified != nil && validResultErrorCodes[classified.Code] {
-		return classified.Code
+	if errors.As(err, &classified) && classified != nil {
+		switch classified.Code {
+		case ResultErrorIdentityInvalid, ResultErrorArtifactMissing,
+			ResultErrorArtifactOwnerRefMismatch, ResultErrorArtifactBytesMismatch,
+			ResultErrorArtifactDigestMismatch, ResultErrorArtifactInvalid,
+			ResultErrorChunkRequestInvalid:
+			return classified.Code
+		}
 	}
 	return ResultErrorArtifactInvalid
 }
 
 func sanitizeNotificationText(value string, maxRunes int) string {
-	var builder strings.Builder
-	for _, r := range value {
-		if r == '\x00' || (r < ' ' && r != '\n' && r != '\r' && r != '\t') {
-			continue
-		}
-		if r == '<' {
-			builder.WriteString("&lt;")
-		} else {
-			builder.WriteRune(r)
-		}
+	if !utf8.ValidString(value) {
+		value = strings.ToValidUTF8(value, "\uFFFD")
 	}
-	result := builder.String()
+	result, err := SanitizeResultText(value)
+	if err != nil {
+		return ""
+	}
 	if maxRunes > 0 && utf8.RuneCountInString(result) > maxRunes {
 		runes := []rune(result)
 		if maxRunes == 1 {
@@ -768,11 +727,8 @@ func ConversationReplyTarget(key ConversationKey) (ReplyTarget, error) {
 		return ReplyTarget{}, errors.New("job conversation key is malformed")
 	}
 	target := ReplyTarget{ChannelID: parts[3]}
-	for index := 4; index+1 < len(parts); index++ {
-		if parts[index] == "thread" && parts[index+1] != "" {
-			target.ThreadTS = parts[index+1]
-			break
-		}
+	if len(parts) == 6 {
+		target.ThreadTS = parts[5]
 	}
 	return target, nil
 }
@@ -800,20 +756,20 @@ const (
 )
 
 type ExternalAgentJobRequest struct {
-	Provider             string
-	Profile              string
-	PrimaryProject       string
-	RegistryRevision     string
-	Task                 string
-	Mode                 ExternalAgentJobMode
-	PermissionOptionKind string
-	Timeout              time.Duration
-	PrimaryPath          string
-	WrapperCallID        string
-	OriginalCallID       string
-	Actor                string
-	TeamID               string
-	ConversationKey      ConversationKey
+	Provider             string               `json:"provider"`
+	Profile              string               `json:"profile"`
+	PrimaryProject       string               `json:"primary_project"`
+	RegistryRevision     string               `json:"registry_revision"`
+	Task                 string               `json:"task"`
+	Mode                 ExternalAgentJobMode `json:"mode"`
+	PermissionOptionKind string               `json:"permission_option_kind"`
+	Timeout              time.Duration        `json:"timeout_nanos"`
+	PrimaryPath          string               `json:"-"`
+	WrapperCallID        string               `json:"wrapper_call_id"`
+	OriginalCallID       string               `json:"original_call_id"`
+	Actor                string               `json:"actor"`
+	TeamID               string               `json:"team_id"`
+	ConversationKey      ConversationKey      `json:"conversation_key"`
 }
 
 type ExternalAgentJob struct {
@@ -822,7 +778,6 @@ type ExternalAgentJob struct {
 	Provider            string
 	Profile             string
 	PrimaryProject      string
-	AdditionalProjects  []string // Legacy persisted data only; dispatch rejects non-empty values.
 	RegistryRevision    string
 	Task                string
 	RequestSHA256       string
@@ -957,40 +912,26 @@ func (j *ExternalAgentJob) Transition(next ExternalAgentJobStatus) error {
 }
 
 func validJobTransition(from, to ExternalAgentJobStatus) bool {
-	legal := map[ExternalAgentJobStatus]map[ExternalAgentJobStatus]bool{
-		JobQueued:            {JobRunning: true, JobCancelled: true},
-		JobRunning:           {JobCompleted: true, JobFailed: true, JobCancelRequested: true, JobInterruptedSafe: true, JobCompletionUnknown: true},
-		JobCancelRequested:   {JobCancelled: true, JobCompletionUnknown: true},
-		JobInterruptedSafe:   {JobQueued: true, JobCancelled: true},
-		JobCompletionUnknown: {JobReconciling: true, JobAbandoned: true},
-		JobReconciling:       {JobCompleted: true, JobFailed: true, JobCompletionUnknown: true, JobCancelRequested: true},
+	switch from {
+	case JobQueued:
+		return to == JobRunning || to == JobCancelled
+	case JobRunning:
+		return to == JobCompleted || to == JobFailed || to == JobCancelRequested || to == JobInterruptedSafe || to == JobCompletionUnknown
+	case JobCancelRequested:
+		return to == JobCancelled || to == JobCompletionUnknown
+	case JobInterruptedSafe:
+		return to == JobQueued || to == JobCancelled
+	case JobCompletionUnknown:
+		return to == JobReconciling || to == JobAbandoned
+	case JobReconciling:
+		return to == JobCompleted || to == JobFailed || to == JobCompletionUnknown || to == JobCancelRequested
+	default:
+		return false
 	}
-	return legal[from][to]
 }
 
 func ExternalAgentJobRequestDigest(request ExternalAgentJobRequest) string {
-	canonical, _ := json.Marshal(struct {
-		Provider             string               `json:"provider"`
-		Profile              string               `json:"profile"`
-		PrimaryProject       string               `json:"primary_project"`
-		RegistryRevision     string               `json:"registry_revision"`
-		Task                 string               `json:"task"`
-		Mode                 ExternalAgentJobMode `json:"mode"`
-		PermissionOptionKind string               `json:"permission_option_kind"`
-		TimeoutNanos         int64                `json:"timeout_nanos"`
-		WrapperCallID        string               `json:"wrapper_call_id"`
-		OriginalCallID       string               `json:"original_call_id"`
-		Actor                string               `json:"actor"`
-		TeamID               string               `json:"team_id"`
-		ConversationKey      ConversationKey      `json:"conversation_key"`
-	}{
-		Provider: request.Provider, Profile: request.Profile, PrimaryProject: request.PrimaryProject,
-		RegistryRevision: request.RegistryRevision, Task: request.Task, Mode: request.Mode,
-		PermissionOptionKind: request.PermissionOptionKind,
-		TimeoutNanos:         request.Timeout.Nanoseconds(), WrapperCallID: request.WrapperCallID,
-		OriginalCallID: request.OriginalCallID, Actor: request.Actor, TeamID: request.TeamID,
-		ConversationKey: request.ConversationKey,
-	})
+	canonical, _ := json.Marshal(request)
 	digest := sha256.Sum256(canonical)
 	return fmt.Sprintf("%x", digest)
 }
