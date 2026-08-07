@@ -793,7 +793,7 @@ func (r *detachedFakeACP) Run(_ context.Context, request domain.AcpInvocationReq
 	return domain.AcpInvocationResult{Text: r.raw}, nil
 }
 
-func (*detachedFakeACP) Probe(context.Context, string, []string, []domain.ACPConfigOption) error {
+func (*detachedFakeACP) Probe(context.Context, string, []domain.ACPConfigOption) error {
 	return nil
 }
 
@@ -946,7 +946,7 @@ func (r *foregroundFakeACP) Run(_ context.Context, request domain.AcpInvocationR
 	return domain.AcpInvocationResult{Text: r.raw}, nil
 }
 
-func (*foregroundFakeACP) Probe(context.Context, string, []string, []domain.ACPConfigOption) error {
+func (*foregroundFakeACP) Probe(context.Context, string, []domain.ACPConfigOption) error {
 	return nil
 }
 
@@ -1022,17 +1022,17 @@ func (r *foregroundFacadeRuntime) Run(ctx context.Context, request domain.AcpInv
 	}
 	return r.jobs.StartAndWait(ctx, domain.ExternalAgentJobRequest{
 		Provider: provider, Profile: request.ProfileName,
-		PrimaryProject: request.PrimaryProject, AdditionalProjects: request.AdditionalProjects,
-		RegistryRevision: request.RegistryRevision, Task: request.Task, Mode: domain.JobForeground,
+		PrimaryProject: request.PrimaryProject, RegistryRevision: request.RegistryRevision,
+		Task: request.Task, Mode: domain.JobForeground,
 		PermissionOptionKind: request.PermissionOptionKind, Timeout: request.Timeout,
-		PrimaryPath: request.PrimaryPath, AdditionalPaths: request.AdditionalPaths,
+		PrimaryPath:   request.PrimaryPath,
 		WrapperCallID: request.OriginalCallID, OriginalCallID: request.OriginalCallID,
 		Actor: request.Actor, TeamID: request.TeamID, ConversationKey: request.ConversationKey,
 	})
 }
 
-func (r *foregroundFacadeRuntime) Probe(ctx context.Context, primaryPath string, additionalPaths []string, options []domain.ACPConfigOption) error {
-	return r.direct.Probe(ctx, primaryPath, additionalPaths, options)
+func (r *foregroundFacadeRuntime) Probe(ctx context.Context, primaryPath string, options []domain.ACPConfigOption) error {
+	return r.direct.Probe(ctx, primaryPath, options)
 }
 
 func (r *foregroundFacadeRuntime) Describe(ctx context.Context) (domain.ACPInitResult, error) {

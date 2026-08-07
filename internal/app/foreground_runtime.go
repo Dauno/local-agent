@@ -41,17 +41,17 @@ func (r *foregroundExternalAgentRuntime) Run(ctx context.Context, request domain
 	}
 	return r.jobs.StartAndWait(ctx, domain.ExternalAgentJobRequest{
 		Provider: provider, Profile: request.ProfileName,
-		PrimaryProject: request.PrimaryProject, AdditionalProjects: request.AdditionalProjects,
-		RegistryRevision: request.RegistryRevision, Task: request.Task, Mode: domain.JobForeground,
+		PrimaryProject: request.PrimaryProject, RegistryRevision: request.RegistryRevision,
+		Task: request.Task, Mode: domain.JobForeground,
 		PermissionOptionKind: request.PermissionOptionKind, Timeout: request.Timeout,
-		PrimaryPath: request.PrimaryPath, AdditionalPaths: request.AdditionalPaths,
+		PrimaryPath:   request.PrimaryPath,
 		WrapperCallID: originalCallID, OriginalCallID: originalCallID,
 		Actor: request.Actor, TeamID: request.TeamID, ConversationKey: request.ConversationKey,
 	})
 }
 
-func (r *foregroundExternalAgentRuntime) Probe(ctx context.Context, primaryPath string, additionalPaths []string, options []domain.ACPConfigOption) error {
-	return r.direct.Probe(ctx, primaryPath, additionalPaths, options)
+func (r *foregroundExternalAgentRuntime) Probe(ctx context.Context, primaryPath string, options []domain.ACPConfigOption) error {
+	return r.direct.Probe(ctx, primaryPath, options)
 }
 
 func (r *foregroundExternalAgentRuntime) Describe(ctx context.Context) (domain.ACPInitResult, error) {

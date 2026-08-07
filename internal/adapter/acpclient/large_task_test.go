@@ -33,7 +33,7 @@ func TestACPFramesDoNotUseCumulativeStdoutBudget(t *testing.T) {
 }
 
 func TestACPFrameOneByteOverLimitReturnsTypedError(t *testing.T) {
-	script := fakeACPAgentScript(true, false)
+	script := fakeACPAgentScript(false)
 	client := acpclient.NewWithBounds("python3", []string{"-c", script}, acpclient.Bounds{
 		MaxFrameBytes:        256,
 		MaxInlineResultBytes: 128,
@@ -66,7 +66,7 @@ func TestACPCollectorUsesFinalAssistantMessageID(t *testing.T) {
 }
 
 func TestACPLargeFinalResultReturnsCompleteBoundedText(t *testing.T) {
-	client := acpclient.NewWithBounds("python3", []string{"-c", fakeACPAgentScript(true, false)}, acpclient.Bounds{
+	client := acpclient.NewWithBounds("python3", []string{"-c", fakeACPAgentScript(false)}, acpclient.Bounds{
 		MaxFrameBytes:          128 * 1024,
 		MaxInlineResultBytes:   4,
 		MaxResultArtifactBytes: 4096,
@@ -87,7 +87,7 @@ func TestACPLargeFinalResultReturnsCompleteBoundedText(t *testing.T) {
 }
 
 func TestACPResultKeepsUTF8TextForHostMaterialization(t *testing.T) {
-	script := strings.Replace(fakeACPAgentScript(true, false), `"text":"safe final text"`, `"text":"🚀🚀"`, 1)
+	script := strings.Replace(fakeACPAgentScript(false), `"text":"safe final text"`, `"text":"🚀🚀"`, 1)
 	client := acpclient.NewWithBounds("python3", []string{"-c", script}, acpclient.Bounds{
 		MaxFrameBytes: 64 * 1024, MaxInlineResultBytes: 5, MaxResultArtifactBytes: 4096, StderrTailBytes: 1024,
 	})

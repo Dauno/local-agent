@@ -169,7 +169,7 @@ for line in sys.stdin:
     req_id = req.get("id")
     params = req.get("params", {})
     if method == "initialize":
-        respond(req_id, {"protocolVersion": 1, "agentInfo":{"name":"fake-acp-agent","version":"1.0.0"}, "agentCapabilities":{"sessionCapabilities":{"additionalDirectories": False,"close":{}}}})
+        respond(req_id, {"protocolVersion": 1, "agentInfo":{"name":"fake-acp-agent","version":"1.0.0"}, "agentCapabilities":{"sessionCapabilities":{"close":{}}}})
     elif method == "session/new":
         respond(req_id, {"sessionId":session_id,"configOptions":[{"id":"model","name":"model","type":"select","currentValue":"default","options":[]}]})
     elif method == "session/set_config_option":

@@ -26,15 +26,15 @@ func TestExternalAgentJobAllowsOnlyDeclaredTransitions(t *testing.T) {
 func TestExternalAgentJobRequestDigestExcludesHostPaths(t *testing.T) {
 	request := domain.ExternalAgentJobRequest{
 		Provider: "opencode", Profile: "build", PrimaryProject: "workspace",
-		AdditionalProjects: []string{"docs"}, RegistryRevision: "rev-1",
-		Task: "create a document", Mode: domain.JobDetached,
+		RegistryRevision: "rev-1",
+		Task:             "create a document", Mode: domain.JobDetached,
 		PermissionOptionKind: domain.ACPPermissionAllowOnce,
 		Timeout:              2 * time.Hour,
-		PrimaryPath:          "/private/one", AdditionalPaths: []string{"/private/two"},
+		PrimaryPath:          "/private/one",
 	}
 	left := domain.ExternalAgentJobRequestDigest(request)
 	request.PrimaryPath = "/another/private/path"
-	request.AdditionalPaths = []string{"/different"}
+	request.PrimaryPath = "/different"
 	right := domain.ExternalAgentJobRequestDigest(request)
 	if left == "" || left != right || len(left) != 64 || strings.Contains(left, "private") {
 		t.Fatalf("digest = %q / %q", left, right)

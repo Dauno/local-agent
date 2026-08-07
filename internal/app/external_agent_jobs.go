@@ -51,7 +51,10 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
 			continue
 		}
-		primary, additional, err := resolveACPProjects(child.projectRoots, job.PrimaryProject, job.AdditionalProjects)
+		if len(job.AdditionalProjects) > 0 {
+			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorInvalidInput, Err: errors.New("ACP jobs support exactly one project")}
+		}
+		primary, err := resolveACPProject(child.projectRoots, job.PrimaryProject)
 		if err != nil {
 			return domain.AcpInvocationResult{}, err
 		}
@@ -68,7 +71,6 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		}
 		result, runErr := child.acpRuntime.Run(ctx, domain.AcpInvocationRequest{
 			JobID: job.ID, PrimaryProject: job.PrimaryProject, PrimaryPath: primary,
-			AdditionalProjects: append([]string(nil), job.AdditionalProjects...), AdditionalPaths: additional,
 			ProfileName: job.Profile, ConfigOptions: options, PermissionOptionKind: child.acpResolved.PermissionOptionKind,
 			GlobalInstruction: d.global, AgentInstruction: child.definition.Instruction, Task: job.Task,
 			Timeout: time.Until(job.TimeoutAt),
@@ -236,7 +238,10 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
 			continue
 		}
-		primary, additional, err := resolveACPProjects(child.projectRoots, job.PrimaryProject, job.AdditionalProjects)
+		if len(job.AdditionalProjects) > 0 {
+			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorInvalidInput, Err: errors.New("ACP jobs support exactly one project")}
+		}
+		primary, err := resolveACPProject(child.projectRoots, job.PrimaryProject)
 		if err != nil {
 			return domain.AcpInvocationResult{}, err
 		}
@@ -254,7 +259,6 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 		}
 		result, runErr := recoverer.ReconcileInvocation(ctx, domain.AcpInvocationRequest{
 			JobID: job.ID, PrimaryProject: job.PrimaryProject, PrimaryPath: primary,
-			AdditionalProjects: append([]string(nil), job.AdditionalProjects...), AdditionalPaths: additional,
 			ProfileName: job.Profile, ProviderName: job.Provider, ConfigOptions: options,
 			GlobalInstruction: d.global, AgentInstruction: child.definition.Instruction,
 			PermissionOptionKind: child.acpResolved.PermissionOptionKind, Timeout: recoveryTimeout,

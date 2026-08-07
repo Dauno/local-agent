@@ -719,16 +719,15 @@ func TestResolvePaths(t *testing.T) {
 		t.Fatalf("ResolvePaths() error: %v", err)
 	}
 	want := config.Paths{
-		ProjectRoot:         root,
-		StateDir:            filepath.Join(root, "var", "state"),
-		DatabaseFile:        filepath.Join(root, "outside", "agent.db"),
-		ConfigFile:          filepath.Join(root, ".local-agent", "config.yaml"),
-		ManifestFile:        filepath.Join(root, ".local-agent", "app-manifest.local.yaml"),
-		EnvExampleFile:      filepath.Join(root, ".local-agent", "local.env.example"),
-		EnvFile:             filepath.Join(root, ".env"),
-		MemoryDir:           filepath.Join(root, "var", "state", "memory"),
-		OpenCodeWorktreeDir: filepath.Join(root, "var", "state", "worktrees"),
-		ArtifactDir:         filepath.Join(root, "var", "state", "artifacts"),
+		ProjectRoot:    root,
+		StateDir:       filepath.Join(root, "var", "state"),
+		DatabaseFile:   filepath.Join(root, "outside", "agent.db"),
+		ConfigFile:     filepath.Join(root, ".local-agent", "config.yaml"),
+		ManifestFile:   filepath.Join(root, ".local-agent", "app-manifest.local.yaml"),
+		EnvExampleFile: filepath.Join(root, ".local-agent", "local.env.example"),
+		EnvFile:        filepath.Join(root, ".env"),
+		MemoryDir:      filepath.Join(root, "var", "state", "memory"),
+		ArtifactDir:    filepath.Join(root, "var", "state", "artifacts"),
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("ResolvePaths()\n got: %#v\nwant: %#v", paths, want)

@@ -18,7 +18,7 @@ func (f *fakeRuntime) Run(context.Context, domain.AcpInvocationRequest) (domain.
 	return domain.AcpInvocationResult{}, nil
 }
 
-func (f *fakeRuntime) Probe(context.Context, string, []string, []domain.ACPConfigOption) error {
+func (f *fakeRuntime) Probe(context.Context, string, []domain.ACPConfigOption) error {
 	index := f.probes
 	f.probes++
 	if index < len(f.probeErrors) {

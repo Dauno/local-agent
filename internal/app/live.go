@@ -325,15 +325,11 @@ func (acpProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.
 		if err != nil {
 			return "", fmt.Errorf("project %q: %w", name, err)
 		}
-		if err := client.Probe(ctx, canonical, nil, options); err != nil {
+		if err := client.Probe(ctx, canonical, options); err != nil {
 			return "", fmt.Errorf("project %q: %w", name, err)
 		}
 	}
-	additional := "controlled fallback unavailable"
-	if description.SessionCapabilities.AdditionalDirectories {
-		additional = "native additionalDirectories available"
-	}
-	return fmt.Sprintf("%s %s uses ACP v%s; profile verified; %s", description.AgentInfo.Name, description.AgentInfo.Version, description.ProtocolVersion, additional), nil
+	return fmt.Sprintf("%s %s uses ACP v%s; single-project profile verified", description.AgentInfo.Name, description.AgentInfo.Version, description.ProtocolVersion), nil
 }
 
 // CheckAuthentication reports saved-login status for a known mapper identity

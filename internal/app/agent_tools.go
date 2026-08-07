@@ -65,9 +65,8 @@ type preparedAgentTool struct {
 }
 
 type acpAgentArgs struct {
-	Project            string   `json:"project" jsonschema:"registered project name to use as the primary workspace"`
-	Task               string   `json:"task" jsonschema:"complete bounded task for the external agent"`
-	AdditionalProjects []string `json:"additional_projects,omitempty" jsonschema:"optional additional registered project names"`
+	Project string `json:"project" jsonschema:"registered project name to use as the workspace"`
+	Task    string `json:"task" jsonschema:"complete bounded task for the external agent"`
 }
 
 type acpAgentResult struct {
@@ -345,7 +344,7 @@ func invokeACPAgent(ctx context.Context, definition agentdef.AgentDef, globalIns
 }
 
 func invokeACPAgentForInvocation(ctx context.Context, definition agentdef.AgentDef, globalInstruction string, runtime port.ExternalAgentRuntime, resolved *agentdef.ResolvedModel, projectRoots map[string]string, timeout time.Duration, registryRevision string, jobStarter port.ExternalAgentJobStarter, actor string, key domain.ConversationKey, args acpAgentArgs) (acpAgentResult, error) {
-	primaryPath, additionalPaths, err := resolveACPProjects(projectRoots, args.Project, args.AdditionalProjects)
+	primaryPath, err := resolveACPProject(projectRoots, args.Project)
 	if err != nil {
 		return acpAgentResult{}, err
 	}
@@ -362,9 +361,8 @@ func invokeACPAgentForInvocation(ctx context.Context, definition agentdef.AgentD
 		}
 		job, err := jobStarter.Start(ctx, domain.ExternalAgentJobRequest{
 			Provider: resolved.Provider.Name, Profile: definition.Runtime, PrimaryProject: args.Project,
-			AdditionalProjects: append([]string(nil), args.AdditionalProjects...), RegistryRevision: registryRevision,
-			Task: args.Task, Mode: domain.JobDetached, PermissionOptionKind: resolved.PermissionOptionKind,
-			Timeout: timeout, PrimaryPath: primaryPath, AdditionalPaths: additionalPaths,
+			RegistryRevision: registryRevision, Task: args.Task, Mode: domain.JobDetached,
+			PermissionOptionKind: resolved.PermissionOptionKind, Timeout: timeout, PrimaryPath: primaryPath,
 			WrapperCallID: ctxFunctionCallID(ctx), OriginalCallID: ctxFunctionCallID(ctx), Actor: actor,
 			TeamID: teamIDFromConversation(key), ConversationKey: key,
 		})
@@ -375,11 +373,9 @@ func invokeACPAgentForInvocation(ctx context.Context, definition agentdef.AgentD
 		return acpAgentResult{Result: string(encoded)}, nil
 	}
 	result, err := runtime.Run(ctx, domain.AcpInvocationRequest{
-		PrimaryProject:     args.Project,
-		PrimaryPath:        primaryPath,
-		AdditionalProjects: append([]string(nil), args.AdditionalProjects...),
-		AdditionalPaths:    additionalPaths,
-		ProfileName:        definition.Runtime, ProviderName: resolved.Provider.Name, RegistryRevision: registryRevision,
+		PrimaryProject: args.Project,
+		PrimaryPath:    primaryPath,
+		ProfileName:    definition.Runtime, ProviderName: resolved.Provider.Name, RegistryRevision: registryRevision,
 		ConfigOptions:        configOptions,
 		PermissionOptionKind: resolved.PermissionOptionKind,
 		GlobalInstruction:    globalInstruction,
@@ -446,36 +442,19 @@ func teamIDFromConversation(key domain.ConversationKey) string {
 	return ""
 }
 
-func resolveACPProjects(projectRoots map[string]string, primary string, additional []string) (string, []string, error) {
-	if strings.TrimSpace(primary) == "" {
-		return "", nil, errors.New("primary project must not be empty")
+func resolveACPProject(projectRoots map[string]string, project string) (string, error) {
+	if strings.TrimSpace(project) == "" {
+		return "", errors.New("project must not be empty")
 	}
-	primaryPath, exists := projectRoots[primary]
+	projectPath, exists := projectRoots[project]
 	if !exists {
-		return "", nil, fmt.Errorf("project %q is not registered", primary)
+		return "", fmt.Errorf("project %q is not registered", project)
 	}
-	canonicalPrimary, err := canonicalProjectPath(primaryPath)
+	canonical, err := canonicalProjectPath(projectPath)
 	if err != nil {
-		return "", nil, fmt.Errorf("resolve project %q: %w", primary, err)
+		return "", fmt.Errorf("resolve project %q: %w", project, err)
 	}
-	seen := map[string]struct{}{primary: {}}
-	additionalPaths := make([]string, 0, len(additional))
-	for _, name := range additional {
-		if _, duplicate := seen[name]; duplicate {
-			return "", nil, fmt.Errorf("project %q is selected more than once", name)
-		}
-		seen[name] = struct{}{}
-		path, exists := projectRoots[name]
-		if !exists {
-			return "", nil, fmt.Errorf("project %q is not registered", name)
-		}
-		canonical, err := canonicalProjectPath(path)
-		if err != nil {
-			return "", nil, fmt.Errorf("resolve project %q: %w", name, err)
-		}
-		additionalPaths = append(additionalPaths, canonical)
-	}
-	return canonicalPrimary, additionalPaths, nil
+	return canonical, nil
 }
 
 func canonicalProjectPath(path string) (string, error) {

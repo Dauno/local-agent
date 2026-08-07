@@ -38,7 +38,6 @@ type preparedWorkflowTool struct {
 	acpRuntimes       map[string]port.ExternalAgentRuntime
 	acpResolved       map[string]*agentdef.ResolvedModel
 	projectRoots      map[string]string
-	worktreeRoot      string
 	timeout           time.Duration
 	globalInstruction string
 	coordinator       port.OpenCodeCoordinator
@@ -93,7 +92,6 @@ type invocationScope struct {
 	acpRuntimes       map[string]port.ExternalAgentRuntime
 	acpResolved       map[string]*agentdef.ResolvedModel
 	projectRoots      map[string]string
-	worktreeRoot      string
 	timeout           time.Duration
 }
 
@@ -182,7 +180,6 @@ func prepareRootWorkflowTools(
 			acpRuntimes:       acpRuntimes,
 			acpResolved:       acpResolved,
 			projectRoots:      paths.SandboxProjectRoots,
-			worktreeRoot:      paths.OpenCodeWorktreeDir,
 			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
 		}); err != nil {
 			return nil, fmt.Errorf("workflow %q: build agent tree: %w", blueprint.ID, err)
@@ -194,7 +191,6 @@ func prepareRootWorkflowTools(
 			acpRuntimes:       acpRuntimes,
 			acpResolved:       acpResolved,
 			projectRoots:      paths.SandboxProjectRoots,
-			worktreeRoot:      paths.OpenCodeWorktreeDir,
 			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
 			globalInstruction: root.EffectiveDelegatedGlobalInstruction(),
 			coordinator:       coordinator,
@@ -210,9 +206,8 @@ func (p *preparedWorkflowTool) buildAgentTool(scope invocationScope) (tool.Tool,
 	scope.acpRuntimes = p.acpRuntimes
 	scope.acpResolved = p.acpResolved
 	scope.projectRoots = p.projectRoots
-	scope.worktreeRoot = p.worktreeRoot
 	scope.timeout = p.timeout
-	if p.blueprint.ID == "trd_generator" {
+	if p.blueprint.ID == "trd_generator" || p.blueprint.ID == "tdd_engineer" {
 		return p.buildTRDTool(scope)
 	}
 	workflowRoot, err := buildWorkflowAgent(p.blueprint, p.models, scope)
@@ -250,14 +245,14 @@ func (p *preparedWorkflowTool) buildTRDTool(scope invocationScope) (tool.Tool, e
 			}
 			defer release()
 		}
-		primaryPath, _, err := resolveACPProjects(p.projectRoots, args.Project, nil)
+		primaryPath, err := resolveACPProject(p.projectRoots, args.Project)
 		if err != nil {
 			return trdResult{}, err
 		}
 		if strings.TrimSpace(args.Requirements) == "" {
 			return trdResult{}, errors.New("TRD requirements must not be empty")
 		}
-		worktreeRoot, err := createWorkflowWorktreeRoot(p.worktreeRoot, args.Project, ctx.FunctionCallID())
+		worktreeRoot, err := createWorkflowWorktreeRoot(primaryPath, ctx.FunctionCallID())
 		if err != nil {
 			return trdResult{}, err
 		}
@@ -266,7 +261,7 @@ func (p *preparedWorkflowTool) buildTRDTool(scope invocationScope) (tool.Tool, e
 			return trdResult{}, err
 		}
 		options := domainConfigOptions(resolved)
-		if err := runtime.Probe(ctx, primaryPath, []string{worktreeRoot}, options); err != nil {
+		if err := runtime.Probe(ctx, primaryPath, options); err != nil {
 			return trdResult{}, fmt.Errorf("OpenCode ACP preflight failed: %w", err)
 		}
 
@@ -301,13 +296,11 @@ func (p *preparedWorkflowTool) workflowACPRuntime() (port.ExternalAgentRuntime, 
 	return nil, nil, errors.New("TRD workflow has no ACP node")
 }
 
-func createWorkflowWorktreeRoot(base, project, callID string) (string, error) {
-	if !filepath.IsAbs(base) {
-		return "", errors.New("managed worktree root must be absolute")
+func createWorkflowWorktreeRoot(projectRoot, callID string) (string, error) {
+	if !filepath.IsAbs(projectRoot) {
+		return "", errors.New("project root must be absolute")
 	}
-	if project == "" || filepath.Base(project) != project || project == "." || project == ".." {
-		return "", errors.New("registered project name is not safe for a managed directory")
-	}
+	base := filepath.Join(projectRoot, ".worktrees")
 	if err := os.MkdirAll(base, 0o700); err != nil {
 		return "", fmt.Errorf("create managed worktree base: %w", err)
 	}
@@ -316,7 +309,7 @@ func createWorkflowWorktreeRoot(base, project, callID string) (string, error) {
 		return "", fmt.Errorf("resolve managed worktree base: %w", err)
 	}
 	digest := sha256.Sum256([]byte(callID))
-	directory := filepath.Join(canonicalBase, project, hex.EncodeToString(digest[:8]))
+	directory := filepath.Join(canonicalBase, hex.EncodeToString(digest[:8]))
 	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return "", fmt.Errorf("create managed worktree root: %w", err)
 	}
@@ -415,32 +408,16 @@ func buildACPNode(doc agentdef.AgentDocument, scope invocationScope) (agent.Agen
 					yield(nil, err)
 					return
 				}
-				primaryPath, _, err := resolveACPProjects(scope.projectRoots, project, nil)
+				primaryPath, err := resolveACPProject(scope.projectRoots, project)
 				if err != nil {
 					yield(nil, err)
 					return
 				}
-				var additionalPaths []string
-				if len(doc.ACP.AdditionalDirectories) > 0 {
-					worktree, stateErr := stateString(ctx.Session().State(), "worktree_root")
-					if stateErr != nil {
-						yield(nil, stateErr)
-						return
-					}
-					canonical, pathErr := canonicalManagedPath(scope.worktreeRoot, worktree)
-					if pathErr != nil {
-						yield(nil, pathErr)
-						return
-					}
-					additionalPaths = []string{canonical}
-				}
 				instruction := renderWorkflowState(doc.ACP.Instruction, ctx.Session().State())
 				result, err := runtime.Run(ctx, domain.AcpInvocationRequest{
-					PrimaryProject:     project,
-					PrimaryPath:        primaryPath,
-					AdditionalProjects: []string{"managed_worktree_root"},
-					AdditionalPaths:    additionalPaths,
-					ProfileName:        doc.ACP.Runtime, ProviderName: resolved.Provider.Name,
+					PrimaryProject: project,
+					PrimaryPath:    primaryPath,
+					ProfileName:    doc.ACP.Runtime, ProviderName: resolved.Provider.Name,
 					ConfigOptions:        domainConfigOptions(resolved),
 					PermissionOptionKind: resolved.PermissionOptionKind,
 					GlobalInstruction:    scope.globalInstruction,
@@ -514,22 +491,6 @@ func renderWorkflowState(template string, state session.ReadonlyState) string {
 		}
 	}
 	return result
-}
-
-func canonicalManagedPath(root, target string) (string, error) {
-	canonicalRoot, err := filepath.EvalSymlinks(root)
-	if err != nil {
-		return "", fmt.Errorf("resolve managed worktree base: %w", err)
-	}
-	canonicalTarget, err := filepath.EvalSymlinks(target)
-	if err != nil {
-		return "", fmt.Errorf("resolve managed worktree path: %w", err)
-	}
-	relative, err := filepath.Rel(canonicalRoot, canonicalTarget)
-	if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
-		return "", errors.New("managed worktree path escapes configured worktree root")
-	}
-	return canonicalTarget, nil
 }
 
 func buildLLMNode(doc agentdef.AgentDocument, models map[string]model.LLM, scope invocationScope, loopAncestor bool) (agent.Agent, error) {

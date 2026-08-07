@@ -135,7 +135,7 @@ type StreamingAgentRuntime interface {
 // ExternalAgentRuntime invokes an ACP-compatible external agent.
 type ExternalAgentRuntime interface {
 	Run(ctx context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error)
-	Probe(ctx context.Context, primaryPath string, additionalPaths []string, configOptions []domain.ACPConfigOption) error
+	Probe(ctx context.Context, primaryPath string, configOptions []domain.ACPConfigOption) error
 	Describe(ctx context.Context) (domain.ACPInitResult, error)
 }
 

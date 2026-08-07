@@ -102,7 +102,7 @@ func Probe(ctx context.Context, deps Dependencies, primaryPath string, configOpt
 	if deps.Runtime == nil {
 		return Result{}, errors.New("OpenCode ACP runtime is not configured")
 	}
-	if err := deps.Runtime.Probe(ctx, primaryPath, nil, configOptions); err != nil {
+	if err := deps.Runtime.Probe(ctx, primaryPath, configOptions); err != nil {
 		return Result{
 			Success:    false,
 			Diagnostic: fmt.Sprintf("OpenCode ACP probe failed: %v", err),
@@ -134,12 +134,12 @@ func Upgrade(ctx context.Context, deps Dependencies) (Result, error) {
 	if deps.Runtime == nil {
 		return Result{}, errors.New("OpenCode ACP runtime is not configured")
 	}
-	if err := deps.Runtime.Probe(ctx, deps.PrimaryPath, nil, deps.ConfigOptions); err != nil {
+	if err := deps.Runtime.Probe(ctx, deps.PrimaryPath, deps.ConfigOptions); err != nil {
 		rollback, rollbackErr := deps.Manager.Rollback(ctx)
 		if rollbackErr != nil {
 			return Result{}, fmt.Errorf("OpenCode upgrade probe failed and rollback failed: %v; rollback: %w", err, rollbackErr)
 		}
-		if probeErr := deps.Runtime.Probe(ctx, deps.PrimaryPath, nil, deps.ConfigOptions); probeErr != nil {
+		if probeErr := deps.Runtime.Probe(ctx, deps.PrimaryPath, deps.ConfigOptions); probeErr != nil {
 			return Result{}, fmt.Errorf("OpenCode upgrade probe failed; rollback to %s could not be verified: %w", rollback.CurrentVersion, probeErr)
 		}
 		return Result{}, fmt.Errorf("OpenCode upgrade probe failed; rolled back to %s: %w", rollback.CurrentVersion, err)
@@ -167,7 +167,7 @@ func Rollback(ctx context.Context, deps Dependencies) (Result, error) {
 	if deps.Runtime == nil {
 		return Result{}, errors.New("OpenCode ACP runtime is not configured")
 	}
-	if err := deps.Runtime.Probe(ctx, deps.PrimaryPath, nil, deps.ConfigOptions); err != nil {
+	if err := deps.Runtime.Probe(ctx, deps.PrimaryPath, deps.ConfigOptions); err != nil {
 		return Result{}, fmt.Errorf("OpenCode rollback completed but ACP probe failed: %w", err)
 	}
 	return result, nil
