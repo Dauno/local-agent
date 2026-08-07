@@ -65,10 +65,7 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 	if job.Status != domain.JobQueued {
 		return false, nil, errors.New("new external-agent jobs must be queued")
 	}
-	projects, err := json.Marshal(job.AdditionalProjects)
-	if err != nil {
-		return false, nil, fmt.Errorf("encode external-agent projects: %w", err)
-	}
+	projects := "[]"
 	now := job.CreatedAt
 	if now.IsZero() {
 		now = time.Now().UTC()
@@ -664,6 +661,10 @@ func insertJobNotification(ctx context.Context, exec interface {
 	if err != nil {
 		return err
 	}
+	legacyContentSHA := notification.ResultSHA256
+	if legacyContentSHA == "" {
+		legacyContentSHA = notification.NotificationSHA256
+	}
 	_, err = exec.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
 		job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,
 		renderer_version, channel_id, thread_ts, publish_state, lease_owner,
@@ -675,7 +676,7 @@ func insertJobNotification(ctx context.Context, exec interface {
 			?, ?, ?, ?)
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 		notification.JobID, notification.StatusRevision, notification.Kind, notification.TerminalStatus,
-		notification.CanonicalMarkdown, notification.ContentSHA256, notification.RendererVersion,
+		notification.CanonicalMarkdown, legacyContentSHA, notification.RendererVersion,
 		notification.Target.ChannelID, notification.Target.ThreadTS, notification.PublishState,
 		unix(job.UpdatedAt), unix(job.UpdatedAt), unix(job.UpdatedAt), notification.DeliveryMode, notification.PolicyVersion,
 		notification.ArtifactRef, notification.ResultBytes, notification.MaxMarkdownParts, notification.UploadState,
@@ -1087,7 +1088,8 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ?`, jobID, revision, kind)
 	var terminalStatus string
 	var publishedAt int64
-	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &terminalStatus, &publishedAt, &n.CanonicalMarkdown, &n.ContentSHA256, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID, &rootActivationRequired, &n.NotificationSHA256, &n.NotificationBytes, &n.ResultSHA256, &n.Actor, &n.ConversationKey)
+	var legacyContentSHA string
+	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &terminalStatus, &publishedAt, &n.CanonicalMarkdown, &legacyContentSHA, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID, &rootActivationRequired, &n.NotificationSHA256, &n.NotificationBytes, &n.ResultSHA256, &n.Actor, &n.ConversationKey)
 	if err != nil {
 		return domain.ExternalAgentJobNotification{}, fmt.Errorf("load notification: %w", err)
 	}
@@ -1120,6 +1122,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 	var (
 		job                                                                  domain.ExternalAgentJob
 		mode, projects, status, conversation                                 string
+		additionalProjects                                                   []string
 		leaseExpiry, heartbeat, timeout, created, started, finished, updated int64
 		sideEffects                                                          int
 	)
@@ -1127,8 +1130,11 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 	if err != nil {
 		return domain.ExternalAgentJob{}, err
 	}
-	if err := json.Unmarshal([]byte(projects), &job.AdditionalProjects); err != nil {
+	if err := json.Unmarshal([]byte(projects), &additionalProjects); err != nil {
 		return domain.ExternalAgentJob{}, fmt.Errorf("decode external-agent projects: %w", err)
+	}
+	if len(additionalProjects) > 0 {
+		return domain.ExternalAgentJob{}, errors.New("external-agent job contains unsupported additional projects")
 	}
 	job.Mode = domain.ExternalAgentJobMode(mode)
 	job.Status = domain.ExternalAgentJobStatus(status)

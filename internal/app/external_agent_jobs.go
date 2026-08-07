@@ -51,9 +51,6 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
 			continue
 		}
-		if len(job.AdditionalProjects) > 0 {
-			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorInvalidInput, Err: errors.New("ACP jobs support exactly one project")}
-		}
 		primary, err := resolveACPProject(child.projectRoots, job.PrimaryProject)
 		if err != nil {
 			return domain.AcpInvocationResult{}, err
@@ -237,9 +234,6 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 		profileMatched = true
 		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
 			continue
-		}
-		if len(job.AdditionalProjects) > 0 {
-			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorInvalidInput, Err: errors.New("ACP jobs support exactly one project")}
 		}
 		primary, err := resolveACPProject(child.projectRoots, job.PrimaryProject)
 		if err != nil {
