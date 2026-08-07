@@ -296,7 +296,7 @@ func validateProtocol(contents []domain.Content, active bool) error {
 }
 
 func validateProjectedContents(contents []domain.Content) error {
-	turns, activeStart, err := domain.ClassifyConversationTurns(contents)
+	turns, activeStart, err := domain.ClassifyConversationTurns(contents, domain.TurnClassificationOptions{})
 	if err != nil {
 		return fmt.Errorf("validate projected ADK history: %w", err)
 	}
@@ -511,7 +511,7 @@ func ConversationTurnsFromEvents(events []*session.Event, redact func(string) st
 	if err != nil {
 		return nil, err
 	}
-	turns, _, err := domain.ClassifyConversationTurns(converted)
+	turns, _, err := domain.ClassifyConversationTurns(converted, domain.TurnClassificationOptions{})
 	if err != nil {
 		return nil, err
 	}
