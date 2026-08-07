@@ -5,7 +5,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 10 batches de refactor completados + docs update, 10 commits, neto acumulado **−163 líneas**.
+- 11 batches de refactor completados + docs update, 11 commits, neto acumulado **−175 líneas**.
 - Tests verdes en todo momento; no se modificó ningún archivo de test.
 - 3 archivos con cambios preexistentes sin commitear (no tocar, quedan fuera de cualquier commit).
 
@@ -23,6 +23,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A2 | `internal/domain/compaction.go` + `context_metrics.go` | `3a11a1d` |
 | A3 | `internal/domain/memory_core.go` + `memory_entity.go` + `memory_instruction.go` | `4476419` |
 | A4 | `internal/domain/continuity.go` + `invocation.go` | `89a498a` |
+| A5 | `internal/domain/message.go` + `validation.go` | `aed5d0e` |
 
 ## Proceso por batch
 
@@ -57,4 +58,5 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - Nota de comportamiento: `unicode.IsControl` en `SanitizeConversationSummary` (A2) también rechaza controles C1 que la condición anterior no rechazaba — comportamiento levemente más estricto, documentado.
 - `memory_core.go`: cambios preexistentes sin stagear quedaron intactos; A3 se aplicó con stage selectivo.
 - A4: el grep global no permitió eliminar `ContinuityItem.Kind` (sin lecturas directas, pero con construcciones en `adkagent` y tests), `ContinuityCapsule.Superseded` (uso en `adkagent`, persistencia SQLite y test), ni `SourceEventOrdinal`, `SourceSessionRevision`, `SourceDigest`, `SupersedesID` (escritura en `adkagent`, validación SQLite y tests). `AgentContext.MaxChars` también se conserva: Slack lo construye, `adkagent` lo lee como budget y hay referencia en test. No se eliminó ninguno de estos campos.
+- A5: el grep global de los ítems 6-8 no permitió eliminar las formas largas de `MessageSource` (consumidores externos en producción e integración/tests), `WithInferredSource` (dos consumidores SQLite) ni `ValidateACPAllowlist` (dos llamadores en `agentbuilder`). Las reducciones mecánicas sí eliminaron ramas de validación duplicadas, la clonación innecesaria de mensajes y las construcciones repetidas del error de kind.
 ---
