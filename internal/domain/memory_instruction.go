@@ -25,6 +25,7 @@ var (
 	}
 	formatOrOutputFactVerbs = []string{"is", "was", "were", "changed", "changes", "change", "has", "had"}
 	imperativeMemoryVerbs   = []string{"ignore", "disregard", "override", "bypass", "follow", "obey", "execute", "run", "call", "invoke", "use", "send", "reveal", "disclose", "exfiltrate", "grant", "allow", "deny", "enable", "disable", "change", "modify", "delete", "remove", "write", "read", "return", "respond", "act", "fetch", "open", "click", "curl", "wget", "bash", "sh", "python", "powershell", "rm"}
+	modalMemoryVerbs        = []string{"must", "should", "shall", "need", "required", "require", "cannot", "can"}
 	directiveWords          = []string{"answer", "include", "mention", "state", "provide", "begin", "end", "be"}
 )
 
@@ -74,21 +75,16 @@ func isInstructionLikeMemoryText(value string) bool {
 		if isPersistentAssistantInstruction(words) {
 			return true
 		}
-		if isSafeMemoryReferenceIdentifier(sentence) {
+		if strings.Trim(sentence, "-`*_#[]() \t") == string(CapReadFile) {
 			continue
 		}
-		if imperativeMemoryVerb(words[0]) || isFormatOrOutputDirective(words) || (len(words) > 1 && words[0] == "you" && modalMemoryVerb(words[1])) ||
+		if slices.Contains(imperativeMemoryVerbs, words[0]) || isFormatOrOutputDirective(words) || (len(words) > 1 && words[0] == "you" && modalMemoryVerb(words[1])) ||
 			(len(words) > 2 && words[0] == "you" && words[1] == "are" && words[2] == "now") ||
 			(len(words) > 1 && words[0] == "do" && words[1] == "not") || words[0] == "never" {
 			return true
 		}
 	}
 	return false
-}
-
-func isSafeMemoryReferenceIdentifier(value string) bool {
-	value = strings.Trim(value, "-`*_#[]() \t")
-	return value == string(CapReadFile)
 }
 
 func isSpanishInstructionLikeMemorySentence(words []string) bool {
@@ -98,13 +94,13 @@ func isSpanishInstructionLikeMemorySentence(words []string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	if spanishImperativeMemoryVerb(words[0]) || isSpanishMemoryCategoryDirective(words) {
+	if slices.Contains(spanishImperativeMemoryVerbs, words[0]) || isSpanishMemoryCategoryDirective(words) {
 		return true
 	}
 	if len(words) >= 3 && words[0] == "a" && words[1] == "partir" && words[2] == "de" {
 		return true
 	}
-	if len(words) >= 3 && words[0] == "recuerda" && words[1] == "que" && spanishDirectiveModal(words[2]) {
+	if len(words) >= 3 && words[0] == "recuerda" && words[1] == "que" && slices.Contains(spanishDirectiveModals, words[2]) {
 		return true
 	}
 	return isSpanishPersistentAssistantInstruction(words)
@@ -124,18 +120,18 @@ func spanishDirectiveClause(words []string) bool {
 		return false
 	}
 	index := spanishDirectivePrefix(words)
-	if index < len(words) && spanishDirectiveModal(words[index]) {
+	if index < len(words) && slices.Contains(spanishDirectiveModals, words[index]) {
 		index++
 		if index < len(words) && words[index] == "que" {
 			index++
 		}
 		index += spanishDirectivePrefix(words[index:])
-		return index < len(words) && spanishDirectiveAction(words[index])
+		return index < len(words) && slices.Contains(spanishDirectiveActions, words[index])
 	}
 	if index+1 < len(words) && (words[index] == "el" || words[index] == "la") && words[index+1] == "asistente" {
 		index += 2
 		index += spanishDirectivePrefix(words[index:])
-		if index >= len(words) || !spanishDirectiveModal(words[index]) {
+		if index >= len(words) || !slices.Contains(spanishDirectiveModals, words[index]) {
 			return false
 		}
 		index++
@@ -143,7 +139,7 @@ func spanishDirectiveClause(words []string) bool {
 			index++
 		}
 		index += spanishDirectivePrefix(words[index:])
-		return index < len(words) && spanishDirectiveAction(words[index])
+		return index < len(words) && slices.Contains(spanishDirectiveActions, words[index])
 	}
 	return false
 }
@@ -161,10 +157,6 @@ func spanishDirectivePrefix(words []string) int {
 	return index
 }
 
-func spanishDirectiveAction(word string) bool {
-	return slices.Contains(spanishDirectiveActions, word)
-}
-
 func isSpanishMemoryCategoryDirective(words []string) bool {
 	if len(words) == 0 {
 		return false
@@ -176,15 +168,7 @@ func isSpanishMemoryCategoryDirective(words []string) bool {
 	if start == len(words) {
 		return false
 	}
-	return slices.Contains(spanishMemoryCategoryTerms, words[start]) && len(words) > start+1 && spanishImperativeMemoryVerb(words[start+1])
-}
-
-func spanishImperativeMemoryVerb(word string) bool {
-	return slices.Contains(spanishImperativeMemoryVerbs, word)
-}
-
-func spanishDirectiveModal(word string) bool {
-	return slices.Contains(spanishDirectiveModals, word)
+	return slices.Contains(spanishMemoryCategoryTerms, words[start]) && len(words) > start+1 && slices.Contains(spanishImperativeMemoryVerbs, words[start+1])
 }
 
 func isPersistentAssistantInstruction(words []string) bool {
@@ -254,7 +238,7 @@ func isDirectiveWords(words []string) bool {
 	if len(words) == 0 {
 		return false
 	}
-	if imperativeMemoryVerb(words[0]) {
+	if slices.Contains(imperativeMemoryVerbs, words[0]) {
 		return true
 	}
 	if slices.Contains(directiveWords, words[0]) {
@@ -270,30 +254,15 @@ func isFormatOrOutputDirective(words []string) bool {
 	if len(words) == 0 || (words[0] != "format" && words[0] != "output") {
 		return false
 	}
-	if isFormatOrOutputFactVerb(words[1:]) {
+	if len(words) > 1 && slices.Contains(formatOrOutputFactVerbs, words[1]) {
 		return false
 	}
-	if words[0] == "output" && len(words) > 1 && words[1] == "format" && isFormatOrOutputFactVerb(words[2:]) {
+	if words[0] == "output" && len(words) > 2 && words[1] == "format" && slices.Contains(formatOrOutputFactVerbs, words[2]) {
 		return false
 	}
 	return true
 }
 
-func isFormatOrOutputFactVerb(words []string) bool {
-	if len(words) == 0 {
-		return false
-	}
-	return slices.Contains(formatOrOutputFactVerbs, words[0])
-}
-
-func imperativeMemoryVerb(word string) bool {
-	return slices.Contains(imperativeMemoryVerbs, word)
-}
-
 func modalMemoryVerb(word string) bool {
-	switch word {
-	case "must", "should", "shall", "need", "required", "require", "cannot", "can":
-		return true
-	}
-	return false
+	return slices.Contains(modalMemoryVerbs, word)
 }
