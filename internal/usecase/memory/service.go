@@ -290,16 +290,26 @@ func (s *Service) Validate(patch domain.MemoryPatch) error {
 func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 	reasons := make([]error, 0)
 	add := func(format string, args ...any) { reasons = append(reasons, fmt.Errorf(format, args...)) }
+	validateReferenceFields := func(fields []struct{ name, value string }, report func(string, error)) {
+		for _, field := range fields {
+			if err := domain.ValidateMemoryReferenceText(field.value); err != nil {
+				report(field.name, err)
+			}
+		}
+	}
+	validateExpectedRevision := func(prefix string, expectedRev int) {
+		if expectedRev <= 0 {
+			add("%s: expected_rev must be positive", prefix)
+		}
+	}
 	if len(patch.Operations) > s.cfg.MaxPatchOps {
 		add("patch has %d operations; maximum is %d", len(patch.Operations), s.cfg.MaxPatchOps)
 	}
-	for _, field := range []struct{ name, value string }{
+	validateReferenceFields([]struct{ name, value string }{
 		{"conversation key", string(patch.ConversationKey)}, {"exchange timestamp", patch.ExchangeTS}, {"source author", patch.SourceAuthorID},
-	} {
-		if err := domain.ValidateMemoryReferenceText(field.value); err != nil {
-			add("patch: %s: %v", field.name, err)
-		}
-	}
+	}, func(name string, err error) {
+		add("patch: %s: %v", name, err)
+	})
 	for i, op := range patch.Operations {
 		prefix := fmt.Sprintf("operation %d (%s)", i, op.Type)
 		if err := domain.ValidateMemoryReferenceText(op.Type); err != nil {
@@ -312,16 +322,14 @@ func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 		if err := domain.ValidateSlug(op.TopicSlug); err != nil {
 			add("%s: %v", prefix, err)
 		}
-		for _, field := range []struct{ name, value string }{
+		validateReferenceFields([]struct{ name, value string }{
 			{"topic slug", op.TopicSlug}, {"target topic slug", op.TargetTopicSlug},
 			{"topic title", op.TopicTitle}, {"topic description", op.TopicDesc}, {"content", op.Content},
 			{"change reason", op.ChangeReason}, {"decision", op.Decision}, {"question", op.Question},
 			{"link relation", op.LinkRelation},
-		} {
-			if err := domain.ValidateMemoryReferenceText(field.value); err != nil {
-				add("%s: %s: %v", prefix, field.name, err)
-			}
-		}
+		}, func(name string, err error) {
+			add("%s: %s: %v", prefix, name, err)
+		})
 		for _, tag := range op.Tags {
 			if err := domain.ValidateMemoryReferenceText(tag); err != nil {
 				add("%s: tag: %v", prefix, err)
@@ -336,30 +344,22 @@ func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 				add("%s: %v", prefix, err)
 			}
 		case domain.MemoryOpRevise, domain.MemoryOpCorrect:
-			if op.ExpectedRev <= 0 {
-				add("%s: expected_rev must be positive", prefix)
-			}
+			validateExpectedRevision(prefix, op.ExpectedRev)
 			if err := domain.ValidateTopicContent(op.Content, s.cfg.Limits.MaxTopicChars); err != nil {
 				add("%s: %v", prefix, err)
 			}
 		case domain.MemoryOpDecide:
-			if op.ExpectedRev <= 0 {
-				add("%s: expected_rev must be positive", prefix)
-			}
+			validateExpectedRevision(prefix, op.ExpectedRev)
 			if strings.TrimSpace(op.Decision) == "" {
 				add("%s: decision text must not be empty", prefix)
 			}
 		case domain.MemoryOpQuestionAdd, domain.MemoryOpQuestionResolve:
-			if op.ExpectedRev <= 0 {
-				add("%s: expected_rev must be positive", prefix)
-			}
+			validateExpectedRevision(prefix, op.ExpectedRev)
 			if strings.TrimSpace(op.Question) == "" {
 				add("%s: question text must not be empty", prefix)
 			}
 		case domain.MemoryOpLinkAdd, domain.MemoryOpLinkRemove:
-			if op.ExpectedRev <= 0 {
-				add("%s: expected_rev must be positive", prefix)
-			}
+			validateExpectedRevision(prefix, op.ExpectedRev)
 			if err := domain.ValidateSlug(op.TargetTopicSlug); err != nil {
 				add("%s: target topic: %v", prefix, err)
 			}

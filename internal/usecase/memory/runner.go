@@ -138,27 +138,23 @@ func (r *Runner) processOutbox(ctx context.Context) {
 
 		messages, err := r.store.LoadOutboxMessages(ctx, item)
 		if err != nil {
-			r.logger.Error("memory outbox load messages failed", "item_id", item.ID, "error", err)
-			r.retryOutbox(ctx, item, err)
+			r.errorOutboxRetry(ctx, item, "memory outbox load messages failed", err, "item_id", item.ID, "error", err)
 			return
 		}
 		if len(messages) == 0 {
 			err := errors.New("source exchange is no longer available")
-			r.logger.Warn("memory outbox source exchange unavailable", "item_id", item.ID)
-			r.retryOutbox(ctx, item, err)
+			r.warnOutboxRetry(ctx, item, "memory outbox source exchange unavailable", err, "item_id", item.ID)
 			return
 		}
 
 		trusted, err := r.memory.TrustedEntityOperations(ctx, item.ConversationKey, messages)
 		if err != nil {
-			r.logger.Warn("trusted entity topic lookup failed", "item_id", item.ID, "error", err)
-			r.retryOutbox(ctx, item, err)
+			r.warnOutboxRetry(ctx, item, "trusted entity topic lookup failed", err, "item_id", item.ID, "error", err)
 			return
 		}
 		topics, err := r.memory.RelevantTopics(ctx, messages)
 		if err != nil {
-			r.logger.Warn("memory curator topic lookup failed", "item_id", item.ID, "error", err)
-			r.retryOutbox(ctx, item, err)
+			r.warnOutboxRetry(ctx, item, "memory curator topic lookup failed", err, "item_id", item.ID, "error", err)
 			return
 		}
 		patch, err := r.curator.ProposePatch(ctx, item.ConversationKey, item.ExchangeTS, messages, topics)
@@ -178,8 +174,7 @@ func (r *Runner) processOutbox(ctx context.Context) {
 				r.logger.Warn("memory curator response incomplete; discarding optional patch", "item_id", item.ID, "error", err)
 				patch = domain.MemoryPatch{ConversationKey: item.ConversationKey, ExchangeTS: item.ExchangeTS}
 			} else if len(trusted) == 0 {
-				r.logger.Warn("memory curator proposal failed", "item_id", item.ID, "error", err)
-				r.retryOutbox(ctx, item, err)
+				r.warnOutboxRetry(ctx, item, "memory curator proposal failed", err, "item_id", item.ID, "error", err)
 				return
 			}
 			if len(trusted) > 0 {
@@ -204,13 +199,11 @@ func (r *Runner) processOutbox(ctx context.Context) {
 			}
 		}
 		if _, applyErr := r.memory.ValidateAndApply(ctx, patch); applyErr != nil {
-			r.logger.Warn("memory patch validation failed", "item_id", item.ID, "error", applyErr)
-			r.retryOutbox(ctx, item, applyErr)
+			r.warnOutboxRetry(ctx, item, "memory patch validation failed", applyErr, "item_id", item.ID, "error", applyErr)
 			return
 		}
 		if err := r.projector.Project(ctx, r.reader, r.cfg.MemoryDir); err != nil {
-			r.logger.Error("memory projection failed", "error", err)
-			r.retryOutbox(ctx, item, err)
+			r.errorOutboxRetry(ctx, item, "memory projection failed", err, "error", err)
 			return
 		}
 		if err := r.store.CompleteOutboxItem(ctx, item.ID, item.LeaseUntil); err != nil {
@@ -219,6 +212,16 @@ func (r *Runner) processOutbox(ctx context.Context) {
 		}
 		r.logger.Debug("memory curator processed exchange", "item_id", item.ID, "operations", len(patch.Operations))
 	}
+}
+
+func (r *Runner) warnOutboxRetry(ctx context.Context, item *domain.OutboxItem, msg string, cause error, logArgs ...any) {
+	r.logger.Warn(msg, logArgs...)
+	r.retryOutbox(ctx, item, cause)
+}
+
+func (r *Runner) errorOutboxRetry(ctx context.Context, item *domain.OutboxItem, msg string, cause error, logArgs ...any) {
+	r.logger.Error(msg, logArgs...)
+	r.retryOutbox(ctx, item, cause)
 }
 
 func (r *Runner) retryOutbox(ctx context.Context, item *domain.OutboxItem, cause error) {
