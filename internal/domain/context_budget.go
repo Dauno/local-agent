@@ -11,14 +11,6 @@ var (
 	ErrContextWindowTooLarge = fmt.Errorf("context window exceeds implementation-safe maximum of %d", MaxSafeContextWindow)
 )
 
-type ModelContextCapability struct {
-	ProfileID           string
-	ContextWindowTokens int
-	MaxOutputTokens     int
-	CounterStrategy     string
-	CounterID           string
-}
-
 type RequestBudgetPolicy struct {
 	MaxRequestPercent int
 }
@@ -55,27 +47,14 @@ func NewRequestBudget(windowTokens int, policy RequestBudgetPolicy) (RequestBudg
 		return RequestBudget{}, err
 	}
 	trigger, target := DerivePercentages(policy.MaxRequestPercent)
-	wt := int64(windowTokens)
-	pct := int64(policy.MaxRequestPercent)
-	hard := wt * pct / 100
-	triggerTokens := wt * int64(trigger) / 100
-	targetTokens := wt * int64(target) / 100
 	return RequestBudget{
 		WindowTokens:  windowTokens,
-		HardTokens:    int(hard),
-		TriggerTokens: int(triggerTokens),
-		TargetTokens:  int(targetTokens),
+		HardTokens:    windowTokens * policy.MaxRequestPercent / 100,
+		TriggerTokens: windowTokens * trigger / 100,
+		TargetTokens:  windowTokens * target / 100,
 	}, nil
 }
 
 func DerivePercentages(maxRequestPercent int) (triggerPercent, targetPercent int) {
-	trigger := maxRequestPercent - 5
-	if trigger < 20 {
-		trigger = 20
-	}
-	target := maxRequestPercent - 10
-	if target < 20 {
-		target = 20
-	}
-	return trigger, target
+	return max(maxRequestPercent-5, 20), max(maxRequestPercent-10, 20)
 }
