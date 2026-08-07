@@ -9,10 +9,6 @@ import (
 
 var deicticPrefixPattern = regexp.MustCompile(`^(?i)\s*(?:esto|este|esta|eso|esa|this|that|it|ello)\s*[:,]?\s*`)
 
-func normalizeExplicitFact(fact string) string {
-	return deicticPrefixPattern.ReplaceAllString(fact, "")
-}
-
 func EntityMemoryCandidates(messages []Message) []EntityMemoryCandidate {
 	seen := make(map[string]struct{})
 	var candidates []EntityMemoryCandidate
@@ -88,7 +84,7 @@ func explicitMemoryFact(text string) (string, bool) {
 	for _, prefix := range []string{"recuerda que ", "recuerda ", "guarda que ", "guarda ", "remember that ", "remember ", "save that ", "save "} {
 		if strings.HasPrefix(lower, prefix) {
 			fact := strings.TrimSpace(strings.TrimRight(text[len(prefix):], ".!?"))
-			fact = normalizeExplicitFact(fact)
+			fact = deicticPrefixPattern.ReplaceAllString(fact, "")
 			return fact, fact != ""
 		}
 	}
