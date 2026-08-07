@@ -529,39 +529,33 @@ func validateProfile(providerPrefix, providerType, name string, profile Profile)
 	}
 
 	switch providerType {
-	case ProviderTypeACP:
+	case ProviderTypeACP, ProviderTypeAgentCLI:
 		if profile.ReasoningEffort != "" {
-			errs = append(errs, fmt.Sprintf("%s: reasoning_effort is invalid for %s profiles", prefix, ProviderTypeACP))
+			errs = append(errs, fmt.Sprintf("%s: reasoning_effort is invalid for %s profiles", prefix, providerType))
 		}
 		if len(profile.ExtraBody) > 0 {
-			errs = append(errs, fmt.Sprintf("%s: extra_body is invalid for %s profiles", prefix, ProviderTypeACP))
+			errs = append(errs, fmt.Sprintf("%s: extra_body is invalid for %s profiles", prefix, providerType))
 		}
 		if profile.GenerateContentConfig != nil {
-			errs = append(errs, fmt.Sprintf("%s: generate_content_config is invalid for %s profiles", prefix, ProviderTypeACP))
+			errs = append(errs, fmt.Sprintf("%s: generate_content_config is invalid for %s profiles", prefix, providerType))
 		}
-		if profile.Agent != "" {
-			errs = append(errs, fmt.Sprintf("%s: agent is invalid for %s profiles", prefix, ProviderTypeACP))
-		}
-		if profile.Approval != "" {
-			errs = append(errs, fmt.Sprintf("%s: approval is invalid for %s profiles", prefix, ProviderTypeACP))
-		}
-		if profile.Variant != "" {
-			errs = append(errs, fmt.Sprintf("%s: variant is invalid for %s profiles", prefix, ProviderTypeACP))
-		}
-	case ProviderTypeAgentCLI:
-		if profile.ReasoningEffort != "" {
-			errs = append(errs, fmt.Sprintf("%s: reasoning_effort is invalid for %s profiles", prefix, ProviderTypeAgentCLI))
-		}
-		if len(profile.ExtraBody) > 0 {
-			errs = append(errs, fmt.Sprintf("%s: extra_body is invalid for %s profiles", prefix, ProviderTypeAgentCLI))
-		}
-		if profile.GenerateContentConfig != nil {
-			errs = append(errs, fmt.Sprintf("%s: generate_content_config is invalid for %s profiles", prefix, ProviderTypeAgentCLI))
-		}
-		switch profile.Approval {
-		case "", ApprovalReject, ApprovalAuto:
-		default:
-			errs = append(errs, fmt.Sprintf("%s: approval must be %s or %s", prefix, ApprovalReject, ApprovalAuto))
+		switch providerType {
+		case ProviderTypeACP:
+			if profile.Agent != "" {
+				errs = append(errs, fmt.Sprintf("%s: agent is invalid for %s profiles", prefix, ProviderTypeACP))
+			}
+			if profile.Approval != "" {
+				errs = append(errs, fmt.Sprintf("%s: approval is invalid for %s profiles", prefix, ProviderTypeACP))
+			}
+			if profile.Variant != "" {
+				errs = append(errs, fmt.Sprintf("%s: variant is invalid for %s profiles", prefix, ProviderTypeACP))
+			}
+		case ProviderTypeAgentCLI:
+			switch profile.Approval {
+			case "", ApprovalReject, ApprovalAuto:
+			default:
+				errs = append(errs, fmt.Sprintf("%s: approval must be %s or %s", prefix, ApprovalReject, ApprovalAuto))
+			}
 		}
 	default:
 		if profile.Agent != "" {
