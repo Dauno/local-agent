@@ -49,7 +49,6 @@ const (
 	MetricContinuityCheckpointCASConflictTotal  = "continuity_checkpoint_cas_conflict_total"
 	MetricContinuityCheckpointValidationFailure = "continuity_checkpoint_validation_failure_total"
 	MetricContinuityCheckpointFallbackTotal     = "continuity_checkpoint_fallback_total"
-	MetricContinuityCheckpointRenderTokens      = "continuity_checkpoint_render_tokens"
 	MetricContinuityCheckpointRenderCodePoints  = "continuity_checkpoint_render_code_points"
 )
 
