@@ -119,13 +119,8 @@ func entityFactKind(subject string) string {
 }
 
 func safeEntityMemoryCandidate(candidate EntityMemoryCandidate) bool {
-	for _, value := range []string{candidate.Slug, candidate.Title, candidate.Description, candidate.Content, candidate.ChangeReason, candidate.SearchQuery} {
+	for _, value := range append([]string{candidate.Slug, candidate.Title, candidate.Description, candidate.Content, candidate.ChangeReason, candidate.SearchQuery}, candidate.Tags...) {
 		if ValidateMemoryReferenceText(value) != nil {
-			return false
-		}
-	}
-	for _, tag := range candidate.Tags {
-		if ValidateMemoryReferenceText(tag) != nil {
 			return false
 		}
 	}
