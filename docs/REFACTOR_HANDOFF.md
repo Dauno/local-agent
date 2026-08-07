@@ -27,6 +27,12 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 3. Presentar hallazgos con neto estimado de líneas + caveats.
 4. Asignar el batch a Luna con aprobación explícita previa del operador.
 
+## Reglas por batch
+
+- Para cada batch: decidir explícitamente **usar o no `ponytail-review`** y anotar la decisión.
+- **Presentar hallazgos en tabla** (archivo / hallazgo / neto aprox.) con caveats.
+- **Luna ejecuta el batch** en job durable — 1 commit por batch, aprobación explícita antes de invocar.
+
 ## Reglas del refactor
 
 - No modificar archivos de test.
@@ -35,6 +41,8 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - 1 commit por batch, mensaje conventional (refactor/docs/...).
 - Verificación: `go build ./...`, `go vet ./...`, `go test` (paquete + suite), `git diff --check`.
 - Refactors con neto ≤ 0 se descartan (ej.: clasificador de ambigüedad compartido, +3 neto).
+- **Scope por delegación:** máximo 2–3 archivos por invocación de worker/review; nunca carpetas completas ni contexto de conversación entero. Dividir batches grandes en sub-batches.
+- Si un batch supera 3 archivos de producción, partir en sub-batches antes de delegar.
 
 ## Pendientes
 
