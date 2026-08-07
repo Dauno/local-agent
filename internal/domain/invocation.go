@@ -140,10 +140,7 @@ type ReplyTarget struct {
 }
 
 func (i Invocation) ReplyTarget() ReplyTarget {
-	if i.ChannelKind == ChannelDM {
-		if i.ThreadedDM {
-			return ReplyTarget{ChannelID: i.ChannelID, ThreadTS: i.rootTS()}
-		}
+	if i.ChannelKind == ChannelDM && !i.ThreadedDM {
 		return ReplyTarget{ChannelID: i.ChannelID}
 	}
 	return ReplyTarget{ChannelID: i.ChannelID, ThreadTS: i.rootTS()}

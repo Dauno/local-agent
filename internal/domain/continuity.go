@@ -1,6 +1,7 @@
 package domain
 
 import (
+	"regexp"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -101,11 +102,7 @@ func containsSecretLike(s string) bool {
 
 func containsControlCharacters(s string) bool {
 	for _, r := range s {
-		if r < ' ' && r != '\n' && r != '\t' {
-			return true
-		}
-		// Reject DEL (0x7F)
-		if r == 0x7F {
+		if unicode.IsControl(r) && r != '\n' && r != '\t' {
 			return true
 		}
 	}
@@ -114,7 +111,6 @@ func containsControlCharacters(s string) bool {
 
 var imperatives = []string{
 	"you must",
-	"you must not",
 	"you shall",
 	"you should",
 	"you have to",
@@ -133,13 +129,7 @@ var imperatives = []string{
 }
 
 func containsImperatives(s string) bool {
-	lower := strings.ToLower(s)
-	for _, phrase := range imperatives {
-		if strings.Contains(lower, phrase) {
-			return true
-		}
-	}
-	return false
+	return containsAnyFold(s, imperatives)
 }
 
 var policyClaims = []string{
@@ -154,8 +144,12 @@ var policyClaims = []string{
 }
 
 func containsPolicyClaims(s string) bool {
+	return containsAnyFold(s, policyClaims)
+}
+
+func containsAnyFold(s string, phrases []string) bool {
 	lower := strings.ToLower(s)
-	for _, phrase := range policyClaims {
+	for _, phrase := range phrases {
 		if strings.Contains(lower, phrase) {
 			return true
 		}
@@ -163,19 +157,10 @@ func containsPolicyClaims(s string) bool {
 	return false
 }
 
+var xmlTagPattern = regexp.MustCompile(`<[\p{L}/][^<>]*>`)
+
 func containsXMLTags(s string) bool {
-	for i := 0; i < len(s); i++ {
-		if s[i] == '<' {
-			end := strings.IndexByte(s[i:], '>')
-			if end != -1 {
-				tagContent := s[i+1 : i+end]
-				if len(tagContent) > 0 && (unicode.IsLetter(rune(tagContent[0])) || tagContent[0] == '/') {
-					return true
-				}
-			}
-		}
-	}
-	return false
+	return xmlTagPattern.MatchString(s)
 }
 
 const (
@@ -194,13 +179,6 @@ func RenderContinuityCapsule(capsule ContinuityCapsule, maxCodePoints int) strin
 
 	var sections []string
 
-	if capsule.Objective != nil && capsule.Objective.Status != ContinuityStatusSuperseded {
-		objective, ok := SanitizeContinuityItem(*capsule.Objective)
-		if ok {
-			sections = append(sections, "--- objective ---")
-			sections = append(sections, objective.Text)
-		}
-	}
 	appendSection := func(title string, items []ContinuityItem) {
 		if len(items) == 0 {
 			return
@@ -212,6 +190,10 @@ func RenderContinuityCapsule(capsule ContinuityCapsule, maxCodePoints int) strin
 			}
 		}
 	}
+	if capsule.Objective != nil {
+		appendSection("objective", []ContinuityItem{*capsule.Objective})
+	}
+
 	for _, section := range []struct {
 		title string
 		items []ContinuityItem
@@ -251,7 +233,5 @@ func RenderContinuityCapsule(capsule ContinuityCapsule, maxCodePoints int) strin
 	if maxCodePoints <= fixedLen {
 		return ""
 	}
-	bodyRunes := []rune(body)
-	bodyRunes = bodyRunes[:maxCodePoints-fixedLen]
-	return continuityDelimiterOpen + string(bodyRunes) + truncationMarker + continuityDelimiterClose
+	return continuityDelimiterOpen + truncateRunes(body, maxCodePoints-fixedLen) + truncationMarker + continuityDelimiterClose
 }
