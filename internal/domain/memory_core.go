@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -242,7 +243,7 @@ func TrustedEntityMemoryOperations(messages []Message, topics []TopicReference, 
 		}
 		op := MemoryOp{
 			TopicSlug: slug, TopicTitle: candidate.Title, TopicDesc: candidate.Description,
-			Tags: append([]string(nil), candidate.Tags...), BundlePath: candidate.BundlePath, Content: candidate.Content, ChangeReason: candidate.ChangeReason,
+			Tags: slices.Clone(candidate.Tags), BundlePath: candidate.BundlePath, Content: candidate.Content, ChangeReason: candidate.ChangeReason,
 		}
 		if topic, exists := bySlug[slug]; exists && topic.Revision > 0 {
 			op.Type = MemoryOpRevise
@@ -335,17 +336,11 @@ func RenderMemoryReference(memory []MemorySnippet) string {
 	if len(memory) == 0 {
 		return ""
 	}
-	var b strings.Builder
-	b.WriteString(memoryReferencePreamble)
-	for i, snippet := range memory {
-		b.WriteString(snippetHeader(snippet))
-		b.WriteString(snippet.Content)
-		b.WriteString("\n")
-		if i < len(memory)-1 {
-			b.WriteString("\n---\n\n")
-		}
+	parts := make([]string, 0, len(memory))
+	for _, snippet := range memory {
+		parts = append(parts, snippetHeader(snippet)+snippet.Content+"\n")
 	}
-	return b.String()
+	return memoryReferencePreamble + strings.Join(parts, "\n---\n\n")
 }
 
 func FitMemorySnippets(snippets []MemorySnippet, budget int) []MemorySnippet {
