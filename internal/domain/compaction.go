@@ -248,7 +248,7 @@ func ClassifyConversationTurns(contents []Content, options ...TurnClassification
 		openIDs[id] = struct{}{}
 	}
 	for id, call := range ledger.calls {
-		if !protocolCallOpen(call, ledger) {
+		if !protocolCallOpen(call) {
 			continue
 		}
 		openIDs[id] = struct{}{}

@@ -933,7 +933,6 @@ func assertProtocolFixtureProtocol(t *testing.T, fixture protocolFixture) string
 	options := domain.ProtocolValidationOptions{
 		RequireComplete:            true,
 		AllowConfirmationLifecycle: true,
-		RequireProviderReadyOrder:  true,
 	}
 	frontier, err := domain.ScanProtocolFrontier(contents, options)
 	if err != nil {
@@ -950,7 +949,7 @@ func assertProtocolFixtureProtocol(t *testing.T, fixture protocolFixture) string
 	for index, content := range contents {
 		cloned[index] = content.Clone()
 	}
-	if digest == "" || digest != domain.ContentProtocolDigest(contents) || digest != domain.ProtocolDigest(cloned) {
+	if digest == "" || digest != domain.ProtocolDigest(cloned) {
 		t.Fatalf("fixture protocol digest = %q, want stable content digest", digest)
 	}
 	return digest

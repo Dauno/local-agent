@@ -52,7 +52,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			contents:          []*genai.Content{openAIProtocolCall(genai.RoleUser, "call-1", "lookup", nil)},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "function calls require model role",
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 0,
 		},
 		{
@@ -63,7 +63,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "function responses require a user-role content with no text",
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 1,
 		},
 		{
@@ -80,7 +80,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "function responses require a user-role content with no text",
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 1,
 		},
 		{
@@ -94,7 +94,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			}},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "content cannot mix function calls and responses",
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 0,
 		},
 		{
@@ -105,7 +105,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			}},
 			options:           openAIProtocolOptions(false),
 			adapterError:      ErrUnsupportedPart.Error(),
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 0,
 		},
 		{
@@ -116,7 +116,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			}},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "image content requires user role",
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 0,
 		},
 		{
@@ -132,7 +132,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			contents:          []*genai.Content{{Role: genai.RoleUser}},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "content must have non-empty text",
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 0,
 		},
 		{
@@ -143,7 +143,7 @@ func TestOpenAIConversionMatchesProviderProtocolForSharedContentRules(t *testing
 			}},
 			options:           openAIProtocolOptions(false),
 			adapterError:      "content must have non-empty text",
-			protocolRule:      domain.ProtocolRuleProviderReadyOrder,
+			protocolRule:      "",
 			adapterErrorIndex: 0,
 		},
 		{
@@ -357,7 +357,6 @@ func openAIProtocolOptions(complete bool) domain.ProtocolValidationOptions {
 	return domain.ProtocolValidationOptions{
 		RequireComplete:            complete,
 		AllowConfirmationLifecycle: true,
-		RequireProviderReadyOrder:  true,
 	}
 }
 

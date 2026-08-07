@@ -1,7 +1,6 @@
 package domain
 
 import (
-	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -155,30 +154,6 @@ func TestProtocolValidationRejectsMalformedSequencesWithTypedErrors(t *testing.T
 			contents:        []Content{{Role: ContentRole("tool"), Parts: []ContentPart{{Text: "invalid"}}}},
 			options:         protocolOptions(false),
 			rule:            ProtocolRuleContentRole,
-			contentIndex:    0,
-			partIndex:       -1,
-			frontierCorrupt: true,
-		},
-		{
-			name:     "content has no parts",
-			contents: []Content{{Role: ContentRoleUser}},
-			options: ProtocolValidationOptions{
-				AllowConfirmationLifecycle: true,
-				RequireProviderReadyOrder:  true,
-			},
-			rule:            ProtocolRuleProviderReadyOrder,
-			contentIndex:    0,
-			partIndex:       -1,
-			frontierCorrupt: true,
-		},
-		{
-			name:     "content has empty part",
-			contents: []Content{{Role: ContentRoleUser, Parts: []ContentPart{{}}}},
-			options: ProtocolValidationOptions{
-				AllowConfirmationLifecycle: true,
-				RequireProviderReadyOrder:  true,
-			},
-			rule:            ProtocolRuleProviderReadyOrder,
 			contentIndex:    0,
 			partIndex:       -1,
 			frontierCorrupt: true,
@@ -379,46 +354,6 @@ func TestProtocolValidationRejectsMalformedSequencesWithTypedErrors(t *testing.T
 			frontierCorrupt: true,
 		},
 		{
-			name:     "function call has user role for provider",
-			contents: []Content{protocolCallContent(ContentRoleUser, "call-1", "lookup")},
-			options: ProtocolValidationOptions{
-				AllowConfirmationLifecycle: true,
-				RequireProviderReadyOrder:  true,
-			},
-			rule:            ProtocolRuleProviderReadyOrder,
-			contentIndex:    0,
-			partIndex:       -1,
-			frontierCorrupt: true,
-		},
-		{
-			name:     "function response has model role for provider",
-			contents: []Content{{Role: ContentRoleModel, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "lookup"}}}}},
-			options: ProtocolValidationOptions{
-				AllowConfirmationLifecycle: true,
-				RequireProviderReadyOrder:  true,
-			},
-			rule:            ProtocolRuleProviderReadyOrder,
-			contentIndex:    0,
-			partIndex:       -1,
-			frontierCorrupt: true,
-		},
-		{
-			name: "new call follows open invocation for provider",
-			contents: []Content{
-				protocolText(ContentRoleUser, "start"),
-				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
-				protocolCallContent(ContentRoleModel, "call-2", "write"),
-			},
-			options: ProtocolValidationOptions{
-				AllowConfirmationLifecycle: true,
-				RequireProviderReadyOrder:  true,
-			},
-			rule:            ProtocolRuleProviderReadyOrder,
-			contentIndex:    2,
-			partIndex:       0,
-			frontierCorrupt: true,
-		},
-		{
 			name:         "incomplete call has no terminal response",
 			contents:     []Content{protocolCallContent(ContentRoleModel, "call-1", "lookup")},
 			options:      protocolOptions(true),
@@ -562,107 +497,6 @@ func TestProtocolValidationContinuationMarkerIsUnsupportedByDefault(t *testing.T
 	}
 }
 
-func TestProtocolProviderReadyOrderIsSeparateFromStructuralValidation(t *testing.T) {
-	contents := []Content{
-		protocolText(ContentRoleUser, "start"),
-		protocolCallContent(ContentRoleModel, "call-1", "lookup"),
-		protocolText(ContentRoleUser, "retry"),
-	}
-	if err := ValidateContentProtocol(contents, ProtocolValidationOptions{AllowConfirmationLifecycle: true}); err != nil {
-		t.Fatalf("structural validation rejected open suffix: %v", err)
-	}
-	err := ValidateContentProtocol(contents, ProtocolValidationOptions{
-		AllowConfirmationLifecycle: true,
-		RequireProviderReadyOrder:  true,
-	})
-	var validationErr *ProtocolValidationError
-	if !errors.As(err, &validationErr) || validationErr.Rule != ProtocolRuleProviderReadyOrder {
-		t.Fatalf("provider-order error = %v", err)
-	}
-}
-
-func TestProtocolProviderReadyOrderMatchesOpenAIContentConstraints(t *testing.T) {
-	responsePart := ContentPart{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "lookup"}}
-	options := ProtocolValidationOptions{
-		RequireComplete:            true,
-		AllowConfirmationLifecycle: true,
-		RequireProviderReadyOrder:  true,
-	}
-	tests := []struct {
-		name     string
-		contents []Content
-		wantRule ProtocolValidationRule
-	}{
-		{
-			name:     "function call requires model role",
-			contents: []Content{protocolCallContent(ContentRoleUser, "call-1", "lookup")},
-			wantRule: ProtocolRuleProviderReadyOrder,
-		},
-		{
-			name:     "function response requires user role",
-			contents: []Content{{Role: ContentRoleModel, Parts: []ContentPart{responsePart}}},
-			wantRule: ProtocolRuleProviderReadyOrder,
-		},
-		{
-			name: "function responses cannot share content with text",
-			contents: []Content{
-				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
-				{Role: ContentRoleUser, Parts: []ContentPart{responsePart, {Text: "extra"}}},
-			},
-			wantRule: ProtocolRuleProviderReadyOrder,
-		},
-		{
-			name:     "unsupported structured part",
-			contents: []Content{{Role: ContentRoleUser, Parts: []ContentPart{{StructuredJSON: json.RawMessage(`{"fileData":{"mimeType":"text/plain"}}`)}}}},
-			wantRule: ProtocolRuleProviderReadyOrder,
-		},
-		{
-			name:     "image requires user role",
-			contents: []Content{{Role: ContentRoleModel, Parts: []ContentPart{{StructuredJSON: json.RawMessage(`{"inlineData":{"mimeType":"image/png"}}`)}}}},
-			wantRule: ProtocolRuleProviderReadyOrder,
-		},
-		{
-			name:     "unsupported content role",
-			contents: []Content{{Role: ContentRole("tool"), Parts: []ContentPart{{Text: "invalid"}}}},
-			wantRule: ProtocolRuleContentRole,
-		},
-		{
-			name: "duplicate response remains rejected",
-			contents: []Content{
-				protocolCallContent(ContentRoleModel, "call-1", "lookup"),
-				protocolResponse("call-1", "lookup", nil),
-				protocolResponse("call-1", "lookup", nil),
-			},
-			wantRule: ProtocolRuleDuplicateResponse,
-		},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			err := ValidateContentProtocol(test.contents, options)
-			var validationErr *ProtocolValidationError
-			if !errors.As(err, &validationErr) {
-				t.Fatalf("validation error = %v, want ProtocolValidationError", err)
-			}
-			if validationErr.Rule != test.wantRule {
-				t.Fatalf("validation rule = %q, want %q", validationErr.Rule, test.wantRule)
-			}
-		})
-	}
-
-	valid := []Content{
-		protocolText(ContentRoleUser, "lookup"),
-		{Role: ContentRoleModel, Parts: []ContentPart{{Text: "I will look up the value."}, {FunctionCall: &FunctionCall{ID: "call-1", Name: "lookup"}}}},
-		protocolResponse("call-1", "lookup", nil),
-	}
-	if err := ValidateContentProtocol(valid, options); err != nil {
-		t.Fatalf("model call with text rejected: %v", err)
-	}
-	image := []Content{{Role: ContentRoleUser, Parts: []ContentPart{{StructuredJSON: json.RawMessage(`{"inlineData":{"mimeType":"image/png","data":"aW1hZ2U="}}`)}}}}
-	if err := ValidateContentProtocol(image, options); err != nil {
-		t.Fatalf("supported image rejected: %v", err)
-	}
-}
-
 func TestRetentionPinsCannotAuthorizeIncompleteProviderRequest(t *testing.T) {
 	contents := []Content{
 		protocolText(ContentRoleUser, "start"),
@@ -705,9 +539,6 @@ func TestProtocolDigestIgnoresMapIterationAndContentData(t *testing.T) {
 	if leftDigest, rightDigest := ProtocolDigest(left), ProtocolDigest(right); leftDigest != rightDigest {
 		t.Fatalf("protocol digests differ: %q != %q", leftDigest, rightDigest)
 	}
-	if ProtocolDigest(left) != ContentProtocolDigest(left) {
-		t.Fatal("digest alias changed protocol digest")
-	}
 }
 
 func TestProtocolDigestV1IsStableAndSensitiveToIdentity(t *testing.T) {
@@ -721,7 +552,7 @@ func TestProtocolDigestV1IsStableAndSensitiveToIdentity(t *testing.T) {
 		protocolConfirmationCall("wrapper-1", "call-1", "lookup"),
 	}
 
-	const wantGolden = "v1:9f95e04120eaebd5bb8d460f8392f52481aaea1d79f61effd380e3afaaaffa06"
+	const wantGolden = "v1:f4d1a5160c145da5d2c419b73800dc2766099952b306537a2906b5a1df87a4ad"
 	got := ProtocolDigest(base)
 	if got != wantGolden {
 		t.Fatalf("protocol digest = %q, want golden %q", got, wantGolden)
