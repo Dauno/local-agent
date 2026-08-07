@@ -26,8 +26,6 @@ const (
 
 	ACPPermissionRejectOnce = "reject_once"
 	ACPPermissionAllowOnce  = "allow_once"
-
-	ACPFallbackExternalDirectoryMode = "external_directory"
 )
 
 // ACPErrorCode is a bounded host-owned classification for ACP failures. The
@@ -97,10 +95,9 @@ type ACPAgentInfo struct {
 }
 
 type ACPSessionCapabilities struct {
-	AdditionalDirectories bool
-	Close                 bool
-	LoadSession           bool
-	Resume                bool
+	Close       bool
+	LoadSession bool
+	Resume      bool
 }
 
 type ACPInitResult struct {
@@ -136,8 +133,6 @@ type AcpInvocationRequest struct {
 	JobID                string
 	PrimaryProject       string
 	PrimaryPath          string
-	AdditionalProjects   []string
-	AdditionalPaths      []string
 	ProfileName          string
 	ProviderName         string
 	RegistryRevision     string

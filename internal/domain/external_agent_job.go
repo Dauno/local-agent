@@ -803,14 +803,12 @@ type ExternalAgentJobRequest struct {
 	Provider             string
 	Profile              string
 	PrimaryProject       string
-	AdditionalProjects   []string
 	RegistryRevision     string
 	Task                 string
 	Mode                 ExternalAgentJobMode
 	PermissionOptionKind string
 	Timeout              time.Duration
 	PrimaryPath          string
-	AdditionalPaths      []string
 	WrapperCallID        string
 	OriginalCallID       string
 	Actor                string
@@ -824,7 +822,7 @@ type ExternalAgentJob struct {
 	Provider            string
 	Profile             string
 	PrimaryProject      string
-	AdditionalProjects  []string
+	AdditionalProjects  []string // Legacy persisted data only; dispatch rejects non-empty values.
 	RegistryRevision    string
 	Task                string
 	RequestSHA256       string
@@ -975,7 +973,6 @@ func ExternalAgentJobRequestDigest(request ExternalAgentJobRequest) string {
 		Provider             string               `json:"provider"`
 		Profile              string               `json:"profile"`
 		PrimaryProject       string               `json:"primary_project"`
-		AdditionalProjects   []string             `json:"additional_projects"`
 		RegistryRevision     string               `json:"registry_revision"`
 		Task                 string               `json:"task"`
 		Mode                 ExternalAgentJobMode `json:"mode"`
@@ -988,9 +985,9 @@ func ExternalAgentJobRequestDigest(request ExternalAgentJobRequest) string {
 		ConversationKey      ConversationKey      `json:"conversation_key"`
 	}{
 		Provider: request.Provider, Profile: request.Profile, PrimaryProject: request.PrimaryProject,
-		AdditionalProjects: request.AdditionalProjects, RegistryRevision: request.RegistryRevision,
-		Task: request.Task, Mode: request.Mode, PermissionOptionKind: request.PermissionOptionKind,
-		TimeoutNanos: request.Timeout.Nanoseconds(), WrapperCallID: request.WrapperCallID,
+		RegistryRevision: request.RegistryRevision, Task: request.Task, Mode: request.Mode,
+		PermissionOptionKind: request.PermissionOptionKind,
+		TimeoutNanos:         request.Timeout.Nanoseconds(), WrapperCallID: request.WrapperCallID,
 		OriginalCallID: request.OriginalCallID, Actor: request.Actor, TeamID: request.TeamID,
 		ConversationKey: request.ConversationKey,
 	})

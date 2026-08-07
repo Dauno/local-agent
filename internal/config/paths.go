@@ -19,7 +19,6 @@ type Paths struct {
 	EnvFile             string
 	MemoryDir           string
 	SandboxProjectRoots map[string]string
-	OpenCodeWorktreeDir string
 	ArtifactDir         string
 }
 
@@ -56,7 +55,6 @@ func ResolvePaths(projectRoot string, cfg Config) (Paths, error) {
 		EnvFile:             resolveAgainst(root, DefaultEnvFile),
 		MemoryDir:           resolveMemoryDir(root, cfg.State.Dir, cfg.Memory.Directory),
 		SandboxProjectRoots: resolveSandboxRoots(root, cfg.Sandbox.Projects),
-		OpenCodeWorktreeDir: filepath.Join(resolveAgainst(root, cfg.State.Dir), "worktrees"),
 		ArtifactDir:         filepath.Join(resolveAgainst(root, cfg.State.Dir), "artifacts"),
 	}, nil
 }

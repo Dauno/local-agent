@@ -100,10 +100,10 @@ func (c *Client) Describe(ctx context.Context) (domain.ACPInitResult, error) {
 	return c.initialize(proc)
 }
 
-func (c *Client) Probe(ctx context.Context, primaryPath string, additionalPaths []string, configOptions []domain.ACPConfigOption) error {
+func (c *Client) Probe(ctx context.Context, primaryPath string, configOptions []domain.ACPConfigOption) error {
 	ctx, cancel := withDefaultTimeout(ctx, defaultProbeTimeout)
 	defer cancel()
-	if err := validateWorkspacePaths(primaryPath, additionalPaths); err != nil {
+	if err := validateWorkspacePath(primaryPath); err != nil {
 		return err
 	}
 	proc, err := c.start(ctx, primaryPath)
@@ -116,10 +116,7 @@ func (c *Client) Probe(ctx context.Context, primaryPath string, additionalPaths 
 	if err != nil {
 		return err
 	}
-	if len(additionalPaths) > 0 && !init.SessionCapabilities.AdditionalDirectories {
-		return errors.New("ACP agent does not advertise additionalDirectories; no verified fallback is available")
-	}
-	sessionID, _, err := c.newSession(proc, primaryPath, additionalPaths)
+	sessionID, _, err := c.newSession(proc, primaryPath)
 	if err != nil {
 		return fmt.Errorf("session/new: %w", err)
 	}
@@ -151,7 +148,7 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 	}
 	ctx, cancel := withDefaultTimeout(ctx, timeout)
 	defer cancel()
-	if err := validateWorkspacePaths(req.PrimaryPath, req.AdditionalPaths); err != nil {
+	if err := validateWorkspacePath(req.PrimaryPath); err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
 	emitter := &progressEmitter{onProgress: req.OnProgress}
@@ -168,11 +165,7 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 		return domain.AcpInvocationResult{}, fmt.Errorf("acp initialize: %w", err)
 	}
 	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventInitializeResponse})
-	if len(req.AdditionalPaths) > 0 && !init.SessionCapabilities.AdditionalDirectories {
-		return domain.AcpInvocationResult{}, errors.New("ACP agent does not advertise additionalDirectories; no verified fallback is available")
-	}
-
-	sessionID, initialConfig, err := c.newSession(proc, req.PrimaryPath, req.AdditionalPaths)
+	sessionID, initialConfig, err := c.newSession(proc, req.PrimaryPath)
 	if err != nil {
 		emitter.emitProgressFailure(err)
 		return domain.AcpInvocationResult{}, fmt.Errorf("acp session/new: %w", err)
@@ -192,7 +185,7 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 	}
 	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventTransportActivity})
 
-	prompt := buildPrompt(req.GlobalInstruction, req.AgentInstruction, req.Task, req.AdditionalProjects, req.AdditionalPaths)
+	prompt := buildPrompt(req.GlobalInstruction, req.AgentInstruction, req.Task)
 	emitter.emit(domain.ACPProgressEvent{Kind: domain.ACPEventPromptSent})
 	result, err := c.prompt(proc, sessionID, prompt, req.PermissionOptionKind, req.ConfigOptions, req.JobID, req.OnSideEffectsPossible, req.BeforePermission, emitter)
 	if err != nil {
@@ -283,7 +276,7 @@ func (c *Client) reconcile(ctx context.Context, req domain.AcpInvocationRequest,
 	if !init.SessionCapabilities.LoadSession && !init.SessionCapabilities.Resume {
 		return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorSessionRecoveryUnsupported, Err: errors.New("session recovery is unsupported by the ACP agent")}
 	}
-	if err := validateWorkspacePaths(req.PrimaryPath, req.AdditionalPaths); err != nil {
+	if err := validateWorkspacePath(req.PrimaryPath); err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
 	method := "session/resume"
@@ -291,12 +284,6 @@ func (c *Client) reconcile(ctx context.Context, req domain.AcpInvocationRequest,
 		method = "session/load"
 	}
 	params := map[string]any{"sessionId": sessionID, "cwd": req.PrimaryPath, "mcpServers": []any{}}
-	if len(req.AdditionalPaths) > 0 {
-		if !init.SessionCapabilities.AdditionalDirectories {
-			return domain.AcpInvocationResult{}, errors.New("ACP recovery cannot restore additional workspace roots")
-		}
-		params["additionalDirectories"] = req.AdditionalPaths
-	}
 	loaded, err := c.request(proc, method, params, nil)
 	if err != nil {
 		return domain.AcpInvocationResult{}, fmt.Errorf("ACP %s: %w", method, err)
@@ -334,24 +321,16 @@ func (c *Client) reconcile(ctx context.Context, req domain.AcpInvocationRequest,
 	return result, nil
 }
 
-func validateWorkspacePaths(primary string, additional []string) error {
-	seen := make(map[string]struct{}, len(additional)+1)
-	for index, path := range append([]string{primary}, additional...) {
-		if !filepath.IsAbs(path) {
-			return fmt.Errorf("ACP workspace path %d must be absolute", index)
-		}
-		canonical, err := filepath.EvalSymlinks(path)
-		if err != nil {
-			return fmt.Errorf("resolve ACP workspace path %d: %w", index, err)
-		}
-		canonical = filepath.Clean(canonical)
-		if canonical != filepath.Clean(path) {
-			return fmt.Errorf("ACP workspace path %d must be canonical", index)
-		}
-		if _, duplicate := seen[canonical]; duplicate {
-			return fmt.Errorf("ACP workspace path %d is duplicated", index)
-		}
-		seen[canonical] = struct{}{}
+func validateWorkspacePath(path string) error {
+	if !filepath.IsAbs(path) {
+		return errors.New("ACP workspace path must be absolute")
+	}
+	canonical, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		return fmt.Errorf("resolve ACP workspace path: %w", err)
+	}
+	if filepath.Clean(canonical) != filepath.Clean(path) {
+		return errors.New("ACP workspace path must be canonical")
 	}
 	return nil
 }
@@ -363,25 +342,12 @@ func withDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Con
 	return context.WithTimeout(ctx, timeout)
 }
 
-func buildPrompt(globalInstruction, agentInstruction, task string, additionalProjects, additionalPaths []string) string {
+func buildPrompt(globalInstruction, agentInstruction, task string) string {
 	var b strings.Builder
 	b.WriteString("<<GLOBAL INSTRUCTION (trusted)>>\n")
 	b.WriteString(globalInstruction)
 	b.WriteString("\n\n<<AGENT INSTRUCTION (trusted)>>\n")
 	b.WriteString(agentInstruction)
-	if len(additionalPaths) > 0 {
-		b.WriteString("\n\n<<ADDITIONAL PROJECTS (trusted)>>\n")
-		for index, path := range additionalPaths {
-			name := ""
-			if index < len(additionalProjects) {
-				name = additionalProjects[index]
-			}
-			b.WriteString(name)
-			b.WriteString(": ")
-			b.WriteString(path)
-			b.WriteByte('\n')
-		}
-	}
 	b.WriteString("\n\n<<TASK>>\n")
 	b.WriteString(task)
 	return b.String()
@@ -745,10 +711,9 @@ func (c *Client) initialize(proc *process) (domain.ACPInitResult, error) {
 		AgentInfo:          *response.AgentInfo,
 		ServerCapabilities: serverCapabilities,
 		SessionCapabilities: domain.ACPSessionCapabilities{
-			AdditionalDirectories: capabilityEnabled(sessionCaps["additionalDirectories"]),
-			Close:                 capabilityEnabled(sessionCaps["close"]),
-			LoadSession:           loadSession,
-			Resume:                capabilityEnabled(sessionCaps["resume"]),
+			Close:       capabilityEnabled(sessionCaps["close"]),
+			LoadSession: loadSession,
+			Resume:      capabilityEnabled(sessionCaps["resume"]),
 		},
 	}, nil
 }
@@ -803,11 +768,8 @@ type sessionResult struct {
 	ConfigOptions []sessionConfigOption `json:"configOptions"`
 }
 
-func (c *Client) newSession(proc *process, primaryPath string, additional []string) (string, domain.ACPConfigState, error) {
+func (c *Client) newSession(proc *process, primaryPath string) (string, domain.ACPConfigState, error) {
 	params := map[string]any{"cwd": primaryPath, "mcpServers": []any{}}
-	if len(additional) > 0 {
-		params["additionalDirectories"] = additional
-	}
 	result, err := c.request(proc, "session/new", params, nil)
 	if err != nil {
 		return "", domain.ACPConfigState{}, err

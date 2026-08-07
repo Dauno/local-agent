@@ -303,8 +303,7 @@ func TestWorkflowLoopExitsThroughADKExitLoopTool(t *testing.T) {
 
 func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
 	project := filepath.Join(t.TempDir(), "project")
-	managedBase := filepath.Join(t.TempDir(), "worktrees")
-	managedInvocation := filepath.Join(managedBase, "project", "call")
+	managedInvocation := filepath.Join(project, ".worktrees", "call")
 	createdWorktree := filepath.Join(managedInvocation, "feature")
 	for _, path := range []string{project, createdWorktree} {
 		if err := os.MkdirAll(path, 0o755); err != nil {
@@ -318,7 +317,7 @@ func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
 		Name:       "TRDGitOperator",
 		ACP: &agentdef.AcpAgentDocument{
 			Runtime: "opencode/build", Instruction: "Deliver {trd_content}.", Project: "{target_project}",
-			AdditionalDirectories: []string{"{worktree_root}"}, OutputKey: "delivery_result", OutputSchema: "git_delivery_result",
+			OutputKey: "delivery_result", OutputSchema: "git_delivery_result",
 		},
 	}
 	bp := &agentdef.WorkflowBlueprint{Root: doc}
@@ -327,7 +326,7 @@ func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
 		acpResolved: map[string]*agentdef.ResolvedModel{"opencode/build": {
 			Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}, PermissionOptionKind: domain.ACPPermissionAllowOnce,
 		}},
-		projectRoots: map[string]string{"workspace": project}, worktreeRoot: managedBase,
+		projectRoots: map[string]string{"workspace": project},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -338,7 +337,7 @@ func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, `"status":"success"`) || runtime.request.PrimaryPath != project || len(runtime.request.AdditionalPaths) != 1 {
+	if !strings.Contains(text, `"status":"success"`) || runtime.request.PrimaryPath != project {
 		t.Fatalf("text = %s, request = %+v", text, runtime.request)
 	}
 }

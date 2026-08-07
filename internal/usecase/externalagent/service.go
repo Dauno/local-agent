@@ -134,8 +134,8 @@ func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequ
 	now := s.clock.Now().UTC()
 	job := domain.ExternalAgentJob{
 		ID: "job_" + randomID(), Mode: request.Mode, Provider: request.Provider, Profile: request.Profile,
-		PrimaryProject: request.PrimaryProject, AdditionalProjects: append([]string(nil), request.AdditionalProjects...),
-		RegistryRevision: request.RegistryRevision, Task: request.Task, RequestSHA256: domain.ExternalAgentJobRequestDigest(request),
+		PrimaryProject: request.PrimaryProject, RegistryRevision: request.RegistryRevision,
+		Task: request.Task, RequestSHA256: domain.ExternalAgentJobRequestDigest(request),
 		WrapperCallID: request.WrapperCallID, OriginalCallID: request.OriginalCallID, Actor: request.Actor, TeamID: request.TeamID,
 		ConversationKey: request.ConversationKey, Status: domain.JobQueued, TimeoutAt: now.Add(timeout), CreatedAt: now, UpdatedAt: now,
 	}

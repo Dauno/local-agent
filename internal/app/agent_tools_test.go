@@ -95,7 +95,7 @@ func (*acpCallingRootModel) GenerateContent(context.Context, *model.LLMRequest, 
 	}
 }
 
-func (f *fakeExternalRuntime) Probe(context.Context, string, []string, []domain.ACPConfigOption) error {
+func (f *fakeExternalRuntime) Probe(context.Context, string, []domain.ACPConfigOption) error {
 	f.probes++
 	return f.err
 }
@@ -590,11 +590,11 @@ func TestACPAgentToolResolvesRegisteredProjectsAndInvokesRuntime(t *testing.T) {
 		ConfigOptions:        []agentdef.ACPConfigOption{{ID: "model", Value: "test/model"}},
 		PermissionOptionKind: domain.ACPPermissionAllowOnce,
 	}
-	result, err := invokeACPAgent(t.Context(), agentdef.AgentDef{Name: "opencode_worker", Description: "Runs OpenCode.", Instruction: "Do work."}, "Global.", runtime, resolved, map[string]string{"primary": primary, "additional": additional}, time.Minute, acpAgentArgs{Project: "primary", Task: "change code", AdditionalProjects: []string{"additional"}})
+	result, err := invokeACPAgent(t.Context(), agentdef.AgentDef{Name: "opencode_worker", Description: "Runs OpenCode.", Instruction: "Do work."}, "Global.", runtime, resolved, map[string]string{"primary": primary, "additional": additional}, time.Minute, acpAgentArgs{Project: "primary", Task: "change code"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Result != "completed" || runtime.request.PrimaryProject != "primary" || len(runtime.request.AdditionalPaths) != 1 {
+	if result.Result != "completed" || runtime.request.PrimaryProject != "primary" || runtime.request.PrimaryPath != primary {
 		t.Fatalf("result = %v, request = %+v", result, runtime.request)
 	}
 	if runtime.request.PermissionOptionKind != domain.ACPPermissionAllowOnce || runtime.request.Task != "change code" {
@@ -605,13 +605,10 @@ func TestACPAgentToolResolvesRegisteredProjectsAndInvokesRuntime(t *testing.T) {
 	}
 }
 
-func TestResolveACPProjectsRejectsDuplicateAndUnknownNames(t *testing.T) {
+func TestResolveACPProjectRejectsUnknownName(t *testing.T) {
 	root := t.TempDir()
 	projects := map[string]string{"workspace": root}
-	if _, _, err := resolveACPProjects(projects, "workspace", []string{"workspace"}); err == nil {
-		t.Fatal("expected duplicate rejection")
-	}
-	if _, _, err := resolveACPProjects(projects, "missing", nil); err == nil {
+	if _, err := resolveACPProject(projects, "missing"); err == nil {
 		t.Fatal("expected unknown project rejection")
 	}
 }
