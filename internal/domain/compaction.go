@@ -216,9 +216,6 @@ func ClassifyConversationTurns(contents []Content, options TurnClassificationOpt
 		return nil, 0, errors.New("history has no plain user input")
 	}
 	turns = append(turns, newTurn(int64(len(turns)+1), contents[start:], false))
-	if err := ValidateContentProtocol(contents, ProtocolValidationOptions{AllowConfirmationLifecycle: true}); err != nil {
-		return nil, 0, err
-	}
 	ledger, err := scanContentProtocol(contents, ProtocolValidationOptions{AllowConfirmationLifecycle: true})
 	if err != nil {
 		return nil, 0, err
