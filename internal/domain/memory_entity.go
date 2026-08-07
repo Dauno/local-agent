@@ -48,13 +48,7 @@ func entityMemoryCandidate(message string) (EntityMemoryCandidate, bool) {
 			return EntityMemoryCandidate{}, false
 		}
 		kind := entityFactKind(subject)
-		bundlePath := "facts"
-		switch kind {
-		case "project":
-			bundlePath = "projects"
-		case "system":
-			bundlePath = "systems"
-		}
+		bundlePath := kind + "s"
 		return EntityMemoryCandidate{
 			Slug: kind + "-" + memorySlug(subject), Title: sentenceTitle(subject), BundlePath: bundlePath, Description: "Explicitly remembered user-supplied fact.",
 			Tags: []string{kind, "explicit-memory-request"}, Content: sentenceTitle(fact) + ".",
