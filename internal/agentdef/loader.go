@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -295,14 +296,11 @@ func ValidateCandidateAgent(current *Definitions, candidate AgentDef) error {
 	}
 
 	snapshot := &Definitions{
-		Providers: make(map[string]Provider, len(current.Providers)),
-		Agents:    make(map[string]AgentDef, len(current.Agents)+1),
+		Providers: maps.Clone(current.Providers),
+		Agents:    maps.Clone(current.Agents),
 	}
-	for name, provider := range current.Providers {
-		snapshot.Providers[name] = provider
-	}
-	for name, agent := range current.Agents {
-		snapshot.Agents[name] = agent
+	if snapshot.Agents == nil {
+		snapshot.Agents = make(map[string]AgentDef)
 	}
 	snapshot.Agents[candidate.Name] = candidate
 	return ValidateDefinitions(snapshot)
