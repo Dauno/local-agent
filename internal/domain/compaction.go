@@ -232,8 +232,7 @@ func ClassifyConversationTurns(contents []Content, options ...TurnClassification
 	callIndexes := make(map[string]int)
 	for index, content := range contents {
 		for _, part := range content.Parts {
-			switch {
-			case part.FunctionCall != nil:
+			if part.FunctionCall != nil {
 				callIndexes[part.FunctionCall.ID] = index
 			}
 		}
