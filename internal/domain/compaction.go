@@ -77,10 +77,10 @@ func (c Content) Clone() Content {
 	for i, part := range c.Parts {
 		clone.Parts[i] = ContentPart{Text: part.Text, StructuredJSON: slices.Clone(part.StructuredJSON)}
 		if part.FunctionCall != nil {
-			clone.Parts[i].FunctionCall = &FunctionCall{ID: part.FunctionCall.ID, Name: part.FunctionCall.Name, Args: cloneMap(part.FunctionCall.Args)}
+			clone.Parts[i].FunctionCall = &FunctionCall{ID: part.FunctionCall.ID, Name: part.FunctionCall.Name, Args: mapsClone(part.FunctionCall.Args)}
 		}
 		if part.FunctionResponse != nil {
-			clone.Parts[i].FunctionResponse = &FunctionResponse{ID: part.FunctionResponse.ID, Name: part.FunctionResponse.Name, Response: cloneMap(part.FunctionResponse.Response)}
+			clone.Parts[i].FunctionResponse = &FunctionResponse{ID: part.FunctionResponse.ID, Name: part.FunctionResponse.Name, Response: mapsClone(part.FunctionResponse.Response)}
 			if part.FunctionResponse.WillContinue != nil {
 				value := *part.FunctionResponse.WillContinue
 				clone.Parts[i].FunctionResponse.WillContinue = &value
@@ -90,14 +90,10 @@ func (c Content) Clone() Content {
 	return clone
 }
 
-func cloneMap(input map[string]any) map[string]any {
+func mapsClone(input map[string]any) map[string]any {
 	if input == nil {
 		return nil
 	}
-	return mapsClone(input)
-}
-
-func mapsClone(input map[string]any) map[string]any {
 	output := make(map[string]any, len(input))
 	for key, value := range input {
 		output[key] = cloneValue(value)
