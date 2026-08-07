@@ -188,7 +188,6 @@ func (t ConversationTurn) Clone() ConversationTurn {
 
 // TurnClassificationOptions carries invocation state that is known outside the
 // content ledger, such as a confirmation that is pending in a delivery store.
-// The variadic form keeps callers that do not have external state simple.
 type TurnClassificationOptions struct {
 	OpenInvocationIDs map[string]struct{}
 }
@@ -196,13 +195,9 @@ type TurnClassificationOptions struct {
 // ClassifyConversationTurns groups plain user inputs and validates the
 // function-call protocol. The active suffix starts at the oldest unmatched or
 // externally-open invocation, not necessarily at the last plain user input.
-func ClassifyConversationTurns(contents []Content, options ...TurnClassificationOptions) ([]ConversationTurn, int, error) {
+func ClassifyConversationTurns(contents []Content, options TurnClassificationOptions) ([]ConversationTurn, int, error) {
 	if len(contents) == 0 {
 		return nil, 0, nil
-	}
-	var opts TurnClassificationOptions
-	if len(options) > 0 {
-		opts = options[0]
 	}
 	turns := make([]ConversationTurn, 0)
 	start := -1
@@ -238,8 +233,8 @@ func ClassifyConversationTurns(contents []Content, options ...TurnClassification
 		}
 	}
 	activeStart := start
-	openIDs := make(map[string]struct{}, len(opts.OpenInvocationIDs))
-	for id := range opts.OpenInvocationIDs {
+	openIDs := make(map[string]struct{}, len(options.OpenInvocationIDs))
+	for id := range options.OpenInvocationIDs {
 		openIDs[id] = struct{}{}
 	}
 	for id, call := range ledger.calls {

@@ -12,7 +12,7 @@ func TestClassifyConversationTurnsKeepsOlderOpenInvocationInActiveSuffix(t *test
 		{Role: ContentRoleUser, Parts: []ContentPart{{Text: "concurrent request"}}},
 	}
 
-	turns, activeStart, err := ClassifyConversationTurns(contents)
+	turns, activeStart, err := ClassifyConversationTurns(contents, TurnClassificationOptions{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -37,7 +37,7 @@ func TestClassifyConversationTurnsAcceptsADKConfirmationLifecycle(t *testing.T) 
 		{Role: ContentRoleModel, Parts: []ContentPart{{Text: "completed"}}},
 	}
 
-	if _, _, err := ClassifyConversationTurns(contents); err != nil {
+	if _, _, err := ClassifyConversationTurns(contents, TurnClassificationOptions{}); err != nil {
 		t.Fatalf("valid ADK confirmation lifecycle rejected: %v", err)
 	}
 }
@@ -50,7 +50,7 @@ func TestClassifyConversationTurnsRejectsDuplicateResponseWithoutConfirmation(t 
 		{Role: ContentRoleUser, Parts: []ContentPart{{FunctionResponse: &FunctionResponse{ID: "call-1", Name: "write"}}}},
 	}
 
-	_, _, err := ClassifyConversationTurns(contents)
+	_, _, err := ClassifyConversationTurns(contents, TurnClassificationOptions{})
 	if err == nil || !strings.Contains(err.Error(), "has no matching call") {
 		t.Fatalf("duplicate response error = %v", err)
 	}
