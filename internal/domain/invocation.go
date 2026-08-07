@@ -199,10 +199,6 @@ type ContextFact struct {
 // RenderContextReference renders context facts in stable key order with an
 // explicit untrusted-data preamble. Returns empty string for empty context.
 func RenderContextReference(context AgentContext, budget int) string {
-	return renderContextReference(context, budget)
-}
-
-func renderContextReference(context AgentContext, budget int) string {
 	if len(context.Facts) == 0 || budget <= 0 {
 		return ""
 	}
