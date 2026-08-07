@@ -38,7 +38,7 @@ func TestTerminalTransitionEnqueuesOneDurableNotification(t *testing.T) {
 	if claimedNotification == nil || claimedNotification.JobID != job.ID || claimedNotification.PublishState != domain.NotificationPublishing {
 		t.Fatalf("notification = %#v", claimedNotification)
 	}
-	if claimedNotification.CanonicalMarkdown == "" || claimedNotification.ContentSHA256 == "" || claimedNotification.Target.ChannelID == "" {
+	if claimedNotification.CanonicalMarkdown == "" || claimedNotification.NotificationSHA256 == "" || claimedNotification.Target.ChannelID == "" {
 		t.Fatalf("notification lacks canonical delivery data: %#v", claimedNotification)
 	}
 	if duplicate, err := jobs.ClaimNextNotification(t.Context(), now.Add(2*time.Second), "publisher-2", time.Minute); err != nil || duplicate != nil {

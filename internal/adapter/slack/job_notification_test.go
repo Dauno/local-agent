@@ -32,7 +32,7 @@ func TestJobNotificationPublisherUsesDeterministicMetadata(t *testing.T) {
 		t.Fatalf("requests = %d", len(recorder.requests))
 	}
 	req := recorder.requests[0]
-	if req.eventType != jobNotificationMetadataEventType || req.extraMetadata["job_id"] != "job-1" || req.extraMetadata["status_revision"] != 3 || req.extraMetadata["content_sha256"] != notification.ContentSHA256 {
+	if req.eventType != jobNotificationMetadataEventType || req.extraMetadata["job_id"] != "job-1" || req.extraMetadata["status_revision"] != 3 || req.extraMetadata["content_sha256"] != notification.NotificationSHA256 {
 		t.Fatalf("metadata = %#v", req)
 	}
 	if req.extraMetadata["notification_sha256"] != notification.NotificationSHA256 || req.extraMetadata["notification_bytes"] != int64(len([]byte(notification.CanonicalMarkdown))) {
@@ -93,7 +93,7 @@ func TestJobNotificationHistoryRejectsPartialEvidenceBeforeRetry(t *testing.T) {
 	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{{Msg: slackapi.Msg{
 		User: "BOT", Timestamp: "1710000000.000001", Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: map[string]any{
 			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
-			"renderer_version": notification.RendererVersion, "content_sha256": notification.ContentSHA256,
+			"renderer_version": notification.RendererVersion, "content_sha256": notification.NotificationSHA256,
 			"part_sha256": contentSHA256(notification.CanonicalMarkdown), "part_index": 1, "part_count": 2,
 		}},
 	}}}}, "BOT", 0, nil, false)
@@ -107,8 +107,8 @@ func TestFileNotificationWithoutSlackIdentityRetriesInsteadOfReconciling(t *test
 	notification := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 3, Kind: domain.JobNotificationTerminal,
 		CanonicalMarkdown: "OpenCode job `job-1` completed. The complete result was attached.",
-		ContentSHA256:     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-		ContentBytes:      4, RendererVersion: domain.JobNotificationRenderer,
+		ResultSHA256:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		ResultBytes:       4, RendererVersion: domain.JobNotificationRenderer,
 		Target: domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678", DeliveryMode: domain.JobResultDeliveryFile,
 		PolicyVersion: domain.JobDeliveryPolicyV1, ArtifactRef: "job-1-delivery.result",
 		MaxMarkdownParts: 6, UploadState: domain.JobResultUploadUnknown,
@@ -145,7 +145,7 @@ func TestJobNotificationRejectsDestinationMismatch(t *testing.T) {
 	notification := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 3, Kind: domain.JobNotificationTerminal,
 		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
-		ContentSHA256:     contentSHA256(content), ContentBytes: int64(len(content)),
+		ResultSHA256:      contentSHA256(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer,
 		Target:          domain.ReplyTarget{ChannelID: "D99999999"}, ConversationKey: "slack:T12345678:dm:D12345678",
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1, MaxMarkdownParts: 1,
@@ -296,8 +296,8 @@ func TestJobNotificationValidationVerifiesCanonicalMarkdownIdentity(t *testing.T
 		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -1 }, wantError: true},
 		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -5 }, wantError: true},
 		{name: "negative notification bytes rejected", mode: domain.JobResultDeliveryFile, mutate: func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", -5 }, wantError: true},
-		{name: "legacy fallback markdown must match content digest", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) {
-			n.NotificationSHA256, n.NotificationBytes, n.ContentSHA256 = "", 0, otherDigest
+		{name: "missing notification identity rejected", mode: domain.JobResultDeliveryMarkdown, mutate: func(n *domain.ExternalAgentJobNotification) {
+			n.NotificationSHA256, n.NotificationBytes = "", 0
 		}, wantError: true},
 	}
 	for _, scenario := range cases {
@@ -310,13 +310,12 @@ func TestJobNotificationValidationVerifiesCanonicalMarkdownIdentity(t *testing.T
 		})
 	}
 
-	// Legacy markdown rows (no v32 identity fields at all) keep the fallback
-	// contract: content_sha256 must equal the digest of the canonical
-	// Markdown they will deliver.
+	// Legacy markdown rows use the canonical notification identity after v32
+	// backfill; the old storage digest is not part of the domain object.
 	markdownDigest := domain.NotificationIdentitySHA256(markdown)
 	legacy := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: markdown, ContentSHA256: markdownDigest, ContentBytes: int64(len([]byte(markdown))),
+		CanonicalMarkdown: markdown, NotificationSHA256: markdownDigest, NotificationBytes: int64(len([]byte(markdown))),
 		RendererVersion: domain.JobNotificationRenderer,
 		Target:          domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678",
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
@@ -325,9 +324,7 @@ func TestJobNotificationValidationVerifiesCanonicalMarkdownIdentity(t *testing.T
 	if err := publish(legacy); err != nil {
 		t.Fatalf("legacy markdown fallback publish = %v", err)
 	}
-	// Legacy file rows (no v32 identity fields at all) keep the fallback
-	// contract: the content identity shape is validated here and the exact
-	// bytes against the delivered content at publication time.
+	// Legacy file rows retain their result identity for upload verification.
 	fileLegacy := build(domain.JobResultDeliveryFile, func(n *domain.ExternalAgentJobNotification) { n.NotificationSHA256, n.NotificationBytes = "", 0 })
 	if err := publish(fileLegacy); err != nil {
 		t.Fatalf("legacy file fallback publish = %v", err)
@@ -389,8 +386,7 @@ func preV32DeliveryNotification(mode domain.JobResultDeliveryMode, canonicalMark
 		CanonicalMarkdown:  canonicalMarkdown,
 		NotificationSHA256: domain.NotificationIdentitySHA256(canonicalMarkdown),
 		NotificationBytes:  int64(len([]byte(canonicalMarkdown))),
-		ContentSHA256:      contentSHA256(resultContent), ContentBytes: int64(len([]byte(resultContent))),
-		ResultSHA256: contentSHA256(resultContent), ResultBytes: int64(len([]byte(resultContent))),
+		ResultSHA256:       contentSHA256(resultContent), ResultBytes: int64(len([]byte(resultContent))),
 		RendererVersion: domain.JobNotificationRenderer,
 		Target:          domain.ReplyTarget{ChannelID: "D12345678"},
 		ConversationKey: "slack:T12345678:dm:D12345678",
@@ -405,8 +401,8 @@ func preV32EvidencePayload(notification domain.ExternalAgentJobNotification) map
 	payload := map[string]any{
 		"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
 		"renderer_version": notification.RendererVersion, "delivery_mode": string(notification.DeliveryMode),
-		"policy_version": notification.PolicyVersion, "notification_sha256": notification.ContentSHA256,
-		"content_sha256": notification.ContentSHA256, "result_bytes": notification.ContentBytes,
+		"policy_version": notification.PolicyVersion, "notification_sha256": notification.ResultSHA256,
+		"content_sha256": notification.ResultSHA256, "result_bytes": notification.ResultBytes,
 		"max_markdown_parts": notification.MaxMarkdownParts, "upload_state": string(notification.UploadState),
 		"part_sha256": contentSHA256(part), "part_index": 1, "part_count": 1,
 	}
@@ -472,7 +468,7 @@ func TestJobNotificationReconcileFailsClosedOnEvidenceIdentityMismatch(t *testin
 	v32Mismatch := preV32EvidencePayload(notification)
 	v32Mismatch["notification_sha256"] = strings.Repeat("a", 64)
 	v32Mismatch["notification_bytes"] = int64(len([]byte(notification.CanonicalMarkdown)))
-	v32Mismatch["result_sha256"] = notification.ContentSHA256
+	v32Mismatch["result_sha256"] = notification.ResultSHA256
 	for name, payload := range map[string]map[string]any{
 		"v32_digest_mismatch": v32Mismatch,
 		"legacy_digest_mismatch": {
@@ -603,8 +599,8 @@ func TestJobNotificationReconcileRejectsNegativeNotificationBytes(t *testing.T) 
 					// gate must reject it before any history lookup.
 					notification = domain.ExternalAgentJobNotification{
 						JobID: "job-1", StatusRevision: 1, Kind: domain.JobNotificationTerminal,
-						CanonicalMarkdown: markdown, ContentSHA256: domain.NotificationIdentitySHA256(markdown),
-						ContentBytes: int64(len([]byte(markdown))), RendererVersion: domain.JobNotificationRenderer,
+						CanonicalMarkdown: markdown, NotificationSHA256: domain.NotificationIdentitySHA256(markdown),
+						NotificationBytes: int64(len([]byte(markdown))), RendererVersion: domain.JobNotificationRenderer,
 						Target: domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678",
 						DeliveryMode: mode, PolicyVersion: domain.JobDeliveryPolicyV1,
 						UploadState: domain.JobResultUploadNotApplicable, MaxMarkdownParts: 6,
@@ -659,7 +655,7 @@ func fileTestNotification(content string, state domain.JobResultUploadState, fil
 		JobID: "job-1", StatusRevision: 3, Kind: domain.JobNotificationTerminal,
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678", HostResultText: content,
 		CanonicalMarkdown: fmt.Sprintf("OpenCode job `job-1` completed. The complete result was attached as `opencode-job-1.md` (%d bytes, SHA-256 `%s`).", len(content), digest),
-		ContentSHA256:     digest, ContentBytes: int64(len(content)), RendererVersion: domain.JobNotificationRenderer,
+		ResultSHA256:      digest, ResultBytes: int64(len(content)), RendererVersion: domain.JobNotificationRenderer,
 		Target:       domain.ReplyTarget{ChannelID: "D12345678", CorrelationID: "job:job-1:3:terminal"},
 		DeliveryMode: domain.JobResultDeliveryFile, PolicyVersion: domain.JobDeliveryPolicyV1,
 		ArtifactRef: "job-1-delivery.result", MaxMarkdownParts: 6, UploadState: state, SlackFileID: fileID,
