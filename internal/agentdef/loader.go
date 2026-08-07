@@ -281,19 +281,6 @@ func ValidateCandidateAgent(current *Definitions, candidate AgentDef) error {
 	if _, exists := current.Agents[candidate.Name]; exists {
 		return fmt.Errorf("agent name %q already exists", candidate.Name)
 	}
-	if candidate.AgentClass != "AcpAgent" {
-		providerName, profileName, ok := splitModelReference(candidate.Model)
-		if !ok {
-			return fmt.Errorf("agent %q: model must be provider/profile format", candidate.Name)
-		}
-		provider, exists := current.Providers[providerName]
-		if !exists {
-			return fmt.Errorf("agent %q: unknown provider %q", candidate.Name, providerName)
-		}
-		if _, exists := provider.Profiles[profileName]; !exists {
-			return fmt.Errorf("agent %q: unknown profile %q in provider %q", candidate.Name, profileName, providerName)
-		}
-	}
 
 	snapshot := &Definitions{
 		Providers: maps.Clone(current.Providers),
