@@ -288,8 +288,8 @@ func (s *Service) Validate(patch domain.MemoryPatch) error {
 }
 
 func (s *Service) validatePatch(patch domain.MemoryPatch) error {
-	reasons := make([]string, 0)
-	add := func(format string, args ...any) { reasons = append(reasons, fmt.Sprintf(format, args...)) }
+	reasons := make([]error, 0)
+	add := func(format string, args ...any) { reasons = append(reasons, fmt.Errorf(format, args...)) }
 	if len(patch.Operations) > s.cfg.MaxPatchOps {
 		add("patch has %d operations; maximum is %d", len(patch.Operations), s.cfg.MaxPatchOps)
 	}
@@ -369,7 +369,7 @@ func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 		}
 	}
 	if len(reasons) > 0 {
-		return &domain.MemoryValidationError{Reasons: reasons}
+		return fmt.Errorf("invalid memory patch: %w", errors.Join(reasons...))
 	}
 	return nil
 }
