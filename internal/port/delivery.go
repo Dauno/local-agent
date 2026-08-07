@@ -114,6 +114,10 @@ type Clock interface {
 	Now() time.Time
 }
 
+type SystemClock struct{}
+
+func (SystemClock) Now() time.Time { return time.Now() }
+
 // StructuredPublisher renders provider-neutral structured response data
 // (Presentation) using provider-specific rich presentation (e.g. Slack
 // Block Kit context and table blocks). It is selected by the bot only when

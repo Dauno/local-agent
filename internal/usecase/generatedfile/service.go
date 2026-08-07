@@ -68,7 +68,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		return nil, fmt.Errorf("generated file content limit must not exceed %d bytes", domain.MaxGeneratedFileBytes)
 	}
 	if deps.Clock == nil {
-		deps.Clock = systemClock{}
+		deps.Clock = port.SystemClock{}
 	}
 	return &Service{cfg: cfg, uploader: deps.Uploader, store: deps.Store, clock: deps.Clock, logger: deps.Logger, sanitize: deps.SanitizeContent}, nil
 }
@@ -282,7 +282,3 @@ func ensureJSONEnd(decoder *json.Decoder) error {
 func hasControl(value string) bool {
 	return strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) }) >= 0
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }
