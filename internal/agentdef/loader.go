@@ -721,18 +721,9 @@ func validateAgentTools(defs *Definitions) []string {
 			errs = append(errs, fmt.Sprintf("%s: agent_tools requires an %s root model", prefix, ProviderTypeOpenAICompatible))
 		}
 
-		seen := make(map[string]struct{}, len(owner.AgentTools))
-		for index, name := range owner.AgentTools {
-			if strings.TrimSpace(name) == "" {
-				errs = append(errs, fmt.Sprintf("%s: agent_tools[%d] must not be empty", prefix, index))
-				continue
-			}
-			if _, duplicate := seen[name]; duplicate {
-				errs = append(errs, fmt.Sprintf("%s: duplicate agent tool %q", prefix, name))
-				continue
-			}
-			seen[name] = struct{}{}
-
+		uniqueNames, uniqueErrs := checkUnique(prefix, "agent tool", owner.AgentTools)
+		errs = append(errs, uniqueErrs...)
+		for _, name := range uniqueNames {
 			target, exists := defs.Agents[name]
 			if !exists {
 				errs = append(errs, fmt.Sprintf("%s: unknown agent tool %q", prefix, name))
@@ -792,18 +783,9 @@ func validateWorkflowTools(defs *Definitions) []string {
 			errs = append(errs, fmt.Sprintf("%s: workflow_tools requires an %s root model", prefix, ProviderTypeOpenAICompatible))
 		}
 
-		seen := make(map[string]struct{}, len(owner.WorkflowTools))
-		for index, id := range owner.WorkflowTools {
-			if strings.TrimSpace(id) == "" {
-				errs = append(errs, fmt.Sprintf("%s: workflow_tools[%d] must not be empty", prefix, index))
-				continue
-			}
-			if _, duplicate := seen[id]; duplicate {
-				errs = append(errs, fmt.Sprintf("%s: duplicate workflow tool %q", prefix, id))
-				continue
-			}
-			seen[id] = struct{}{}
-
+		uniqueIDs, uniqueErrs := checkUnique(prefix, "workflow tool", owner.WorkflowTools)
+		errs = append(errs, uniqueErrs...)
+		for _, id := range uniqueIDs {
 			if !agentNamePattern.MatchString(id) {
 				errs = append(errs, fmt.Sprintf("%s: workflow tool id %q is not a valid identifier", prefix, id))
 			}
@@ -812,6 +794,26 @@ func validateWorkflowTools(defs *Definitions) []string {
 	}
 
 	return errs
+}
+
+func checkUnique(prefix, label string, values []string) ([]string, []string) {
+	field := strings.ReplaceAll(label, " ", "_") + "s"
+	seen := make(map[string]struct{}, len(values))
+	unique := make([]string, 0, len(values))
+	var errs []string
+	for index, value := range values {
+		if strings.TrimSpace(value) == "" {
+			errs = append(errs, fmt.Sprintf("%s: %s[%d] must not be empty", prefix, field, index))
+			continue
+		}
+		if _, duplicate := seen[value]; duplicate {
+			errs = append(errs, fmt.Sprintf("%s: duplicate %s %q", prefix, label, value))
+			continue
+		}
+		seen[value] = struct{}{}
+		unique = append(unique, value)
+	}
+	return unique, errs
 }
 
 func validateAcpAgent(prefix string, a AgentDef, providers map[string]Provider) []string {
