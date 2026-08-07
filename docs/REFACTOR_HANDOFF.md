@@ -5,7 +5,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 9 batches de refactor completados + docs update, 9 commits, neto acumulado **−140 líneas**.
+- 10 batches de refactor completados + docs update, 10 commits, neto acumulado **−163 líneas**.
 - Tests verdes en todo momento; no se modificó ningún archivo de test.
 - 3 archivos con cambios preexistentes sin commitear (no tocar, quedan fuera de cualquier commit).
 
@@ -22,6 +22,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A1 | `internal/domain/context_budget.go` | `1d1a5d7` |
 | A2 | `internal/domain/compaction.go` + `context_metrics.go` | `3a11a1d` |
 | A3 | `internal/domain/memory_core.go` + `memory_entity.go` + `memory_instruction.go` | `4476419` |
+| A4 | `internal/domain/continuity.go` + `invocation.go` | `89a498a` |
 
 ## Proceso por batch
 
@@ -55,4 +56,5 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - `RequestBudgetPolicy` y diagnósticos no métricos en domain: conservados en A1 porque eliminarlos requiere ampliar el alcance a consumidores externos; revisar en batch futuro si se amplía scope.
 - Nota de comportamiento: `unicode.IsControl` en `SanitizeConversationSummary` (A2) también rechaza controles C1 que la condición anterior no rechazaba — comportamiento levemente más estricto, documentado.
 - `memory_core.go`: cambios preexistentes sin stagear quedaron intactos; A3 se aplicó con stage selectivo.
+- A4: el grep global no permitió eliminar `ContinuityItem.Kind` (sin lecturas directas, pero con construcciones en `adkagent` y tests), `ContinuityCapsule.Superseded` (uso en `adkagent`, persistencia SQLite y test), ni `SourceEventOrdinal`, `SourceSessionRevision`, `SourceDigest`, `SupersedesID` (escritura en `adkagent`, validación SQLite y tests). `AgentContext.MaxChars` también se conserva: Slack lo construye, `adkagent` lo lee como budget y hay referencia en test. No se eliminó ninguno de estos campos.
 ---
