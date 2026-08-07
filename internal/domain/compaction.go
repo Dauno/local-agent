@@ -270,16 +270,22 @@ func ClassifyConversationTurns(contents []Content, options ...TurnClassification
 	for index := range turns {
 		contentEnd := contentStart + len(turns[index].Contents)
 		if activeStart >= contentStart && activeStart < contentEnd {
-			for openID := range openIDs {
-				for _, content := range turns[index].Contents {
-					for _, part := range content.Parts {
-						if part.FunctionCall != nil && part.FunctionCall.ID == openID {
-							turns[index].HasOpenInvocation = true
-							if part.FunctionCall.Name == ConfirmationFunctionName {
-								turns[index].HasOpenConfirmation = true
-							}
-						}
+			callNames := make(map[string]string)
+			for _, content := range turns[index].Contents {
+				for _, part := range content.Parts {
+					if part.FunctionCall != nil {
+						callNames[part.FunctionCall.ID] = part.FunctionCall.Name
 					}
+				}
+			}
+			for openID := range openIDs {
+				name, ok := callNames[openID]
+				if !ok {
+					continue
+				}
+				turns[index].HasOpenInvocation = true
+				if name == ConfirmationFunctionName {
+					turns[index].HasOpenConfirmation = true
 				}
 			}
 			turns[index].Closed = false
