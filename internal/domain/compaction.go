@@ -252,13 +252,8 @@ func ClassifyConversationTurns(contents []Content, options ...TurnClassification
 			continue
 		}
 		openIDs[id] = struct{}{}
-		if index, ok := callIndexes[id]; ok {
-			if invocationStart := invocationStartAt(contents, index); invocationStart < activeStart {
-				activeStart = invocationStart
-			}
-		}
 	}
-	for id := range opts.OpenInvocationIDs {
+	for id := range openIDs {
 		if index, ok := callIndexes[id]; ok {
 			if invocationStart := invocationStartAt(contents, index); invocationStart < activeStart {
 				activeStart = invocationStart
