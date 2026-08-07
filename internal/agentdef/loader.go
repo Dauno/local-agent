@@ -437,65 +437,21 @@ func validateOpenAICompatibleProvider(prefix string, p Provider) []string {
 }
 
 func validateAgentCLIProvider(prefix string, p Provider) []string {
-	var errs []string
-	if p.BaseURL != "" {
-		errs = append(errs, fmt.Sprintf("%s: base_url is invalid for %s providers", prefix, ProviderTypeAgentCLI))
-	}
-	if p.APIKeyEnv != "" {
-		errs = append(errs, fmt.Sprintf("%s: api_key_env is invalid for %s providers", prefix, ProviderTypeAgentCLI))
-	}
-	if len(p.Headers) > 0 {
-		errs = append(errs, fmt.Sprintf("%s: headers are invalid for %s providers", prefix, ProviderTypeAgentCLI))
-	}
+	errs := forbidHTTPFields(prefix, p, ProviderTypeAgentCLI)
 	if p.Shim == nil {
 		errs = append(errs, fmt.Sprintf("%s: shim is required for %s providers", prefix, ProviderTypeAgentCLI))
 		return errs
 	}
-	if strings.TrimSpace(p.Shim.Command) == "" {
-		errs = append(errs, fmt.Sprintf("%s: shim.command must not be empty", prefix))
-	}
-	if strings.ContainsAny(p.Shim.Command, "\r\n\x00") {
-		errs = append(errs, fmt.Sprintf("%s: shim.command must be a single line", prefix))
-	}
-	for index, arg := range p.Shim.Args {
-		if strings.TrimSpace(arg) == "" {
-			errs = append(errs, fmt.Sprintf("%s: shim.args[%d] must not be empty", prefix, index))
-		}
-		if strings.ContainsAny(arg, "\r\n\x00") {
-			errs = append(errs, fmt.Sprintf("%s: shim.args[%d] must be a single line", prefix, index))
-		}
-	}
+	errs = append(errs, validateCommandArgs(prefix, "shim", p.Shim.Command, p.Shim.Args)...)
 	return errs
 }
 
 func validateACPProvider(prefix string, p Provider) []string {
-	var errs []string
-	if p.BaseURL != "" {
-		errs = append(errs, fmt.Sprintf("%s: base_url is invalid for %s providers", prefix, ProviderTypeACP))
-	}
-	if p.APIKeyEnv != "" {
-		errs = append(errs, fmt.Sprintf("%s: api_key_env is invalid for %s providers", prefix, ProviderTypeACP))
-	}
-	if len(p.Headers) > 0 {
-		errs = append(errs, fmt.Sprintf("%s: headers are invalid for %s providers", prefix, ProviderTypeACP))
-	}
+	errs := forbidHTTPFields(prefix, p, ProviderTypeACP)
 	if p.Shim != nil {
 		errs = append(errs, fmt.Sprintf("%s: shim is invalid for %s providers", prefix, ProviderTypeACP))
 	}
-	if strings.TrimSpace(p.Command) == "" {
-		errs = append(errs, fmt.Sprintf("%s: command is required for %s providers", prefix, ProviderTypeACP))
-	}
-	if strings.ContainsAny(p.Command, "\r\n\x00") {
-		errs = append(errs, fmt.Sprintf("%s: command must be a single line", prefix))
-	}
-	for index, arg := range p.Args {
-		if strings.TrimSpace(arg) == "" {
-			errs = append(errs, fmt.Sprintf("%s: args[%d] must not be empty", prefix, index))
-		}
-		if strings.ContainsAny(arg, "\r\n\x00") {
-			errs = append(errs, fmt.Sprintf("%s: args[%d] must be a single line", prefix, index))
-		}
-	}
+	errs = append(errs, validateCommandArgs(prefix, "", p.Command, p.Args)...)
 	for profileName, profile := range p.Profiles {
 		profilePrefix := fmt.Sprintf("%s profile %q", prefix, profileName)
 		if len(profile.ConfigOptions) == 0 {
@@ -529,6 +485,50 @@ func validateACPProvider(prefix string, p Provider) []string {
 		case "", "reject_once", "allow_once":
 		default:
 			errs = append(errs, fmt.Sprintf("%s: permission_option_kind must be reject_once or allow_once", profilePrefix))
+		}
+	}
+	return errs
+}
+
+func forbidHTTPFields(prefix string, p Provider, providerType string) []string {
+	var errs []string
+	if p.BaseURL != "" {
+		errs = append(errs, fmt.Sprintf("%s: base_url is invalid for %s providers", prefix, providerType))
+	}
+	if p.APIKeyEnv != "" {
+		errs = append(errs, fmt.Sprintf("%s: api_key_env is invalid for %s providers", prefix, providerType))
+	}
+	if len(p.Headers) > 0 {
+		errs = append(errs, fmt.Sprintf("%s: headers are invalid for %s providers", prefix, providerType))
+	}
+	return errs
+}
+
+func validateCommandArgs(prefix, label, command string, args []string) []string {
+	commandLabel := "command"
+	argsLabel := "args"
+	if label != "" {
+		commandLabel = label + ".command"
+		argsLabel = label + ".args"
+	}
+
+	var errs []string
+	if strings.TrimSpace(command) == "" {
+		if label == "" {
+			errs = append(errs, fmt.Sprintf("%s: command is required for %s providers", prefix, ProviderTypeACP))
+		} else {
+			errs = append(errs, fmt.Sprintf("%s: %s must not be empty", prefix, commandLabel))
+		}
+	}
+	if strings.ContainsAny(command, "\r\n\x00") {
+		errs = append(errs, fmt.Sprintf("%s: %s must be a single line", prefix, commandLabel))
+	}
+	for index, arg := range args {
+		if strings.TrimSpace(arg) == "" {
+			errs = append(errs, fmt.Sprintf("%s: %s[%d] must not be empty", prefix, argsLabel, index))
+		}
+		if strings.ContainsAny(arg, "\r\n\x00") {
+			errs = append(errs, fmt.Sprintf("%s: %s[%d] must be a single line", prefix, argsLabel, index))
 		}
 	}
 	return errs
