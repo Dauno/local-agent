@@ -243,19 +243,9 @@ func escapeContextText(value string) string {
 }
 
 func truncateRunes(value string, max int) string {
-	if max <= 0 {
-		return ""
-	}
-	if len([]rune(value)) <= max {
+	r := []rune(value)
+	if len(r) <= max {
 		return value
 	}
-	var b strings.Builder
-	for _, r := range value {
-		if max == 0 {
-			break
-		}
-		b.WriteRune(r)
-		max--
-	}
-	return b.String()
+	return string(r[:max])
 }
