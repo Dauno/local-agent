@@ -76,12 +76,9 @@ func (s *Service) ReconcileJobCompletion(ctx context.Context, activation domain.
 }
 
 func (s *Service) runJobCompletion(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
-	metadata, channelKind, err := activationMetadata(*activation)
+	metadata, channelKind, err := s.activationIdentity(ctx, activation)
 	if err != nil {
-		return s.failActivation(ctx, activation, "activation_identity_invalid", false, err)
-	}
-	if !domain.PlausibleUserID(activation.Actor) || !domain.PlausibleTeamID(activation.TeamID) || !domain.PlausibleChannelID(metadata.ChannelID) {
-		return s.failActivation(ctx, activation, "activation_identity_invalid", false, errors.New("external-agent activation binding is invalid"))
+		return err
 	}
 	authorization := s.cfg.AccessPolicy.Authorize(domain.Invocation{
 		TeamID: activation.TeamID, ChannelID: metadata.ChannelID, ChannelKind: channelKind, UserID: activation.Actor,
@@ -195,12 +192,9 @@ func (s *Service) prepareActivationResponse(ctx context.Context, activation *dom
 }
 
 func (s *Service) publishPreparedActivation(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
-	metadata, channelKind, err := activationMetadata(*activation)
+	metadata, channelKind, err := s.activationIdentity(ctx, activation)
 	if err != nil {
-		return s.failActivation(ctx, activation, "activation_identity_invalid", false, err)
-	}
-	if !domain.PlausibleUserID(activation.Actor) || !domain.PlausibleTeamID(activation.TeamID) || !domain.PlausibleChannelID(metadata.ChannelID) {
-		return s.failActivation(ctx, activation, "activation_identity_invalid", false, errors.New("external-agent activation binding is invalid"))
+		return err
 	}
 	authorization := s.cfg.AccessPolicy.Authorize(domain.Invocation{
 		TeamID: activation.TeamID, ChannelID: metadata.ChannelID, ChannelKind: channelKind, UserID: activation.Actor,
@@ -337,6 +331,17 @@ func activationIdentityMatches(left, right domain.ExternalAgentJobActivation) bo
 		left.Actor == right.Actor && left.TeamID == right.TeamID && left.ConversationKey == right.ConversationKey &&
 		left.OriginalCallID == right.OriginalCallID && left.DeliveryMode == right.DeliveryMode &&
 		left.ContentBytes == right.ContentBytes && left.SlackMessageTS == right.SlackMessageTS && left.PublishedAt.Equal(right.PublishedAt)
+}
+
+func (s *Service) activationIdentity(ctx context.Context, activation *domain.ExternalAgentJobActivation) (domain.ConversationMetadata, domain.ChannelKind, error) {
+	metadata, channelKind, err := activationMetadata(*activation)
+	if err != nil {
+		return domain.ConversationMetadata{}, "", s.failActivation(ctx, activation, "activation_identity_invalid", false, err)
+	}
+	if !domain.PlausibleUserID(activation.Actor) || !domain.PlausibleTeamID(activation.TeamID) || !domain.PlausibleChannelID(metadata.ChannelID) {
+		return domain.ConversationMetadata{}, "", s.failActivation(ctx, activation, "activation_identity_invalid", false, errors.New("external-agent activation binding is invalid"))
+	}
+	return metadata, channelKind, nil
 }
 
 func activationMetadata(activation domain.ExternalAgentJobActivation) (domain.ConversationMetadata, domain.ChannelKind, error) {
