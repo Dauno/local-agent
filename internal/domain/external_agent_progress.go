@@ -439,6 +439,7 @@ func (p *ExternalAgentJobProgress) toolPhase(tool *ACPToolProgress) ACPProgressP
 		return p.Phase
 	}
 }
+
 // eventMeaningful reports whether the event indicates observable task
 // advancement. Tool updates are meaningful only on a status transition of the
 // specific call ID, never on the last global status.
