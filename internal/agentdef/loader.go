@@ -69,41 +69,23 @@ func dirExists(path string) (bool, error) {
 }
 
 func loadProviders(dir string) (map[string]Provider, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, fmt.Errorf("read providers directory: %w", err)
-	}
-	providers := make(map[string]Provider)
-	for _, entry := range entries {
-		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
-			continue
-		}
-		path := filepath.Join(dir, entry.Name())
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return nil, fmt.Errorf("read provider file %q: %w", entry.Name(), err)
-		}
-		var p Provider
-		if err := decodeStrictYAML(data, &p); err != nil {
-			return nil, fmt.Errorf("parse provider file %q: %w", entry.Name(), err)
-		}
-		if err := validateProviderFieldPresence(data, p); err != nil {
-			return nil, fmt.Errorf("parse provider file %q: %w", entry.Name(), err)
-		}
-		if _, exists := providers[p.Name]; exists {
-			return nil, fmt.Errorf("duplicate provider name %q in %q", p.Name, entry.Name())
-		}
-		providers[p.Name] = p
-	}
-	return providers, nil
+	return loadYAMLDir[Provider](dir, "provider", func(provider Provider) string {
+		return provider.Name
+	}, validateProviderFieldPresence)
 }
 
 func loadAgents(dir string) (map[string]AgentDef, error) {
+	return loadYAMLDir[AgentDef](dir, "agent", func(agent AgentDef) string {
+		return agent.Name
+	}, nil)
+}
+
+func loadYAMLDir[T any](dir, kind string, nameOf func(T) string, postDecode func([]byte, T) error) (map[string]T, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
-		return nil, fmt.Errorf("read agents directory: %w", err)
+		return nil, fmt.Errorf("read %ss directory: %w", kind, err)
 	}
-	agents := make(map[string]AgentDef)
+	values := make(map[string]T)
 	for _, entry := range entries {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".yaml") {
 			continue
@@ -111,18 +93,24 @@ func loadAgents(dir string) (map[string]AgentDef, error) {
 		path := filepath.Join(dir, entry.Name())
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("read agent file %q: %w", entry.Name(), err)
+			return nil, fmt.Errorf("read %s file %q: %w", kind, entry.Name(), err)
 		}
-		var a AgentDef
-		if err := decodeStrictYAML(data, &a); err != nil {
-			return nil, fmt.Errorf("parse agent file %q: %w", entry.Name(), err)
+		var value T
+		if err := decodeStrictYAML(data, &value); err != nil {
+			return nil, fmt.Errorf("parse %s file %q: %w", kind, entry.Name(), err)
 		}
-		if _, exists := agents[a.Name]; exists {
-			return nil, fmt.Errorf("duplicate agent name %q in %q", a.Name, entry.Name())
+		if postDecode != nil {
+			if err := postDecode(data, value); err != nil {
+				return nil, fmt.Errorf("parse %s file %q: %w", kind, entry.Name(), err)
+			}
 		}
-		agents[a.Name] = a
+		name := nameOf(value)
+		if _, exists := values[name]; exists {
+			return nil, fmt.Errorf("duplicate %s name %q in %q", kind, name, entry.Name())
+		}
+		values[name] = value
 	}
-	return agents, nil
+	return values, nil
 }
 
 func decodeStrictYAML(data []byte, target any) error {
