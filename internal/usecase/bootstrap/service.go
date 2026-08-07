@@ -113,8 +113,8 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	if err != nil {
 		return Snapshot{}, err
 	}
-	if err := s.files.EnsureDirectory(ctx, filepath.Dir(configPath), 0o755); err != nil {
-		return Snapshot{}, fmt.Errorf("create local-agent artifact directory: %w", err)
+	if err := s.ensureDir(ctx, "local-agent artifact directory", filepath.Dir(configPath)); err != nil {
+		return Snapshot{}, err
 	}
 
 	cfg, err := s.loadOrCreateConfig(ctx, configPath)
@@ -126,11 +126,11 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, fmt.Errorf("resolve bootstrap paths: %w", err)
 	}
 
-	if err := s.files.EnsureDirectory(ctx, paths.StateDir, 0o755); err != nil {
-		return Snapshot{}, fmt.Errorf("create configured state directory: %w", err)
+	if err := s.ensureDir(ctx, "configured state directory", paths.StateDir); err != nil {
+		return Snapshot{}, err
 	}
-	if err := s.files.EnsureDirectory(ctx, filepath.Dir(paths.DatabaseFile), 0o755); err != nil {
-		return Snapshot{}, fmt.Errorf("create database directory: %w", err)
+	if err := s.ensureDir(ctx, "database directory", filepath.Dir(paths.DatabaseFile)); err != nil {
+		return Snapshot{}, err
 	}
 
 	renderedManifest, err := manifest.Render(manifest.Identity{
@@ -149,14 +149,14 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	agentsDir := filepath.Join(paths.StateDir, "agents")
 	providersDir := filepath.Join(paths.StateDir, "providers")
 	workflowsDir := filepath.Join(paths.StateDir, "workflows")
-	if err := s.files.EnsureDirectory(ctx, agentsDir, 0o755); err != nil {
-		return Snapshot{}, fmt.Errorf("create agents directory: %w", err)
+	if err := s.ensureDir(ctx, "agents directory", agentsDir); err != nil {
+		return Snapshot{}, err
 	}
-	if err := s.files.EnsureDirectory(ctx, providersDir, 0o755); err != nil {
-		return Snapshot{}, fmt.Errorf("create providers directory: %w", err)
+	if err := s.ensureDir(ctx, "providers directory", providersDir); err != nil {
+		return Snapshot{}, err
 	}
-	if err := s.files.EnsureDirectory(ctx, workflowsDir, 0o755); err != nil {
-		return Snapshot{}, fmt.Errorf("create workflows directory: %w", err)
+	if err := s.ensureDir(ctx, "workflows directory", workflowsDir); err != nil {
+		return Snapshot{}, err
 	}
 
 	provider := agentdef.SeedDeepSeekProvider(agentdef.SeedModelConfig{
@@ -171,8 +171,8 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("marshal seeded provider: %w", err)
 	}
-	if _, err := s.files.CreateFile(ctx, filepath.Join(providersDir, "deepseek.yaml"), providerData, 0o644); err != nil {
-		return Snapshot{}, fmt.Errorf("create provider definition: %w", err)
+	if err := s.writeSeedFile(ctx, "provider definition", filepath.Join(providersDir, "deepseek.yaml"), providerData); err != nil {
+		return Snapshot{}, err
 	}
 
 	rootAgent := agentdef.SeedRootAgent("deepseek/flash-reasoning")
@@ -181,8 +181,8 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, fmt.Errorf("marshal seeded root agent: %w", err)
 	}
 	rootAgentPath := filepath.Join(agentsDir, "root_agent.yaml")
-	if _, err := s.files.CreateFile(ctx, rootAgentPath, rootData, 0o644); err != nil {
-		return Snapshot{}, fmt.Errorf("create root agent definition: %w", err)
+	if err := s.writeSeedFile(ctx, "root agent definition", rootAgentPath, rootData); err != nil {
+		return Snapshot{}, err
 	}
 	rootData, err = s.files.ReadFile(ctx, rootAgentPath)
 	if err != nil {
@@ -201,8 +201,8 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("marshal seeded explore agent: %w", err)
 	}
-	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "explore.yaml"), exploreData, 0o644); err != nil {
-		return Snapshot{}, fmt.Errorf("create explore agent definition: %w", err)
+	if err := s.writeSeedFile(ctx, "explore agent definition", filepath.Join(agentsDir, "explore.yaml"), exploreData); err != nil {
+		return Snapshot{}, err
 	}
 
 	curator := agentdef.SeedMemoryCurator("deepseek/flash-json")
@@ -210,8 +210,8 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("marshal seeded curator: %w", err)
 	}
-	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "memory_curator.yaml"), curatorData, 0o644); err != nil {
-		return Snapshot{}, fmt.Errorf("create memory curator definition: %w", err)
+	if err := s.writeSeedFile(ctx, "memory curator definition", filepath.Join(agentsDir, "memory_curator.yaml"), curatorData); err != nil {
+		return Snapshot{}, err
 	}
 
 	attachmentAnalyzer := agentdef.SeedAttachmentAnalyzer("provider/profile")
@@ -220,8 +220,8 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, fmt.Errorf("marshal attachment analyzer template: %w", err)
 	}
 	attachmentAnalyzerData = append([]byte("# Rename this file to attachment_analyzer.yaml after replacing provider/profile.\n# The referenced provider profile must configure token_counter.strategy: estimator\n# with id: visual-tile-conservative-v1 so image requests can be valued; doctor\n# and startup fail closed otherwise.\n"), attachmentAnalyzerData...)
-	if _, err := s.files.CreateFile(ctx, filepath.Join(agentsDir, "attachment_analyzer.yaml.example"), attachmentAnalyzerData, 0o644); err != nil {
-		return Snapshot{}, fmt.Errorf("create attachment analyzer template: %w", err)
+	if err := s.writeSeedFile(ctx, "attachment analyzer template", filepath.Join(agentsDir, "attachment_analyzer.yaml.example"), attachmentAnalyzerData); err != nil {
+		return Snapshot{}, err
 	}
 
 	openCodeProvider := agentdef.SeedOpenCodeProviderExample()
@@ -236,8 +236,8 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 			"# OpenCode model reference in profiles.\n"+
 			"# Switching root_agent.model between provider families requires:\n"+
 			"#   local-agent init --reset-state\n"), openCodeData...)
-	if _, err := s.files.CreateFile(ctx, filepath.Join(providersDir, "opencode.yaml.example"), openCodeData, 0o644); err != nil {
-		return Snapshot{}, fmt.Errorf("create OpenCode provider template: %w", err)
+	if err := s.writeSeedFile(ctx, "OpenCode provider template", filepath.Join(providersDir, "opencode.yaml.example"), openCodeData); err != nil {
+		return Snapshot{}, err
 	}
 
 	if err := s.files.CheckRegularFileOrMissing(ctx, paths.DatabaseFile); err != nil {
@@ -251,6 +251,20 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	}
 
 	return Snapshot{ProjectRoot: root, Config: cfg, Paths: paths}, nil
+}
+
+func (s *Service) ensureDir(ctx context.Context, what string, path string) error {
+	if err := s.files.EnsureDirectory(ctx, path, 0o755); err != nil {
+		return fmt.Errorf("create %s: %w", what, err)
+	}
+	return nil
+}
+
+func (s *Service) writeSeedFile(ctx context.Context, what string, path string, content []byte) error {
+	if _, err := s.files.CreateFile(ctx, path, content, 0o644); err != nil {
+		return fmt.Errorf("create %s: %w", what, err)
+	}
+	return nil
 }
 
 func (s *Service) loadOrCreateConfig(ctx context.Context, path string) (config.Config, error) {
@@ -410,15 +424,7 @@ func validateIdentity(identity Identity) error {
 		"Slack app name":         identity.SlackAppName,
 		"Slack bot display name": identity.SlackBotDisplayName,
 	}
-	for name, value := range values {
-		if strings.TrimSpace(value) == "" {
-			return fmt.Errorf("%s is required", name)
-		}
-		if strings.ContainsAny(value, "\r\n\x00") {
-			return fmt.Errorf("%s must be a single line", name)
-		}
-	}
-	return nil
+	return validateRequiredSingleLine(values)
 }
 
 func validateSecrets(secrets Secrets) error {
@@ -427,6 +433,20 @@ func validateSecrets(secrets Secrets) error {
 		"Slack bot token": secrets.SlackBotToken,
 		"Slack app token": secrets.SlackAppToken,
 	}
+	if err := validateRequiredSingleLine(values); err != nil {
+		return err
+	}
+
+	if !strings.HasPrefix(secrets.SlackBotToken, "xoxb-") || len(secrets.SlackBotToken) == len("xoxb-") {
+		return errors.New("Slack bot token must start with xoxb-")
+	}
+	if !strings.HasPrefix(secrets.SlackAppToken, "xapp-") || len(secrets.SlackAppToken) == len("xapp-") {
+		return errors.New("Slack app token must start with xapp-")
+	}
+	return nil
+}
+
+func validateRequiredSingleLine(values map[string]string) error {
 	for name, value := range values {
 		if strings.TrimSpace(value) == "" {
 			return fmt.Errorf("%s is required", name)
@@ -434,12 +454,6 @@ func validateSecrets(secrets Secrets) error {
 		if strings.ContainsAny(value, "\r\n\x00") {
 			return fmt.Errorf("%s must be a single line", name)
 		}
-	}
-	if !strings.HasPrefix(secrets.SlackBotToken, "xoxb-") || len(secrets.SlackBotToken) == len("xoxb-") {
-		return errors.New("Slack bot token must start with xoxb-")
-	}
-	if !strings.HasPrefix(secrets.SlackAppToken, "xapp-") || len(secrets.SlackAppToken) == len("xapp-") {
-		return errors.New("Slack app token must start with xapp-")
 	}
 	return nil
 }

@@ -25,18 +25,12 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 		return nil, fmt.Errorf("current agent definitions must not be nil")
 	}
 
-	kind := draft.Kind
-	if kind == "" {
-		kind = domain.AgentKindLLM
-	}
+	kind := defaultKind(draft)
 	if err := domain.ValidateAgentKind(kind); err != nil {
 		return nil, err
 	}
 
-	mode := draft.ExecutionMode
-	if mode == "" {
-		mode = domain.ExecutionModeForeground
-	}
+	mode := defaultMode(draft)
 	if err := domain.ValidateExecutionMode(kind, mode); err != nil {
 		return nil, err
 	}
@@ -67,7 +61,7 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 			return nil, err
 		}
 		agent = agentdef.AgentDef{
-			AgentClass:      "LlmAgent",
+			AgentClass:      string(agentdef.AgentClassLLM),
 			Name:            draft.Name,
 			Model:           model,
 			Description:     draft.Description,
@@ -86,7 +80,7 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 		if err := validateProviderProfile(defs, kind, runtime); err != nil {
 			return nil, err
 		}
-		if err := domain.ValidateACPAllowlist(strings.SplitN(runtime, "/", 2)[0]); err != nil {
+		if err := domain.ValidateACPAllowlist(providerName(runtime)); err != nil {
 			return nil, err
 		}
 		timeout := draft.TimeoutSeconds
@@ -97,7 +91,7 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 			return nil, err
 		}
 		agent = agentdef.AgentDef{
-			AgentClass:     "AcpAgent",
+			AgentClass:     string(agentdef.AgentClassAcp),
 			Name:           draft.Name,
 			Runtime:        runtime,
 			Description:    draft.Description,
@@ -143,10 +137,7 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 	if defs == nil {
 		return fmt.Errorf("current agent definitions are not available")
 	}
-	kind := draft.Kind
-	if kind == "" {
-		kind = domain.AgentKindLLM
-	}
+	kind := defaultKind(draft)
 	if err := domain.ValidateAgentKind(kind); err != nil {
 		return err
 	}
@@ -157,10 +148,10 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 		return fmt.Errorf("canonical agent definition does not match draft name")
 	}
 
-	expectedClass := "LlmAgent"
+	expectedClass := string(agentdef.AgentClassLLM)
 	reference := candidate.Model
 	if kind == domain.AgentKindACP {
-		expectedClass = "AcpAgent"
+		expectedClass = string(agentdef.AgentClassAcp)
 		reference = candidate.Runtime
 	}
 	if candidate.AgentClass != expectedClass {
@@ -169,21 +160,18 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 	if err := validateProviderProfile(defs, kind, reference); err != nil {
 		return fmt.Errorf("invalid canonical agent provider: %w", err)
 	}
-	providerName := strings.SplitN(reference, "/", 2)[0]
+	provider := providerName(reference)
 	if kind == domain.AgentKindACP {
 		if strings.TrimSpace(draft.Model) != "" {
 			return fmt.Errorf("model is not valid for ACP agents")
 		}
-		if err := domain.ValidateACPAllowlist(providerName); err != nil {
+		if err := domain.ValidateACPAllowlist(provider); err != nil {
 			return err
 		}
 		if candidate.Model != "" || candidate.Confirmation != "required" {
 			return fmt.Errorf("canonical ACP agent has incompatible model or confirmation")
 		}
-		expectedMode := draft.ExecutionMode
-		if expectedMode == "" {
-			expectedMode = domain.ExecutionModeForeground
-		}
+		expectedMode := defaultMode(draft)
 		if err := domain.ValidateExecutionMode(kind, expectedMode); err != nil {
 			return err
 		}
@@ -211,6 +199,22 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 	}
 	return nil
 }
+
+func defaultKind(draft domain.AgentDraft) domain.AgentKind {
+	if draft.Kind == "" {
+		return domain.AgentKindLLM
+	}
+	return draft.Kind
+}
+
+func defaultMode(draft domain.AgentDraft) string {
+	if draft.ExecutionMode == "" {
+		return domain.ExecutionModeForeground
+	}
+	return draft.ExecutionMode
+}
+
+func providerName(ref string) string { return strings.SplitN(ref, "/", 2)[0] }
 
 func validateProviderProfile(defs *agentdef.Definitions, kind domain.AgentKind, reference string) error {
 	parts := strings.Split(reference, "/")
