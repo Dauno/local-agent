@@ -395,7 +395,11 @@ func (p *ExternalAgentJobProgress) applyToolEvent(tool *ACPToolProgress) {
 	if tool == nil || tool.CallID == "" {
 		return
 	}
-	p.applyToolIdentity(tool)
+	p.LastToolCallID = tool.CallID
+	if tool.Kind != "" {
+		p.LastToolKind = tool.Kind
+	}
+	p.LastToolStatus = tool.Status
 	if p.toolStates == nil {
 		p.toolStates = make(map[string]ACPToolStatus)
 	}
@@ -435,18 +439,6 @@ func (p *ExternalAgentJobProgress) toolPhase(tool *ACPToolProgress) ACPProgressP
 		return p.Phase
 	}
 }
-
-func (p *ExternalAgentJobProgress) applyToolIdentity(tool *ACPToolProgress) {
-	if tool == nil || tool.CallID == "" {
-		return
-	}
-	p.LastToolCallID = tool.CallID
-	if tool.Kind != "" {
-		p.LastToolKind = tool.Kind
-	}
-	p.LastToolStatus = tool.Status
-}
-
 // eventMeaningful reports whether the event indicates observable task
 // advancement. Tool updates are meaningful only on a status transition of the
 // specific call ID, never on the last global status.
