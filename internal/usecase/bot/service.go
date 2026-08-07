@@ -684,24 +684,24 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 	if s.confirmationPublisher != nil {
 		rendererMode = confirmationRendererMode
 	}
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID:   pc.WrapperCallID,
+		OriginalCallID:  pc.OriginalCallID,
+		SessionID:       fmt.Sprintf("adk:%s", key),
+		Actor:           pc.Actor,
+		TeamID:          invocation.TeamID,
+		ChannelID:       invocation.ChannelID,
+		ThreadTS:        invocation.ReplyTarget().ThreadTS,
+		ConversationKey: key,
+		Summary:         pc.Summary,
+		ParameterHash:   pc.ParameterHash,
+		Status:          port.ConfirmationPending,
+		CorrelationID:   correlationID,
+		RendererMode:    rendererMode,
+		Expiry:          pc.Expiry,
+	}
 
 	if s.confirmationStore != nil {
-		delivery := port.ConfirmationDelivery{
-			WrapperCallID:   pc.WrapperCallID,
-			OriginalCallID:  pc.OriginalCallID,
-			SessionID:       fmt.Sprintf("adk:%s", key),
-			Actor:           pc.Actor,
-			TeamID:          invocation.TeamID,
-			ChannelID:       invocation.ChannelID,
-			ThreadTS:        invocation.ReplyTarget().ThreadTS,
-			ConversationKey: key,
-			Summary:         pc.Summary,
-			ParameterHash:   pc.ParameterHash,
-			Status:          port.ConfirmationPending,
-			CorrelationID:   correlationID,
-			RendererMode:    rendererMode,
-			Expiry:          pc.Expiry,
-		}
 		if err := s.confirmationStore.CreateDelivery(ctx, delivery); err != nil {
 			s.logger.Error("confirmation delivery creation failed", "conversation_key", key, "error", err)
 			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.ModelErrorMessage); pubErr != nil {
@@ -713,22 +713,6 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 	}
 
 	if s.confirmationPublisher != nil {
-		delivery := port.ConfirmationDelivery{
-			WrapperCallID:   pc.WrapperCallID,
-			OriginalCallID:  pc.OriginalCallID,
-			SessionID:       fmt.Sprintf("adk:%s", key),
-			Actor:           pc.Actor,
-			TeamID:          invocation.TeamID,
-			ChannelID:       invocation.ChannelID,
-			ThreadTS:        invocation.ReplyTarget().ThreadTS,
-			ConversationKey: key,
-			Summary:         pc.Summary,
-			ParameterHash:   pc.ParameterHash,
-			Status:          port.ConfirmationPending,
-			CorrelationID:   correlationID,
-			RendererMode:    rendererMode,
-			Expiry:          pc.Expiry,
-		}
 		result, err := s.confirmationPublisher.PublishConfirmation(ctx, delivery)
 		if err != nil {
 			s.logger.Error("confirmation blocks publish failed", "conversation_key", key, "error", err)
@@ -761,6 +745,29 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 	}
 
 	return OutcomeResponded, nil
+}
+
+func (s *Service) persistAssistantTurn(ctx context.Context, metadata domain.ConversationMetadata, assistantTS, content string, prepared port.PreparedAssistantExchange) error {
+	if s.exchange != nil && prepared.ID != "" {
+		if err := s.exchange.MarkAssistantExchangePublished(ctx, prepared.ID, assistantTS); err != nil {
+			s.logger.Error("assistant exchange publication marking failed", "conversation_key", metadata.Key, "error", err)
+			return fmt.Errorf("mark assistant exchange published: %w", err)
+		}
+		if err := s.exchange.FinalizeAssistantExchange(ctx, prepared.ID); err != nil {
+			s.logger.Error("assistant exchange persistence failed", "conversation_key", metadata.Key, "error", err)
+			return fmt.Errorf("persist assistant exchange: %w", err)
+		}
+		return nil
+	}
+
+	metadata.LastTS = assistantTS
+	if err := s.store.AppendMessage(ctx, metadata, domain.Message{
+		Role: domain.RoleAssistant, Content: content, ExternalTS: assistantTS, CreatedAt: s.clock.Now().UTC(),
+	}, s.cfg.RetainMessages); err != nil {
+		s.logger.Error("assistant message persistence failed", "conversation_key", metadata.Key, "error", err)
+		return fmt.Errorf("persist assistant message: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) finalizeStructuredTurn(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey, turn port.AgentTurn, metadata domain.ConversationMetadata) (Outcome, error) {
@@ -823,25 +830,8 @@ func (s *Service) finalizeStructuredTurn(ctx context.Context, invocation domain.
 		return "", errors.New("structured publisher returned response without a timestamp")
 	}
 
-	if s.exchange != nil && prepared.ID != "" {
-		if err := s.exchange.MarkAssistantExchangePublished(ctx, prepared.ID, assistantTS); err != nil {
-			s.logger.Error("structured exchange publication marking failed", "conversation_key", key, "error", err)
-			return "", fmt.Errorf("mark structured exchange published: %w", err)
-		}
-		if err := s.exchange.FinalizeAssistantExchange(ctx, prepared.ID); err != nil {
-			s.logger.Error("structured exchange persistence failed", "conversation_key", key, "error", err)
-			return "", fmt.Errorf("persist structured exchange: %w", err)
-		}
-	} else {
-		metadata.LastTS = assistantTS
-		assistant := domain.Message{
-			Role: domain.RoleAssistant, Content: canonicalContent, ExternalTS: assistantTS,
-			CreatedAt: s.clock.Now().UTC(),
-		}
-		if err := s.store.AppendMessage(ctx, metadata, assistant, s.cfg.RetainMessages); err != nil {
-			s.logger.Error("structured message persistence failed", "conversation_key", key, "error", err)
-			return "", fmt.Errorf("persist structured message: %w", err)
-		}
+	if err := s.persistAssistantTurn(ctx, metadata, assistantTS, canonicalContent, prepared); err != nil {
+		return "", err
 	}
 
 	s.logger.Info("structured Slack invocation completed", "conversation_key", key, "event_id", invocation.EventID)
@@ -911,25 +901,8 @@ func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation
 	if assistantTS == "" {
 		return "", errors.New("Slack published a response without a timestamp")
 	}
-	if s.exchange != nil && prepared.ID != "" {
-		if err := s.exchange.MarkAssistantExchangePublished(ctx, prepared.ID, assistantTS); err != nil {
-			s.logger.Error("assistant exchange publication marking failed", "conversation_key", key, "error", err)
-			return "", fmt.Errorf("mark assistant exchange published: %w", err)
-		}
-		if err := s.exchange.FinalizeAssistantExchange(ctx, prepared.ID); err != nil {
-			s.logger.Error("assistant exchange persistence failed", "conversation_key", key, "error", err)
-			return "", fmt.Errorf("persist assistant exchange: %w", err)
-		}
-	} else {
-		metadata.LastTS = assistantTS
-		assistant := domain.Message{
-			Role: domain.RoleAssistant, Content: safeResponse, ExternalTS: assistantTS,
-			CreatedAt: s.clock.Now().UTC(),
-		}
-		if err := s.store.AppendMessage(ctx, metadata, assistant, s.cfg.RetainMessages); err != nil {
-			s.logger.Error("assistant message persistence failed", "conversation_key", key, "error", err)
-			return "", fmt.Errorf("persist assistant message: %w", err)
-		}
+	if err := s.persistAssistantTurn(ctx, metadata, assistantTS, safeResponse, prepared); err != nil {
+		return "", err
 	}
 
 	s.logger.Info("Slack invocation completed", "conversation_key", key, "event_id", invocation.EventID)
@@ -1055,10 +1028,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 		correlationID := confirmationCorrelationID(delivery.WrapperCallID)
 		prompt := confirmationPrompt(delivery.Summary, delivery.OriginalCallID, delivery.WrapperCallID, delivery.Expiry)
 		safePrompt := s.sanitize(prompt)
-		channelKind := domain.ChannelPublic
-		if strings.HasPrefix(delivery.ChannelID, "D") {
-			channelKind = domain.ChannelDM
-		}
+		channelKind := channelKindForChannel(delivery.ChannelID)
 		_, found, err := finder.FindPublishedAssistantExchange(ctx, port.AssistantExchangeIntent{
 			ChannelID: delivery.ChannelID, ChannelKind: channelKind, RootTS: delivery.ThreadTS,
 			Content: safePrompt, CorrelationID: correlationID,
@@ -1225,18 +1195,12 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	}
 	if delivery == nil {
 		s.logger.Warn("confirmation not found", "wrapper_call_id", wrapperCallID)
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "Confirmation not found or already processed."); pubErr != nil {
-				s.logger.Error("confirmation-not-found reply failed", "error", pubErr)
-			}
-		}
+		s.publishIfText(ctx, invocation, interactive, "Confirmation not found or already processed.", "confirmation-not-found reply failed")
 		return OutcomeIgnoredFollowup
 	}
 	if interactive == nil && delivery.RendererMode == confirmationRendererMode {
 		s.logger.Warn("typed command rejected for interactive confirmation", "wrapper_call_id", wrapperCallID)
-		if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "Use the buttons on the confirmation prompt."); pubErr != nil {
-			s.logger.Error("interactive-only confirmation reply failed", "error", pubErr)
-		}
+		s.publishIfText(ctx, invocation, interactive, "Use the buttons on the confirmation prompt.", "interactive-only confirmation reply failed")
 		return OutcomeIgnoredFollowup
 	}
 	if interactive != nil {
@@ -1253,10 +1217,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 			s.logger.Warn("confirmation interaction metadata mismatch", "wrapper_call_id", wrapperCallID)
 			return OutcomeIgnoredFollowup
 		}
-		channelKind := domain.ChannelPublic
-		if strings.HasPrefix(interactive.ChannelID, "D") {
-			channelKind = domain.ChannelDM
-		}
+		channelKind := channelKindForChannel(interactive.ChannelID)
 		authorization := s.cfg.AccessPolicy.Authorize(domain.Invocation{
 			TeamID: interactive.TeamID, ChannelID: interactive.ChannelID,
 			ChannelKind: channelKind, UserID: interactive.Actor,
@@ -1274,11 +1235,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	if delivery.Actor != actor {
 		s.logger.Warn("confirmation actor mismatch",
 			"expected", delivery.Actor, "got", actor)
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "Only the original requester can approve this action."); pubErr != nil {
-				s.logger.Error("actor-mismatch reply failed", "error", pubErr)
-			}
-		}
+		s.publishIfText(ctx, invocation, interactive, "Only the original requester can approve this action.", "actor-mismatch reply failed")
 		return OutcomeIgnoredFollowup
 	}
 
@@ -1291,11 +1248,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	}
 	if delivery.ConversationKey != invocationKey || delivery.SessionID != fmt.Sprintf("adk:%s", invocationKey) {
 		s.logger.Warn("confirmation conversation mismatch", "wrapper_call_id", wrapperCallID)
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation belongs to a different conversation."); pubErr != nil {
-				s.logger.Error("conversation-mismatch reply failed", "error", pubErr)
-			}
-		}
+		s.publishIfText(ctx, invocation, interactive, "This confirmation belongs to a different conversation.", "conversation-mismatch reply failed")
 		return OutcomeIgnoredFollowup
 	}
 
@@ -1308,11 +1261,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 					s.logger.Error("expired confirmation prompt update failed", "wrapper_call_id", wrapperCallID, "error", err)
 				}
 			}
-			if interactive == nil {
-				if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has expired."); pubErr != nil {
-					s.logger.Error("expiry reply failed", "error", pubErr)
-				}
-			}
+			s.publishIfText(ctx, invocation, interactive, "This confirmation has expired.", "expiry reply failed")
 			return nil
 		}
 		firstExpiry, expiryErr := s.expireAndResumeConfirmation(ctx, *delivery, publishExpired)
@@ -1332,21 +1281,13 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 
 	if delivery.Status != port.ConfirmationPending && delivery.Status != port.ConfirmationPublished {
 		s.logger.Warn("confirmation already consumed", "wrapper_call_id", wrapperCallID, "status", delivery.Status)
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
-				s.logger.Error("already-consumed reply failed", "error", pubErr)
-			}
-		}
+		s.publishIfText(ctx, invocation, interactive, "This confirmation has already been processed.", "already-consumed reply failed")
 		return OutcomeIgnoredFollowup
 	}
 	conversationRelease, conversationAcquired := s.limiter.TryAcquire(string(delivery.ConversationKey))
 	if !conversationAcquired {
 		s.logger.Info("confirmation resume rejected by conversation backpressure")
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); pubErr != nil {
-				s.logger.Error("busy reply failed", "error", pubErr)
-			}
-		}
+		s.publishIfText(ctx, invocation, interactive, s.cfg.BusyMessage, "busy reply failed")
 		return OutcomeBusy
 	}
 	defer conversationRelease()
@@ -1360,11 +1301,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	if !modelAcquired {
 		cancel()
 		s.logger.Info("confirmation resume rejected by backpressure")
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); pubErr != nil {
-				s.logger.Error("busy reply failed", "error", pubErr)
-			}
-		}
+		s.publishIfText(ctx, invocation, interactive, s.cfg.BusyMessage, "busy reply failed")
 		return OutcomeBusy
 	}
 
@@ -1373,22 +1310,14 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 			modelRelease()
 			cancel()
 			s.logger.Warn("confirmation already consumed (race)", "wrapper_call_id", wrapperCallID, "error", err)
-			if interactive == nil {
-				if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
-					s.logger.Error("race reply failed", "error", pubErr)
-				}
-			}
+			s.publishIfText(ctx, invocation, interactive, "This confirmation has already been processed.", "race reply failed")
 			return OutcomeIgnoredFollowup
 		}
 	} else if err := s.confirmationStore.RejectDelivery(ctx, wrapperCallID); err != nil {
 		modelRelease()
 		cancel()
 		s.logger.Warn("confirmation already rejected (race)", "wrapper_call_id", wrapperCallID, "error", err)
-		if interactive == nil {
-			if _, pubErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "This confirmation has already been processed."); pubErr != nil {
-				s.logger.Error("race reply failed", "error", pubErr)
-			}
-		}
+		s.publishIfText(ctx, invocation, interactive, "This confirmation has already been processed.", "race reply failed")
 		return OutcomeIgnoredFollowup
 	}
 	progress := s.waitingProgress(ctx, delivery.ConversationKey)
@@ -1478,6 +1407,15 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		s.scheduleSummary(ctx, delivery.ConversationKey)
 	}
 	return OutcomeResponded
+}
+
+func (s *Service) publishIfText(ctx context.Context, invocation domain.Invocation, interactive *domain.ConfirmationInteractiveAction, text, logMsg string) {
+	if interactive != nil {
+		return
+	}
+	if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), text); err != nil {
+		s.logger.Error(logMsg, "error", err)
+	}
 }
 
 func (s *Service) waitingProgress(ctx context.Context, key domain.ConversationKey) *domain.ProgressOperation {

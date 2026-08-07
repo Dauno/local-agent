@@ -157,29 +157,24 @@ func (s *Service) handleStreamingTurn(
 	if multipartFallback {
 		s.interruptIncremental(ctx, &operation, "", incrementalMultipartFallbackMarker)
 		outcome, err := s.finalizeTurn(ctx, invocation, key, terminal.Turn.Text, metadata)
-		if err == nil && outcome == OutcomeResponded {
-			s.updateProgress(ctx, progress, domain.ProgressCleared)
-			s.scheduleSummary(ctx, key)
-		} else {
-			s.updateProgress(ctx, progress, domain.ProgressFailed)
-		}
-		return outcome, err
+		return s.completeTurnProgress(ctx, progress, key, outcome, err)
 	}
 	if operation.MessageTS == "" {
 		outcome, err := s.finalizeTurn(ctx, invocation, key, terminal.Turn.Text, metadata)
 		status := domain.IncrementalInterrupted
 		if err == nil && outcome == OutcomeResponded {
 			status = domain.IncrementalFinalized
-			s.updateProgress(ctx, progress, domain.ProgressCleared)
-			s.scheduleSummary(ctx, key)
-		} else {
-			s.updateProgress(ctx, progress, domain.ProgressFailed)
 		}
+		outcome, err = s.completeTurnProgress(ctx, progress, key, outcome, err)
 		_ = s.standardStore.AdvanceIncremental(ctx, operation.ID, status, operation.Sequence, operation.PrefixDigest, s.clock.Now().UTC())
 		return outcome, err
 	}
 
 	outcome, err := s.finalizeIncrementalTurn(ctx, invocation, key, metadata, &operation, finalText)
+	return s.completeTurnProgress(ctx, progress, key, outcome, err)
+}
+
+func (s *Service) completeTurnProgress(ctx context.Context, progress *domain.ProgressOperation, key domain.ConversationKey, outcome Outcome, err error) (Outcome, error) {
 	if err == nil && outcome == OutcomeResponded {
 		s.updateProgress(ctx, progress, domain.ProgressCleared)
 		s.scheduleSummary(ctx, key)
@@ -256,20 +251,8 @@ func (s *Service) finalizeIncrementalTurn(ctx context.Context, invocation domain
 		_ = s.standardStore.AdvanceIncremental(ctx, operation.ID, domain.IncrementalUnknown, operation.Sequence, operation.PrefixDigest, operation.UpdatedAt)
 		return OutcomePublishFailed, nil
 	}
-	if s.exchange != nil && prepared.ID != "" {
-		if err := s.exchange.MarkAssistantExchangePublished(ctx, prepared.ID, operation.MessageTS); err != nil {
-			return "", fmt.Errorf("mark streamed assistant exchange published: %w", err)
-		}
-		if err := s.exchange.FinalizeAssistantExchange(ctx, prepared.ID); err != nil {
-			return "", fmt.Errorf("persist streamed assistant exchange: %w", err)
-		}
-	} else {
-		metadata.LastTS = operation.MessageTS
-		if err := s.store.AppendMessage(ctx, metadata, domain.Message{
-			Role: domain.RoleAssistant, Content: finalText, ExternalTS: operation.MessageTS, CreatedAt: s.clock.Now().UTC(),
-		}, s.cfg.RetainMessages); err != nil {
-			return "", fmt.Errorf("persist streamed assistant message: %w", err)
-		}
+	if err := s.persistAssistantTurn(ctx, metadata, operation.MessageTS, finalText, prepared); err != nil {
+		return "", err
 	}
 	operation.Status = domain.IncrementalFinalized
 	if err := s.standardStore.AdvanceIncremental(ctx, operation.ID, operation.Status, operation.Sequence, operation.PrefixDigest, operation.UpdatedAt); err != nil {
