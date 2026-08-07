@@ -5,7 +5,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 6 batches completados, 6 commits, neto acumulado **−19 líneas**.
+- 9 batches de refactor completados + docs update, 9 commits, neto acumulado **−140 líneas**.
 - Tests verdes en todo momento; no se modificó ningún archivo de test.
 - 3 archivos con cambios preexistentes sin commitear (no tocar, quedan fuera de cualquier commit).
 
@@ -19,6 +19,9 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | memory | 3/3 archivos | `764487b` |
 | canvas | 1/1 archivo | `87f3dab` |
 | cross-cutting | systemClock → port.SystemClock (canvas, memory/runner, generatedfile) | `4e306aa` |
+| A1 | `internal/domain/context_budget.go` | `1d1a5d7` |
+| A2 | `internal/domain/compaction.go` + `context_metrics.go` | `3a11a1d` |
+| A3 | `internal/domain/memory_core.go` + `memory_entity.go` + `memory_instruction.go` | `4476419` |
 
 ## Proceso por batch
 
@@ -49,4 +52,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - Revisión de comportamiento en `internal/adapter/slack`: `canvas_creator.go` vs `generated_file_uploader.go` — mismo switch de clasificación de ambigüedad (SlackErrorResponse fatal/internal/service_unavailable, RateLimitedError, StatusCodeError ≥ 500) con defaults deliberadamente distintos (canvas: ambiguous=true por defecto; uploader: false + sniffing de texto). Requiere revisión normal de comportamiento, no dedup mecánica.
 - Resto del árbol: `internal/domain`, `internal/port`, otros adapters (mismo proceso).
 - Tracking en Slack Canvas (opcional).
+- `RequestBudgetPolicy` y diagnósticos no métricos en domain: conservados en A1 porque eliminarlos requiere ampliar el alcance a consumidores externos; revisar en batch futuro si se amplía scope.
+- Nota de comportamiento: `unicode.IsControl` en `SanitizeConversationSummary` (A2) también rechaza controles C1 que la condición anterior no rechazaba — comportamiento levemente más estricto, documentado.
+- `memory_core.go`: cambios preexistentes sin stagear quedaron intactos; A3 se aplicó con stage selectivo.
 ---
