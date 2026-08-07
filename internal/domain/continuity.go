@@ -204,45 +204,28 @@ func RenderContinuityCapsule(capsule ContinuityCapsule, maxCodePoints int) strin
 			sections = append(sections, objective.Text)
 		}
 	}
-	if len(capsule.Constraints) > 0 {
-		sections = append(sections, "--- constraints ---")
-		for _, c := range capsule.Constraints {
-			if clean, ok := SanitizeContinuityItem(c); ok && c.Status != ContinuityStatusSuperseded {
+	appendSection := func(title string, items []ContinuityItem) {
+		if len(items) == 0 {
+			return
+		}
+		sections = append(sections, "--- "+title+" ---")
+		for _, item := range items {
+			if clean, ok := SanitizeContinuityItem(item); ok && item.Status != ContinuityStatusSuperseded {
 				sections = append(sections, clean.Text)
 			}
 		}
 	}
-	if len(capsule.Decisions) > 0 {
-		sections = append(sections, "--- decisions ---")
-		for _, d := range capsule.Decisions {
-			if clean, ok := SanitizeContinuityItem(d); ok && d.Status != ContinuityStatusSuperseded {
-				sections = append(sections, clean.Text)
-			}
-		}
-	}
-	if len(capsule.Completed) > 0 {
-		sections = append(sections, "--- completed ---")
-		for _, c := range capsule.Completed {
-			if clean, ok := SanitizeContinuityItem(c); ok && c.Status != ContinuityStatusSuperseded {
-				sections = append(sections, clean.Text)
-			}
-		}
-	}
-	if len(capsule.Pending) > 0 {
-		sections = append(sections, "--- pending ---")
-		for _, p := range capsule.Pending {
-			if clean, ok := SanitizeContinuityItem(p); ok && p.Status != ContinuityStatusSuperseded {
-				sections = append(sections, clean.Text)
-			}
-		}
-	}
-	if len(capsule.OpenQuestions) > 0 {
-		sections = append(sections, "--- open questions ---")
-		for _, q := range capsule.OpenQuestions {
-			if clean, ok := SanitizeContinuityItem(q); ok && q.Status != ContinuityStatusSuperseded {
-				sections = append(sections, clean.Text)
-			}
-		}
+	for _, section := range []struct {
+		title string
+		items []ContinuityItem
+	}{
+		{title: "constraints", items: capsule.Constraints},
+		{title: "decisions", items: capsule.Decisions},
+		{title: "completed", items: capsule.Completed},
+		{title: "pending", items: capsule.Pending},
+		{title: "open questions", items: capsule.OpenQuestions},
+	} {
+		appendSection(section.title, section.items)
 	}
 	if len(capsule.ActiveResults) > 0 {
 		sections = append(sections, "--- active results ---")
