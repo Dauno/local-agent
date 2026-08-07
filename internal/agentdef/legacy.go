@@ -1,16 +1,12 @@
 package agentdef
 
+import "maps"
+
 // NormalizeLegacy creates the in-memory definitions used by the legacy model
 // configuration path. The returned definitions are never persisted.
 func NormalizeLegacy(agentName, modelName, baseURL, apiKeyEnv, reasoningEffort string, headers map[string]string, extraBody map[string]any) *Definitions {
-	clonedHeaders := make(map[string]string, len(headers))
-	for key, value := range headers {
-		clonedHeaders[key] = value
-	}
-	clonedExtraBody := make(map[string]any, len(extraBody))
-	for key, value := range extraBody {
-		clonedExtraBody[key] = value
-	}
+	clonedHeaders := maps.Clone(headers)
+	clonedExtraBody := maps.Clone(extraBody)
 	return &Definitions{
 		Providers: map[string]Provider{
 			"legacy": {

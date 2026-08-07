@@ -1,6 +1,10 @@
 package agentdef
 
-import "gopkg.in/yaml.v3"
+import (
+	"maps"
+
+	"gopkg.in/yaml.v3"
+)
 
 type SeedModelConfig struct {
 	Name            string
@@ -22,20 +26,20 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 		Type:      "openai_compatible",
 		BaseURL:   cfg.BaseURL,
 		APIKeyEnv: cfg.APIKeyEnv,
-		Headers:   copyStringMap(cfg.Headers),
+		Headers:   maps.Clone(cfg.Headers),
 		Profiles: map[string]Profile{
 			"flash-reasoning": {
 				Model:               cfg.Name,
 				ReasoningEffort:     cfg.ReasoningEffort,
-				ContextWindowTokens: intPtr(1_000_000),
-				MaxOutputTokens:     intPtr(32_000),
+				ContextWindowTokens: ptrTo(1_000_000),
+				MaxOutputTokens:     ptrTo(32_000),
 				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
 				ExtraBody:           extraBody,
 			},
 			"flash-json": {
 				Model:               cfg.Name,
-				ContextWindowTokens: intPtr(1_000_000),
-				MaxOutputTokens:     intPtr(1_200),
+				ContextWindowTokens: ptrTo(1_000_000),
+				MaxOutputTokens:     ptrTo(1_200),
 				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
 				ExtraBody: map[string]any{
 					// DeepSeek V4 enables thinking by default; reserve this profile's output budget for curator JSON.
@@ -47,15 +51,15 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 					},
 				},
 				GenerateContentConfig: &GenerateContentConfig{
-					Temperature:     float64Ptr(0),
+					Temperature:     ptrTo(0.0),
 					MaxOutputTokens: 1200,
 				},
 			},
 			"pro-reasoning": {
 				Model:               "deepseek-v4-pro",
 				ReasoningEffort:     "xhigh",
-				ContextWindowTokens: intPtr(1_000_000),
-				MaxOutputTokens:     intPtr(32_000),
+				ContextWindowTokens: ptrTo(1_000_000),
+				MaxOutputTokens:     ptrTo(32_000),
 				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
 				ExtraBody: map[string]any{
 					"thinking": map[string]any{
@@ -174,22 +178,7 @@ func SeedOpenCodeProviderExample() Provider {
 	}
 }
 
-func copyStringMap(m map[string]string) map[string]string {
-	if m == nil {
-		return nil
-	}
-	out := make(map[string]string, len(m))
-	for k, v := range m {
-		out[k] = v
-	}
-	return out
-}
-
-func float64Ptr(v float64) *float64 {
-	return &v
-}
-
-func intPtr(v int) *int {
+func ptrTo[T any](v T) *T {
 	return &v
 }
 

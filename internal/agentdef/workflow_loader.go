@@ -214,25 +214,25 @@ type workflowRawDoc struct {
 	DisallowTransferToPeers  bool `yaml:"disallow_transfer_to_peers"`
 }
 
-var unsupportedWorkflowFields = map[string]string{
-	"model_code":              "model_code",
-	"static_instruction":      "static_instruction",
-	"input_schema":            "input_schema",
-	"before_agent_callbacks":  "before_agent_callbacks",
-	"after_agent_callbacks":   "after_agent_callbacks",
-	"before_model_callbacks":  "before_model_callbacks",
-	"after_model_callbacks":   "after_model_callbacks",
-	"before_tool_callbacks":   "before_tool_callbacks",
-	"after_tool_callbacks":    "after_tool_callbacks",
-	"generate_content_config": "generate_content_config",
-	"agent_tools":             "agent_tools",
-	"workflow_tools":          "workflow_tools",
-	"durable_session":         "durable_session",
-	"role":                    "role",
-	"tool_scope":              "tool_scope",
-	"global_instruction":      "global_instruction",
-	"mode":                    "mode",
-	"timeout_seconds":         "timeout_seconds",
+var unsupportedWorkflowFields = map[string]struct{}{
+	"model_code":              {},
+	"static_instruction":      {},
+	"input_schema":            {},
+	"before_agent_callbacks":  {},
+	"after_agent_callbacks":   {},
+	"before_model_callbacks":  {},
+	"after_model_callbacks":   {},
+	"before_tool_callbacks":   {},
+	"after_tool_callbacks":    {},
+	"generate_content_config": {},
+	"agent_tools":             {},
+	"workflow_tools":          {},
+	"durable_session":         {},
+	"role":                    {},
+	"tool_scope":              {},
+	"global_instruction":      {},
+	"mode":                    {},
+	"timeout_seconds":         {},
 }
 
 func decodeWorkflowDocument(data []byte, canonicalPath, displayPath string) (AgentDocument, error) {
@@ -241,8 +241,8 @@ func decodeWorkflowDocument(data []byte, canonicalPath, displayPath string) (Age
 		return AgentDocument{}, err
 	}
 	var raw workflowRawDoc
-	if err := decodeStrictYAMLWorkflow(data, &raw, displayPath); err != nil {
-		return AgentDocument{}, err
+	if err := decodeStrictYAML(data, &raw); err != nil {
+		return AgentDocument{}, fmt.Errorf("parse %q: %w", displayPath, err)
 	}
 
 	agentClass, ok := agentClasses[raw.AgentClass]
@@ -313,13 +313,6 @@ func decodeWorkflowDocument(data []byte, canonicalPath, displayPath string) (Age
 	return doc, nil
 }
 
-func decodeStrictYAMLWorkflow(data []byte, target *workflowRawDoc, displayPath string) error {
-	if err := decodeStrictYAML(data, target); err != nil {
-		return fmt.Errorf("parse %q: %w", displayPath, err)
-	}
-	return nil
-}
-
 func inspectWorkflowDocument(data []byte, displayPath string) (map[string]struct{}, error) {
 	dec := yaml.NewDecoder(strings.NewReader(string(data)))
 	var document yaml.Node
@@ -342,8 +335,8 @@ func inspectWorkflowDocument(data []byte, displayPath string) (map[string]struct
 	for index := 0; index+1 < len(root.Content); index += 2 {
 		key := root.Content[index].Value
 		fields[key] = struct{}{}
-		if known, unsupported := unsupportedWorkflowFields[key]; unsupported {
-			return nil, fmt.Errorf("workflow %q: %s is an ADK field but is not supported by local-agent", displayPath, known)
+		if _, unsupported := unsupportedWorkflowFields[key]; unsupported {
+			return nil, fmt.Errorf("workflow %q: %s is an ADK field but is not supported by local-agent", displayPath, key)
 		}
 	}
 	if subAgents := mappingValue(root, "sub_agents"); subAgents != nil && subAgents.Kind == yaml.SequenceNode {
@@ -354,6 +347,21 @@ func inspectWorkflowDocument(data []byte, displayPath string) (map[string]struct
 		}
 	}
 	return fields, nil
+}
+
+func resolveWorkflowModelRef(defs *Definitions, ref, prefix, field string) (string, string, []string) {
+	providerName, profileName, ok := splitModelReference(ref)
+	if !ok {
+		return "", "", []string{fmt.Sprintf("%s: %s must be provider/profile format", prefix, field)}
+	}
+	if _, exists := defs.Providers[providerName]; !exists {
+		providerLabel := "provider"
+		if field == "runtime" {
+			providerLabel = "runtime provider"
+		}
+		return providerName, profileName, []string{fmt.Sprintf("%s: unknown %s %q", prefix, providerLabel, providerName)}
+	}
+	return providerName, profileName, nil
 }
 
 func validateWorkflowClassFields(fields map[string]struct{}, class AgentClass, displayPath string) error {
@@ -447,14 +455,11 @@ func validateWorkflowNode(doc AgentDocument, defs *Definitions, isLoopDescendant
 		if strings.TrimSpace(doc.LLM.Model) == "" {
 			errs = append(errs, fmt.Sprintf("%s: model must not be empty", prefix))
 		} else {
-			providerName, profileName, ok := splitModelReference(doc.LLM.Model)
-			if !ok {
-				errs = append(errs, fmt.Sprintf("%s: model must be provider/profile format", prefix))
-			} else {
-				p, exists := defs.Providers[providerName]
-				if !exists {
-					errs = append(errs, fmt.Sprintf("%s: unknown provider %q", prefix, providerName))
-				} else if _, exists := p.Profiles[profileName]; !exists {
+			providerName, profileName, refErrs := resolveWorkflowModelRef(defs, doc.LLM.Model, prefix, "model")
+			errs = append(errs, refErrs...)
+			if len(refErrs) == 0 {
+				p := defs.Providers[providerName]
+				if _, exists := p.Profiles[profileName]; !exists {
 					errs = append(errs, fmt.Sprintf("%s: unknown profile %q in provider %q", prefix, profileName, providerName))
 				} else {
 					if p.Type == ProviderTypeACP {
@@ -498,14 +503,11 @@ func validateWorkflowNode(doc AgentDocument, defs *Definitions, isLoopDescendant
 		if strings.TrimSpace(doc.ACP.Runtime) == "" {
 			errs = append(errs, fmt.Sprintf("%s: runtime must not be empty", prefix))
 		} else {
-			providerName, profileName, ok := splitModelReference(doc.ACP.Runtime)
-			if !ok {
-				errs = append(errs, fmt.Sprintf("%s: runtime must be provider/profile format", prefix))
-			} else {
-				p, exists := defs.Providers[providerName]
-				if !exists {
-					errs = append(errs, fmt.Sprintf("%s: unknown runtime provider %q", prefix, providerName))
-				} else if p.Type != ProviderTypeACP {
+			providerName, profileName, refErrs := resolveWorkflowModelRef(defs, doc.ACP.Runtime, prefix, "runtime")
+			errs = append(errs, refErrs...)
+			if len(refErrs) == 0 {
+				p := defs.Providers[providerName]
+				if p.Type != ProviderTypeACP {
 					errs = append(errs, fmt.Sprintf("%s: runtime provider %q must be type acp", prefix, providerName))
 				} else if _, exists := p.Profiles[profileName]; !exists {
 					errs = append(errs, fmt.Sprintf("%s: unknown runtime profile %q in provider %q", prefix, profileName, providerName))
