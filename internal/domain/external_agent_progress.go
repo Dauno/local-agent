@@ -1,6 +1,9 @@
 package domain
 
-import "time"
+import (
+	"errors"
+	"time"
+)
 
 // ACPProgressPhase is the best ACP-visible description of the current prompt
 // work. It is the latest safe phase, never a claim about provider internals.
@@ -296,12 +299,8 @@ func (p ExternalAgentJobProgress) Validate() error {
 }
 
 func errProgressInvalid(message string) error {
-	return &ACPError{Code: ACPErrorProgressInvalid, Err: errorString(message)}
+	return &ACPError{Code: ACPErrorProgressInvalid, Err: errors.New(message)}
 }
-
-type errorString string
-
-func (e errorString) Error() string { return string(e) }
 
 func validStopReason(reason string) bool {
 	switch reason {
