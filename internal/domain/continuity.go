@@ -2,6 +2,7 @@ package domain
 
 import (
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -168,17 +169,13 @@ func containsXMLTags(s string) bool {
 			end := strings.IndexByte(s[i:], '>')
 			if end != -1 {
 				tagContent := s[i+1 : i+end]
-				if len(tagContent) > 0 && (isAlpha(rune(tagContent[0])) || tagContent[0] == '/') {
+				if len(tagContent) > 0 && (unicode.IsLetter(rune(tagContent[0])) || tagContent[0] == '/') {
 					return true
 				}
 			}
 		}
 	}
 	return false
-}
-
-func isAlpha(r rune) bool {
-	return (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z')
 }
 
 const (
