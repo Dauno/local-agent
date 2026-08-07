@@ -94,8 +94,7 @@ func (s *Service) CreateCanvas(ctx context.Context, operationID string, conversa
 		return CreateCanvasResult{}, err
 	}
 
-	contentDigest := sha256.Sum256([]byte(content))
-	contentSHA256 := fmt.Sprintf("%x", contentDigest)
+	contentSHA256 := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
 
 	now := s.clock.Now().UTC()
 	op := domain.CanvasOperation{
@@ -207,32 +206,28 @@ func (s *Service) prepareCanvas(title, content string) (string, string, error) {
 }
 
 func validateCanvasLinks(content string) error {
-	groups := [][]string{}
 	for _, pattern := range []*regexp.Regexp{markdownLinkPattern, markdownReferencePattern, markdownAutolinkPattern} {
 		for _, match := range pattern.FindAllStringSubmatch(content, -1) {
-			groups = append(groups, match)
-		}
-	}
-	for _, match := range groups {
-		target := strings.Trim(strings.TrimSpace(match[1]), "<>")
-		if strings.HasPrefix(target, "@") || strings.HasPrefix(target, "#") {
-			continue
-		}
-		parsed, err := url.ParseRequestURI(target)
-		if err != nil {
-			return &CanvasError{Message: "canvas content contains a malformed link"}
-		}
-		switch strings.ToLower(parsed.Scheme) {
-		case "http", "https":
-			if parsed.Host == "" {
-				return &CanvasError{Message: "canvas links must include a host"}
+			target := strings.Trim(strings.TrimSpace(match[1]), "<>")
+			if strings.HasPrefix(target, "@") || strings.HasPrefix(target, "#") {
+				continue
 			}
-		case "mailto":
-			if parsed.Opaque == "" {
-				return &CanvasError{Message: "canvas mail links must include an address"}
+			parsed, err := url.ParseRequestURI(target)
+			if err != nil {
+				return &CanvasError{Message: "canvas content contains a malformed link"}
 			}
-		default:
-			return &CanvasError{Message: fmt.Sprintf("canvas link scheme %q is not allowed", parsed.Scheme)}
+			switch strings.ToLower(parsed.Scheme) {
+			case "http", "https":
+				if parsed.Host == "" {
+					return &CanvasError{Message: "canvas links must include a host"}
+				}
+			case "mailto":
+				if parsed.Opaque == "" {
+					return &CanvasError{Message: "canvas mail links must include an address"}
+				}
+			default:
+				return &CanvasError{Message: fmt.Sprintf("canvas link scheme %q is not allowed", parsed.Scheme)}
+			}
 		}
 	}
 	return nil
@@ -243,9 +238,6 @@ func validateCanvasTables(content string) error {
 	for index := 1; index < len(lines); index++ {
 		separator := strings.Trim(strings.TrimSpace(lines[index]), "|")
 		cells := strings.Split(separator, "|")
-		if len(cells) == 0 {
-			continue
-		}
 		valid := true
 		for _, cell := range cells {
 			cell = strings.Trim(strings.TrimSpace(cell), ":")
@@ -269,9 +261,6 @@ func validateCanvasTables(content string) error {
 }
 
 func isAmbiguous(err error) bool {
-	if err == nil {
-		return false
-	}
 	var createErr *port.CanvasCreateError
 	if errors.As(err, &createErr) {
 		return createErr.Ambiguous
