@@ -1,6 +1,9 @@
 package domain
 
-import "fmt"
+import (
+	"errors"
+	"fmt"
+)
 
 const (
 	ExecutionModeForeground  = "foreground"
@@ -9,46 +12,34 @@ const (
 	MaxACPTimeoutSeconds     = 86400
 )
 
+var errBadAgentKind = errors.New("agent kind must be llm or acp")
+
 // ValidateAgentKind validates the builder agent kind.
 func ValidateAgentKind(kind AgentKind) error {
-	switch kind {
-	case AgentKindLLM, AgentKindACP:
+	if kind == AgentKindLLM || kind == AgentKindACP {
 		return nil
-	default:
-		return fmt.Errorf("agent kind must be llm or acp")
 	}
+	return errBadAgentKind
 }
 
 // ValidateProviderKind validates the provider family allowed for an agent kind.
 func ValidateProviderKind(kind AgentKind, providerType string) error {
-	switch kind {
-	case AgentKindLLM:
-		if providerType == "openai_compatible" {
-			return nil
-		}
-	case AgentKindACP:
-		if providerType == "acp" {
-			return nil
-		}
-	default:
-		return fmt.Errorf("agent kind must be llm or acp")
+	if err := ValidateAgentKind(kind); err != nil {
+		return err
+	}
+	if (kind == AgentKindLLM && providerType == "openai_compatible") || (kind == AgentKindACP && providerType == "acp") {
+		return nil
 	}
 	return fmt.Errorf("provider type %q is not valid for agent kind %q", providerType, kind)
 }
 
 // ValidateExecutionMode validates execution modes available to a kind.
 func ValidateExecutionMode(kind AgentKind, mode string) error {
-	switch kind {
-	case AgentKindLLM:
-		if mode == ExecutionModeForeground {
-			return nil
-		}
-	case AgentKindACP:
-		if mode == ExecutionModeForeground || mode == ExecutionModeDurableJob {
-			return nil
-		}
-	default:
-		return fmt.Errorf("agent kind must be llm or acp")
+	if err := ValidateAgentKind(kind); err != nil {
+		return err
+	}
+	if (kind == AgentKindLLM && mode == ExecutionModeForeground) || (kind == AgentKindACP && (mode == ExecutionModeForeground || mode == ExecutionModeDurableJob)) {
+		return nil
 	}
 	return fmt.Errorf("execution mode %q is not valid for agent kind %q", mode, kind)
 }

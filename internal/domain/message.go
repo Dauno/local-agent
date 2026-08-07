@@ -41,10 +41,7 @@ func (m Message) Validate() error {
 	if m.Source == "" {
 		return errors.New("message source is required")
 	}
-	if m.Role == RoleUser && (m.Source == MessageSourceHuman || m.Source == MessageSourceJobCompletion) {
-		return nil
-	}
-	if m.Role == RoleAssistant && m.Source == MessageSourceAssistant {
+	if (m.Role == RoleUser && (m.Source == SourceHuman || m.Source == SourceJobCompletion)) || (m.Role == RoleAssistant && m.Source == SourceAssistant) {
 		return nil
 	}
 	return fmt.Errorf("message role %q and source %q are incompatible", m.Role, m.Source)
@@ -101,7 +98,7 @@ func LimitMessages(messages []Message, limits ContextLimits) []Message {
 		return nil
 	}
 	start := max(0, len(messages)-limits.MaxMessages)
-	selected := slices.Clone(messages[start:])
+	selected := messages[start:]
 	remaining := limits.MaxChars
 	result := make([]Message, 0, len(selected))
 	for idx := len(selected) - 1; idx >= 0 && remaining > 0; idx-- {
