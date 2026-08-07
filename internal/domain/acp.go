@@ -1,21 +1,18 @@
 package domain
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
 	"unicode"
-	"unicode/utf8"
 )
 
 const (
 	ProviderTypeACP        = "acp"
-	ProviderFamilyACP      = "acp"
+	ProviderFamilyACP      = ProviderTypeACP
 	ACPProtocolVersion     = "1"
 	ACPClientIdentity      = "slack-local-agent"
 	ACPClientVersion       = "v1"
@@ -56,9 +53,6 @@ type ACPError struct {
 }
 
 func (e *ACPError) Error() string {
-	if e == nil {
-		return ""
-	}
 	if e.Err == nil {
 		return string(e.Code)
 	}
@@ -66,9 +60,6 @@ func (e *ACPError) Error() string {
 }
 
 func (e *ACPError) Unwrap() error {
-	if e == nil {
-		return nil
-	}
 	return e.Err
 }
 
@@ -214,30 +205,16 @@ func ParseGitDeliveryResult(data []byte, targetProject, worktreeRoot string) (Gi
 			return GitDeliveryResult{}, fmt.Errorf("git delivery result is missing field %q", field)
 		}
 	}
-	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder := json.NewDecoder(strings.NewReader(string(data)))
 	decoder.DisallowUnknownFields()
 	var result GitDeliveryResult
 	if err := decoder.Decode(&result); err != nil {
 		return GitDeliveryResult{}, fmt.Errorf("decode git delivery result: %w", err)
 	}
-	if err := ensureJSONEOF(decoder); err != nil {
-		return GitDeliveryResult{}, err
-	}
 	if err := result.Validate(targetProject, worktreeRoot); err != nil {
 		return GitDeliveryResult{}, err
 	}
 	return result, nil
-}
-
-func ensureJSONEOF(decoder *json.Decoder) error {
-	var extra any
-	if err := decoder.Decode(&extra); err != io.EOF {
-		if err == nil {
-			return fmt.Errorf("git delivery result must contain exactly one JSON object")
-		}
-		return fmt.Errorf("decode trailing git delivery data: %w", err)
-	}
-	return nil
 }
 
 func (r *GitDeliveryResult) Validate(targetProject, worktreeRoot string) error {
@@ -260,19 +237,17 @@ func (r *GitDeliveryResult) Validate(targetProject, worktreeRoot string) error {
 			return fmt.Errorf("git delivery worktree %q cannot be resolved: %w", r.Worktree, err)
 		}
 		relative, err := filepath.Rel(canonicalRoot, canonical)
-		if err != nil || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) {
+		if err != nil || !filepath.IsLocal(relative) {
 			return fmt.Errorf("git delivery worktree %q is outside worktree root %q", canonical, canonicalRoot)
 		}
 	}
 	fields := []string{r.Status, r.Repository, r.PRURL, r.Branch, r.BaseBranch, r.Remote, r.Commit, r.Title, r.FilePath, r.Worktree, r.Error}
 	for _, field := range fields {
-		if !utf8.ValidString(field) || len([]rune(field)) > maxGitDeliveryFieldRunes {
+		if len([]rune(field)) > maxGitDeliveryFieldRunes {
 			return fmt.Errorf("git delivery field is invalid or exceeds %d characters", maxGitDeliveryFieldRunes)
 		}
-		for _, c := range field {
-			if unicode.IsControl(c) {
-				return fmt.Errorf("git delivery field contains control characters")
-			}
+		if strings.ContainsFunc(field, unicode.IsControl) {
+			return fmt.Errorf("git delivery field contains control characters")
 		}
 	}
 	if r.Status == "success" {
@@ -292,11 +267,7 @@ func (r *GitDeliveryResult) Validate(targetProject, worktreeRoot string) error {
 		if strings.TrimSpace(r.FilePath) == "" {
 			return fmt.Errorf("file_path is required for successful delivery")
 		}
-		if filepath.IsAbs(r.FilePath) {
-			return fmt.Errorf("file_path must be repository-relative")
-		}
-		cleanFile := filepath.Clean(r.FilePath)
-		if cleanFile == ".." || strings.HasPrefix(cleanFile, ".."+string(filepath.Separator)) {
+		if !filepath.IsLocal(r.FilePath) {
 			return fmt.Errorf("file_path escapes the repository")
 		}
 		if strings.TrimSpace(r.Title) == "" {
