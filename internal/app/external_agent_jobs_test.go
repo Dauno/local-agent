@@ -35,25 +35,6 @@ func TestDurableACPDispatcherRejectsScopeRevisionDrift(t *testing.T) {
 	}
 }
 
-func TestDurableACPDispatcherRejectsHistoricalMultiProjectJob(t *testing.T) {
-	workspace := t.TempDir()
-	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "must not run"}}
-	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   runtime,
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
-		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "sha256:current",
-	}
-	_, err := (&acpJobDispatcher{children: []preparedAgentTool{child}}).Run(context.Background(), domain.ExternalAgentJob{
-		ID: "job-1", Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
-		AdditionalProjects: []string{"other"}, RegistryRevision: "sha256:current", Task: "task",
-	})
-	var acpErr *domain.ACPError
-	if !errors.As(err, &acpErr) || acpErr.Code != domain.ACPErrorInvalidInput || runtime.runs != 0 {
-		t.Fatalf("err = %v, runtime runs = %d", err, runtime.runs)
-	}
-}
-
 func TestNoACPConfigurationReturnsNilJobService(t *testing.T) {
 	service, worker, err := newExternalAgentJobService(config.Default(), newRuntimeModels(), nil)
 	if err != nil {

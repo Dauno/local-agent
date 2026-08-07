@@ -16,7 +16,7 @@ import (
 func TestNotificationWorkerReconcilesAmbiguousDeliveryWithoutLoggingContent(t *testing.T) {
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "secret path must not be logged", ContentSHA256: "digest",
+		CanonicalMarkdown: "secret path must not be logged", NotificationSHA256: "digest",
 		RendererVersion: "markdown_v1", PublishState: domain.NotificationPublishing,
 	}}
 	publisher := &fakeNotificationPublisher{recoveredTS: "1710000000.000001"}
@@ -35,7 +35,7 @@ func TestNotificationWorkerReconcilesAmbiguousDeliveryWithoutLoggingContent(t *t
 func TestNotificationWorkerBacksOffAmbiguousReconciliation(t *testing.T) {
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "safe", ContentSHA256: "digest", RendererVersion: domain.JobNotificationRenderer,
+		CanonicalMarkdown: "safe", NotificationSHA256: "digest", RendererVersion: domain.JobNotificationRenderer,
 		PublishState: domain.NotificationPublishing,
 	}}
 	publisher := &fakeNotificationPublisher{reconcileErr: port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("transient history failure"))}
@@ -149,7 +149,7 @@ func contentSHA256ForTest(value string) string {
 func TestNotificationWorkerRetriesDefinitiveFailureWithPersistedBackoff(t *testing.T) {
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "safe", ContentSHA256: "digest", RendererVersion: domain.JobNotificationRenderer,
+		CanonicalMarkdown: "safe", NotificationSHA256: "digest", RendererVersion: domain.JobNotificationRenderer,
 		PublishState: domain.NotificationPending,
 	}}
 	publisher := &fakeNotificationPublisher{publishErr: &port.NotificationPublishError{Code: "result_file_upload_failed", Retryable: true, Err: errors.New("definitive")}}
@@ -168,7 +168,7 @@ func TestNotificationWorkerRetriesDefinitiveFailureWithPersistedBackoff(t *testi
 func TestNotificationWorkerDoesNotReissueAmbiguousFileRequestWithoutID(t *testing.T) {
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "OpenCode job `job-1` completed.", ContentSHA256: "digest",
+		CanonicalMarkdown: "OpenCode job `job-1` completed.", NotificationSHA256: "digest",
 		RendererVersion: domain.JobNotificationRenderer, DeliveryMode: domain.JobResultDeliveryFile,
 		PublishState: domain.NotificationPublishState("unknown"),
 	}}
@@ -190,8 +190,7 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
-		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
-		ContentSHA256:     contentSHA256ForTest(content), ContentBytes: int64(len(content)),
+		CanonicalMarkdown:  "OpenCode job `job-1` completed.\n\n" + content,
 		NotificationSHA256: contentSHA256ForTest("OpenCode job `job-1` completed.\n\n" + content), NotificationBytes: int64(len([]byte("OpenCode job `job-1` completed.\n\n" + content))),
 		ResultSHA256: contentSHA256ForTest(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
@@ -292,7 +291,8 @@ func TestNotificationWorkerRejectsDeliveryV1WithoutHostCompleter(t *testing.T) {
 	notification := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
-		CanonicalMarkdown: "OpenCode job `job-1` completed.", ContentSHA256: contentSHA256ForTest(content), ContentBytes: int64(len(content)),
+		CanonicalMarkdown: "OpenCode job `job-1` completed.",
+		ResultSHA256:      contentSHA256ForTest(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
 	}
@@ -392,7 +392,7 @@ func TestNotificationWorkerPersistsProviderFailureLogsWarningAndRecordsMetric(t 
 	metrics := &recordingNotificationMetrics{}
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "safe", ContentSHA256: "digest", RendererVersion: domain.JobNotificationRenderer,
+		CanonicalMarkdown: "safe", NotificationSHA256: "digest", RendererVersion: domain.JobNotificationRenderer,
 		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: "legacy_v1",
 	}}
 	publisher := &fakeNotificationPublisher{publishErr: port.NewNotificationPublishError("notification_publish_ambiguous", false, false, errors.New(secret))}
@@ -451,7 +451,7 @@ func TestNotificationWorkerMetricsUseOnlyBoundedLabels(t *testing.T) {
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "secret-job-id", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
 		Actor: "secret-actor", ConversationKey: "secret-conversation", CanonicalMarkdown: content,
-		ContentSHA256: contentSHA256ForTest(content), ContentBytes: int64(len(content)),
+		NotificationSHA256: contentSHA256ForTest(content), NotificationBytes: int64(len(content)),
 		PublishState: domain.NotificationPending, DeliveryMode: domain.JobResultDeliveryMarkdown,
 	}}
 	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
