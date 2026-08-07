@@ -137,41 +137,13 @@ func sentenceTitle(value string) string {
 }
 
 func memorySlug(value string) string {
-	var b strings.Builder
-	pendingDash := false
-	for _, r := range strings.ToLower(value) {
-		if replacement, ok := spanishSlugRune(r); ok {
-			r = replacement
-		}
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
-			if pendingDash && b.Len() > 0 {
-				b.WriteByte('-')
-			}
-			b.WriteRune(r)
-			pendingDash = false
-			continue
-		}
-		if b.Len() > 0 {
-			pendingDash = true
-		}
-	}
-	return strings.Trim(b.String(), "-")
-}
-
-func spanishSlugRune(r rune) (rune, bool) {
-	switch r {
-	case 'á', 'à', 'ä', 'â':
-		return 'a', true
-	case 'é', 'è', 'ë', 'ê':
-		return 'e', true
-	case 'í', 'ì', 'ï', 'î':
-		return 'i', true
-	case 'ó', 'ò', 'ö', 'ô':
-		return 'o', true
-	case 'ú', 'ù', 'ü', 'û':
-		return 'u', true
-	case 'ñ':
-		return 'n', true
-	}
-	return r, false
+	value = strings.NewReplacer(
+		"á", "a", "à", "a", "ä", "a", "â", "a", "é", "e", "è", "e", "ë", "e", "ê", "e",
+		"í", "i", "ì", "i", "ï", "i", "î", "i", "ó", "o", "ò", "o", "ö", "o", "ô", "o",
+		"ú", "u", "ù", "u", "ü", "u", "û", "u", "ñ", "n",
+	).Replace(strings.ToLower(value))
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9'))
+	})
+	return strings.Join(parts, "-")
 }
