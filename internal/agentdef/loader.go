@@ -38,20 +38,7 @@ func Load(dir string) (*Definitions, error) {
 		return nil, errors.New("agents and providers directories must either both exist or both be absent")
 	}
 
-	providers, err := loadProviders(providersDir)
-	if err != nil {
-		return nil, err
-	}
-	agents, err := loadAgents(agentsDir)
-	if err != nil {
-		return nil, err
-	}
-
-	defs := &Definitions{Providers: providers, Agents: agents}
-	if err := ValidateDefinitions(defs); err != nil {
-		return nil, err
-	}
-	return defs, nil
+	return LoadFromDirs(agentsDir, providersDir)
 }
 
 func LoadFromDirs(agentsDir, providersDir string) (*Definitions, error) {
