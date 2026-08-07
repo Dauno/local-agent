@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"time"
@@ -271,9 +272,6 @@ func ScopedPersonTopicSlug(slug, ownerKey string) string {
 }
 
 func ValidateSlug(slug string) error {
-	if strings.TrimSpace(slug) == "" {
-		return errors.New("topic slug must not be empty")
-	}
 	if !slugPattern.MatchString(slug) {
 		return fmt.Errorf("topic slug %q must match %s", slug, slugPattern.String())
 	}
@@ -281,23 +279,11 @@ func ValidateSlug(slug string) error {
 }
 
 func ValidateBundlePath(path string) error {
-	if strings.TrimSpace(path) == "" {
-		return errors.New("bundle path must not be empty")
-	}
-	if strings.HasPrefix(path, "/") {
-		return fmt.Errorf("bundle path %q must not be absolute", path)
-	}
-	if strings.HasSuffix(path, "/") {
-		return fmt.Errorf("bundle path %q must not end with a slash", path)
-	}
-	if strings.Contains(path, "//") {
-		return fmt.Errorf("bundle path %q must not contain double slashes", path)
+	if !filepath.IsLocal(path) {
+		return fmt.Errorf("bundle path %q must be local", path)
 	}
 	segments := strings.Split(path, "/")
 	for i, segment := range segments {
-		if segment == "." || segment == ".." {
-			return fmt.Errorf("bundle path %q contains reserved segment %q", path, segment)
-		}
 		if err := ValidateSlug(segment); err != nil {
 			return fmt.Errorf("bundle path segment %d in %q: %w", i+1, path, err)
 		}
