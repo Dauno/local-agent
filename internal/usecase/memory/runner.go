@@ -59,7 +59,7 @@ func NewRunner(cfg RunnerConfig, deps RunnerDependencies) (*Runner, error) {
 		return nil, errors.New("logger is required")
 	}
 	if deps.Clock == nil {
-		deps.Clock = systemClock{}
+		deps.Clock = port.SystemClock{}
 	}
 	if deps.Sanitize == nil {
 		deps.Sanitize = func(value string) string { return value }
@@ -253,7 +253,3 @@ func mergeTrustedEntityOperations(trusted, proposed []domain.MemoryOp) []domain.
 	}
 	return result
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }

@@ -8,7 +8,6 @@ import (
 	"net/url"
 	"regexp"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -64,7 +63,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		cfg.MaxContentBytes = 5 * 1024 * 1024
 	}
 	if deps.Clock == nil {
-		deps.Clock = systemClock{}
+		deps.Clock = port.SystemClock{}
 	}
 	return &Service{
 		cfg: cfg, creator: deps.Creator, store: deps.Store,
@@ -276,7 +275,3 @@ func isAmbiguous(err error) bool {
 		strings.Contains(errStr, "fatal_error") ||
 		strings.Contains(errStr, "service_unavailable")
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }
