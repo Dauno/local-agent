@@ -113,25 +113,24 @@ func (i Invocation) Validate() error {
 
 type ConversationKey string
 
+func (i Invocation) rootTS() string {
+	if i.ThreadTS != "" {
+		return i.ThreadTS
+	}
+	return i.EventTS
+}
+
 func (i Invocation) ConversationKey() (ConversationKey, error) {
 	if err := i.Validate(); err != nil {
 		return "", err
 	}
 	if i.ChannelKind == ChannelDM {
 		if i.ThreadedDM {
-			rootTS := i.EventTS
-			if i.ThreadTS != "" {
-				rootTS = i.ThreadTS
-			}
-			return ConversationKey(fmt.Sprintf("slack:%s:dm:%s:thread:%s", i.TeamID, i.ChannelID, rootTS)), nil
+			return ConversationKey(fmt.Sprintf("slack:%s:dm:%s:thread:%s", i.TeamID, i.ChannelID, i.rootTS())), nil
 		}
 		return ConversationKey(fmt.Sprintf("slack:%s:dm:%s", i.TeamID, i.ChannelID)), nil
 	}
-	rootTS := i.EventTS
-	if i.ThreadTS != "" {
-		rootTS = i.ThreadTS
-	}
-	return ConversationKey(fmt.Sprintf("slack:%s:channel:%s:thread:%s", i.TeamID, i.ChannelID, rootTS)), nil
+	return ConversationKey(fmt.Sprintf("slack:%s:channel:%s:thread:%s", i.TeamID, i.ChannelID, i.rootTS())), nil
 }
 
 type ReplyTarget struct {
@@ -143,19 +142,11 @@ type ReplyTarget struct {
 func (i Invocation) ReplyTarget() ReplyTarget {
 	if i.ChannelKind == ChannelDM {
 		if i.ThreadedDM {
-			rootTS := i.EventTS
-			if i.ThreadTS != "" {
-				rootTS = i.ThreadTS
-			}
-			return ReplyTarget{ChannelID: i.ChannelID, ThreadTS: rootTS}
+			return ReplyTarget{ChannelID: i.ChannelID, ThreadTS: i.rootTS()}
 		}
 		return ReplyTarget{ChannelID: i.ChannelID}
 	}
-	rootTS := i.ThreadTS
-	if rootTS == "" {
-		rootTS = i.EventTS
-	}
-	return ReplyTarget{ChannelID: i.ChannelID, ThreadTS: rootTS}
+	return ReplyTarget{ChannelID: i.ChannelID, ThreadTS: i.rootTS()}
 }
 
 func (i Invocation) ProcessingID(attachmentIndex int) string {
