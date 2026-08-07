@@ -5,9 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"regexp"
+	"maps"
 	"slices"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -91,11 +92,8 @@ func (c Content) Clone() Content {
 }
 
 func mapsClone(input map[string]any) map[string]any {
-	if input == nil {
-		return nil
-	}
-	output := make(map[string]any, len(input))
-	for key, value := range input {
+	output := maps.Clone(input)
+	for key, value := range output {
 		output[key] = cloneValue(value)
 	}
 	return output
@@ -120,15 +118,7 @@ func cloneValue(value any) any {
 // CanonicalJSON returns deterministic JSON for structured protocol data.
 // encoding/json sorts string map keys, which is sufficient for this contract.
 func CanonicalJSON(value any) ([]byte, error) {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
-	var normalized any
-	if err := json.Unmarshal(encoded, &normalized); err != nil {
-		return nil, err
-	}
-	return json.Marshal(normalized)
+	return json.Marshal(value)
 }
 
 func (p ContentPart) Cost() (int, error) {
@@ -230,9 +220,9 @@ func ClassifyConversationTurns(contents []Content, options TurnClassificationOpt
 		}
 	}
 	activeStart := start
-	openIDs := make(map[string]struct{}, len(options.OpenInvocationIDs))
-	for id := range options.OpenInvocationIDs {
-		openIDs[id] = struct{}{}
+	openIDs := maps.Clone(options.OpenInvocationIDs)
+	if openIDs == nil {
+		openIDs = make(map[string]struct{})
 	}
 	for id, call := range ledger.calls {
 		if !protocolCallOpen(call) {
@@ -357,8 +347,6 @@ type CompactionResult struct {
 
 var ErrActiveContextTooLarge = errors.New("active_context_too_large")
 
-var summaryXMLLike = regexp.MustCompile(`<[[:alnum:]_/?!][^>]*>`)
-
 type ActiveContextTooLargeError struct {
 	Chars  int
 	Budget int
@@ -381,10 +369,7 @@ func SanitizeConversationSummary(text string, maxChars int) (string, error) {
 		return "", fmt.Errorf("conversation summary exceeds %d Unicode code points", maxChars)
 	}
 	for _, r := range text {
-		if r == '\n' || r == '\t' {
-			continue
-		}
-		if r < 0x20 || r == 0x7f {
+		if r != '\n' && r != '\t' && unicode.IsControl(r) {
 			return "", errors.New("conversation summary contains control characters")
 		}
 	}
@@ -403,7 +388,7 @@ func SanitizeConversationSummary(text string, maxChars int) (string, error) {
 		if len(fields) == 0 {
 			continue
 		}
-		if summaryXMLLike.MatchString(line) || strings.ContainsAny(line, "<>") {
+		if strings.ContainsAny(line, "<>") {
 			return "", errors.New("conversation summary contains XML-like delimiters")
 		}
 		if !hasSummaryAttribution(strings.ToLower(line)) {
