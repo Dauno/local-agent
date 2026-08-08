@@ -55,20 +55,6 @@ type SummaryWorkerMetrics struct {
 	Failures atomic.Uint64
 }
 
-func (s *Service) Metrics() *SummaryWorkerMetrics {
-	if s == nil {
-		return nil
-	}
-	return s.metrics
-}
-
-func (s *Service) Counters() map[string]uint64 {
-	if s == nil || s.metrics == nil {
-		return map[string]uint64{}
-	}
-	return map[string]uint64{"summary_worker_failures": s.metrics.Failures.Load()}
-}
-
 func New(config Config, deps Dependencies) (*Service, error) {
 	if config.MaxChars <= 0 || config.RecentTurns <= 0 {
 		return nil, errors.New("summary max chars and recent turns must be positive")
@@ -94,10 +80,6 @@ func New(config Config, deps Dependencies) (*Service, error) {
 	return &Service{config: config, store: deps.Store, summarizer: deps.Summarizer, turnSource: deps.TurnSource, logger: deps.Logger, metrics: &SummaryWorkerMetrics{}}, nil
 }
 
-func (s *Service) Schedule(ctx context.Context, sessionIdentity string, targetOrdinal int64) (bool, error) {
-	return s.store.ScheduleSummaryJob(ctx, sessionIdentity, targetOrdinal, time.Now().UTC())
-}
-
 // ScheduleConversation finds the newest contiguous closed prefix and relies on
 // the store's session/target uniqueness to coalesce repeated successful turns.
 func (s *Service) ScheduleConversation(ctx context.Context, sessionIdentity string) error {
@@ -113,7 +95,7 @@ func (s *Service) ScheduleConversation(ctx context.Context, sessionIdentity stri
 		return nil
 	}
 	target := turns[len(turns)-s.config.RecentTurns-1].Ordinal
-	_, err = s.Schedule(ctx, sessionIdentity, target)
+	_, err = s.store.ScheduleSummaryJob(ctx, sessionIdentity, target, time.Now().UTC())
 	return err
 }
 
@@ -132,18 +114,18 @@ func (s *Service) RunOnce(ctx context.Context, now time.Time) error {
 func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.SummaryJob) error {
 	previous, err := s.store.LatestSummary(ctx, job.SessionIdentity)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return s.retry(persistContext(persistCtx), job, err)
+		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	if err != nil && !errors.Is(err, port.ErrSummaryNotFound) {
-		return s.retry(persistContext(persistCtx), job, err)
+		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	previousOrdinal := previous.CoveredThroughOrdinal
 	turns, err := s.turnSource.ClosedTurns(ctx, job.SessionIdentity, previousOrdinal, job.TargetOrdinal)
 	if err != nil {
-		return s.retry(persistContext(persistCtx), job, err)
+		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	if err := validateContiguousTurns(turns, previousOrdinal, job.TargetOrdinal); err != nil {
-		return s.retry(persistContext(persistCtx), job, err)
+		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	batchTurns := turns
 	if len(batchTurns) > s.config.MaxSourceTurns {
@@ -153,27 +135,27 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 		batchTurns = batchTurns[:len(batchTurns)-1]
 	}
 	if len(batchTurns) == 0 || summaryPromptChars(previous.SanitizedText, batchTurns) > s.config.MaxPromptChars {
-		return s.retry(persistContext(persistCtx), job, errors.New("summary prompt exceeds configured bound"))
+		return s.retry(context.WithoutCancel(persistCtx), job, errors.New("summary prompt exceeds configured bound"))
 	}
 	effectiveTarget := batchTurns[len(batchTurns)-1].Ordinal
 	request := port.ConversationSummaryRequest{PreviousSummary: previous.SanitizedText, ClosedTurns: cloneTurns(batchTurns), MaxChars: s.config.MaxChars, MaxOutputTokens: s.config.MaxOutputTokens}
 	summary, err := s.summarizer.Summarize(ctx, request)
 	if err != nil {
-		return s.retry(persistContext(persistCtx), job, err)
+		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	if summary.PromptVersion == "" {
 		summary.PromptVersion = DefaultPromptVersion
 	}
 	expectedDigest := domain.ConversationSummarySourceDigest(previous.SanitizedText, request.ClosedTurns)
 	if summary.SourceDigest != expectedDigest {
-		return s.retry(persistContext(persistCtx), job, errors.New("summarizer returned an invalid source digest"))
+		return s.retry(context.WithoutCancel(persistCtx), job, errors.New("summarizer returned an invalid source digest"))
 	}
 	if summary.CoveredThroughOrdinal != effectiveTarget {
-		return s.retry(persistContext(persistCtx), job, errors.New("summarizer returned non-contiguous coverage"))
+		return s.retry(context.WithoutCancel(persistCtx), job, errors.New("summarizer returned non-contiguous coverage"))
 	}
 	cleanSummary, err := domain.SanitizeConversationSummary(summary.Text, s.config.MaxChars)
 	if err != nil {
-		return s.retry(persistContext(persistCtx), job, err)
+		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	summary.Text = cleanSummary
 	committed, err := s.store.CommitSummary(ctx, port.SummaryCommit{
@@ -181,7 +163,7 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 		ExpectedSourceDigest: previous.SourceDigest, Summary: summary,
 	})
 	if err != nil {
-		return s.retry(persistContext(persistCtx), job, err)
+		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	// A false CAS means another worker already advanced the summary. The job is
 	// obsolete, not failed, and must not overwrite the newer revision.
@@ -192,15 +174,11 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 		s.logger.Warn("summary CAS lost; job marked obsolete", "session_identity", job.SessionIdentity, "target_ordinal", job.TargetOrdinal)
 	}
 	if effectiveTarget < job.TargetOrdinal {
-		if _, err := s.store.ScheduleSummaryJob(persistContext(persistCtx), job.SessionIdentity, job.TargetOrdinal, time.Now().UTC()); err != nil {
+		if _, err := s.store.ScheduleSummaryJob(context.WithoutCancel(persistCtx), job.SessionIdentity, job.TargetOrdinal, time.Now().UTC()); err != nil {
 			return fmt.Errorf("schedule remaining summary batch: %w", err)
 		}
 	}
 	return nil
-}
-
-func persistContext(ctx context.Context) context.Context {
-	return context.WithoutCancel(ctx)
 }
 
 func (s *Service) Run(ctx context.Context) {
