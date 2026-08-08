@@ -5,7 +5,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 13 batches de refactor completados + docs update, 14 commits de refactor (A8 dividido en dos commits), neto acumulado **−209 líneas**.
+- 15 batches de refactor completados + docs update, 16 commits de refactor (A8 dividido en dos commits), neto acumulado **−237 líneas**.
 - Tests verdes en todo momento; no se modificó ningún archivo de test.
 - 3 archivos con cambios preexistentes sin commitear (no tocar, quedan fuera de cualquier commit).
 
@@ -27,6 +27,8 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A7 | `internal/usecase/bot` (`service.go`, `job_completion.go`, `streaming.go`) | `c0ad0a0` |
 | A8.1 | `internal/usecase/contextcompiler/compiler.go` | `877994b` (net `−9`) |
 | A8.2 | `internal/usecase/contextsummary/service.go` | `2712523` (net `−22`) |
+| A9 | `internal/usecase/generatedfile/service.go` | `8336f08` (`+4/-19`, net `−15`) |
+| A10 | `internal/usecase/externalagent/activations.go` | `6e693c2` (`+4/-17`, net `−13`) |
 
 ## Proceso por batch
 
@@ -64,4 +66,6 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - A5: el grep global de los ítems 6-8 no permitió eliminar las formas largas de `MessageSource` (consumidores externos en producción e integración/tests), `WithInferredSource` (dos consumidores SQLite) ni `ValidateACPAllowlist` (dos llamadores en `agentbuilder`). Las reducciones mecánicas sí eliminaron ramas de validación duplicadas, la clonación innecesaria de mensajes y las construcciones repetidas del error de kind.
 - A7: las nueve reducciones aprobadas en `internal/usecase/bot` se aplicaron tras grep global sin consumidores externos. Commit de refactor: `+34/-37`, neto **−3 líneas**; build y suite del paquete verdes; tests sin cambios.
 - A8: C1, C2 y C4 aplicados en `877994b` (`+6/-15`, neto **−9**); C3 se conservó por referencias en tests y declaraciones de domain, y C5 por fakes de contadores inyectados y la cobertura vigente del guard byte-bound. S1 y S2 aplicados en `2712523` (`+12/-34`, neto **−22**); build y suites de ambos paquetes verdes; tests sin cambios. El bug latente de `responseCountBefore` stale en el segundo recount fue confirmado y queda fuera de este refactor.
+- A9: `hasControl` y `destination` eliminados en `8336f08` (`+4/-19`, neto **−15**); se reutilizó `domain.ConversationReplyTarget` y se preservó el mensaje de destino inválido. Paquete generatedfile verde; tests sin cambios.
+- A10: `activationErrorRetryable` y `currentActivation` inlineados, y `systemClock` sustituido por `port.SystemClock`, en `6e693c2` (`+4/-17`, neto **−13**); `noopLogger` se conservó porque no existe `port.NoopLogger`. Paquete externalagent verde tras repetir un timeout intermitente; tests sin cambios.
 ---
