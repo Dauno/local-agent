@@ -126,6 +126,7 @@ type expiredConfirmationLister interface {
 }
 
 var errConversationBusy = errors.New("conversation already has an active root turn")
+var confirmationAlreadyProcessedMessage = "This confirmation has already been processed."
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.Store == nil {
@@ -255,7 +256,7 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	}
 
 	// Before the normal agent flow, check if this is a confirmation reply.
-	if s.runtime != nil && s.confirmationStore != nil {
+	if s.confirmationStore != nil {
 		if outcome, ok := s.tryResumeConfirmation(ctx, invocation); ok {
 			return outcome, nil
 		}
@@ -441,23 +442,20 @@ func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Contex
 }
 
 func (s *Service) publicModelError(err error) string {
-	if errors.Is(err, domain.ErrIrreducibleContext) || strings.Contains(errorText(err), domain.ErrIrreducibleContext.Error()) {
+	errMessage := ""
+	if err != nil {
+		errMessage = err.Error()
+	}
+	if errors.Is(err, domain.ErrIrreducibleContext) || strings.Contains(errMessage, domain.ErrIrreducibleContext.Error()) {
 		return "No pude procesar este turno: el contexto activo superó el límite seguro incluso después de reducirlo. Reduce el alcance de la solicitud y vuelve a intentarlo."
 	}
-	if strings.Contains(errorText(err), "request_token_count_unavailable") {
+	if strings.Contains(errMessage, "request_token_count_unavailable") {
 		return "No pude verificar temporalmente el tamaño de la solicitud. Intenta de nuevo cuando se recupere la contabilidad del modelo."
 	}
-	if strings.Contains(errorText(err), "completion_unknown") || strings.Contains(errorText(err), string(domain.ACPErrorSessionRecoveryUnsupported)) {
+	if strings.Contains(errMessage, "completion_unknown") || strings.Contains(errMessage, string(domain.ACPErrorSessionRecoveryUnsupported)) {
 		return "La finalización de una operación previa no pudo verificarse. Requiere recuperación operativa antes de continuar."
 	}
 	return s.cfg.ModelErrorMessage
-}
-
-func errorText(err error) string {
-	if err == nil {
-		return ""
-	}
-	return err.Error()
 }
 
 func (s *Service) scheduleSummary(ctx context.Context, key domain.ConversationKey) {
@@ -1281,7 +1279,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 
 	if delivery.Status != port.ConfirmationPending && delivery.Status != port.ConfirmationPublished {
 		s.logger.Warn("confirmation already consumed", "wrapper_call_id", wrapperCallID, "status", delivery.Status)
-		s.publishIfText(ctx, invocation, interactive, "This confirmation has already been processed.", "already-consumed reply failed")
+		s.publishIfText(ctx, invocation, interactive, confirmationAlreadyProcessedMessage, "already-consumed reply failed")
 		return OutcomeIgnoredFollowup
 	}
 	conversationRelease, conversationAcquired := s.limiter.TryAcquire(string(delivery.ConversationKey))
@@ -1310,14 +1308,14 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 			modelRelease()
 			cancel()
 			s.logger.Warn("confirmation already consumed (race)", "wrapper_call_id", wrapperCallID, "error", err)
-			s.publishIfText(ctx, invocation, interactive, "This confirmation has already been processed.", "race reply failed")
+			s.publishIfText(ctx, invocation, interactive, confirmationAlreadyProcessedMessage, "race reply failed")
 			return OutcomeIgnoredFollowup
 		}
 	} else if err := s.confirmationStore.RejectDelivery(ctx, wrapperCallID); err != nil {
 		modelRelease()
 		cancel()
 		s.logger.Warn("confirmation already rejected (race)", "wrapper_call_id", wrapperCallID, "error", err)
-		s.publishIfText(ctx, invocation, interactive, "This confirmation has already been processed.", "race reply failed")
+		s.publishIfText(ctx, invocation, interactive, confirmationAlreadyProcessedMessage, "race reply failed")
 		return OutcomeIgnoredFollowup
 	}
 	progress := s.waitingProgress(ctx, delivery.ConversationKey)

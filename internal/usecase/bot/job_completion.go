@@ -14,21 +14,26 @@ import (
 
 var _ port.ExternalAgentJobCompletionHandler = (*Service)(nil)
 
+var errAssistantExchangeUnavailable = errors.New("assistant exchange writer is unavailable")
+var errActivationStoreUnavailable = errors.New("external-agent activation store is unavailable")
+
+func activationStateConflict(err error) error {
+	return port.NewActivationProcessError("activation_state_conflict", true, err)
+}
+
 // HandleJobCompletion runs the root turn for one already-published terminal
 // notification. The activation is the only source of actor and destination
 // identity; no Slack event is accepted at this boundary.
 func (s *Service) HandleJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error {
 	if s == nil || s.activationStore == nil {
-		return port.NewActivationProcessError("activation_store_unavailable", true, errors.New("external-agent activation store is unavailable"))
+		return port.NewActivationProcessError("activation_store_unavailable", true, errActivationStoreUnavailable)
 	}
 	current, err := s.authoritativeActivation(ctx, activation)
 	if err != nil {
 		return err
 	}
 	switch current.State {
-	case domain.ActivationResponsePrepared, domain.ActivationCompleted:
-		return s.ReconcileJobCompletion(ctx, *current)
-	case domain.ActivationModelStarted:
+	case domain.ActivationResponsePrepared, domain.ActivationCompleted, domain.ActivationModelStarted:
 		return s.ReconcileJobCompletion(ctx, *current)
 	case domain.ActivationProcessing:
 		return s.runJobCompletion(ctx, current)
@@ -46,7 +51,7 @@ func (s *Service) HandleJobCompletion(ctx context.Context, activation domain.Ext
 // completion_unknown.
 func (s *Service) ReconcileJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error {
 	if s == nil || s.activationStore == nil {
-		return port.NewActivationProcessError("activation_store_unavailable", true, errors.New("external-agent activation store is unavailable"))
+		return port.NewActivationProcessError("activation_store_unavailable", true, errActivationStoreUnavailable)
 	}
 	current, err := s.authoritativeActivation(ctx, activation)
 	if err != nil {
@@ -54,7 +59,7 @@ func (s *Service) ReconcileJobCompletion(ctx context.Context, activation domain.
 	}
 	releaseConversation, acquired := s.limiter.TryAcquire(string(current.ConversationKey))
 	if !acquired {
-		return port.NewActivationProcessError("conversation_busy", true, errors.New("conversation already has an active root turn"))
+		return port.NewActivationProcessError("conversation_busy", true, errConversationBusy)
 	}
 	defer releaseConversation()
 	// The activation may have changed while waiting for the conversation
@@ -71,7 +76,7 @@ func (s *Service) ReconcileJobCompletion(ctx context.Context, activation domain.
 	case domain.ActivationResponsePrepared:
 		return s.publishPreparedActivation(ctx, current)
 	default:
-		return port.NewActivationProcessError("activation_state_conflict", true, fmt.Errorf("cannot reconcile activation in state %q", current.State))
+		return activationStateConflict(fmt.Errorf("cannot reconcile activation in state %q", current.State))
 	}
 }
 
@@ -98,7 +103,7 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 	}
 	releaseConversation, acquired := s.limiter.TryAcquire(string(activation.ConversationKey))
 	if !acquired {
-		return port.NewActivationProcessError("conversation_busy", true, errors.New("conversation already has an active root turn"))
+		return port.NewActivationProcessError("conversation_busy", true, errConversationBusy)
 	}
 	defer releaseConversation()
 
@@ -130,7 +135,7 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 	if err := s.activationStore.MarkActivationModelStarted(modelCtx, activation, s.clock.Now().UTC()); err != nil {
 		cancel()
 		modelRelease()
-		return port.NewActivationProcessError("activation_state_conflict", true, err)
+		return activationStateConflict(err)
 	}
 	activation.State = domain.ActivationModelStarted
 	turn, runErr := func() (port.AgentTurn, error) {
@@ -178,7 +183,7 @@ func (s *Service) prepareActivationResponse(ctx context.Context, activation *dom
 		return atomicStore.PrepareActivationResponseWithExchange(ctx, activation, metadata, message, s.cfg.RetainMessages, s.clock.Now().UTC())
 	}
 	if s.exchange == nil {
-		return port.PreparedAssistantExchange{}, errors.New("assistant exchange writer is unavailable")
+		return port.PreparedAssistantExchange{}, errAssistantExchangeUnavailable
 	}
 	prepared, err := s.exchange.PrepareAssistantExchange(ctx, metadata, message, s.cfg.RetainMessages, false)
 	if err != nil {
@@ -206,7 +211,7 @@ func (s *Service) publishPreparedActivation(ctx context.Context, activation *dom
 		return port.NewActivationProcessError("activation_response_invalid", false, errors.New("prepared activation response is incomplete"))
 	}
 	if s.exchange == nil {
-		return port.NewActivationProcessError("activation_exchange_unavailable", true, errors.New("assistant exchange writer is unavailable"))
+		return port.NewActivationProcessError("activation_exchange_unavailable", true, errAssistantExchangeUnavailable)
 	}
 
 	intent := port.AssistantExchangeIntent{
@@ -236,7 +241,7 @@ func (s *Service) publishPreparedActivation(ctx context.Context, activation *dom
 		return port.NewActivationProcessError("activation_exchange_retryable", true, err)
 	}
 	if err := s.activationStore.CompleteActivation(ctx, activation, assistantTS, s.clock.Now().UTC()); err != nil {
-		return port.NewActivationProcessError("activation_state_conflict", true, err)
+		return activationStateConflict(err)
 	}
 	return nil
 }
@@ -285,14 +290,14 @@ func (s *Service) reconcileModelStarted(ctx context.Context, activation *domain.
 
 func (s *Service) markUnknown(ctx context.Context, activation *domain.ExternalAgentJobActivation, code string) error {
 	if err := s.activationStore.MarkActivationCompletionUnknown(ctx, activation, code, s.clock.Now().UTC()); err != nil {
-		return port.NewActivationProcessError("activation_state_conflict", true, err)
+		return activationStateConflict(err)
 	}
 	return nil
 }
 
 func (s *Service) failActivation(ctx context.Context, activation *domain.ExternalAgentJobActivation, code string, retryable bool, cause error) error {
 	if err := s.activationStore.FailActivation(ctx, activation, code, s.clock.Now().UTC()); err != nil {
-		return port.NewActivationProcessError("activation_state_conflict", true, err)
+		return activationStateConflict(err)
 	}
 	return port.NewActivationProcessError(code, retryable, cause)
 }
