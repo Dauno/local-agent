@@ -162,8 +162,6 @@ func (r Report) ExitCode() int {
 	return code
 }
 
-func (r Report) Passed() bool { return r.ExitCode() == 0 }
-
 type Service struct {
 	deps Dependencies
 }
@@ -412,8 +410,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		}
 	}
 	durableOpenAI := defs == nil || (resolvedModel != nil && resolvedModel.Type() == agentdef.ProviderTypeOpenAICompatible)
-	summarizerCompatible := durableOpenAI
-	if err := config.ValidateADKCompaction(cfg, durableOpenAI, summarizerCompatible); err != nil {
+	if err := config.ValidateADKCompaction(cfg, durableOpenAI, durableOpenAI); err != nil {
 		report.fail("ADK compaction", err.Error(), "Set context.adk_compaction.enabled=true with valid positive limits and keep summary composition compatible, then restart.", false)
 	} else if durableOpenAI {
 		report.pass("ADK compaction", "durable OpenAI-compatible model history projection is enabled")
@@ -486,7 +483,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			report.fail("audio transcription profile", redactor.String(fmt.Sprintf("resolve %q: %v", transcriptionProfile, transcriptionResolveErr)), "Fix slack.files.transcription_profile and its openai_compatible provider definition.", false)
 		case cfg.Slack.Files.TranscriptionTimeoutSeconds <= 0:
 			report.fail("audio transcription profile", "transcription timeout must be greater than zero", "Set slack.files.transcription_timeout_seconds to a positive value.", false)
-		case transcriptionResolved == nil || transcriptionResolved.Type() != agentdef.ProviderTypeOpenAICompatible:
+		case transcriptionResolved.Type() != agentdef.ProviderTypeOpenAICompatible:
 			report.fail("audio transcription profile", "profile must resolve to an openai_compatible provider", "Select an openai_compatible profile in slack.files.transcription_profile.", false)
 		case !validSecrets[transcriptionResolved.APIKeyEnv]:
 			report.fail("audio transcription profile", fmt.Sprintf("profile %q requires %s, which is not set", transcriptionProfile, transcriptionResolved.APIKeyEnv), "Set the transcription provider API key in the process environment or .env.", false)
