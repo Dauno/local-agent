@@ -72,7 +72,7 @@ func NewActivationWorker(cfg ActivationConfig, deps ActivationDependencies) (*Ac
 		cfg.StuckThreshold = 5 * time.Minute
 	}
 	if deps.Clock == nil {
-		deps.Clock = systemClock{}
+		deps.Clock = port.SystemClock{}
 	}
 	if deps.Logger == nil {
 		deps.Logger = noopLogger{}
@@ -186,7 +186,7 @@ func (w *ActivationWorker) ProcessOne(ctx context.Context) error {
 
 func (w *ActivationWorker) processBeforeModel(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
 	handlerErr := w.invokeWithLease(ctx, activation, w.handler.HandleJobCompletion)
-	current, err := w.currentActivation(ctx, activation.ActivationID)
+	current, err := w.store.GetActivation(context.WithoutCancel(ctx), activation.ActivationID)
 	if err != nil {
 		return wrapActivationError(activation, err)
 	}
@@ -213,7 +213,7 @@ func (w *ActivationWorker) processBeforeModel(ctx context.Context, activation *d
 
 func (w *ActivationWorker) reconcileAfterModel(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
 	reconcileErr := w.invokeWithLease(ctx, activation, w.handler.ReconcileJobCompletion)
-	current, err := w.currentActivation(ctx, activation.ActivationID)
+	current, err := w.store.GetActivation(context.WithoutCancel(ctx), activation.ActivationID)
 	if err != nil {
 		return wrapActivationError(activation, err)
 	}
@@ -243,7 +243,7 @@ func (w *ActivationWorker) reconcileAfterModel(ctx context.Context, activation *
 		if reconcileErr == nil {
 			reconcileErr = errors.New("activation response remains unpublished")
 		}
-		if !activationErrorRetryable(reconcileErr) {
+		if _, retryable := classifyActivationError(reconcileErr); !retryable {
 			code, _ := classifyActivationError(reconcileErr)
 			if err := w.store.FailActivation(context.WithoutCancel(ctx), current, code, w.clock.Now().UTC()); err != nil {
 				return wrapActivationError(current, err)
@@ -318,14 +318,6 @@ func (w *ActivationWorker) renewLease(ctx context.Context, store port.ExternalAg
 			}
 		}
 	}
-}
-
-func (w *ActivationWorker) currentActivation(ctx context.Context, activationID string) (*domain.ExternalAgentJobActivation, error) {
-	activation, err := w.store.GetActivation(context.WithoutCancel(ctx), activationID)
-	if err != nil {
-		return nil, err
-	}
-	return activation, nil
 }
 
 // SnapshotHealth exposes bounded activation state and updates the worker's
@@ -408,11 +400,6 @@ func classifyActivationError(err error) (string, bool) {
 		}
 	}
 	return "activation_retryable", true
-}
-
-func activationErrorRetryable(err error) bool {
-	_, retryable := classifyActivationError(err)
-	return retryable
 }
 
 func safeActivationErrorCode(code string, retryable bool) string {
