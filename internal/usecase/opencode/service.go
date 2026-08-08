@@ -21,13 +21,6 @@ type Dependencies struct {
 	Coordinator   port.OpenCodeCoordinator
 }
 
-type Result struct {
-	Success        bool
-	PriorVersion   string
-	CurrentVersion string
-	Diagnostic     string
-}
-
 var (
 	ErrNotAuthorized = errors.New("actor is not an OpenCode management operator")
 	ErrMaintenance   = errors.New("OpenCode management is currently busy")
@@ -71,105 +64,105 @@ func (c *Coordinator) TryMaintenance() (func(), bool) {
 	}, true
 }
 
-func Status(ctx context.Context, deps Dependencies) (Result, error) {
+func Status(ctx context.Context, deps Dependencies) (domain.OpenCodeManagementResult, error) {
 	release, acquired := acquireInvocation(deps.Coordinator)
 	if !acquired {
-		return Result{}, ErrMaintenance
+		return domain.OpenCodeManagementResult{}, ErrMaintenance
 	}
 	defer release()
 	if deps.Runtime == nil {
-		return Result{}, errors.New("OpenCode ACP runtime is not configured")
+		return domain.OpenCodeManagementResult{}, errors.New("OpenCode ACP runtime is not configured")
 	}
 	desc, err := deps.Runtime.Describe(ctx)
 	if err != nil {
-		return Result{
+		return domain.OpenCodeManagementResult{
 			Success:    false,
 			Diagnostic: fmt.Sprintf("OpenCode ACP describe failed: %v", err),
 		}, nil
 	}
-	return Result{
+	return domain.OpenCodeManagementResult{
 		Success:        true,
 		CurrentVersion: desc.AgentInfo.Version,
 		Diagnostic:     fmt.Sprintf("OpenCode %s available (protocol v%s)", desc.AgentInfo.Name, desc.ProtocolVersion),
 	}, nil
 }
 
-func Probe(ctx context.Context, deps Dependencies, primaryPath string, configOptions []domain.ACPConfigOption) (Result, error) {
+func Probe(ctx context.Context, deps Dependencies, primaryPath string, configOptions []domain.ACPConfigOption) (domain.OpenCodeManagementResult, error) {
 	release, acquired := acquireInvocation(deps.Coordinator)
 	if !acquired {
-		return Result{}, ErrMaintenance
+		return domain.OpenCodeManagementResult{}, ErrMaintenance
 	}
 	defer release()
 	if deps.Runtime == nil {
-		return Result{}, errors.New("OpenCode ACP runtime is not configured")
+		return domain.OpenCodeManagementResult{}, errors.New("OpenCode ACP runtime is not configured")
 	}
 	if err := deps.Runtime.Probe(ctx, primaryPath, configOptions); err != nil {
-		return Result{
+		return domain.OpenCodeManagementResult{
 			Success:    false,
 			Diagnostic: fmt.Sprintf("OpenCode ACP probe failed: %v", err),
 		}, nil
 	}
-	return Result{
+	return domain.OpenCodeManagementResult{
 		Success:    true,
 		Diagnostic: "OpenCode ACP probe passed: initialization, session, config, and workspace verified",
 	}, nil
 }
 
-func Upgrade(ctx context.Context, deps Dependencies) (Result, error) {
+func Upgrade(ctx context.Context, deps Dependencies) (domain.OpenCodeManagementResult, error) {
 	if !isAuthorized(deps.ActorID, deps.AllowedIDs) {
-		return Result{}, ErrNotAuthorized
+		return domain.OpenCodeManagementResult{}, ErrNotAuthorized
 	}
 	if deps.Manager == nil {
-		return Result{}, errors.New("OpenCode manager is not configured")
+		return domain.OpenCodeManagementResult{}, errors.New("OpenCode manager is not configured")
 	}
 	release, acquired := acquireMaintenance(deps.Coordinator)
 	if !acquired {
-		return Result{}, ErrMaintenance
+		return domain.OpenCodeManagementResult{}, ErrMaintenance
 	}
 	defer release()
 
-	result, err := resultFromManager(deps.Manager.Upgrade(ctx))
+	result, err := deps.Manager.Upgrade(ctx)
 	if err != nil {
-		return Result{}, err
+		return domain.OpenCodeManagementResult{}, err
 	}
 	if deps.Runtime == nil {
-		return Result{}, errors.New("OpenCode ACP runtime is not configured")
+		return domain.OpenCodeManagementResult{}, errors.New("OpenCode ACP runtime is not configured")
 	}
 	if err := deps.Runtime.Probe(ctx, deps.PrimaryPath, deps.ConfigOptions); err != nil {
 		rollback, rollbackErr := deps.Manager.Rollback(ctx)
 		if rollbackErr != nil {
-			return Result{}, fmt.Errorf("OpenCode upgrade probe failed and rollback failed: %v; rollback: %w", err, rollbackErr)
+			return domain.OpenCodeManagementResult{}, fmt.Errorf("OpenCode upgrade probe failed and rollback failed: %v; rollback: %w", err, rollbackErr)
 		}
 		if probeErr := deps.Runtime.Probe(ctx, deps.PrimaryPath, deps.ConfigOptions); probeErr != nil {
-			return Result{}, fmt.Errorf("OpenCode upgrade probe failed; rollback to %s could not be verified: %w", rollback.CurrentVersion, probeErr)
+			return domain.OpenCodeManagementResult{}, fmt.Errorf("OpenCode upgrade probe failed; rollback to %s could not be verified: %w", rollback.CurrentVersion, probeErr)
 		}
-		return Result{}, fmt.Errorf("OpenCode upgrade probe failed; rolled back to %s: %w", rollback.CurrentVersion, err)
+		return domain.OpenCodeManagementResult{}, fmt.Errorf("OpenCode upgrade probe failed; rolled back to %s: %w", rollback.CurrentVersion, err)
 	}
 	return result, nil
 }
 
-func Rollback(ctx context.Context, deps Dependencies) (Result, error) {
+func Rollback(ctx context.Context, deps Dependencies) (domain.OpenCodeManagementResult, error) {
 	if !isAuthorized(deps.ActorID, deps.AllowedIDs) {
-		return Result{}, ErrNotAuthorized
+		return domain.OpenCodeManagementResult{}, ErrNotAuthorized
 	}
 	if deps.Manager == nil {
-		return Result{}, errors.New("OpenCode manager is not configured")
+		return domain.OpenCodeManagementResult{}, errors.New("OpenCode manager is not configured")
 	}
 	release, acquired := acquireMaintenance(deps.Coordinator)
 	if !acquired {
-		return Result{}, ErrMaintenance
+		return domain.OpenCodeManagementResult{}, ErrMaintenance
 	}
 	defer release()
 
-	result, err := resultFromManager(deps.Manager.Rollback(ctx))
+	result, err := deps.Manager.Rollback(ctx)
 	if err != nil {
-		return Result{}, err
+		return domain.OpenCodeManagementResult{}, err
 	}
 	if deps.Runtime == nil {
-		return Result{}, errors.New("OpenCode ACP runtime is not configured")
+		return domain.OpenCodeManagementResult{}, errors.New("OpenCode ACP runtime is not configured")
 	}
 	if err := deps.Runtime.Probe(ctx, deps.PrimaryPath, deps.ConfigOptions); err != nil {
-		return Result{}, fmt.Errorf("OpenCode rollback completed but ACP probe failed: %w", err)
+		return domain.OpenCodeManagementResult{}, fmt.Errorf("OpenCode rollback completed but ACP probe failed: %w", err)
 	}
 	return result, nil
 }
@@ -189,18 +182,6 @@ func acquireInvocation(coordinator port.OpenCodeCoordinator) (func(), bool) {
 		return func() {}, true
 	}
 	return coordinator.TryInvocation()
-}
-
-func resultFromManager(mr domain.OpenCodeManagementResult, err error) (Result, error) {
-	if err != nil {
-		return Result{}, err
-	}
-	return Result{
-		Success:        mr.Success,
-		PriorVersion:   mr.PriorVersion,
-		CurrentVersion: mr.CurrentVersion,
-		Diagnostic:     mr.Diagnostic,
-	}, nil
 }
 
 func isAuthorized(actorID string, allowedIDs []string) bool {
