@@ -637,19 +637,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			if counterCheck == "" {
 				report.fail("token counter", "no token_counter configured for root openai_compatible model", "Add token_counter.strategy (e.g. byte_bound) to the root profile YAML.", false)
 			} else {
-				detail := fmt.Sprintf("strategy: %s", counterCheck)
-				if resolvedModel.CounterID != "" {
-					detail += fmt.Sprintf(", id: %s", resolvedModel.CounterID)
-				}
-				if s.deps.Counter != nil {
-					if counterErr := s.deps.Counter.CheckCounter(resolvedModel.CounterStrategy, resolvedModel.CounterID); counterErr != nil {
-						report.fail("token counter", redactor.String(counterErr.Error()), "Use a strategy and id implemented by this release, or roll back to a binary that implements the configured combination. There is no silent fallback.", false)
-					} else {
-						report.pass("token counter", detail)
-					}
-				} else {
-					report.pass("token counter", detail)
-				}
+				s.checkTokenCounter(&report, redactor, "token counter", counterCheck, resolvedModel.CounterID, "Use a strategy and id implemented by this release, or roll back to a binary that implements the configured combination. There is no silent fallback.")
 			}
 			if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
 				if attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model); resolveErr == nil {
@@ -671,19 +659,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 				continue
 			}
 			agentName := "token counter (" + selected.agent + ")"
-			detail := fmt.Sprintf("strategy: %s", selected.resolved.CounterStrategy)
-			if selected.resolved.CounterID != "" {
-				detail += fmt.Sprintf(", id: %s", selected.resolved.CounterID)
-			}
-			if s.deps.Counter == nil {
-				report.pass(agentName, detail)
-				continue
-			}
-			if counterErr := s.deps.Counter.CheckCounter(selected.resolved.CounterStrategy, selected.resolved.CounterID); counterErr != nil {
-				report.fail(agentName, redactor.String(counterErr.Error()), "Use a strategy and id implemented by this release; there is no silent fallback.", false)
-			} else {
-				report.pass(agentName, detail)
-			}
+			s.checkTokenCounter(&report, redactor, agentName, selected.resolved.CounterStrategy, selected.resolved.CounterID, "Use a strategy and id implemented by this release; there is no silent fallback.")
 		}
 	}
 	if cfg.CodeIntelligence != nil && cfg.CodeIntelligence.Enabled {
@@ -873,6 +849,22 @@ func (r *Report) fail(name, detail, remediation string, fatal bool) {
 	r.Results = append(r.Results, Result{
 		Name: name, Status: StatusFail, Detail: detail, Remediation: remediation, Fatal: fatal,
 	})
+}
+
+func (s *Service) checkTokenCounter(report *Report, redactor secure.Redactor, name, strategy, id, remediation string) {
+	detail := fmt.Sprintf("strategy: %s", strategy)
+	if id != "" {
+		detail += fmt.Sprintf(", id: %s", id)
+	}
+	if s.deps.Counter == nil {
+		report.pass(name, detail)
+		return
+	}
+	if counterErr := s.deps.Counter.CheckCounter(strategy, id); counterErr != nil {
+		report.fail(name, redactor.String(counterErr.Error()), remediation, false)
+	} else {
+		report.pass(name, detail)
+	}
 }
 
 func validateAudioTranscriptionProfile(resolved *agentdef.ResolvedModel) error {
