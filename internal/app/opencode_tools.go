@@ -46,24 +46,18 @@ func (f *openCodeManagementToolFactory) ToolsForInvocation(actor string, key dom
 	type args struct {
 		Action string `json:"action" jsonschema:"one of status, probe, upgrade, rollback"`
 	}
-	type result struct {
-		Success        bool   `json:"success"`
-		PriorVersion   string `json:"prior_version,omitempty"`
-		CurrentVersion string `json:"current_version,omitempty"`
-		Diagnostic     string `json:"diagnostic"`
-	}
 	managementTool, err := functiontool.New(functiontool.Config{
 		Name:        "manage_opencode",
 		Description: "Checks or repairs the trusted OpenCode installation. Upgrade and rollback require operator authorization and confirmation.",
 		RequireConfirmationProvider: func(input args) bool {
 			return input.Action == "upgrade" || input.Action == "rollback"
 		},
-	}, func(ctx agent.Context, input args) (result, error) {
+	}, func(ctx agent.Context, input args) (domain.OpenCodeManagementResult, error) {
 		deps := opencodeusecase.Dependencies{
 			Runtime: f.runtime, Manager: f.manager, ActorID: actor,
 			AllowedIDs: f.allowedIDs, PrimaryPath: f.primaryPath, ConfigOptions: f.configOptions, Coordinator: f.coordinator,
 		}
-		var output opencodeusecase.Result
+		var output domain.OpenCodeManagementResult
 		var callErr error
 		switch input.Action {
 		case "status":
@@ -75,12 +69,12 @@ func (f *openCodeManagementToolFactory) ToolsForInvocation(actor string, key dom
 		case "rollback":
 			output, callErr = opencodeusecase.Rollback(ctx, deps)
 		default:
-			return result{}, fmt.Errorf("unsupported OpenCode management action %q", input.Action)
+			return domain.OpenCodeManagementResult{}, fmt.Errorf("unsupported OpenCode management action %q", input.Action)
 		}
 		if callErr != nil {
-			return result{}, callErr
+			return domain.OpenCodeManagementResult{}, callErr
 		}
-		return result{Success: output.Success, PriorVersion: output.PriorVersion, CurrentVersion: output.CurrentVersion, Diagnostic: output.Diagnostic}, nil
+		return output, nil
 	})
 	if err != nil {
 		return nil, err
