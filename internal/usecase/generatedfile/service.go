@@ -98,9 +98,9 @@ func (s *Service) Export(ctx context.Context, request ExportRequest) (ExportResu
 	if strings.TrimSpace(request.Actor) == "" {
 		return ExportResult{}, &ExportError{Message: "actor is required"}
 	}
-	channelID, threadTS, err := destination(request.ConversationKey)
+	replyTarget, err := domain.ConversationReplyTarget(request.ConversationKey)
 	if err != nil {
-		return ExportResult{}, err
+		return ExportResult{}, errors.New("generated file destination is not a canonical Slack conversation")
 	}
 	filename, mediaType, content, err := s.prepare(request.Filename, request.Format, request.Content)
 	if err != nil {
@@ -145,7 +145,7 @@ func (s *Service) Export(ctx context.Context, request ExportRequest) (ExportResu
 	if err := s.persistStatus(ctx, request.OperationID, domain.GeneratedFileOpBytesUploaded, target.FileID); err != nil {
 		return ExportResult{}, fmt.Errorf("mark generated file bytes uploaded: %w", err)
 	}
-	if err := s.uploader.CompleteUpload(ctx, target.FileID, channelID, threadTS, filename); err != nil {
+	if err := s.uploader.CompleteUpload(ctx, target.FileID, replyTarget.ChannelID, replyTarget.ThreadTS, filename); err != nil {
 		s.updateStatus(ctx, request.OperationID, failedStatus(err), target.FileID)
 		return ExportResult{}, fmt.Errorf("complete generated file upload: %w", err)
 	}
@@ -162,7 +162,7 @@ func (s *Service) Validate(filename string, format domain.GeneratedFileFormat, c
 
 func (s *Service) prepare(filename string, format domain.GeneratedFileFormat, content []byte) (string, string, []byte, error) {
 	filename = strings.TrimSpace(path.Base(strings.ReplaceAll(filename, "\\", "/")))
-	if filename == "." || filename == "" || !utf8.ValidString(filename) || strings.ContainsAny(filename, "\x00\r\n") || hasControl(filename) {
+	if filename == "." || filename == "" || !utf8.ValidString(filename) || strings.ContainsAny(filename, "\x00\r\n") || strings.IndexFunc(filename, func(r rune) bool { return unicode.IsControl(r) }) >= 0 {
 		return "", "", nil, &ExportError{Message: "filename must be a non-empty single-line UTF-8 basename"}
 	}
 	if utf8.RuneCountInString(filename) > s.cfg.MaxFilenameChars {
@@ -234,17 +234,6 @@ func formatDetails(format domain.GeneratedFileFormat) (string, string) {
 	}
 }
 
-func destination(key domain.ConversationKey) (channelID, threadTS string, err error) {
-	parts := strings.Split(string(key), ":")
-	if len(parts) == 4 && parts[0] == "slack" && parts[2] == "dm" && parts[3] != "" {
-		return parts[3], "", nil
-	}
-	if len(parts) == 6 && parts[0] == "slack" && parts[2] == "channel" && parts[4] == "thread" && parts[3] != "" && parts[5] != "" {
-		return parts[3], parts[5], nil
-	}
-	return "", "", errors.New("generated file destination is not a canonical Slack conversation")
-}
-
 func failedStatus(err error) domain.GeneratedFileOperationStatus {
 	var uploadErr *port.GeneratedFileUploadError
 	if errors.As(err, &uploadErr) && uploadErr.Ambiguous {
@@ -277,8 +266,4 @@ func ensureJSONEnd(decoder *json.Decoder) error {
 		return err
 	}
 	return nil
-}
-
-func hasControl(value string) bool {
-	return strings.IndexFunc(value, func(r rune) bool { return unicode.IsControl(r) }) >= 0
 }
