@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -206,10 +207,5 @@ func isAuthorized(actorID string, allowedIDs []string) bool {
 	if len(allowedIDs) == 0 {
 		return false
 	}
-	for _, id := range allowedIDs {
-		if id == actorID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(allowedIDs, actorID)
 }
