@@ -64,7 +64,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 		return domain.CompileResult{Contents: nil, Diagnostics: diag}, nil
 	}
 
-	activeTurnIdx := turnIndexForContentStart(turns, activeStart, 0)
+	activeTurnIdx := turnIndexForContentStart(turns, activeStart)
 	if activeTurnIdx < 0 || activeTurnIdx >= len(turns) {
 		return domain.CompileResult{}, fmt.Errorf("context compiler: active start %d maps to no turn", activeStart)
 	}
@@ -85,7 +85,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	minEnvCosts := minEnvelopeCosts(reducibleParts)
 	effectiveMinCosts := make([]int, len(reducibleParts))
 	for i, rp := range reducibleParts {
-		effectiveMinCosts[i] = minVal(rp.cost, minEnvCosts[i])
+		effectiveMinCosts[i] = min(rp.cost, minEnvCosts[i])
 	}
 	totalEffectiveMin := sumCosts(effectiveMinCosts)
 	diag.ProtectedCodePoints = sumCosts([]int{protectedCost, totalEffectiveMin})
@@ -641,9 +641,7 @@ func (c *Compiler) reduceResponses(
 
 		fr := rp.part.FunctionResponse
 
-		fullJSON, marshalErr := domain.CanonicalJSON(struct {
-			FunctionResponse *domain.FunctionResponse `json:"function_response"`
-		}{fr})
+		fullJSON, marshalErr := fullResponseJSON(fr)
 		if marshalErr != nil {
 			return 0, 0, fmt.Errorf("context compiler: serialize response %s: %w", fr.ID, marshalErr)
 		}
@@ -959,13 +957,6 @@ func sumCosts(costs []int) int {
 	return total
 }
 
-func minVal(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
-}
-
 // ---------------------------------------------------------------------------
 // Turn selection
 // ---------------------------------------------------------------------------
@@ -1008,8 +999,8 @@ func flattenTurns(turns []domain.ConversationTurn) []domain.Content {
 	return result
 }
 
-func turnIndexForContentStart(turns []domain.ConversationTurn, contentStart, prefixContents int) int {
-	offset := prefixContents
+func turnIndexForContentStart(turns []domain.ConversationTurn, contentStart int) int {
+	offset := 0
 	for i, turn := range turns {
 		if contentStart >= offset && contentStart < offset+len(turn.Contents) {
 			return i
@@ -1052,7 +1043,7 @@ func validateProjectedContents(contents []domain.Content, openInvocationIDs map[
 	if len(turns) == 0 {
 		return nil
 	}
-	activeIdx := turnIndexForContentStart(turns, activeStart, 0)
+	activeIdx := turnIndexForContentStart(turns, activeStart)
 	if activeIdx < 0 {
 		activeIdx = 0
 	}
