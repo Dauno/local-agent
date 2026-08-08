@@ -2,7 +2,6 @@ package bot
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
 	"strings"
@@ -186,7 +185,7 @@ func (s *Service) completeTurnProgress(ctx context.Context, progress *domain.Pro
 
 func (s *Service) deliverIncremental(ctx context.Context, target domain.ReplyTarget, operation *domain.IncrementalOperation, snapshot string) error {
 	operation.Sequence++
-	operation.PrefixDigest = incrementalDigest(snapshot)
+	operation.PrefixDigest = sha256Hex(snapshot)
 	operation.UpdatedAt = s.clock.Now().UTC()
 	if operation.MessageTS == "" {
 		published, err := s.incrementalPublisher.CreateIncremental(ctx, target, *operation, snapshot)
@@ -214,7 +213,7 @@ func (s *Service) interruptIncremental(ctx context.Context, operation *domain.In
 	operation.Sequence++
 	operation.Status = domain.IncrementalInterrupted
 	text := fitIncrementalMarker(visible, marker)
-	operation.PrefixDigest = incrementalDigest(text)
+	operation.PrefixDigest = sha256Hex(text)
 	operation.UpdatedAt = s.clock.Now().UTC()
 	if operation.MessageTS != "" {
 		if err := s.incrementalPublisher.InterruptIncremental(ctx, *operation, text); err != nil {
@@ -245,7 +244,7 @@ func (s *Service) finalizeIncrementalTurn(ctx context.Context, invocation domain
 		correlationID = operation.ID
 	}
 	operation.Sequence++
-	operation.PrefixDigest = incrementalDigest(finalText)
+	operation.PrefixDigest = sha256Hex(finalText)
 	operation.UpdatedAt = s.clock.Now().UTC()
 	if err := s.incrementalPublisher.FinalizeIncremental(ctx, *operation, finalText, correlationID); err != nil {
 		_ = s.standardStore.AdvanceIncremental(ctx, operation.ID, domain.IncrementalUnknown, operation.Sequence, operation.PrefixDigest, operation.UpdatedAt)
@@ -291,11 +290,6 @@ func (s *Service) ReconcileIncremental(ctx context.Context) error {
 		s.interruptIncremental(ctx, operation, "", "_Interrupted after restart._")
 	}
 	return nil
-}
-
-func incrementalDigest(text string) string {
-	digest := sha256.Sum256([]byte(text))
-	return fmt.Sprintf("%x", digest)
 }
 
 func fitIncrementalMarker(text, marker string) string {
