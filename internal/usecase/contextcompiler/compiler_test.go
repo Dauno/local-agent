@@ -163,6 +163,79 @@ func (c *sequenceTokenCounter) CountRequest(context.Context, port.ModelRequestEn
 	return port.TokenCount{Tokens: c.counts[index], Strategy: "exact"}, nil
 }
 
+func TestCompilerRejectsNilCompiler(t *testing.T) {
+	var compiler *Compiler
+	_, err := compiler.Compile(t.Context(), domain.CompileRequest{ModelBudget: domain.RequestBudget{HardTokens: 100}})
+	if err == nil || !strings.Contains(err.Error(), "compiler is required") {
+		t.Fatalf("Compile() error = %v, want nil compiler error", err)
+	}
+}
+
+func TestCompilerRejectsNilCounterForEmptyContents(t *testing.T) {
+	_, err := New(newFakeResultStore(), nil).Compile(t.Context(), domain.CompileRequest{
+		ModelBudget: domain.RequestBudget{HardTokens: 100},
+	})
+	if err == nil || !strings.Contains(err.Error(), "request token counter is required") {
+		t.Fatalf("Compile() error = %v, want missing counter error", err)
+	}
+}
+
+func TestCompilerRejectsNegativeFixedRequestTokens(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{1}}
+	_, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents:           []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "hello"}}}},
+		ModelBudget:        domain.RequestBudget{HardTokens: 100},
+		FixedRequestTokens: -1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "fixed request tokens must not be negative") {
+		t.Fatalf("Compile() error = %v, want negative fixed-cost error", err)
+	}
+	if counter.calls != 0 {
+		t.Fatalf("counter calls = %d, want zero for invalid request", counter.calls)
+	}
+}
+
+func TestCompilerRejectsInvalidBudgetBeforeCounting(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{1}}
+	_, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents:    []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "hello"}}}},
+		ModelBudget: domain.RequestBudget{HardTokens: 0},
+	})
+	if err == nil || !strings.Contains(err.Error(), "validate request budget") {
+		t.Fatalf("Compile() error = %v, want budget validation error", err)
+	}
+	if counter.calls != 0 {
+		t.Fatalf("counter calls = %d, want zero for invalid budget", counter.calls)
+	}
+}
+
+func TestCompilerRejectsNegativeCounterResult(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{-1}}
+	_, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents:    []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "hello"}}}},
+		ModelBudget: domain.RequestBudget{HardTokens: 100},
+	})
+	if err == nil || !strings.Contains(err.Error(), "request_token_count_unavailable") {
+		t.Fatalf("Compile() error = %v, want unavailable counter error", err)
+	}
+}
+
+func TestCompilerAcceptsValidEmptyContentsWithoutCounting(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{1}}
+	result, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		ModelBudget: domain.RequestBudget{HardTokens: 100},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v, want nil", err)
+	}
+	if len(result.Contents) != 0 || result.Diagnostics.ReductionReason != "empty" {
+		t.Fatalf("result = %#v, want empty result", result)
+	}
+	if counter.calls != 0 {
+		t.Fatalf("counter calls = %d, want zero for empty contents", counter.calls)
+	}
+}
+
 func TestCompilerAccountsForFixedProviderInput(t *testing.T) {
 	contents := []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}}}
 	serialized, err := domain.CanonicalJSON(contents)
