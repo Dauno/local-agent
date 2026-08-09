@@ -49,7 +49,6 @@ var perMetricAllowedLabelKeys = map[string]map[string]struct{}{
 
 type key struct {
 	name   string
-	kind   port.MetricKind
 	labels string
 }
 
@@ -79,7 +78,7 @@ func (r *Recorder) AddCounter(name string, delta int64, labels port.MetricLabels
 		return
 	}
 	clean := sanitizeLabels(name, labels)
-	k := metricKey(name, port.MetricKindCounter, clean)
+	k := metricKey(name, clean)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	entry := r.counters[k]
@@ -95,7 +94,7 @@ func (r *Recorder) SetGauge(name string, value int64, labels port.MetricLabels) 
 		return
 	}
 	clean := sanitizeLabels(name, labels)
-	k := metricKey(name, port.MetricKindGauge, clean)
+	k := metricKey(name, clean)
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.gauges[k] = &sample{name: name, kind: port.MetricKindGauge, labels: clean, value: float64(value)}
@@ -178,8 +177,8 @@ func sanitizeLabels(name string, labels port.MetricLabels) port.MetricLabels {
 	return clean
 }
 
-func metricKey(name string, kind port.MetricKind, labels port.MetricLabels) key {
-	return key{name: name, kind: kind, labels: labelsKey(labels)}
+func metricKey(name string, labels port.MetricLabels) key {
+	return key{name: name, labels: labelsKey(labels)}
 }
 
 func labelsKey(labels port.MetricLabels) string {

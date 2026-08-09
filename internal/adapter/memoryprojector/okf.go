@@ -104,13 +104,13 @@ func renderBundle(dir string, snapshot port.ProjectionSnapshot) error {
 			continue
 		}
 		topicsHere := childrenByDir[d]
-		if err := writeNestedIndex(dir, d, topicsHere, childrenByDir, snapshot.Topics); err != nil {
+		if err := writeNestedIndex(dir, d, topicsHere, snapshot.Topics); err != nil {
 			return fmt.Errorf("write nested index %q: %w", d, err)
 		}
 	}
 
 	allChildren := childrenByDir[""]
-	if err := writeRootIndex(dir, allChildren, childrenByDir, snapshot.Topics); err != nil {
+	if err := writeRootIndex(dir, allChildren); err != nil {
 		return fmt.Errorf("write root index: %w", err)
 	}
 	if err := writeOKFLog(dir, snapshot); err != nil {
@@ -152,18 +152,13 @@ func collectOKFDirs(topics []domain.Topic) ([]string, map[string][]dirEntry) {
 	return dirs, childrenByDir
 }
 
-func writeRootIndex(dir string, children []dirEntry, childrenByDir map[string][]dirEntry, topics []domain.Topic) error {
+func writeRootIndex(dir string, children []dirEntry) error {
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("okf_version: \"0.1\"\n")
 	b.WriteString("---\n\n")
 	b.WriteString("# Memory Index\n\n")
 	b.WriteString("Curated agent memory organized by topic.\n\n")
-
-	topicByID := make(map[domain.TopicID]domain.Topic, len(topics))
-	for _, t := range topics {
-		topicByID[t.ID] = t
-	}
 
 	seen := map[string]struct{}{}
 	sort.Slice(children, func(i, j int) bool { return children[i].path < children[j].path })
@@ -179,14 +174,9 @@ func writeRootIndex(dir string, children []dirEntry, childrenByDir map[string][]
 	return atomicWrite(filepath.Join(dir, "index.md"), b.String())
 }
 
-func writeNestedIndex(rootDir, bundlePath string, entries []dirEntry, childrenByDir map[string][]dirEntry, topics []domain.Topic) error {
+func writeNestedIndex(rootDir, bundlePath string, entries []dirEntry, topics []domain.Topic) error {
 	var b strings.Builder
 	b.WriteString("# " + filepath.Base(bundlePath) + "\n\n")
-
-	topicByID := make(map[domain.TopicID]domain.Topic, len(topics))
-	for _, t := range topics {
-		topicByID[t.ID] = t
-	}
 
 	seen := map[string]struct{}{}
 	for _, entry := range entries {
