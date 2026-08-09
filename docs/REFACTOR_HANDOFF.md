@@ -99,4 +99,51 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - A13c3 Commit 1: `4ea1941`, `git show --shortstat`: `+12/-31`, neto **−19**; contiene solo los tres archivos reales del diff preexistente y queda fuera del acumulado de refactor por decisión del usuario.
 - A13c3 Commit 2: `4883914`, `git show --shortstat`: `+50/-88`, neto **−38**; no modificó tests. El acumulado de refactor queda en **−397** (`−359 − 38`).
 - A13c3 Commit 3: esta actualización documental. Su hash y shortstat se reportan en el cierre; no se puede insertar su propio hash en el contenido sin crear un cuarto commit.
+
+## A13c4
+
+- Se revisó `internal/port` de forma propia en tres lotes: interfaces sospechosas, `external_agent_job.go` y el resto del directorio. Se revisaron aproximadamente 100 interfaces; no se encontraron interfaces muertas. Todas tienen un implementador `var _` y callers.
+- No se usó `ponytail`: la revisión no necesitó una métrica de densidad de dead-weight.
+- A13c4 no tiene commits propios; esta nota se incluye en el registro de A13c5 por decisión del usuario.
+
+## A13c5
+
+### Cortes aplicados
+
+Los ocho gates repo-wide con `rg '\bSIMBOLO\b'` mostraron solo la definición y su comentario cuando existía. Se eliminaron estos símbolos:
+
+| Símbolo | Archivo | Localización original |
+|---|---|---|
+| `NewDispatcher` | `internal/adapter/slack/dispatcher.go` | líneas 93-95 |
+| `NewBuilderLauncherPublisher` | `internal/adapter/slack/builder_launcher.go` | línea 27 |
+| `NewBuilderModalPresenter` | `internal/adapter/slack/builder_modal.go` | líneas 23-29 |
+| `MustLoadTemplateCatalog` | `internal/adapter/slack/template_catalog.go` | líneas 87-89 |
+| `RenderModal` | `internal/adapter/slack/template_renderer.go` | líneas 103-105 |
+| `RenderMessage` | `internal/adapter/slack/template_renderer.go` | líneas 125-127 |
+| `MessageFallback` | `internal/adapter/slack/template_renderer.go` | líneas 147-149 |
+| `BuildView` | `internal/adapter/slack/builder_modal.go` | líneas 61-64 |
+
+### Cortes saltados
+
+Estos cuatro símbolos se conservaron porque sus callers directos verificados están solo en tests; no se modificaron tests:
+
+| Símbolo | Motivo |
+|---|---|
+| `NewJobNotificationPublisher` | Callers en `internal/adapter/slack/job_notification_test.go` solamente. |
+| `NewContextEnricher` | Callers directos en `internal/adapter/slack/context_test.go` solamente; `NewContextEnricherFromSDK` también lo usa internamente. |
+| `BuildViewForCallback` | Callers en `internal/adapter/slack/builder_modal_test.go` y `internal/adapter/slack/builder_continuity_test.go` solamente. |
+| `BuildViewForKind` | Callers en `internal/adapter/slack/builder_modal_test.go` solamente. |
+
+### Evaluados y conservados
+
+- `boundedTextBuilder` y sus helpers se usan en producción en `internal/adapter/slack/history.go`.
+- `RenderMarkdownParts` tiene caller de producción en `internal/app/external_agent_jobs.go`.
+- `ResolveProgressLabels` tiene caller de producción en `internal/app/composition.go`.
+- Los métodos `WithResponsePublisher`, `WithAllowedUserIDs`, `WithBuilderPresenter`, `WithBuilderHandler`, `WithDispatcher` y `SetInteractiveHandler` de `Listener` tienen callers de producción en `internal/app/composition.go`.
+
+### Commits y acumulado
+
+- Commit 1 de cortes: `ef03454`, `git show --shortstat`: `+0/-54`, neto **−54**. Solo contiene los cinco archivos de producción de `internal/adapter/slack`; no modifica tests.
+- Commit 2 de documentación: este commit; `git show --shortstat` será `+47/-0`, neto **+47**. Su hash real se reporta en el cierre; no se puede insertar su propio hash en el contenido sin crear un tercer commit.
+- Acumulado de refactor tras A13c5: **−451** (`−397 − 54`).
 ---
