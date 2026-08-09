@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync/atomic"
 	"unicode/utf8"
 
 	"google.golang.org/adk/v2/agent"
@@ -31,38 +30,6 @@ type Projector struct {
 	config       CompactionConfig
 	summaryStore port.SummaryStore
 	logger       port.Logger
-	metrics      *CompactionMetrics
-}
-
-type CompactionMetrics struct {
-	compactionApplied     atomic.Uint64
-	compactionFallback    atomic.Uint64
-	activeContextTooLarge atomic.Uint64
-}
-
-type CompactionMetricSnapshot struct {
-	CompactionApplied     uint64
-	CompactionFallback    uint64
-	ActiveContextTooLarge uint64
-}
-
-func (p *Projector) Metrics() CompactionMetricSnapshot {
-	if p == nil || p.metrics == nil {
-		return CompactionMetricSnapshot{}
-	}
-	return CompactionMetricSnapshot{
-		CompactionApplied: p.metrics.compactionApplied.Load(), CompactionFallback: p.metrics.compactionFallback.Load(),
-		ActiveContextTooLarge: p.metrics.activeContextTooLarge.Load(),
-	}
-}
-
-func (p *Projector) Counters() map[string]uint64 {
-	snapshot := p.Metrics()
-	return map[string]uint64{
-		"compaction_applied":        snapshot.CompactionApplied,
-		"compaction_fallback":       snapshot.CompactionFallback,
-		"active_context_too_large":  snapshot.ActiveContextTooLarge,
-	}
 }
 
 func (p *Projector) SetSummaryStore(store port.SummaryStore) {
@@ -86,7 +53,7 @@ func NewProjector(config CompactionConfig) (*Projector, error) {
 	if config.SummaryEnabled && config.SummaryMaxChars >= config.MaxHistoryChars {
 		return nil, errors.New("ADK compaction summary limit must be smaller than history limit")
 	}
-	return &Projector{config: config, metrics: &CompactionMetrics{}}, nil
+	return &Projector{config: config}, nil
 }
 
 func (p *Projector) Project(_ context.Context, request domain.CompactionRequest) (domain.CompactionResult, error) {
@@ -142,9 +109,6 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 		return domain.CompactionResult{}, fmt.Errorf("measure active ADK history: %w", err)
 	}
 	if activeChars > maxHistoryChars {
-		if p.metrics != nil {
-			p.metrics.activeContextTooLarge.Add(1)
-		}
 		return domain.CompactionResult{}, &domain.ActiveContextTooLargeError{Chars: activeChars, Budget: maxHistoryChars}
 	}
 	if err := validateSelectedTurns(turns[activeTurnIndex:], true); err != nil {
@@ -206,10 +170,6 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 	} else if strings.TrimSpace(request.ExistingSummary) != "" {
 		summaryFallback = true
 	}
-	if summaryFallback && p.metrics != nil {
-		p.metrics.compactionFallback.Add(1)
-	}
-
 	selectedContents := flattenTurns(selected)
 	resultContents := append(summary, selectedContents...)
 	resultContents = append(resultContents, active...)
@@ -224,21 +184,11 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 	diagnostics.HistoryCharsAfter = afterChars
 	diagnostics.RecentTurnsRetained = len(selected)
 	diagnostics.CompactionApplied = len(resultContents) != len(request.Contents) || afterChars != beforeChars || summaryChars > 0
-	if diagnostics.CompactionApplied && p.metrics != nil {
-		p.metrics.compactionApplied.Add(1)
-	}
 	diagnostics.Reason = "bounded"
 	if summaryFallback {
 		diagnostics.Reason = "bounded_raw_fallback"
 	}
 	return domain.CompactionResult{Contents: resultContents, Diagnostics: diagnostics}, nil
-}
-
-func min(a, b int) int {
-	if a < b {
-		return a
-	}
-	return b
 }
 
 func turnIndexForContentStart(turns []domain.ConversationTurn, contentStart, prefixContents int) int {
