@@ -42,15 +42,7 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 			return nil, fmt.Errorf("timeout_seconds is only valid for ACP agents")
 		}
 		providerProfile := strings.TrimSpace(draft.ProviderProfile)
-		modelInput := strings.TrimSpace(draft.Model)
-		if providerProfile != "" && modelInput != "" && providerProfile != modelInput {
-			return nil, fmt.Errorf("provider_profile and model conflict; use only provider_profile")
-		}
 		model := providerProfile
-		if model == "" {
-			// Model is the pre-v2 input name; retain it for existing callers.
-			model = modelInput
-		}
 		if model == "" {
 			model = defaultModel(defs)
 			if model == "" {
