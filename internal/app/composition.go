@@ -41,11 +41,13 @@ import (
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
+	"github.com/Dauno/slack-local-agent/internal/adapter/toolrunner"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/secure"
+	"github.com/Dauno/slack-local-agent/internal/tooldef"
 	"github.com/Dauno/slack-local-agent/internal/usecase/agentbuilder"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
@@ -356,6 +358,27 @@ func composeRootTokenCounter(resolved *agentdef.ResolvedModel) (port.RequestToke
 		return nil, fmt.Errorf("compose root model token counter strategy %q id %q: %w", resolved.CounterStrategy, resolved.CounterID, err)
 	}
 	return counter, nil
+}
+
+func composeModelContextAdmission(resolved *agentdef.ResolvedModel, cfg config.Config, requestPercentOverride ...int) (port.RequestTokenCounter, domain.RequestBudget, error) {
+	if resolved == nil || resolved.Type() != agentdef.ProviderTypeOpenAICompatible {
+		return nil, domain.RequestBudget{}, nil
+	}
+	counter, err := composeRootTokenCounter(resolved)
+	if err != nil {
+		return nil, domain.RequestBudget{}, err
+	}
+	requestPercent := cfg.Context.ModelBudget.MaxRequestPercent
+	if len(requestPercentOverride) > 0 && requestPercentOverride[0] > 0 {
+		requestPercent = requestPercentOverride[0]
+	}
+	budget, err := domain.NewRequestBudget(resolved.ContextWindowTokens, domain.RequestBudgetPolicy{
+		MaxRequestPercent: requestPercent,
+	})
+	if err != nil {
+		return nil, domain.RequestBudget{}, err
+	}
+	return counter, budget, nil
 }
 
 func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runtimeSetup, models runtimeModels) (*runtimeInfrastructure, error) {
@@ -712,7 +735,13 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 				delegatedGlobalInstruction = models.rootDef.EffectiveDelegatedGlobalInstruction()
 			}
 			compositeFactory = newCompositeAgentToolFactory(toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
+			compositeFactory.setChildContextResultStore(resultStore)
 			toolFactory = compositeFactory
+		}
+		// Declarative tools must be wired after the composite factory exists so
+		// children and workflow steps can reference them.
+		if err := wireDeclarativeTools(factory, models, paths, compositeFactory); err != nil {
+			return nil, models.redactor.Error(err)
 		}
 		externalJobService, notificationWorker, err = newExternalAgentJobService(cfg, models, infra)
 		if err != nil {
@@ -969,5 +998,75 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 		return models.redactor.Error(err)
 	}
 	models.logger.Info("local-agent stopped")
+	return nil
+}
+
+// wireDeclarativeTools loads .local-agent/tools/, resolves every executable at
+// startup, and exposes to the root agent only the tools it declared in
+// tool_scope. Child agents and workflow steps may reference the same active
+// set through their own declarations. Any reference without a matching
+// declaration fails loudly before Slack opens.
+func wireDeclarativeTools(factory *toolfactory.Factory, models runtimeModels, paths config.Paths, compositeFactory *compositeAgentToolFactory) error {
+	rootDef := models.rootDef
+	if factory == nil || rootDef == nil || len(paths.SandboxProjectRoots) == 0 {
+		return nil
+	}
+	loaded, err := tooldef.Load(paths.ToolsDir)
+	if err != nil {
+		return fmt.Errorf("load declarative tools: %w", err)
+	}
+	if len(loaded) == 0 {
+		return nil
+	}
+	selected := make(map[string]tooldef.ToolDef)
+	for _, scope := range rootDef.ToolScope {
+		if scope == "invocation_scoped" {
+			continue
+		}
+		def, ok := loaded[scope]
+		if !ok {
+			return fmt.Errorf("tool_scope references undeclared tool %q; check %s", scope, paths.ToolsDir)
+		}
+		if agentdef.IsDirectToolName(scope) || scope == "exit_loop" {
+			return fmt.Errorf("declarative tool %q collides with a direct application tool", scope)
+		}
+		selected[scope] = def
+	}
+	for _, child := range models.preparedAgentTools {
+		for _, scope := range child.definition.ToolScope {
+			if scope == "invocation_scoped" || isReadOnlyChildTool(scope) {
+				continue
+			}
+			if _, active := selected[scope]; !active {
+				return fmt.Errorf("agent tool %q: tool_scope references undeclared tool %q; add it to root_agent tool_scope or check %s", child.definition.Name, scope, paths.ToolsDir)
+			}
+		}
+	}
+	for _, workflow := range models.preparedWorkflows {
+		for _, doc := range workflow.blueprint.OrderedDocuments() {
+			if doc.LLM == nil {
+				continue
+			}
+			for _, ref := range doc.LLM.Tools {
+				if ref.Name == "exit_loop" || isReadOnlyChildTool(ref.Name) {
+					continue
+				}
+				if _, active := selected[ref.Name]; !active {
+					return fmt.Errorf("workflow %q agent %q: tool %q is not an active declarative tool; add it to root_agent tool_scope or check %s", workflow.blueprint.ID, doc.Name, ref.Name, paths.ToolsDir)
+				}
+			}
+		}
+	}
+	if len(selected) == 0 {
+		return nil
+	}
+	executor, err := toolrunner.New(selected, paths.SandboxProjectRoots)
+	if err != nil {
+		return fmt.Errorf("initialize declarative tool executor: %w", err)
+	}
+	factory.WithDeclarativeTools(selected, executor)
+	if compositeFactory != nil {
+		compositeFactory.setDeclarativeTools(selected)
+	}
 	return nil
 }

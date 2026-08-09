@@ -728,6 +728,7 @@ func TestResolvePaths(t *testing.T) {
 		EnvFile:        filepath.Join(root, ".env"),
 		MemoryDir:      filepath.Join(root, "var", "state", "memory"),
 		ArtifactDir:    filepath.Join(root, "var", "state", "artifacts"),
+		ToolsDir:       filepath.Join(root, "var", "state", "tools"),
 	}
 	if !reflect.DeepEqual(paths, want) {
 		t.Fatalf("ResolvePaths()\n got: %#v\nwant: %#v", paths, want)
