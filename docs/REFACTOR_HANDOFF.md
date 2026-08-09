@@ -146,4 +146,27 @@ Estos cuatro símbolos se conservaron porque sus callers directos verificados es
 - Commit 1 de cortes: `ef03454`, `git show --shortstat`: `+0/-54`, neto **−54**. Solo contiene los cinco archivos de producción de `internal/adapter/slack`; no modifica tests.
 - Commit 2 de documentación: este commit; `git show --shortstat` será `+47/-0`, neto **+47**. Su hash real se reporta en el cierre; no se puede insertar su propio hash en el contenido sin crear un tercer commit.
 - Acumulado de refactor tras A13c5: **−451** (`−397 − 54`).
+
+## A13c6
+
+### Cortes aplicados
+
+Revisión propia; no se invocó `ponytail`. Se aplicaron los cortes #1 y #3 sin modificar tests:
+
+| Hallazgo | Localización original | Veredicto y motivo |
+|---|---|---|
+| #1 `requiredSecrets` | `internal/app/model_builder.go:160-171` | **APLICADO**: no tenía callers repo-wide. Su validación de API key ya está en `newModelForResolved`; la validación de Slack permanece en `requiredSlackTokens` durante la preparación del runtime. |
+| #3 `eligibleAgentNames` | `internal/app/agent_tools.go:88-101`; `internal/usecase/doctor/service.go:183-191` | **APLICADO**: las dos copias privadas byte-idénticas se eliminaron y ambos callers usan `agentdef.EligibleAgentNames`. La implementación pública de `agentdef` quedó intacta. |
+
+### Corte saltado
+
+| Hallazgo | Motivo |
+|---|---|
+| #2 `CancelForConversation` (`internal/usecase/externalagent/service.go:563-568`) | **SALTADO**: callers solo en tests (`authorization_test.go:31`), no pertenece a una interfaz de `internal/port`; la regla de no modificar tests lo excluye. |
+
+### Commits y acumulado
+
+- Commit de cortes: `da2ce75`, `git show --shortstat`: `+2/-53`, neto **−51**.
+- Commit de documentación: este commit; su hash real se reporta en el cierre. No se puede insertar su propio hash en el contenido sin crear un tercer commit.
+- Acumulado de refactor tras A13c6: **−502** (`−451 − 51`). El commit documental no suma al acumulado.
 ---
