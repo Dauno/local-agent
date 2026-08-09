@@ -11,9 +11,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -312,11 +313,7 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		if f.declarativeRunner == nil {
 			return nil, errors.New("declarative tools are configured without an executor")
 		}
-		names := make([]string, 0, len(f.declarativeTools))
-		for name := range f.declarativeTools {
-			names = append(names, name)
-		}
-		sort.Strings(names)
+		names := slices.Sorted(maps.Keys(f.declarativeTools))
 		for _, name := range names {
 			declared, err := f.declarativeTool(f.declarativeTools[name])
 			if err != nil {
@@ -712,7 +709,9 @@ func (f *Factory) installAgentDefTool(actor string, key domain.ConversationKey) 
 			if f.draftStore == nil || f.agentWriter == nil {
 				return installAgentDefResult{}, fmt.Errorf("agent draft store or writer not available")
 			}
-			if !f.isAllowedUser(actor) {
+			if !slices.ContainsFunc(f.allowedUserIDs, func(allowed string) bool {
+				return strings.TrimSpace(allowed) == actor
+			}) {
 				return installAgentDefResult{}, fmt.Errorf("actor is not authorized to install agent definitions")
 			}
 			if strings.TrimSpace(args.DraftID) == "" {
@@ -842,15 +841,6 @@ func agentDraftScope(actor string, key domain.ConversationKey) (teamID, actorID,
 		teamID = strings.TrimSpace(parts[1])
 	}
 	return teamID, actorID, conversationKey
-}
-
-func (f *Factory) isAllowedUser(actor string) bool {
-	for _, allowed := range f.allowedUserIDs {
-		if strings.TrimSpace(allowed) == actor {
-			return true
-		}
-	}
-	return false
 }
 
 // --- read-only: conversation ---
@@ -1291,36 +1281,6 @@ func (f *Factory) listWorktreesTool(actor string) (tool.Tool, error) {
 
 // --- mutable: sandbox (native ADK confirmation) ---
 
-type createWorktreeArgs struct {
-	Project string `json:"project" jsonschema:"the project name from list_repos"`
-	Name    string `json:"name" jsonschema:"name for the new worktree"`
-}
-
-type createWorktreeResult struct {
-	Status string `json:"status"`
-	Name   string `json:"name"`
-}
-
-func (f *Factory) createWorktreeTool(actor string) (tool.Tool, error) {
-	sb := f.sandbox
-	return functiontool.New(
-		functiontool.Config{
-			Name:                "create_worktree",
-			Description:         "Creates a new git worktree in a project. Requires user confirmation.",
-			RequireConfirmation: true,
-		},
-		func(ctx agent.Context, args createWorktreeArgs) (createWorktreeResult, error) {
-			callID := ctx.FunctionCallID()
-			_, err := sb.Run(ctx, callID, domain.CapCreateWorktree,
-				map[string]any{"project": args.Project, "name": args.Name}, actor)
-			if err != nil {
-				return createWorktreeResult{Status: "failed"}, err
-			}
-			return createWorktreeResult{Status: "created", Name: args.Name}, nil
-		},
-	)
-}
-
 type removeWorktreeArgs struct {
 	Project string `json:"project" jsonschema:"the project name from list_repos"`
 	Name    string `json:"name" jsonschema:"name of the worktree to remove"`
@@ -1329,26 +1289,6 @@ type removeWorktreeArgs struct {
 type removeWorktreeResult struct {
 	Status string `json:"status"`
 	Name   string `json:"name"`
-}
-
-func (f *Factory) removeWorktreeTool(actor string) (tool.Tool, error) {
-	sb := f.sandbox
-	return functiontool.New(
-		functiontool.Config{
-			Name:                "remove_worktree",
-			Description:         "Removes a git worktree from a project. Requires user confirmation.",
-			RequireConfirmation: true,
-		},
-		func(ctx agent.Context, args removeWorktreeArgs) (removeWorktreeResult, error) {
-			callID := ctx.FunctionCallID()
-			_, err := sb.Run(ctx, callID, domain.CapRemoveWorktree,
-				map[string]any{"project": args.Project, "name": args.Name}, actor)
-			if err != nil {
-				return removeWorktreeResult{Status: "failed"}, err
-			}
-			return removeWorktreeResult{Status: "removed", Name: args.Name}, nil
-		},
-	)
 }
 
 func splitNonEmpty(s string) []string {
