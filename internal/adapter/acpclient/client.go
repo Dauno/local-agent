@@ -35,10 +35,6 @@ const (
 )
 
 type Bounds struct {
-	// MaxStdout and MaxStderr are retained for source compatibility with older
-	// callers. They no longer impose cumulative stream limits.
-	MaxStdout              int
-	MaxStderr              int
 	MaxFrameBytes          int
 	MaxInlineResultBytes   int
 	MaxResultArtifactBytes int
@@ -58,7 +54,7 @@ func New(executable string, args []string) *Client {
 	return NewWithBounds(executable, args, Bounds{})
 }
 
-func NewWithBounds(executable string, args []string, bounds Bounds, artifactStores ...port.ResultArtifactStore) *Client {
+func NewWithBounds(executable string, args []string, bounds Bounds) *Client {
 	if bounds.MaxFrameBytes <= 0 {
 		bounds.MaxFrameBytes = defaultMaxFrameBytes
 	}
@@ -72,8 +68,6 @@ func NewWithBounds(executable string, args []string, bounds Bounds, artifactStor
 		bounds.StderrTailBytes = defaultStderrTailBytes
 	}
 	client := &Client{executable: executable, args: append([]string(nil), args...), bounds: bounds}
-	// The optional artifact argument is retained for constructor compatibility;
-	// result materialization belongs to the host delivery boundary.
 	return client
 }
 
@@ -83,14 +77,14 @@ func NewWithCoordinator(executable string, args []string, coordinator port.OpenC
 	return client
 }
 
-func NewWithCoordinatorAndBounds(executable string, args []string, coordinator port.OpenCodeCoordinator, bounds Bounds, artifactStore port.ResultArtifactStore) *Client {
-	client := NewWithBounds(executable, args, bounds, artifactStore)
+func NewWithCoordinatorAndBounds(executable string, args []string, coordinator port.OpenCodeCoordinator, bounds Bounds) *Client {
+	client := NewWithBounds(executable, args, bounds)
 	client.coordinator = coordinator
 	return client
 }
 
 func (c *Client) Describe(ctx context.Context) (domain.ACPInitResult, error) {
-	ctx, cancel := withDefaultTimeout(ctx, defaultProbeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, defaultProbeTimeout)
 	defer cancel()
 	proc, err := c.start(ctx, "")
 	if err != nil {
@@ -101,7 +95,7 @@ func (c *Client) Describe(ctx context.Context) (domain.ACPInitResult, error) {
 }
 
 func (c *Client) Probe(ctx context.Context, primaryPath string, configOptions []domain.ACPConfigOption) error {
-	ctx, cancel := withDefaultTimeout(ctx, defaultProbeTimeout)
+	ctx, cancel := context.WithTimeout(ctx, defaultProbeTimeout)
 	defer cancel()
 	if err := validateWorkspacePath(primaryPath); err != nil {
 		return err
@@ -146,7 +140,7 @@ func (c *Client) Run(ctx context.Context, req domain.AcpInvocationRequest) (doma
 	if timeout <= 0 {
 		timeout = defaultRunTimeout
 	}
-	ctx, cancel := withDefaultTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	if err := validateWorkspacePath(req.PrimaryPath); err != nil {
 		return domain.AcpInvocationResult{}, err
@@ -262,7 +256,7 @@ func (c *Client) reconcile(ctx context.Context, req domain.AcpInvocationRequest,
 	if timeout <= 0 {
 		timeout = defaultRunTimeout
 	}
-	ctx, cancel := withDefaultTimeout(ctx, timeout)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	proc, err := c.start(ctx, req.PrimaryPath)
 	if err != nil {
@@ -335,22 +329,8 @@ func validateWorkspacePath(path string) error {
 	return nil
 }
 
-func withDefaultTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) <= timeout {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, timeout)
-}
-
 func buildPrompt(globalInstruction, agentInstruction, task string) string {
-	var b strings.Builder
-	b.WriteString("<<GLOBAL INSTRUCTION (trusted)>>\n")
-	b.WriteString(globalInstruction)
-	b.WriteString("\n\n<<AGENT INSTRUCTION (trusted)>>\n")
-	b.WriteString(agentInstruction)
-	b.WriteString("\n\n<<TASK>>\n")
-	b.WriteString(task)
-	return b.String()
+	return "<<GLOBAL INSTRUCTION (trusted)>>\n" + globalInstruction + "\n\n<<AGENT INSTRUCTION (trusted)>>\n" + agentInstruction + "\n\n<<TASK>>\n" + task
 }
 
 type wireMessage struct {
@@ -426,7 +406,7 @@ func (c *Client) start(ctx context.Context, dir string) (*process, error) {
 }
 
 func (c *Client) readStdout(proc *process, stdout io.Reader) {
-	reader := bufio.NewReaderSize(stdout, minInt(c.bounds.MaxFrameBytes+1, 64*1024))
+	reader := bufio.NewReaderSize(stdout, min(c.bounds.MaxFrameBytes+1, 64*1024))
 	for {
 		frame, err := readFrame(reader, c.bounds.MaxFrameBytes)
 		if err != nil {
@@ -470,7 +450,7 @@ func readFrame(reader *bufio.Reader, maxBytes int) ([]byte, error) {
 	if maxBytes <= 0 {
 		return nil, &domain.ACPError{Code: domain.ACPErrorFrameTooLarge, Err: errors.New("invalid frame bound")}
 	}
-	frame := make([]byte, 0, minInt(maxBytes+1, 64*1024))
+	frame := make([]byte, 0, min(maxBytes+1, 64*1024))
 	for {
 		part, err := reader.ReadSlice('\n')
 		if len(part) > maxBytes+1 || len(frame)+len(part) > maxBytes+1 {
@@ -520,13 +500,6 @@ func decodeFrame(frame []byte) (wireMessage, error) {
 		return wireMessage{}, &domain.ACPError{Code: domain.ACPErrorProtocolViolation, Err: errors.New("ACP frame has no JSON-RPC version")}
 	}
 	return message, nil
-}
-
-func minInt(left, right int) int {
-	if left < right {
-		return left
-	}
-	return right
 }
 
 type tailBuffer struct {

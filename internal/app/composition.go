@@ -268,7 +268,7 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		direct := acpclient.NewWithCoordinatorAndBounds(resolved.Command, resolved.Args, prepared.openCodeCoordinator, acpclient.Bounds{
 			MaxFrameBytes: cfg.ACP.MaxFrameBytes, MaxInlineResultBytes: cfg.ACP.MaxInlineResultBytes,
 			MaxResultArtifactBytes: cfg.ACP.MaxResultArtifactBytes, StderrTailBytes: cfg.ACP.StderrTailBytes,
-		}, prepared.artifactStore)
+		})
 		return newForegroundExternalAgentRuntime(direct, nil), nil
 	}
 	prepared.preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, acpRuntimeFactory)
