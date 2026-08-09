@@ -312,11 +312,11 @@ func ValidateAgentEligibility(agent AgentDef, providers map[string]Provider) []s
 	if provider, ok := providerForAgent(agent, providers); ok {
 		switch provider.Type {
 		case ProviderTypeAgentCLI:
-			if agent.ToolScope != "" {
+			if len(agent.ToolScope) > 0 {
 				errs = append(errs, fmt.Sprintf("%s: tool_scope is not supported for %s agent tools", prefix, ProviderTypeAgentCLI))
 			}
 		case ProviderTypeOpenAICompatible:
-			if agent.ToolScope != "invocation_scoped" {
+			if !agent.ToolScope.Contains("invocation_scoped") {
 				errs = append(errs, fmt.Sprintf("%s: %s agent tools must declare tool_scope: invocation_scoped", prefix, ProviderTypeOpenAICompatible))
 			}
 		}
@@ -617,6 +617,14 @@ func validateTokenBudgets(prefix string, contextWindowTokens, maxOutputTokens *i
 func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	var errs []string
 	prefix := fmt.Sprintf("agent %q", a.Name)
+	if a.ContextBudget != nil {
+		if a.ContextBudget.MaxRequestPercent != 0 && (a.ContextBudget.MaxRequestPercent < 20 || a.ContextBudget.MaxRequestPercent > 80) {
+			errs = append(errs, fmt.Sprintf("%s: context_budget.max_request_percent must be between 20 and 80", prefix))
+		}
+		if a.Name == "root_agent" {
+			errs = append(errs, fmt.Sprintf("%s: context_budget is only valid for delegated LlmAgent children", prefix))
+		}
+	}
 
 	if strings.TrimSpace(a.Name) == "" {
 		errs = append(errs, "agent name must not be empty")
@@ -629,6 +637,9 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	}
 
 	if a.AgentClass == "AcpAgent" {
+		if a.ContextBudget != nil {
+			errs = append(errs, fmt.Sprintf("%s: context_budget is not valid for AcpAgent", prefix))
+		}
 		errs = append(errs, validateAcpAgent(prefix, a, providers)...)
 		// Skip model validation for AcpAgent since it uses runtime instead.
 		return errs
@@ -668,8 +679,16 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	if a.Mode != "" && a.Mode != "chat" {
 		errs = append(errs, fmt.Sprintf("%s: mode must be chat", prefix))
 	}
-	if a.ToolScope != "" && a.ToolScope != "invocation_scoped" {
-		errs = append(errs, fmt.Sprintf("%s: tool_scope must be invocation_scoped", prefix))
+	if a.ToolScope != nil {
+		for _, scope := range a.ToolScope {
+			if strings.TrimSpace(scope) == "" {
+				errs = append(errs, fmt.Sprintf("%s: tool_scope entries must not be empty", prefix))
+				continue
+			}
+			if scope != "invocation_scoped" && !validAgentNamePattern.MatchString(scope) {
+				errs = append(errs, fmt.Sprintf("%s: tool_scope entry %q must be invocation_scoped or a valid declarative tool name", prefix, scope))
+			}
+		}
 	}
 
 	if a.Name == "root_agent" {
@@ -829,7 +848,7 @@ func validateAcpAgent(prefix string, a AgentDef, providers map[string]Provider) 
 	if a.DurableSession {
 		errs = append(errs, fmt.Sprintf("%s: durable_session is not valid for AcpAgent", prefix))
 	}
-	if a.ToolScope != "" {
+	if len(a.ToolScope) > 0 {
 		errs = append(errs, fmt.Sprintf("%s: tool_scope is not valid for AcpAgent", prefix))
 	}
 	if len(a.AgentTools) > 0 {

@@ -112,8 +112,8 @@ func TestLoadWorkflowRejectsUnsafeOrAmbiguousDocuments(t *testing.T) {
 		},
 		{
 			name: "unknown tool",
-			root: "agent_class: LlmAgent\nname: Root\nmodel: deepseek/test\ninstruction: test\ndescription: test\ntools:\n  - name: shell\n",
-			want: "tool \"shell\" is not registered",
+			root: "agent_class: LlmAgent\nname: Root\nmodel: deepseek/test\ninstruction: test\ndescription: test\ntools:\n  - name: Shell\n",
+			want: "tool \"Shell\" is not registered",
 		},
 		{
 			name: "exit loop arguments",
@@ -264,5 +264,25 @@ func TestTrackedWorkflowFixturesLoad(t *testing.T) {
 		if len(bp.OrderedDocuments()) == 0 {
 			t.Fatalf("tracked workflow %q did not load any nodes", id)
 		}
+	}
+}
+
+func TestLoadWorkflowAcceptsDeclarativeToolNames(t *testing.T) {
+	stateDir := t.TempDir()
+	writeWorkflowFile(t, stateDir, "case", "root_agent.yaml", `
+agent_class: LlmAgent
+name: Root
+model: deepseek/test
+instruction: test
+description: test
+tools:
+  - name: ripgrep
+`)
+	bp, err := workflowDefinitions().LoadWorkflow(stateDir, "case")
+	if err != nil {
+		t.Fatalf("load workflow with declarative tool name: %v", err)
+	}
+	if bp == nil || len(bp.Root.LLM.Tools) != 1 || bp.Root.LLM.Tools[0].Name != "ripgrep" {
+		t.Fatalf("workflow tools = %+v", bp)
 	}
 }

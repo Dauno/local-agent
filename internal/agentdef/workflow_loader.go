@@ -565,7 +565,12 @@ func validateWorkflowTool(toolRef ToolRef, isLoopDescendant bool) error {
 		return nil
 	}
 	if _, allowed := workflowReadOnlyTools[toolRef.Name]; !allowed {
-		return fmt.Errorf("tool %q is not registered for workflow use", toolRef.Name)
+		// Declarative tools (loaded from .local-agent/tools/) share the
+		// agent-name pattern. Existence is validated at runtime startup where
+		// the tool registry is available.
+		if !validAgentNamePattern.MatchString(toolRef.Name) {
+			return fmt.Errorf("tool %q is not registered for workflow use", toolRef.Name)
+		}
 	}
 	return nil
 }

@@ -59,7 +59,7 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 			Description:     draft.Description,
 			Instruction:     draft.Instruction,
 			IncludeContents: "none",
-			ToolScope:       "invocation_scoped",
+			ToolScope:       agentdef.ToolScope{"invocation_scoped"},
 		}
 	case domain.AgentKindACP:
 		if strings.TrimSpace(draft.Model) != "" {
