@@ -4,16 +4,20 @@
 package toolfactory
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/url"
 	"reflect"
+	"sort"
 	"strings"
 	"time"
 
+	"github.com/google/jsonschema-go/jsonschema"
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/functiontool"
@@ -21,12 +25,19 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/tooldef"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 )
 
 var _ port.AgentToolFactory = (*Factory)(nil)
+
+// DeclarativeToolExecutor runs a declared tool generically. Implementations
+// live outside this adapter and are composed in internal/app.
+type DeclarativeToolExecutor interface {
+	Run(ctx context.Context, toolName, project string, args map[string]any) (tooldef.ToolResult, error)
+}
 
 // Factory implements port.AgentToolFactory by producing typed ADK function
 // tools for the invoking actor and conversation.
@@ -48,6 +59,8 @@ type Factory struct {
 	syntaxEngine       port.SyntaxEngine
 	codeIntelligence   port.CodeIntelligence
 	metrics            port.MetricRecorder
+	declarativeTools   map[string]tooldef.ToolDef
+	declarativeRunner  DeclarativeToolExecutor
 }
 
 func (f *Factory) WithCodeReaders(readers map[string]port.CodeReader) *Factory {
@@ -73,6 +86,31 @@ func (f *Factory) WithCodeIntelligence(intelligence port.CodeIntelligence) *Fact
 func (f *Factory) WithMetrics(recorder port.MetricRecorder) *Factory {
 	f.metrics = recorder
 	return f
+}
+
+// WithDeclarativeTools registers YAML-declared tools executed by the generic
+// runner. Only tools listed here are exposed to the invoking agent.
+func (f *Factory) WithDeclarativeTools(tools map[string]tooldef.ToolDef, runner DeclarativeToolExecutor) *Factory {
+	f.declarativeTools = tools
+	f.declarativeRunner = runner
+	return f
+}
+
+// DeclarativeToolByName builds one declared tool by name. It is used by child
+// agents and workflow steps, which resolve declarative tools through the
+// composite factory rather than receiving every registered tool.
+func (f *Factory) DeclarativeToolByName(name string) (tool.Tool, error) {
+	if f == nil {
+		return nil, errors.New("tool factory is not configured")
+	}
+	if f.declarativeRunner == nil {
+		return nil, errors.New("declarative tools are configured without an executor")
+	}
+	def, ok := f.declarativeTools[name]
+	if !ok {
+		return nil, fmt.Errorf("declarative tool %q is not registered", name)
+	}
+	return f.declarativeTool(def)
 }
 
 // New creates a tool factory. Sandbox, canvas, and export services may be nil — when
@@ -268,6 +306,24 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 			return nil, fmt.Errorf("build list_worktrees tool: %w", err)
 		}
 		tools = append(tools, listWorktrees)
+	}
+
+	if len(f.declarativeTools) > 0 {
+		if f.declarativeRunner == nil {
+			return nil, errors.New("declarative tools are configured without an executor")
+		}
+		names := make([]string, 0, len(f.declarativeTools))
+		for name := range f.declarativeTools {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		for _, name := range names {
+			declared, err := f.declarativeTool(f.declarativeTools[name])
+			if err != nil {
+				return nil, fmt.Errorf("build declarative tool %q: %w", name, err)
+			}
+			tools = append(tools, declared)
+		}
 	}
 
 	if f.canvas != nil {
@@ -1460,4 +1516,57 @@ func executeExport(ctx agent.Context, svc *generatedfileusecase.Service, actor s
 		return exportFileResult{Message: fmt.Sprintf("Failed to export file: %v", err)}, err
 	}
 	return exportFileResult{FileID: result.SlackFileID, Filename: result.Filename, Message: fmt.Sprintf("File uploaded to this conversation: %s", result.Filename)}, nil
+}
+
+// --- declarative tools ---
+
+// declarativeTool builds an ADK FunctionTool entirely from the YAML
+// declaration: the model-facing contract comes from description and the
+// input/output schemas; the handler delegates execution to the generic
+// runner. No tool-specific code exists here.
+func (f *Factory) declarativeTool(def tooldef.ToolDef) (tool.Tool, error) {
+	inputSchema, err := schemaFromDeclaration(def.InputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("input schema: %w", err)
+	}
+	outputSchema, err := schemaFromDeclaration(def.OutputSchema)
+	if err != nil {
+		return nil, fmt.Errorf("output schema: %w", err)
+	}
+	return functiontool.New[map[string]any, map[string]any](functiontool.Config{
+		Name:         def.Name,
+		Description:  def.Description,
+		InputSchema:  inputSchema,
+		OutputSchema: outputSchema,
+	}, func(ctx agent.Context, args map[string]any) (map[string]any, error) {
+		project, _ := args["project"].(string)
+		if strings.TrimSpace(project) == "" {
+			return nil, errors.New("project is required")
+		}
+		result, err := f.declarativeRunner.Run(ctx, def.Name, project, args)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"output":    result.Output,
+			"truncated": result.Truncated,
+		}, nil
+	})
+}
+
+// schemaFromDeclaration converts the YAML schema (JSON-schema subset) into the
+// ADK jsonschema type via a JSON round trip.
+func schemaFromDeclaration(schema tooldef.Schema) (*jsonschema.Schema, error) {
+	if len(schema) == 0 {
+		return nil, nil
+	}
+	data, err := json.Marshal(schema)
+	if err != nil {
+		return nil, err
+	}
+	var converted jsonschema.Schema
+	if err := json.Unmarshal(data, &converted); err != nil {
+		return nil, err
+	}
+	return &converted, nil
 }
