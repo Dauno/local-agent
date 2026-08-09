@@ -215,3 +215,15 @@ Revisión propia; no se invocó `ponytail`. Se aplicaron los cortes #1 y #3 sin 
 
 - Desviación deliberada (Commit 10): variable local maxInt en internal/usecase/contextcompiler/compiler.go:939 se conservó — fuera de alcance del batch.
 - Nota de cierre: este commit documental no suma al acumulado de refactor (patrón establecido en A13c5/A13c6); su propio hash no puede insertarse en el contenido sin crear un commit adicional.
+
+## A13c8 (post-A13c7)
+
+### Cortes aplicados
+
+| Commit | Shortstat | Neto | Decisión |
+|---|---|---|---|
+| `53943fbc` (cloneContents → `domain.CloneContents`) | `3 files changed, +14/-22` | −8 | Aplicado; 6 call sites actualizados, 2 copias locales eliminadas. |
+| `8f2e7543` (S11: `^uint(0)>>1` → `math.MaxInt`) | `2 files changed, +5/-4` | +1 | **Desviación documentada**: el +1 proviene del import de `math`; se mantiene por decisión explícita del usuario (2026-08-09), consistente con S9/S10 ya aplicados. Excepción a la regla de neto < 0. |
+
+- Acumulado de refactor tras A13c8: **−797**.
+- Nota de cierre: este commit documental no suma al acumulado (patrón A13c5/A13c6); su propio hash no puede insertarse en el contenido sin crear un commit adicional.
