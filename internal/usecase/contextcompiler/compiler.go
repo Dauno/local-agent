@@ -972,20 +972,12 @@ func selectRecentTurns(turns []domain.ConversationTurn, remaining, limit int) ([
 	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
 		selected[left], selected[right] = selected[right], selected[left]
 	}
-	return flattenTurns(selected), len(selected)
+	return domain.FlattenTurns(selected), len(selected)
 }
 
 func turnCost(contents []domain.Content) int {
 	cost, _ := domain.ContentCost(contents)
 	return cost
-}
-
-func flattenTurns(turns []domain.ConversationTurn) []domain.Content {
-	var result []domain.Content
-	for _, turn := range turns {
-		result = append(result, cloneContents(turn.Contents)...)
-	}
-	return result
 }
 
 func turnIndexForContentStart(turns []domain.ConversationTurn, contentStart int) int {
@@ -1037,14 +1029,14 @@ func validateProjectedContents(contents []domain.Content, openInvocationIDs map[
 		activeIdx = 0
 	}
 	if activeIdx > 0 {
-		if err := domain.ValidateContentProtocol(flattenTurns(turns[:activeIdx]), domain.ProtocolValidationOptions{
+		if err := domain.ValidateContentProtocol(domain.FlattenTurns(turns[:activeIdx]), domain.ProtocolValidationOptions{
 			RequireComplete:            true,
 			AllowConfirmationLifecycle: true,
 		}); err != nil {
 			return err
 		}
 	}
-	return domain.ValidateContentProtocol(flattenTurns(turns[activeIdx:]), domain.ProtocolValidationOptions{
+	return domain.ValidateContentProtocol(domain.FlattenTurns(turns[activeIdx:]), domain.ProtocolValidationOptions{
 		AllowConfirmationLifecycle: true,
 	})
 }
