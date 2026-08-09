@@ -85,24 +85,6 @@ type agentToolContextConfig struct {
 	actor    string
 }
 
-func eligibleAgentNames(defs *agentdef.Definitions) []string {
-	if defs == nil {
-		return nil
-	}
-	names := make([]string, 0, len(defs.Agents))
-	for name, agent := range defs.Agents {
-		if name == "root_agent" || agent.Role != "" {
-			continue
-		}
-		if agent.AgentClass != "LlmAgent" && agent.AgentClass != "AcpAgent" {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
 func isReadOnlyChildTool(name string) bool {
 	switch name {
 	case "list_messages", "list_repos", "list_directory", "read_file", "list_worktrees", "read_file_range":
@@ -132,7 +114,7 @@ func prepareRootAgentTools(
 
 	names := root.AgentTools
 	if len(names) == 0 {
-		names = eligibleAgentNames(defs)
+		names = agentdef.EligibleAgentNames(defs)
 	}
 	prepared := make([]preparedAgentTool, 0, len(names))
 	for _, name := range names {

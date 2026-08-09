@@ -15,7 +15,6 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
-	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 )
 
 // memoryCuratorLLM adapts ADK model.LLM to memorycurator.LLM.
@@ -155,17 +154,4 @@ func newModel(cfg config.ModelConfig, apiKey string) (*openaillm.OpenAICompatibl
 		openaillm.WithReasoningEffort(cfg.ReasoningEffort),
 		openaillm.WithExtraBody(cfg.ExtraBody),
 	)
-}
-
-func requiredSecrets(cfg config.Config, values map[string]string) (apiKey, botToken, appToken string, err error) {
-	apiKey = values[cfg.Model.APIKeyEnv]
-	botToken = values[bootstrap.SlackBotTokenEnv]
-	appToken = values[bootstrap.SlackAppTokenEnv]
-	if strings.TrimSpace(apiKey) == "" {
-		return "", "", "", fmt.Errorf("%s is not configured. Run: local-agent init", cfg.Model.APIKeyEnv)
-	}
-	if err := requiredSlackTokens(botToken, appToken); err != nil {
-		return "", "", "", err
-	}
-	return apiKey, botToken, appToken, nil
 }
