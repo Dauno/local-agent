@@ -100,11 +100,6 @@ func (r *TemplateRenderer) CompileModal(templateName string, context TemplateCon
 	return *compiled.Modal, nil
 }
 
-// RenderModal is an explicit synonym for CompileModal.
-func (r *TemplateRenderer) RenderModal(templateName string, context TemplateContext) (slackapi.ModalViewRequest, error) {
-	return r.CompileModal(templateName, context)
-}
-
 // CompileMessage compiles a message template into bounded Slack blocks. The
 // accessible fallback can be obtained with CompileMessageWithFallback.
 func (r *TemplateRenderer) CompileMessage(templateName string, context TemplateContext) ([]slackapi.Block, error) {
@@ -122,11 +117,6 @@ func (r *TemplateRenderer) CompileMessage(templateName string, context TemplateC
 	return compiled.Blocks, nil
 }
 
-// RenderMessage is an explicit synonym for CompileMessage.
-func (r *TemplateRenderer) RenderMessage(templateName string, context TemplateContext) ([]slackapi.Block, error) {
-	return r.CompileMessage(templateName, context)
-}
-
 // CompileMessageWithFallback returns both message components needed by a
 // Block Kit publisher.
 func (r *TemplateRenderer) CompileMessageWithFallback(templateName string, context TemplateContext) (string, []slackapi.Block, error) {
@@ -142,12 +132,6 @@ func (r *TemplateRenderer) CompileMessageWithFallback(templateName string, conte
 		return "", nil, err
 	}
 	return compiled.Fallback, compiled.Blocks, nil
-}
-
-// MessageFallback compiles and returns the accessible fallback text.
-func (r *TemplateRenderer) MessageFallback(templateName string, context TemplateContext) (string, error) {
-	fallback, _, err := r.CompileMessageWithFallback(templateName, context)
-	return fallback, err
 }
 
 func (r *TemplateRenderer) document(name string) (templateDocument, error) {

@@ -24,14 +24,6 @@ type builderLauncherPublisher struct {
 	renderErr      error
 }
 
-func NewBuilderLauncherPublisher(client *slackapi.Client, publisher port.ResponsePublisher, logger port.Logger) port.BuilderLauncherPublisher {
-	var poster blockPostClient
-	if client != nil {
-		poster = sdkBlockPostClient{client: client}
-	}
-	return newBuilderLauncherPublisher(poster, publisher, logger)
-}
-
 func newBuilderLauncherPublisher(client blockPostClient, publisher port.ResponsePublisher, logger port.Logger) *builderLauncherPublisher {
 	return newBuilderLauncherPublisherWithDependencies(client, nil, nil, "", publisher, logger)
 }
