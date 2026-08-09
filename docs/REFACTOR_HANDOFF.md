@@ -5,7 +5,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 19 batches de refactor completados + docs update, 22 commits de refactor (A8, A11 y A13a-ext divididos en dos commits), neto acumulado **−295 líneas**. A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`.
+- 20 batches de refactor completados + docs update, 23 commits de refactor (A8, A11 y A13a-ext divididos en dos commits), neto acumulado **−343 líneas**. A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`.
 - Tests verdes en todo momento; no se modificó ningún archivo de test.
 - 3 archivos con cambios preexistentes sin commitear (no tocar, quedan fuera de cualquier commit).
 
@@ -37,6 +37,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A13a-ext.1 (corte 3) | `internal/usecase/agentbuilder/service.go` | `43d2503` (`+0/-8`, net `−8`) |
 | A13a-ext.2 (cortes 9/10) | `internal/usecase/bootstrap/service.go` + `internal/app/application.go` | `501cd5e` (`+5/-15`, net `−10`) |
 | A13b1.2 (corte 2) | `internal/port/agentbuilder.go` + `internal/usecase/agentbuilder/service.go` | **SALTADO (no aplicado)**: `TestDependencyDirection`; `internal/port` no puede depender de `agentdef` y `current any` es desacoplamiento deliberado de la interfaz. Propuesto en `f61abc2`, revertido en `2e61b22`; acumulado se mantiene en **−295** (neto 0) |
+| A13c1.1 (cortes 1, 2, 5, 6, 7, 8 y 9) | `internal/usecase/sandbox/service.go` | `1aa7e5e` (`+8/-56`, neto **−48**) |
 
 ## Proceso por batch
 
@@ -75,4 +76,5 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - A12a: se reutilizaron los hallazgos de ponytail-review de A11; no se invocó una revisión nueva. A12a.1 extrajo el chequeo duplicado de token counter en `a8b4fbb` (`+18/-26`, neto **−8**), preservando mensajes, remediaciones y orden. A12a.2 se saltó: `validateTranscriptionModel` solo exige URL no vacía y usa mensajes distintos, mientras `validateAudioTranscriptionProfile` exige URL absoluta HTTP/HTTPS y rechaza credenciales o fragmentos; compartir helper cambiaría comportamiento. No se modificaron tests. A12b aplicó el hallazgo #14 de ponytail-review: `Status`, `Probe`, `Upgrade` y `Rollback` devuelven `domain.OpenCodeManagementResult`; se eliminaron `opencode.Result`, `resultFromManager` y la conversión 1:1 del tool, preservando mensajes. Commit `c2fd485` (`+33/-58`, neto **−25**); no se modificaron tests.
 - A13a-ext: `ponytail-review` usado en el segundo intento, exitoso. Corte 3 aplicado en `43d2503`; no hubo callers/tests de `Preview` dependientes del alias `Model`. Cortes 9/10 aplicados en `501cd5e`; `CanonicalRoot` se resolvió una vez en `app.New`, y se preservaron mensajes y firmas. Corte 8 **saltado**: aunque el adapter crea padres, `ProjectFiles.CreateFile` no lo promete en su contrato y bootstrap no debe depender de ese detalle concreto. No se modificaron tests.
 - A13b1: `ponytail-review` hallazgo #2 inválido por arquitectura. El corte 2 se marcó **SALTADO (no aplicado)** porque `TestDependencyDirection` prohíbe que `internal/port` dependa de `agentdef`; `current any` es desacoplamiento deliberado de la interfaz. La propuesta `f61abc2` fue revertida en `2e61b22`; acumulado **−295** (neto 0 del revert). No se modificaron tests.
+- A13c1: `ponytail-review` usado. Aplicados los cortes 1 (gate: `ErrUnauthorized` solo aparecía en `service.go`), 2 (gates: sin inyección `Clock:` en producción y sin uso de `Clock` en tests), 5 (gate: sin lectores de `SandboxResult.Error`), 6 (gate: `isAllowed` solo tenía su declaración y una llamada), 7 (ambos `validateRelativePath` pass-through conservan el mensaje byte-idéntico), 8 (gate: `createWorktreeTool` no tiene registro real y no existe executor para `CapRunCommand`) y 9 (gate: un helper y una llamada; inline con comportamiento byte-idéntico). Se saltaron 3 (gate fallido: `internal/adapter/toolfactory/toolfactory_test.go:602` lee `op.Actor`) y 4 (gate fallido: `internal/usecase/sandbox/service_test.go:205` y `internal/adapter/fssandbox/sandbox_test.go:74,109` leen `OutputBytes`). Commit `1aa7e5e` (`+8/-56`, neto **−48**); acumulado **−343**. No se modificaron tests.
 ---
