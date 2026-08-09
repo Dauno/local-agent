@@ -422,27 +422,16 @@ func (c *Compiler) countProjection(ctx context.Context, contents []domain.Conten
 	// Treat it as a malformed byte-bound sample rather than allowing an empty
 	// estimate to bypass admission. Real byte-bound counters never take this
 	// branch; it also keeps older injected counters fail-closed.
-	zeroSample := false
 	if count.Tokens == 0 && len(serialized) > 256 {
 		if count.Strategy != "byte_bound" {
 			return port.TokenCount{}, errors.New("request_token_count_unavailable: counter returned zero for a non-empty request")
 		}
 		count.Tokens = utf8.RuneCount(serialized)
-		zeroSample = true
 	}
-	// Domain projection JSON can become JSON-escaped string content during
-	// provider conversion. A 2x byte bound remains conservative for that second
-	// serialization; the provider-shaped guard is still authoritative. Estimator
-	// counters return byte_bound for this internal serializer so this adjustment
-	// remains explicit rather than being hidden in the estimator.
-	if count.Strategy == "byte_bound" && !zeroSample {
-		maxInt := int(^uint(0) >> 1)
-		if count.Tokens > maxInt/2 {
-			count.Tokens = maxInt
-		} else {
-			count.Tokens *= 2
-		}
-	}
+	// The byte-bound counter already measures the serialized projection once.
+	// The provider-shaped final guard performs the authoritative count after
+	// provider conversion; multiplying this projection would reject ordinary
+	// text and tool responses before that guard can make the real measurement.
 	count.Tokens = sumCosts([]int{count.Tokens, fixedTokens})
 	return count, nil
 }

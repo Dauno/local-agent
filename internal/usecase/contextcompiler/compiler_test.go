@@ -87,8 +87,8 @@ func TestCompilerAcceptsVisualEstimatorForNonEmptyBudgetTurn(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Diagnostics.RequestTokensBefore != len(serialized)*2 {
-		t.Fatalf("compiler projection count = %d, want conservative 2x byte bound %d", result.Diagnostics.RequestTokensBefore, len(serialized)*2)
+	if result.Diagnostics.RequestTokensBefore != len(serialized) {
+		t.Fatalf("compiler projection count = %d, want one serialized byte bound %d", result.Diagnostics.RequestTokensBefore, len(serialized))
 	}
 }
 
