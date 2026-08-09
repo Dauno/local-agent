@@ -26,9 +26,6 @@ type Dependencies struct {
 type Outcome string
 
 const (
-	OutcomeRecallEmpty   Outcome = "recall_empty"
-	OutcomeRecallHit     Outcome = "recall_hit"
-	OutcomeRecallError   Outcome = "recall_error"
 	OutcomeApplyCreated  Outcome = "apply_created"
 	OutcomeApplyUpdated  Outcome = "apply_updated"
 	OutcomeApplyNoop     Outcome = "apply_noop"
@@ -59,8 +56,34 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 }
 
 func (s *Service) Recall(ctx context.Context, query, ownerKey string) ([]domain.MemorySnippet, error) {
-	snippets, _, err := s.recall(ctx, query, ownerKey)
-	return snippets, err
+	if !s.cfg.Recall.Enabled || strings.TrimSpace(query) == "" {
+		return nil, nil
+	}
+	if s.cfg.Recall.Timeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, s.cfg.Recall.Timeout)
+		defer cancel()
+	}
+	fts, err := s.store.SearchTopicsForOwner(ctx, query, ownerKey, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
+	if err != nil {
+		s.logger.Warn("memory recall failed", "error", err)
+		return nil, err
+	}
+	snippets := fts
+	if isFirstPersonMemoryQuery(query) && strings.TrimSpace(ownerKey) != "" {
+		// First-person questions need provenance recall in addition to normal FTS.
+		personal, personalErr := s.store.SearchPersonTopicsByOwner(ctx, ownerKey, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
+		if personalErr != nil {
+			s.logger.Warn("personal memory recall failed", "error", personalErr)
+		} else {
+			snippets = mergeRecallSnippets(fts, personal, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
+		}
+	}
+	if len(snippets) == 0 {
+		return nil, nil
+	}
+	s.logger.Debug("memory recall matched", "topics", len(snippets))
+	return snippets, nil
 }
 
 // RelevantTopics supplies a bounded set of existing topic identities and
@@ -123,37 +146,6 @@ func (s *Service) TrustedEntityOperations(ctx context.Context, conversationKey d
 		}
 	}
 	return domain.TrustedEntityMemoryOperations(messages, topics, ownerKey), nil
-}
-
-func (s *Service) recall(ctx context.Context, query, ownerKey string) ([]domain.MemorySnippet, Outcome, error) {
-	if !s.cfg.Recall.Enabled || strings.TrimSpace(query) == "" {
-		return nil, OutcomeRecallEmpty, nil
-	}
-	if s.cfg.Recall.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, s.cfg.Recall.Timeout)
-		defer cancel()
-	}
-	fts, err := s.store.SearchTopicsForOwner(ctx, query, ownerKey, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
-	if err != nil {
-		s.logger.Warn("memory recall failed", "error", err)
-		return nil, OutcomeRecallError, err
-	}
-	snippets := fts
-	if isFirstPersonMemoryQuery(query) && strings.TrimSpace(ownerKey) != "" {
-		// First-person questions need provenance recall in addition to normal FTS.
-		personal, personalErr := s.store.SearchPersonTopicsByOwner(ctx, ownerKey, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
-		if personalErr != nil {
-			s.logger.Warn("personal memory recall failed", "error", personalErr)
-		} else {
-			snippets = mergeRecallSnippets(fts, personal, s.cfg.Recall.MaxTopics, s.cfg.Recall.MaxChars)
-		}
-	}
-	if len(snippets) == 0 {
-		return nil, OutcomeRecallEmpty, nil
-	}
-	s.logger.Debug("memory recall matched", "topics", len(snippets))
-	return snippets, OutcomeRecallHit, nil
 }
 
 func isFirstPersonMemoryQuery(query string) bool {
@@ -281,19 +273,13 @@ func (s *Service) withoutExistingCreates(ctx context.Context, patch domain.Memor
 	return patch, nil
 }
 
-// Validate checks a proposed patch without writing it, allowing optional
-// curator output to be discarded safely when it makes a merged patch unsafe.
-func (s *Service) Validate(patch domain.MemoryPatch) error {
-	return s.validatePatch(patch)
-}
-
 func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 	reasons := make([]error, 0)
 	add := func(format string, args ...any) { reasons = append(reasons, fmt.Errorf(format, args...)) }
-	validateReferenceFields := func(fields []struct{ name, value string }, report func(string, error)) {
+	validateReferenceFields := func(prefix string, fields []struct{ name, value string }) {
 		for _, field := range fields {
 			if err := domain.ValidateMemoryReferenceText(field.value); err != nil {
-				report(field.name, err)
+				add("%s: %s: %v", prefix, field.name, err)
 			}
 		}
 	}
@@ -305,10 +291,8 @@ func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 	if len(patch.Operations) > s.cfg.MaxPatchOps {
 		add("patch has %d operations; maximum is %d", len(patch.Operations), s.cfg.MaxPatchOps)
 	}
-	validateReferenceFields([]struct{ name, value string }{
+	validateReferenceFields("patch", []struct{ name, value string }{
 		{"conversation key", string(patch.ConversationKey)}, {"exchange timestamp", patch.ExchangeTS}, {"source author", patch.SourceAuthorID},
-	}, func(name string, err error) {
-		add("patch: %s: %v", name, err)
 	})
 	for i, op := range patch.Operations {
 		prefix := fmt.Sprintf("operation %d (%s)", i, op.Type)
@@ -326,13 +310,11 @@ func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 		if err := domain.ValidateSlug(op.TopicSlug); err != nil {
 			add("%s: %v", prefix, err)
 		}
-		validateReferenceFields([]struct{ name, value string }{
+		validateReferenceFields(prefix, []struct{ name, value string }{
 			{"topic slug", op.TopicSlug}, {"target topic slug", op.TargetTopicSlug},
 			{"topic title", op.TopicTitle}, {"topic description", op.TopicDesc}, {"content", op.Content},
 			{"change reason", op.ChangeReason}, {"decision", op.Decision}, {"question", op.Question},
 			{"link relation", op.LinkRelation},
-		}, func(name string, err error) {
-			add("%s: %s: %v", prefix, name, err)
 		})
 		for _, tag := range op.Tags {
 			if err := domain.ValidateMemoryReferenceText(tag); err != nil {
