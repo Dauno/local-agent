@@ -262,8 +262,8 @@ func (s *Store) ReadChunk(ctx context.Context, req domain.ResultArtifactChunkReq
 			}
 			blockStart := total
 			blockEnd := total + int64(read)
-			copyStart := maxInt64(blockStart, req.OffsetBytes)
-			copyEnd := minInt64(blockEnd, requestedEnd)
+			copyStart := max(blockStart, req.OffsetBytes)
+			copyEnd := min(blockEnd, requestedEnd)
 			if copyStart < copyEnd {
 				chunk = append(chunk, data[copyStart-blockStart:copyEnd-blockStart]...)
 			}
@@ -335,20 +335,6 @@ func completeUTF8Prefix(data []byte) (int, error) {
 		position += size
 	}
 	return position, nil
-}
-
-func minInt64(left, right int64) int64 {
-	if left < right {
-		return left
-	}
-	return right
-}
-
-func maxInt64(left, right int64) int64 {
-	if left > right {
-		return left
-	}
-	return right
 }
 
 func (s *Store) SetReferenceChecker(checker port.ArtifactReferenceChecker) {

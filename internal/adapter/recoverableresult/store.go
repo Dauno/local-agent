@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strings"
@@ -539,7 +540,7 @@ func readAndVerifyFile(baseDir, locator string, expectedSize int64, expectedSHA2
 	if !isWithinDir(filepath.Join(baseDir, locator), baseDir) {
 		return nil, "", errors.New("storage path escapes base directory")
 	}
-	if expectedSize < 0 || expectedSize >= int64(maxInt()) {
+	if expectedSize < 0 || expectedSize >= int64(math.MaxInt) {
 		return nil, "", errors.New("storage size is invalid")
 	}
 
@@ -593,10 +594,6 @@ func verifyFileExists(baseDir, locator string) error {
 		return errors.New("storage file is not a regular file")
 	}
 	return nil
-}
-
-func maxInt() int {
-	return int(^uint(0) >> 1)
 }
 
 func isWithinDir(filePath, baseDir string) bool {

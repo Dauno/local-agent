@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -90,13 +91,12 @@ func (c *visualTileCounter) CountRequest(ctx context.Context, envelope port.Mode
 		return port.TokenCount{}, fmt.Errorf("estimator %s cannot count serializer %q", EstimatorVisualTileConservativeV1, envelope.SerializerID)
 	}
 	total := int64(len(envelope.Serialized))
-	maxInt := int(^uint(0) >> 1)
 	for index, media := range envelope.Media {
 		cost, err := visualTileTokens(media)
 		if err != nil {
 			return port.TokenCount{}, fmt.Errorf("media %d: %w", index, err)
 		}
-		if cost < 0 || total > int64(maxInt)-int64(cost) {
+		if cost < 0 || total > int64(math.MaxInt)-int64(cost) {
 			return port.TokenCount{}, errors.New("multimodal token estimate overflows")
 		}
 		total += int64(cost)
@@ -104,7 +104,7 @@ func (c *visualTileCounter) CountRequest(ctx context.Context, envelope port.Mode
 			return port.TokenCount{}, errors.New("multimodal token estimate overflows")
 		}
 	}
-	if total < 0 || total > int64(maxInt) {
+	if total < 0 || total > int64(math.MaxInt) {
 		return port.TokenCount{}, errors.New("multimodal token estimate overflows")
 	}
 	return port.TokenCount{
@@ -130,16 +130,15 @@ func visualTileTokens(media port.ModelRequestMedia) (int, error) {
 	case "", "auto", "high":
 		tilesX := ceilDiv(media.Width, visualTileEdge)
 		tilesY := ceilDiv(media.Height, visualTileEdge)
-		maxInt := int(^uint(0) >> 1)
-		if tilesX > maxInt/tilesY {
+		if tilesX > math.MaxInt/tilesY {
 			return 0, errors.New("visual tile estimate overflows")
 		}
 		tiles := tilesX * tilesY
-		if tiles > (maxInt-visualTileBase)/visualTileScale {
+		if tiles > (math.MaxInt-visualTileBase)/visualTileScale {
 			return 0, errors.New("visual tile estimate overflows")
 		}
 		scaledTiles := visualTileScale * tiles
-		if scaledTiles > maxInt-visualTileBase {
+		if scaledTiles > math.MaxInt-visualTileBase {
 			return 0, errors.New("visual tile estimate overflows")
 		}
 		return visualTileBase + scaledTiles, nil
