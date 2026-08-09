@@ -10,9 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"os/exec"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -54,19 +55,6 @@ func New(tools map[string]tooldef.ToolDef, projects map[string]string) (*Executo
 		prepared[name] = &preparedTool{def: def, executable: path}
 	}
 	return &Executor{tools: prepared, projects: projects}, nil
-}
-
-// Tools returns the registered tool names.
-func (e *Executor) Tools() []string {
-	if e == nil {
-		return nil
-	}
-	names := make([]string, 0, len(e.tools))
-	for name := range e.tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
 }
 
 // Run executes one declared tool with validated arguments. project must be a
@@ -300,17 +288,13 @@ func enforcePathPolicy(def tooldef.ToolDef, args map[string]any) error {
 	if len(def.Policy.ExcludedPaths) == 0 {
 		return nil
 	}
-	excluded := make(map[string]bool, len(def.Policy.ExcludedPaths))
-	for _, segment := range def.Policy.ExcludedPaths {
-		excluded[segment] = true
-	}
 	for _, name := range []string{"path", "include"} {
 		value, ok := args[name].(string)
 		if !ok || strings.TrimSpace(value) == "" {
 			continue
 		}
 		for _, segment := range strings.Split(strings.ReplaceAll(value, "\\", "/"), "/") {
-			if excluded[segment] {
+			if slices.Contains(def.Policy.ExcludedPaths, segment) {
 				return fmt.Errorf("%q may not reference excluded path segment %q", name, segment)
 			}
 		}
@@ -322,11 +306,7 @@ func enforcePathPolicy(def tooldef.ToolDef, args map[string]any) error {
 // emitted in sorted property order for determinism.
 func buildArgv(def tooldef.ToolDef, args map[string]any) ([]string, error) {
 	argv := append([]string(nil), def.Invocation.Args...)
-	optionNames := make([]string, 0, len(def.Invocation.Options))
-	for name := range def.Invocation.Options {
-		optionNames = append(optionNames, name)
-	}
-	sort.Strings(optionNames)
+	optionNames := slices.Sorted(maps.Keys(def.Invocation.Options))
 	for _, name := range optionNames {
 		value, present := args[name]
 		if !present {
