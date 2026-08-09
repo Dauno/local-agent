@@ -70,7 +70,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	}
 
 	completed := turns[:activeTurnIdx]
-	activeContents := cloneContents(req.Contents[activeStart:])
+	activeContents := domain.CloneContents(req.Contents[activeStart:])
 
 	// Classify active parts into protected and reducible.
 	protectedParts, reducibleParts := classifyActiveParts(activeContents)
@@ -475,7 +475,7 @@ func projectionResponse(response *domain.FunctionResponse, marker domain.Context
 }
 
 func dryRunActiveContents(active []domain.Content, parts []reduciblePart) []domain.Content {
-	result := cloneContents(active)
+	result := domain.CloneContents(active)
 	for _, part := range parts {
 		response := result[part.contentIndex].Parts[part.partIndex].FunctionResponse
 		full, err := fullResponseJSON(response)
@@ -501,7 +501,7 @@ func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileReques
 	if len(parts) == 1 && req.Actor == "" && req.ConversationKey == "" {
 		return nil, hard + 1, 0, &domain.IrreducibleContextError{MinimumTokens: hard + 1, HardTokens: hard}
 	}
-	minimum := cloneContents(active)
+	minimum := domain.CloneContents(active)
 	for _, part := range parts {
 		full, err := fullResponseJSON(part.part.FunctionResponse)
 		if err != nil {
@@ -524,7 +524,7 @@ func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileReques
 		return nil, minimumCount.Tokens, 0, errors.New("context compiler: recoverable result store is required for late externalization")
 	}
 
-	result := cloneContents(active)
+	result := domain.CloneContents(active)
 	removed := 0
 	for _, part := range parts {
 		response := part.part.FunctionResponse
@@ -989,14 +989,6 @@ func turnIndexForContentStart(turns []domain.ConversationTurn, contentStart int)
 		offset += len(turn.Contents)
 	}
 	return -1
-}
-
-func cloneContents(contents []domain.Content) []domain.Content {
-	clone := make([]domain.Content, len(contents))
-	for i, c := range contents {
-		clone[i] = c.Clone()
-	}
-	return clone
 }
 
 // ---------------------------------------------------------------------------
