@@ -19,9 +19,8 @@ func New() *Service {
 }
 
 // Preview compiles an AgentDraft into a validated AgentDef and returns the canonical YAML + SHA-256.
-func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewResult, error) {
-	defs, ok := current.(*agentdef.Definitions)
-	if !ok || defs == nil {
+func (s *Service) Preview(draft domain.AgentDraft, defs *agentdef.Definitions) (*port.PreviewResult, error) {
+	if defs == nil {
 		return nil, fmt.Errorf("current agent definitions must not be nil")
 	}
 
