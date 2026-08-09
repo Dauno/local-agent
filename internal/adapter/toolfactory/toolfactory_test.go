@@ -17,6 +17,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/tooldef"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
@@ -633,5 +634,108 @@ func TestFactoryNilStoreReturnsNil(t *testing.T) {
 	f := toolfactory.New(nil, nil, nil, nil)
 	if f != nil {
 		t.Fatal("factory with nil store should be nil")
+	}
+}
+
+type stubDeclarativeRunner struct {
+	calls int
+	last  struct {
+		toolName string
+		project  string
+		args     map[string]any
+	}
+}
+
+func (r *stubDeclarativeRunner) Run(_ context.Context, toolName, project string, args map[string]any) (tooldef.ToolResult, error) {
+	r.calls++
+	r.last.toolName = toolName
+	r.last.project = project
+	r.last.args = args
+	return tooldef.ToolResult{Output: "file.go:10:match\n", Truncated: false}, nil
+}
+
+func TestFactoryWithDeclarativeToolExposesAndRunsIt(t *testing.T) {
+	runner := &stubDeclarativeRunner{}
+	declared := map[string]tooldef.ToolDef{
+		"ripgrep": {
+			Name:        "ripgrep",
+			Description: "Search text or regular expressions in files inside a registered project.",
+			InputSchema: tooldef.Schema{
+				"type":     "object",
+				"required": []any{"project", "pattern"},
+				"properties": map[string]any{
+					"project": map[string]any{"type": "string"},
+					"pattern": map[string]any{"type": "string"},
+					"limit":   map[string]any{"type": "integer", "default": 100},
+				},
+			},
+			OutputSchema: tooldef.Schema{
+				"type": "object",
+				"properties": map[string]any{
+					"output":    map[string]any{"type": "string"},
+					"truncated": map[string]any{"type": "boolean"},
+				},
+			},
+		},
+	}
+	sb, err := sandboxusecase.New(sandboxusecase.Config{
+		AllowedCapabilities: []domain.Capability{domain.CapListRepos},
+		CommandTimeout:      30 * time.Second,
+		MaxOutputBytes:      65536,
+	}, sandboxusecase.Dependencies{AuditStore: &stubAuditStore{}, Executor: &stubExecutor{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := toolfactory.New(&stubConversationStore{}, sb, nil, nil).WithDeclarativeTools(declared, runner)
+	tools, err := f.ToolsForInvocation("U12345678", "slack:T12345678:dm:D12345678")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var grep runnableFunctionTool
+	for _, candidate := range tools {
+		if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == "ripgrep" {
+			var isTool bool
+			grep, isTool = candidate.(runnableFunctionTool)
+			if !isTool {
+				t.Fatalf("ripgrep is not runnable: %T", candidate)
+			}
+		}
+	}
+	if grep == nil {
+		t.Fatal("declarative ripgrep tool is missing")
+	}
+
+	declaration := grep.Declaration()
+	if declaration.Name != "ripgrep" || declaration.Description != "Search text or regular expressions in files inside a registered project." {
+		t.Fatalf("declaration = %+v", declaration)
+	}
+	if declaration.ParametersJsonSchema == nil {
+		t.Fatal("declaration has no input schema")
+	}
+	if _, err := grep.Run(&stubToolContext{}, map[string]any{"project": "workspace", "pattern": "match"}); err != nil {
+		t.Fatal(err)
+	}
+	if runner.calls != 1 || runner.last.toolName != "ripgrep" || runner.last.project != "workspace" {
+		t.Fatalf("runner calls = %d, last = %+v", runner.calls, runner.last)
+	}
+}
+
+func TestFactoryDeclarativeToolRequiresExecutor(t *testing.T) {
+	sb, err := sandboxusecase.New(sandboxusecase.Config{
+		AllowedCapabilities: []domain.Capability{domain.CapListRepos},
+		CommandTimeout:      30 * time.Second,
+		MaxOutputBytes:      65536,
+	}, sandboxusecase.Dependencies{AuditStore: &stubAuditStore{}, Executor: &stubExecutor{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	f := toolfactory.New(&stubConversationStore{}, sb, nil, nil).WithDeclarativeTools(map[string]tooldef.ToolDef{
+		"ripgrep": {Name: "ripgrep", Description: "d", InputSchema: tooldef.Schema{
+			"type": "object", "properties": map[string]any{"pattern": map[string]any{"type": "string"}},
+		}},
+	}, nil)
+	if _, err := f.ToolsForInvocation("U12345678", "slack:T12345678:dm:D12345678"); err == nil || !strings.Contains(err.Error(), "without an executor") {
+		t.Fatalf("error = %v, want executor requirement", err)
 	}
 }
