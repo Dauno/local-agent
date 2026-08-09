@@ -2,13 +2,16 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"iter"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
@@ -23,6 +26,8 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/tooldef"
+	contextcompilerusecase "github.com/Dauno/slack-local-agent/internal/usecase/contextcompiler"
 )
 
 type streamRecordingModel struct {
@@ -344,7 +349,7 @@ func exploreDefinition() agentdef.AgentDef {
 		Description:     "Explores registered projects and returns read-only evidence.",
 		Instruction:     "Investigate using registered read-only tools.",
 		IncludeContents: "none",
-		ToolScope:       "invocation_scoped",
+		ToolScope:       agentdef.ToolScope{"invocation_scoped"},
 	}
 }
 
@@ -536,6 +541,120 @@ func TestExploreChildRunsScopedReadOnlyToolLoop(t *testing.T) {
 	}
 }
 
+func TestExploreChildContextCompilerBoundsRepeatedToolResponses(t *testing.T) {
+	const maxRequestBytes = 30_000
+	run := func(t *testing.T, compiler port.ContextCompiler) *largeExploringChildModel {
+		t.Helper()
+		base := &fakeBaseFactory{readOutput: strings.Repeat("x", 18_000)}
+		childModel := &largeExploringChildModel{maxRequestBytes: maxRequestBytes, reads: 6}
+		factory := newCompositeAgentToolFactory(base, []preparedAgentTool{{
+			definition:      exploreDefinition(),
+			model:           childModel,
+			contextCompiler: compiler,
+			contextBudget:   domain.RequestBudget{HardTokens: 30_000, TriggerTokens: 22_000, TargetTokens: 20_000},
+		}}, nil, "Global policy.")
+		raw, err := factory.ToolsForInvocation("U777", domain.ConversationKey("slack:T1:dm:D1"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		root, err := llmagent.New(llmagent.Config{
+			Name:        "root_agent",
+			Model:       &delegatingRootModel{target: "explore"},
+			Instruction: "Delegate exploration.",
+			Mode:        llmagent.ModeChat,
+			Tools:       rawAsTools(t, raw),
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if final := runDelegatingTurn(t, root); final != "root used delegated result" {
+			t.Fatalf("final response = %q", final)
+		}
+		return childModel
+	}
+
+	withoutCompiler := run(t, nil)
+	if !withoutCompiler.oversized {
+		t.Fatal("unmanaged child request never exceeded the test bound")
+	}
+
+	store := &childContextResultStore{}
+	withCompiler := run(t, contextcompilerusecase.New(store, childByteCounter{}))
+	if withCompiler.oversized {
+		t.Fatalf("managed child request exceeded %d bytes at sizes %v", maxRequestBytes, withCompiler.requestSizes)
+	}
+	if withCompiler.calls != 7 {
+		t.Fatalf("managed child model calls = %d, want 7", withCompiler.calls)
+	}
+	if store.puts == 0 {
+		t.Fatal("context compiler did not externalize any repeated tool response")
+	}
+}
+
+type largeExploringChildModel struct {
+	calls           int
+	reads           int
+	maxRequestBytes int
+	requestSizes    []int
+	oversized       bool
+}
+
+func (*largeExploringChildModel) Name() string { return "large-explore-model" }
+
+func (m *largeExploringChildModel) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls++
+	encoded, _ := json.Marshal(request.Contents)
+	m.requestSizes = append(m.requestSizes, len(encoded))
+	if len(encoded) > m.maxRequestBytes {
+		m.oversized = true
+	}
+	call := m.calls
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if call <= m.reads {
+			yield(&model.LLMResponse{
+				Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: fmt.Sprintf("large-child-read-%d", call), Name: "read_file", Args: map[string]any{"project": "workspace", "path": fmt.Sprintf("file-%d.go", call)},
+				}}}},
+				FinishReason: genai.FinishReasonStop,
+				TurnComplete: true,
+			}, nil)
+			return
+		}
+		yield(&model.LLMResponse{
+			Content:      genai.NewContentFromText("bounded exploration evidence", genai.RoleModel),
+			FinishReason: genai.FinishReasonStop,
+			TurnComplete: true,
+		}, nil)
+	}
+}
+
+type childByteCounter struct{}
+
+func (childByteCounter) CountRequest(_ context.Context, envelope port.ModelRequestEnvelope) (port.TokenCount, error) {
+	return port.TokenCount{Tokens: len(envelope.Serialized), Strategy: "byte_bound"}, nil
+}
+
+type childContextResultStore struct {
+	puts int
+}
+
+func (s *childContextResultStore) Put(_ context.Context, request port.PutResultRequest) (domain.RecoverableResult, error) {
+	s.puts++
+	return domain.RecoverableResult{Ref: fmt.Sprintf("child-result-%d", s.puts), Kind: request.Kind, SizeBytes: int64(len(request.Content)), CodePoints: utf8.RuneCountInString(request.Content)}, nil
+}
+
+func (*childContextResultStore) ReadChunk(context.Context, domain.ResultChunkRequest) (domain.ResultChunk, error) {
+	return domain.ResultChunk{}, errors.New("child test result is not readable")
+}
+
+func (*childContextResultStore) Stat(context.Context, port.StatResultRequest) (domain.RecoverableResult, error) {
+	return domain.RecoverableResult{}, errors.New("child test result is unavailable")
+}
+
+func (*childContextResultStore) DeleteExpired(context.Context, time.Time, int) (int, error) {
+	return 0, nil
+}
+
 func rawAsTools(t *testing.T, raw []any) []tool.Tool {
 	t.Helper()
 	tools := make([]tool.Tool, 0, len(raw))
@@ -649,5 +768,105 @@ func TestACPAgentToolRequiresADKConfirmationBeforeRuntime(t *testing.T) {
 	}
 	if !foundConfirmation || runtime.runs != 0 {
 		t.Fatalf("confirmation=%v runtime runs=%d", foundConfirmation, runtime.runs)
+	}
+}
+
+// declarativeTestBase is a minimal base factory that exposes declared tools by
+// name, mirroring the toolfactory contract used in production.
+type declarativeTestBase struct {
+	raw   []any
+	tools map[string]tooldef.ToolDef
+}
+
+func (b *declarativeTestBase) ToolsForInvocation(string, domain.ConversationKey) ([]any, error) {
+	return b.raw, nil
+}
+
+func (b *declarativeTestBase) DeclarativeToolByName(name string) (tool.Tool, error) {
+	if _, ok := b.tools[name]; !ok {
+		return nil, fmt.Errorf("declarative tool %q is not registered", name)
+	}
+	return namedTool{name: name}, nil
+}
+
+type namedTool struct{ name string }
+
+func (t namedTool) Name() string        { return t.name }
+func (t namedTool) Description() string { return "declared read-only tool" }
+func (t namedTool) IsLongRunning() bool { return false }
+
+func TestCompositeChildReceivesDeclaredToolScope(t *testing.T) {
+	base := &declarativeTestBase{tools: map[string]tooldef.ToolDef{
+		"ripgrep": {Name: "ripgrep"},
+	}}
+	definition := exploreDefinition()
+	definition.ToolScope = agentdef.ToolScope{"invocation_scoped", "ripgrep"}
+	factory := newCompositeAgentToolFactory(base, nil, nil, "Global policy.")
+	factory.setDeclarativeTools(base.tools)
+
+	fixed := []tool.Tool{namedTool{name: "read_file"}}
+	tools, err := factory.childDeclarativeTools(base, definition, fixed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := make([]string, 0, len(tools))
+	for _, candidate := range tools {
+		names = append(names, candidate.Name())
+	}
+	want := "read_file,ripgrep"
+	if strings.Join(names, ",") != want {
+		t.Fatalf("child tools = %v, want %v", names, want)
+	}
+}
+
+func TestCompositeChildRejectsUndeclaredScopeTool(t *testing.T) {
+	base := &declarativeTestBase{tools: map[string]tooldef.ToolDef{
+		"ripgrep": {Name: "ripgrep"},
+	}}
+	definition := exploreDefinition()
+	definition.ToolScope = agentdef.ToolScope{"invocation_scoped", "ripgrep"}
+	factory := newCompositeAgentToolFactory(base, nil, nil, "Global policy.")
+	// The deployment has no active declarative tools.
+	factory.setDeclarativeTools(nil)
+
+	if _, err := factory.childDeclarativeTools(base, definition, nil); err == nil || !strings.Contains(err.Error(), "undeclared tool") {
+		t.Fatalf("error = %v, want undeclared tool", err)
+	}
+}
+
+func TestCompositeToolsForInvocationIncludesDeclarativeTools(t *testing.T) {
+	// In production the base factory already appends the active declarative
+	// tools to its own invocation list; the composite passes them through and
+	// additionally indexes them for children and workflow steps.
+	base := &declarativeTestBase{
+		raw: []any{namedTool{name: "list_messages"}, namedTool{name: "ripgrep"}},
+		tools: map[string]tooldef.ToolDef{
+			"ripgrep": {Name: "ripgrep"},
+		},
+	}
+	factory := newCompositeAgentToolFactory(base, nil, nil, "Global policy.")
+	factory.setDeclarativeTools(base.tools)
+
+	raw, err := factory.ToolsForInvocation("U777", domain.ConversationKey("slack:T1:dm:D1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := toolNames(t, raw)
+	want := []string{"list_messages", "ripgrep"}
+	if strings.Join(names, ",") != strings.Join(want, ",") {
+		t.Fatalf("tool names = %v, want %v", names, want)
+	}
+}
+
+func TestChildAllowlistIncludesReadOnlyRangeTool(t *testing.T) {
+	for _, name := range []string{"list_messages", "list_repos", "list_directory", "read_file", "list_worktrees", "read_file_range"} {
+		if !isReadOnlyChildTool(name) {
+			t.Fatalf("child allowlist must include %q", name)
+		}
+	}
+	for _, name := range []string{"read_result_chunk", "create_worktree", "ripgrep"} {
+		if isReadOnlyChildTool(name) {
+			t.Fatalf("child allowlist must not include %q", name)
+		}
 	}
 }

@@ -102,6 +102,7 @@ func newModelForResolved(
 	paths config.Paths,
 	logger port.Logger,
 	sanitize func(string) string,
+	requestPercentOverride ...int,
 ) (model.LLM, string, error) {
 	if resolved == nil {
 		return nil, "", errors.New("resolved model is required")
@@ -128,7 +129,11 @@ func newModelForResolved(
 	if err != nil {
 		return nil, "", err
 	}
-	budget, err := domain.NewRequestBudget(resolved.ContextWindowTokens, domain.RequestBudgetPolicy{MaxRequestPercent: cfg.Context.ModelBudget.MaxRequestPercent})
+	requestPercent := cfg.Context.ModelBudget.MaxRequestPercent
+	if len(requestPercentOverride) > 0 && requestPercentOverride[0] > 0 {
+		requestPercent = requestPercentOverride[0]
+	}
+	budget, err := domain.NewRequestBudget(resolved.ContextWindowTokens, domain.RequestBudgetPolicy{MaxRequestPercent: requestPercent})
 	if err != nil {
 		return nil, "", fmt.Errorf("compose model request budget: %w", err)
 	}

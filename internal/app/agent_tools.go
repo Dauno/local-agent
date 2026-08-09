@@ -19,10 +19,13 @@ import (
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/tooldef"
+	contextcompilerusecase "github.com/Dauno/slack-local-agent/internal/usecase/contextcompiler"
 )
 
 // agentToolNonStreamingModel adapts ADK AgentTool's internal SSE runner to a
@@ -55,6 +58,9 @@ func (m *agentToolNonStreamingModel) GenerateContent(ctx context.Context, reques
 type preparedAgentTool struct {
 	definition       agentdef.AgentDef
 	model            model.LLM
+	contextCompiler  port.ContextCompiler
+	contextCounter   port.RequestTokenCounter
+	contextBudget    domain.RequestBudget
 	cliTool          tool.Tool
 	acpRuntime       port.ExternalAgentRuntime
 	acpResolved      *agentdef.ResolvedModel
@@ -71,6 +77,12 @@ type acpAgentArgs struct {
 
 type acpAgentResult struct {
 	Result string `json:"result"`
+}
+
+type agentToolContextConfig struct {
+	compiler port.ContextCompiler
+	budget   domain.RequestBudget
+	actor    string
 }
 
 func eligibleAgentNames(defs *agentdef.Definitions) []string {
@@ -93,7 +105,7 @@ func eligibleAgentNames(defs *agentdef.Definitions) []string {
 
 func isReadOnlyChildTool(name string) bool {
 	switch name {
-	case "list_messages", "list_repos", "list_directory", "read_file", "list_worktrees":
+	case "list_messages", "list_repos", "list_directory", "read_file", "list_worktrees", "read_file_range":
 		return true
 	default:
 		return false
@@ -161,7 +173,12 @@ func prepareRootAgentTools(
 		if err != nil {
 			return nil, fmt.Errorf("resolve agent tool %q model: %w", name, err)
 		}
-		childModel, _, err := newModelForResolved(ctx, resolved, values, cfg, paths, logger, sanitize)
+		requestPercent := definition.EffectiveContextBudgetPercent(cfg.Context.ModelBudget.MaxRequestPercent)
+		contextCounter, contextBudget, contextErr := composeModelContextAdmission(resolved, cfg, requestPercent)
+		if contextErr != nil {
+			return nil, fmt.Errorf("compose agent tool %q context admission: %w", name, contextErr)
+		}
+		childModel, _, err := newModelForResolved(ctx, resolved, values, cfg, paths, logger, sanitize, requestPercent)
 		if err != nil {
 			return nil, fmt.Errorf("build agent tool %q model: %w", name, err)
 		}
@@ -188,7 +205,7 @@ func prepareRootAgentTools(
 		if _, err := newAgentToolAgent(definition, root.EffectiveDelegatedGlobalInstruction(), childModel, nil); err != nil {
 			return nil, fmt.Errorf("build agent tool %q: %w", name, err)
 		}
-		prepared = append(prepared, preparedAgentTool{definition: definition, model: childModel})
+		prepared = append(prepared, preparedAgentTool{definition: definition, model: childModel, contextCounter: contextCounter, contextBudget: contextBudget})
 	}
 	return prepared, nil
 }
@@ -203,6 +220,14 @@ type compositeAgentToolFactory struct {
 	workflowChildren           []preparedWorkflowTool
 	delegatedGlobalInstruction string
 	jobStarter                 port.ExternalAgentJobStarter
+	declarativeTools           map[string]tooldef.ToolDef
+}
+
+// declarativeToolProvider is implemented by the base factory so children and
+// workflow steps can build individual declared tools without receiving the
+// whole registry.
+type declarativeToolProvider interface {
+	DeclarativeToolByName(name string) (tool.Tool, error)
 }
 
 var _ port.AgentToolFactory = (*compositeAgentToolFactory)(nil)
@@ -219,6 +244,27 @@ func newCompositeAgentToolFactory(base port.AgentToolFactory, children []prepare
 func (f *compositeAgentToolFactory) setJobStarter(starter port.ExternalAgentJobStarter) {
 	if f != nil {
 		f.jobStarter = starter
+	}
+}
+
+// setDeclarativeTools records the declarative tools active for this
+// deployment. Children may reference them through their own tool_scope;
+// workflow steps may reference them through their tools list.
+func (f *compositeAgentToolFactory) setDeclarativeTools(tools map[string]tooldef.ToolDef) {
+	if f != nil {
+		f.declarativeTools = tools
+	}
+}
+
+func (f *compositeAgentToolFactory) setChildContextResultStore(store port.RecoverableResultStore) {
+	if f == nil || store == nil {
+		return
+	}
+	for index := range f.children {
+		child := &f.children[index]
+		if child.contextCompiler == nil && child.contextCounter != nil && child.contextBudget.HardTokens > 0 {
+			child.contextCompiler = contextcompilerusecase.New(store, child.contextCounter)
+		}
 	}
 }
 
@@ -249,6 +295,20 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 		}
 	}
 
+	// Declarative tools (sandbox_read_only) are available to child agents that
+	// declare them in tool_scope and to workflow steps by name.
+	provider, hasProvider := f.base.(declarativeToolProvider)
+	for _, name := range sortedDeclarativeNames(f.declarativeTools) {
+		if !hasProvider {
+			return nil, fmt.Errorf("declarative tool %q is configured without a tool provider", name)
+		}
+		declared, err := provider.DeclarativeToolByName(name)
+		if err != nil {
+			return nil, fmt.Errorf("build declarative tool %q: %w", name, err)
+		}
+		toolIndex[name] = declared
+	}
+
 	combined := make([]any, 0, len(f.children)+len(f.workflowChildren)+len(baseRaw))
 	for _, child := range f.children {
 		if child.acpRuntime != nil {
@@ -263,7 +323,11 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 			combined = append(combined, child.cliTool)
 			continue
 		}
-		childAgent, err := newAgentToolAgent(child.definition, f.delegatedGlobalInstruction, child.model, scoped)
+		childTools, err := f.childDeclarativeTools(provider, child.definition, scoped)
+		if err != nil {
+			return nil, fmt.Errorf("build agent tool %q: %w", child.definition.Name, err)
+		}
+		childAgent, err := newAgentToolAgentWithContext(child.definition, f.delegatedGlobalInstruction, child.model, childTools, childContextConfig(child, actor))
 		if err != nil {
 			return nil, fmt.Errorf("build agent tool %q: %w", child.definition.Name, err)
 		}
@@ -469,6 +533,10 @@ func canonicalProjectPath(path string) (string, error) {
 }
 
 func newAgentToolAgent(definition agentdef.AgentDef, globalInstruction string, childModel model.LLM, tools []tool.Tool) (agent.Agent, error) {
+	return newAgentToolAgentWithContext(definition, globalInstruction, childModel, tools, nil)
+}
+
+func newAgentToolAgentWithContext(definition agentdef.AgentDef, globalInstruction string, childModel model.LLM, tools []tool.Tool, contextConfig *agentToolContextConfig) (agent.Agent, error) {
 	instruction := definition.Instruction
 	includeContents := llmagent.IncludeContentsDefault
 	if definition.IncludeContents == "none" {
@@ -488,5 +556,57 @@ func newAgentToolAgent(definition agentdef.AgentDef, globalInstruction string, c
 	if len(tools) > 0 {
 		cfg.Tools = tools
 	}
+	if contextConfig != nil && contextConfig.compiler != nil {
+		cfg.BeforeModelCallbacks = append(cfg.BeforeModelCallbacks,
+			adkagent.CompilerBeforeModelCallback(contextConfig.compiler, contextConfig.budget, nil, nil, contextConfig.actor))
+	}
 	return llmagent.New(cfg)
+}
+
+func childContextConfig(child preparedAgentTool, actor string) *agentToolContextConfig {
+	if child.contextCompiler == nil {
+		return nil
+	}
+	return &agentToolContextConfig{compiler: child.contextCompiler, budget: child.contextBudget, actor: actor}
+}
+
+func sortedDeclarativeNames(tools map[string]tooldef.ToolDef) []string {
+	if len(tools) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(tools))
+	for name := range tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// childDeclarativeTools returns the fixed read-only allowlist plus the
+// declarative tools the child declares in its own tool_scope. A child may only
+// reference tools that are active for this deployment.
+func (f *compositeAgentToolFactory) childDeclarativeTools(provider declarativeToolProvider, definition agentdef.AgentDef, fixed []tool.Tool) ([]tool.Tool, error) {
+	result := append([]tool.Tool(nil), fixed...)
+	names := make([]string, 0, len(definition.ToolScope))
+	for _, scope := range definition.ToolScope {
+		if scope == "invocation_scoped" || isReadOnlyChildTool(scope) {
+			continue
+		}
+		if _, active := f.declarativeTools[scope]; !active {
+			return nil, fmt.Errorf("tool_scope references undeclared tool %q", scope)
+		}
+		names = append(names, scope)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		if provider == nil {
+			return nil, fmt.Errorf("declarative tool %q is configured without a tool provider", name)
+		}
+		declared, err := provider.DeclarativeToolByName(name)
+		if err != nil {
+			return nil, fmt.Errorf("build declarative tool %q: %w", name, err)
+		}
+		result = append(result, declared)
+	}
+	return result, nil
 }

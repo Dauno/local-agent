@@ -20,6 +20,7 @@ type Paths struct {
 	MemoryDir           string
 	SandboxProjectRoots map[string]string
 	ArtifactDir         string
+	ToolsDir            string
 }
 
 // ResolvePaths resolves all relative paths against projectRoot. Managed MVP
@@ -56,6 +57,7 @@ func ResolvePaths(projectRoot string, cfg Config) (Paths, error) {
 		MemoryDir:           resolveMemoryDir(root, cfg.State.Dir, cfg.Memory.Directory),
 		SandboxProjectRoots: resolveSandboxRoots(root, cfg.Sandbox.Projects),
 		ArtifactDir:         filepath.Join(resolveAgainst(root, cfg.State.Dir), "artifacts"),
+		ToolsDir:            filepath.Join(resolveAgainst(root, cfg.State.Dir), "tools"),
 	}, nil
 }
 

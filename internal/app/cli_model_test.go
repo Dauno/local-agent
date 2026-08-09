@@ -139,6 +139,33 @@ func TestNewModelForResolvedOpenAIRequiresKey(t *testing.T) {
 	}
 }
 
+func TestComposeModelContextAdmissionUsesAgentOverride(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Context.ModelBudget.MaxRequestPercent = 35
+	resolved := &agentdef.ResolvedModel{
+		Provider:            agentdef.Provider{Name: "deepseek", Type: agentdef.ProviderTypeOpenAICompatible},
+		ContextWindowTokens: 1_000_000,
+		CounterStrategy:     "byte_bound",
+		Model:               "deepseek-v4-flash",
+	}
+
+	_, rootBudget, err := composeModelContextAdmission(resolved, cfg)
+	if err != nil {
+		t.Fatalf("compose root budget: %v", err)
+	}
+	_, childBudget, err := composeModelContextAdmission(resolved, cfg, 60)
+	if err != nil {
+		t.Fatalf("compose child budget: %v", err)
+	}
+	if rootBudget.HardTokens != 350_000 {
+		t.Fatalf("root hard limit = %d, want 350000", rootBudget.HardTokens)
+	}
+	if childBudget.HardTokens != 600_000 {
+		t.Fatalf("child hard limit = %d, want 600000", childBudget.HardTokens)
+	}
+}
+
 func TestNewModelForResolvedAgentCLINeedsNoKey(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
