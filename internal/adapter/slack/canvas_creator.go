@@ -2,7 +2,6 @@ package slack
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -35,16 +34,8 @@ func (c *CanvasCreator) CreateCanvas(ctx context.Context, title string, document
 	})
 	if err != nil {
 		ambiguous := true
-		var slackErr slackapi.SlackErrorResponse
-		var rateLimitErr *slackapi.RateLimitedError
-		var statusErr slackapi.StatusCodeError
-		switch {
-		case errors.As(err, &slackErr):
-			ambiguous = slackErr.Err == "fatal_error" || slackErr.Err == "internal_error" || slackErr.Err == "service_unavailable"
-		case errors.As(err, &rateLimitErr):
-			ambiguous = false
-		case errors.As(err, &statusErr):
-			ambiguous = statusErr.Code >= 500
+		if v, matched := ambiguousSlackError(err); matched {
+			ambiguous = v
 		}
 		return port.CanvasCreateResult{}, &port.CanvasCreateError{
 			Err: fmt.Errorf("create Slack canvas: %w", err), Ambiguous: ambiguous,

@@ -53,7 +53,8 @@ func (u *GeneratedFileUploader) UploadBytes(ctx context.Context, target port.Gen
 	if err != nil {
 		// The URL is a credential. Do not wrap the SDK error because it can
 		// include that URL in a transport diagnostic.
-		return &port.GeneratedFileUploadError{Err: errors.New("upload generated file bytes failed"), Ambiguous: ambiguousUploadError(err)}
+		ambiguous, _ := ambiguousSlackError(err)
+		return &port.GeneratedFileUploadError{Err: errors.New("upload generated file bytes failed"), Ambiguous: ambiguous}
 	}
 	return nil
 }
@@ -81,26 +82,29 @@ func (u *GeneratedFileUploader) withTimeout(ctx context.Context) (context.Contex
 }
 
 func uploadError(operation string, err error) error {
-	return &port.GeneratedFileUploadError{Err: fmt.Errorf("%s: %w", operation, err), Ambiguous: ambiguousUploadError(err)}
+	ambiguous, _ := ambiguousSlackError(err)
+	return &port.GeneratedFileUploadError{Err: fmt.Errorf("%s: %w", operation, err), Ambiguous: ambiguous}
 }
 
-func ambiguousUploadError(err error) bool {
+// ambiguousSlackError classifies Slack errors whose outcome is ambiguous.
+// matched is false when err is not a known Slack SDK error type.
+func ambiguousSlackError(err error) (ambiguous, matched bool) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-		return true
+		return true, true
 	}
 	var slackErr slackapi.SlackErrorResponse
 	var rateLimitErr *slackapi.RateLimitedError
 	var statusErr slackapi.StatusCodeError
 	switch {
 	case errors.As(err, &slackErr):
-		return slackErr.Err == "fatal_error" || slackErr.Err == "internal_error" || slackErr.Err == "service_unavailable"
+		return slackErr.Err == "fatal_error" || slackErr.Err == "internal_error" || slackErr.Err == "service_unavailable", true
 	case errors.As(err, &rateLimitErr):
-		return false
+		return false, true
 	case errors.As(err, &statusErr):
-		return statusErr.Code >= 500
+		return statusErr.Code >= 500, true
 	}
 	errText := strings.ToLower(err.Error())
-	return strings.Contains(errText, "timeout") || strings.Contains(errText, "connection reset")
+	return strings.Contains(errText, "timeout") || strings.Contains(errText, "connection reset"), false
 }
 
 var _ port.GeneratedFileUploader = (*GeneratedFileUploader)(nil)
