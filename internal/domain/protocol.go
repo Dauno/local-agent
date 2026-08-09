@@ -112,10 +112,6 @@ type protocolLedger struct {
 	openCount int
 }
 
-func newProtocolLedger() protocolLedger {
-	return protocolLedger{calls: make(map[string]*protocolCall)}
-}
-
 func protocolCallOpen(call *protocolCall) bool {
 	if call == nil {
 		return false
@@ -271,7 +267,7 @@ func ProtocolDigest(contents []Content) string {
 }
 
 func scanContentProtocol(contents []Content, options ProtocolValidationOptions) (protocolLedger, error) {
-	ledger := newProtocolLedger()
+	ledger := protocolLedger{calls: make(map[string]*protocolCall)}
 	for contentIndex, content := range contents {
 		if content.Role != ContentRoleUser && content.Role != ContentRoleModel {
 			return ledger, protocolValidationError(
