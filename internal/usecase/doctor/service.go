@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -180,24 +179,6 @@ func selectedModelAlreadyIncluded(selected []selectedModel, agent string) bool {
 	return false
 }
 
-func eligibleAgentNames(defs *agentdef.Definitions) []string {
-	if defs == nil {
-		return nil
-	}
-	names := make([]string, 0, len(defs.Agents))
-	for name, agent := range defs.Agents {
-		if name == "root_agent" || agent.Role != "" {
-			continue
-		}
-		if agent.AgentClass != "LlmAgent" && agent.AgentClass != "AcpAgent" {
-			continue
-		}
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
-}
-
 func New(deps Dependencies) (*Service, error) {
 	if strings.TrimSpace(deps.ConfigPath) == "" {
 		return nil, errors.New("doctor config path is required")
@@ -287,7 +268,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 				}
 				if defsErr == nil {
 					// Tambien revisar agentes auto-descubiertos.
-					for _, name := range eligibleAgentNames(defs) {
+					for _, name := range agentdef.EligibleAgentNames(defs) {
 						if agentdef.IsReservedAgentName(name) {
 							continue
 						}
