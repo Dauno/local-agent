@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"math"
 	"reflect"
 	"strings"
 	"time"
@@ -936,10 +937,9 @@ func truncateToCodePoints(s string, maxCodePoints int) string {
 
 func sumCosts(costs []int) int {
 	total := 0
-	maxInt := int(^uint(0) >> 1)
 	for _, c := range costs {
-		if c > 0 && total > maxInt-c {
-			return maxInt
+		if c > 0 && total > math.MaxInt-c {
+			return math.MaxInt
 		}
 		total += c
 	}

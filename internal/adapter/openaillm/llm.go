@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"iter"
+	"math"
 	"strings"
 
 	"github.com/openai/openai-go/v3"
@@ -196,7 +197,7 @@ func utilizationBasisPoints(tokens, hard int) int64 {
 		return 0
 	}
 	const scale = int64(10_000)
-	if tokens > int(^uint(0)>>1)/int(scale) {
+	if tokens > math.MaxInt/int(scale) {
 		return scale
 	}
 	value := int64(tokens) * scale / int64(hard)
