@@ -3,7 +3,6 @@ package port
 import (
 	"context"
 
-	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
@@ -24,9 +23,10 @@ type AgentDefPreview struct {
 }
 
 // AgentBuilderService compiles an AgentDraft into a validated agent definition.
-// The current definitions snapshot comes from the declarative definition package.
+// The current definitions snapshot is implementation-owned so the port does
+// not depend on the declarative definition package.
 type AgentBuilderService interface {
-	Preview(draft domain.AgentDraft, defs *agentdef.Definitions) (*PreviewResult, error)
+	Preview(draft domain.AgentDraft, current any) (*PreviewResult, error)
 }
 
 // BuilderLauncherRequest contains the context for publishing a builder launcher.
