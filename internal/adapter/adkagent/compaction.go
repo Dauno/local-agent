@@ -77,7 +77,7 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 		diagnostics.HistoryCharsAfter = beforeChars
 		diagnostics.Reason = "disabled"
 		diagnostics.ActiveSuffixContents = len(request.Contents)
-		return domain.CompactionResult{Contents: cloneContents(request.Contents), Diagnostics: diagnostics}, nil
+		return domain.CompactionResult{Contents: domain.CloneContents(request.Contents), Diagnostics: diagnostics}, nil
 	}
 
 	turns, activeStart, err := domain.ClassifyConversationTurns(request.Contents, domain.TurnClassificationOptions{OpenInvocationIDs: request.OpenInvocationIDs})
@@ -102,7 +102,7 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 	if activeTurnIndex < 0 || activeTurnIndex >= len(turns) {
 		return domain.CompactionResult{}, errors.New("active ADK suffix does not map to a turn")
 	}
-	active := cloneContents(request.Contents[activeStart:])
+	active := domain.CloneContents(request.Contents[activeStart:])
 	diagnostics.ActiveSuffixContents = len(active)
 	activeChars, err := domain.ContentCost(active)
 	if err != nil {
@@ -216,14 +216,6 @@ func summaryReference(text string, limit int) string {
 		text = string([]rune(text)[:limit])
 	}
 	return "[UNTRUSTED CONVERSATION SUMMARY REFERENCE]\n" + text + "\n[/UNTRUSTED CONVERSATION SUMMARY REFERENCE]"
-}
-
-func cloneContents(contents []domain.Content) []domain.Content {
-	clone := make([]domain.Content, len(contents))
-	for i, content := range contents {
-		clone[i] = content.Clone()
-	}
-	return clone
 }
 
 func validateSelectedTurns(turns []domain.ConversationTurn, active bool) error {

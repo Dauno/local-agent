@@ -91,6 +91,14 @@ func (c Content) Clone() Content {
 	return clone
 }
 
+func CloneContents(contents []Content) []Content {
+	clone := make([]Content, len(contents))
+	for i, content := range contents {
+		clone[i] = content.Clone()
+	}
+	return clone
+}
+
 func mapsClone(input map[string]any) map[string]any {
 	output := maps.Clone(input)
 	for key, value := range output {
