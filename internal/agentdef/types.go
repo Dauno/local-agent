@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"regexp"
 	"unicode/utf8"
+
+	"gopkg.in/yaml.v3"
 )
 
 // Provider types.
@@ -140,27 +142,86 @@ type GenerateContentConfig struct {
 	StopSequences   []string `yaml:"stop_sequences,omitempty"`
 }
 
+type AgentContextBudget struct {
+	MaxRequestPercent int `yaml:"max_request_percent,omitempty"`
+}
+
+// ToolScope lists the scopes and declarative tool names available to an agent.
+// YAML accepts a scalar ("invocation_scoped") or a sequence
+// ("[invocation_scoped, ripgrep]").
+type ToolScope []string
+
+// UnmarshalYAML accepts a scalar or a sequence of strings.
+func (t *ToolScope) UnmarshalYAML(node *yaml.Node) error {
+	switch node.Kind {
+	case yaml.ScalarNode:
+		*t = ToolScope{node.Value}
+		return nil
+	case yaml.SequenceNode:
+		result := make(ToolScope, 0, len(node.Content))
+		for _, item := range node.Content {
+			if item.Kind != yaml.ScalarNode {
+				return fmt.Errorf("tool_scope entries must be strings")
+			}
+			result = append(result, item.Value)
+		}
+		*t = result
+		return nil
+	default:
+		return fmt.Errorf("tool_scope must be a string or a list of strings")
+	}
+}
+
+// MarshalYAML renders a single scope as a scalar to keep seeded definitions
+// stable, and a multi-entry scope as a sequence.
+func (t ToolScope) MarshalYAML() (any, error) {
+	if len(t) == 1 {
+		return t[0], nil
+	}
+	return []string(t), nil
+}
+
+// Contains reports whether the scope list includes value.
+func (t ToolScope) Contains(value string) bool {
+	for _, entry := range t {
+		if entry == value {
+			return true
+		}
+	}
+	return false
+}
+
 type AgentDef struct {
-	AgentClass                 string   `yaml:"agent_class"`
-	Name                       string   `yaml:"name"`
-	Model                      string   `yaml:"model,omitempty"`
-	Description                string   `yaml:"description,omitempty"`
-	GlobalInstruction          string   `yaml:"global_instruction,omitempty"`
-	DelegatedGlobalInstruction string   `yaml:"delegated_global_instruction,omitempty"`
-	Instruction                string   `yaml:"instruction"`
-	IncludeContents            string   `yaml:"include_contents,omitempty"`
-	Mode                       string   `yaml:"mode,omitempty"`
-	DurableSession             bool     `yaml:"durable_session,omitempty"`
-	ToolScope                  string   `yaml:"tool_scope,omitempty"`
-	AgentTools                 []string `yaml:"agent_tools,omitempty"`
-	WorkflowTools              []string `yaml:"workflow_tools,omitempty"`
-	TimeoutSeconds             int      `yaml:"timeout_seconds,omitempty"`
-	ExecutionMode              string   `yaml:"execution_mode,omitempty"`
-	Role                       string   `yaml:"role,omitempty"`
+	AgentClass                 string              `yaml:"agent_class"`
+	Name                       string              `yaml:"name"`
+	Model                      string              `yaml:"model,omitempty"`
+	Description                string              `yaml:"description,omitempty"`
+	GlobalInstruction          string              `yaml:"global_instruction,omitempty"`
+	DelegatedGlobalInstruction string              `yaml:"delegated_global_instruction,omitempty"`
+	Instruction                string              `yaml:"instruction"`
+	IncludeContents            string              `yaml:"include_contents,omitempty"`
+	Mode                       string              `yaml:"mode,omitempty"`
+	DurableSession             bool                `yaml:"durable_session,omitempty"`
+	ToolScope                  ToolScope           `yaml:"tool_scope,omitempty"`
+	AgentTools                 []string            `yaml:"agent_tools,omitempty"`
+	WorkflowTools              []string            `yaml:"workflow_tools,omitempty"`
+	ContextBudget              *AgentContextBudget `yaml:"context_budget,omitempty"`
+	TimeoutSeconds             int                 `yaml:"timeout_seconds,omitempty"`
+	ExecutionMode              string              `yaml:"execution_mode,omitempty"`
+	Role                       string              `yaml:"role,omitempty"`
 
 	// AcpAgent fields.
 	Runtime      string `yaml:"runtime,omitempty"`
 	Confirmation string `yaml:"confirmation,omitempty"`
+}
+
+// EffectiveContextBudgetPercent returns the agent override or the configured
+// root percentage when no override is present. Zero means inherit.
+func (a AgentDef) EffectiveContextBudgetPercent(defaultPercent int) int {
+	if a.ContextBudget != nil && a.ContextBudget.MaxRequestPercent != 0 {
+		return a.ContextBudget.MaxRequestPercent
+	}
+	return defaultPercent
 }
 
 func (a AgentDef) ValidateName() error {

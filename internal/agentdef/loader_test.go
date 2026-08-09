@@ -1027,7 +1027,7 @@ func TestTrackedDefinitionsLoad(t *testing.T) {
 	if !exists {
 		t.Fatal("tracked explore agent is missing")
 	}
-	if explore.ToolScope != "invocation_scoped" || explore.IncludeContents != "none" {
+	if !explore.ToolScope.Contains("invocation_scoped") || explore.IncludeContents != "none" {
 		t.Fatalf("tracked explore definition = %+v", explore)
 	}
 	for _, name := range []string{
@@ -1059,11 +1059,30 @@ func TestSeedExploreAgentUsesScopedReadOnlyContract(t *testing.T) {
 	if agent.Name != "explore" || agent.AgentClass != "LlmAgent" {
 		t.Fatalf("seeded explore identity = %+v", agent)
 	}
-	if agent.ToolScope != "invocation_scoped" || agent.IncludeContents != "none" {
+	if !agent.ToolScope.Contains("invocation_scoped") || agent.IncludeContents != "none" {
 		t.Fatalf("seeded explore scope = %+v", agent)
+	}
+	if agent.ContextBudget == nil || agent.ContextBudget.MaxRequestPercent != 60 {
+		t.Fatalf("seeded explore context budget = %+v, want 60%%", agent.ContextBudget)
 	}
 	if !strings.Contains(agent.Instruction, "read-only") || !strings.Contains(agent.Instruction, "Never modify files") {
 		t.Fatalf("seeded explore instruction lacks read-only policy: %q", agent.Instruction)
+	}
+}
+
+func TestAgentContextBudgetInheritsRootPercent(t *testing.T) {
+	t.Parallel()
+	defaultAgent := agentdef.AgentDef{}
+	if got := defaultAgent.EffectiveContextBudgetPercent(35); got != 35 {
+		t.Fatalf("inherited context budget = %d, want 35", got)
+	}
+	defaultAgent.ContextBudget = &agentdef.AgentContextBudget{MaxRequestPercent: 0}
+	if got := defaultAgent.EffectiveContextBudgetPercent(35); got != 35 {
+		t.Fatalf("zero context budget = %d, want inherited 35", got)
+	}
+	defaultAgent.ContextBudget.MaxRequestPercent = 60
+	if got := defaultAgent.EffectiveContextBudgetPercent(35); got != 60 {
+		t.Fatalf("overridden context budget = %d, want 60", got)
 	}
 }
 
@@ -1298,13 +1317,13 @@ func TestValidateAgentEligibility(t *testing.T) {
 		}(), want: true},
 		{name: "openai scope mismatch", agent: func() agentdef.AgentDef {
 			agent := base
-			agent.ToolScope = ""
+			agent.ToolScope = nil
 			return agent
 		}(), want: true},
 		{name: "agent_cli no scope", agent: func() agentdef.AgentDef {
 			agent := base
 			agent.Model = "cli/p1"
-			agent.ToolScope = ""
+			agent.ToolScope = nil
 			return agent
 		}(), providers: agentCLIEligibilityProviders(), want: false},
 		{name: "acp missing confirmation", agent: func() agentdef.AgentDef {
@@ -1356,8 +1375,10 @@ func TestValidateAgentEligibilityProviderMatrix(t *testing.T) {
 				Name:         "matrix_agent",
 				Description:  "A matrix test agent.",
 				Instruction:  "Handle the matrix test.",
-				ToolScope:    test.toolScope,
 				Confirmation: test.confirmation,
+			}
+			if test.toolScope != "" {
+				agent.ToolScope = agentdef.ToolScope{test.toolScope}
 			}
 			if test.agentClass == "AcpAgent" {
 				agent.Runtime = providerName + "/p1"
@@ -1408,7 +1429,7 @@ func validCandidateAgent() agentdef.AgentDef {
 		Description:     "Creates a new delegated agent.",
 		Instruction:     "Handle the delegated request.",
 		IncludeContents: "none",
-		ToolScope:       "invocation_scoped",
+		ToolScope:       agentdef.ToolScope{"invocation_scoped"},
 	}
 }
 

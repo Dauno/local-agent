@@ -51,7 +51,7 @@ func TestEnsureBaseArtifactsFirstRun(t *testing.T) {
 		t.Fatalf("load generated agent definitions: %v", err)
 	}
 	explore, ok := defs.Agents["explore"]
-	if !ok || explore.ToolScope != "invocation_scoped" || explore.IncludeContents != "none" {
+	if !ok || !explore.ToolScope.Contains("invocation_scoped") || explore.IncludeContents != "none" {
 		t.Fatalf("generated explore definition = %+v", explore)
 	}
 	workflowsDir := filepath.Join(snapshot.Paths.StateDir, "workflows")

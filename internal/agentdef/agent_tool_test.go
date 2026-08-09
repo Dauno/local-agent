@@ -62,6 +62,10 @@ include_contents: none
 tool_scope: invocation_scoped
 `
 
+const agentToolScopedExploreWithBudget = agentToolScopedExplore + `context_budget:
+  max_request_percent: 60
+`
+
 func TestLoadAgentToolComposition(t *testing.T) {
 	defs, err := loadAgentToolDefinitions(t, agentToolRoot, agentToolWorker)
 	if err != nil {
@@ -82,8 +86,19 @@ func TestLoadScopedOpenAICompatibleAgentTool(t *testing.T) {
 		t.Fatalf("load scoped openai_compatible agent tool: %v", err)
 	}
 	child := defs.Agents["opencode_worker"]
-	if child.ToolScope != "invocation_scoped" {
-		t.Fatalf("tool_scope = %q", child.ToolScope)
+	if !child.ToolScope.Contains("invocation_scoped") {
+		t.Fatalf("tool_scope = %v", child.ToolScope)
+	}
+}
+
+func TestLoadScopedOpenAICompatibleAgentToolContextBudget(t *testing.T) {
+	defs, err := loadAgentToolDefinitions(t, agentToolRoot, agentToolScopedExploreWithBudget)
+	if err != nil {
+		t.Fatalf("load scoped openai_compatible agent tool with context budget: %v", err)
+	}
+	child := defs.Agents["opencode_worker"]
+	if child.ContextBudget == nil || child.ContextBudget.MaxRequestPercent != 60 {
+		t.Fatalf("context budget = %+v, want 60%%", child.ContextBudget)
 	}
 }
 
