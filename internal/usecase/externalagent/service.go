@@ -82,7 +82,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		return nil, errors.New("external-agent job store and runtime are required")
 	}
 	if deps.Clock == nil {
-		deps.Clock = systemClock{}
+		deps.Clock = port.SystemClock{}
 	}
 	if deps.MaxResultBytes <= 0 || deps.MaxResultBytes > domain.MaxExternalAgentResultBytes {
 		deps.MaxResultBytes = domain.MaxExternalAgentResultBytes
@@ -883,7 +883,3 @@ func stringsEmpty(values ...string) bool {
 	}
 	return false
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }

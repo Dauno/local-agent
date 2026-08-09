@@ -85,7 +85,7 @@ type ProgressRecorder struct {
 // owner is the job lease owner captured at claim time.
 func NewProgressRecorder(store port.ExternalAgentJobProgressStore, registry port.ACPProcessRegistry, clock port.Clock, logger port.Logger, metrics port.MetricRecorder, gauge *ActiveProgressGauge, warnAfter time.Duration, jobID, owner string, attempt int) *ProgressRecorder {
 	if clock == nil {
-		clock = systemClock{}
+		clock = port.SystemClock{}
 	}
 	if logger == nil {
 		logger = noopLogger{}

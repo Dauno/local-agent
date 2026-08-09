@@ -182,7 +182,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		}
 	}
 	if deps.Clock == nil {
-		deps.Clock = systemClock{}
+		deps.Clock = port.SystemClock{}
 	}
 	if deps.Logger == nil {
 		deps.Logger = slog.New(slog.NewTextHandler(io.Discard, nil))
@@ -1434,10 +1434,6 @@ func channelKindForChannel(channelID string) domain.ChannelKind {
 	}
 	return domain.ChannelPublic
 }
-
-type systemClock struct{}
-
-func (systemClock) Now() time.Time { return time.Now() }
 
 // unlimitedModelCalls preserves standalone bot-service behavior. Runtime
 // composition always injects the shared process-wide limiter.
