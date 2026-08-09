@@ -5,9 +5,9 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 20 batches de refactor completados + docs update, 23 commits de refactor (A8, A11 y A13a-ext divididos en dos commits), neto acumulado **−343 líneas**. A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`.
-- Tests verdes en todo momento; no se modificó ningún archivo de test.
-- 3 archivos con cambios preexistentes sin commitear (no tocar, quedan fuera de cualquier commit).
+- 21 batches de refactor completados + docs update, 24 commits de refactor (A8, A11 y A13a-ext divididos en dos commits), neto acumulado **−359 líneas**. A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`. A13c2 aplicó los cortes 2, 3 y 4; saltó 1 y 5 por la regla de no tocar tests.
+- Tests verdes en todo momento; los commits del refactor no modificaron archivos de test.
+- Los cambios preexistentes sin stagear quedan fuera de estos commits.
 
 ## Commits por batch
 
@@ -38,28 +38,15 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A13a-ext.2 (cortes 9/10) | `internal/usecase/bootstrap/service.go` + `internal/app/application.go` | `501cd5e` (`+5/-15`, net `−10`) |
 | A13b1.2 (corte 2) | `internal/port/agentbuilder.go` + `internal/usecase/agentbuilder/service.go` | **SALTADO (no aplicado)**: `TestDependencyDirection`; `internal/port` no puede depender de `agentdef` y `current any` es desacoplamiento deliberado de la interfaz. Propuesto en `f61abc2`, revertido en `2e61b22`; acumulado se mantiene en **−295** (neto 0) |
 | A13c1.1 (cortes 1, 2, 5, 6, 7, 8 y 9) | `internal/usecase/sandbox/service.go` | `1aa7e5e` (`+8/-56`, neto **−48**) |
+| A13c2.1 (cortes 2, 3 y 4) | `internal/adapter/memorycurator/curator.go` | `53886f3` (`+6/-22`, neto **−16**) |
 
-## Proceso por batch
+## Proceso y reglas por batch
 
-1. Leer los archivos de producción del path.
-2. Evaluar si conviene invocar `ponytail-review` (agente más capaz para over-engineering); si aplica, usar su salida como base de los hallazgos.
-3. Presentar hallazgos con neto estimado de líneas + caveats; asignar el batch a Luna con aprobación explícita previa del operador.
-
-## Reglas por batch
-
-- Para cada batch: decidir explícitamente **usar o no `ponytail-review`** y anotar la decisión.
-- **Presentar hallazgos en tabla** (archivo / hallazgo / neto aprox.) con caveats.
-- **Luna ejecuta el batch** en job durable — 1 commit por batch, aprobación explícita antes de invocar.
-
-## Reglas del refactor
-
-- No modificar archivos de test.
-- Preservar mensajes de error/log exactos (los tests los fijan).
-- `git status` antes de tocar; cambios preexistentes fuera del commit.
-- 1 commit por batch, mensaje conventional (refactor/docs/...).
-- Verificación: `go build ./...`, `go vet ./...`, `go test` (paquete + suite), `git diff --check`.
-- Refactors con neto ≤ 0 se descartan (ej.: clasificador de ambigüedad compartido, +3 neto).
-- **Scope por delegación:** máximo 2–3 archivos por invocación de worker/review; nunca carpetas completas ni contexto de conversación entero; partir batches mayores en sub-batches.
+- Leer producción; decidir y anotar si se usa `ponytail-review`; presentar hallazgos en tabla con neto y caveats.
+- Ejecutar solo tras aprobación explícita; Luna usa job durable y máximo 2–3 archivos por invocación.
+- No modificar tests; preservar mensajes de error/log exactos; revisar `git status` antes y dejar cambios preexistentes fuera.
+- Crear un commit conventional por batch y verificar `go build ./...`, `go vet ./...`, `go test` (paquete y suite) y `git diff --check`.
+- Cada commit debe tener neto < 0; revertirlo si no cumple. No invocar workers sobre carpetas completas ni sobre todo el contexto.
 
 ## Pendientes
 
@@ -77,4 +64,15 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - A13a-ext: `ponytail-review` usado en el segundo intento, exitoso. Corte 3 aplicado en `43d2503`; no hubo callers/tests de `Preview` dependientes del alias `Model`. Cortes 9/10 aplicados en `501cd5e`; `CanonicalRoot` se resolvió una vez en `app.New`, y se preservaron mensajes y firmas. Corte 8 **saltado**: aunque el adapter crea padres, `ProjectFiles.CreateFile` no lo promete en su contrato y bootstrap no debe depender de ese detalle concreto. No se modificaron tests.
 - A13b1: `ponytail-review` hallazgo #2 inválido por arquitectura. El corte 2 se marcó **SALTADO (no aplicado)** porque `TestDependencyDirection` prohíbe que `internal/port` dependa de `agentdef`; `current any` es desacoplamiento deliberado de la interfaz. La propuesta `f61abc2` fue revertida en `2e61b22`; acumulado **−295** (neto 0 del revert). No se modificaron tests.
 - A13c1: `ponytail-review` usado. Aplicados los cortes 1 (gate: `ErrUnauthorized` solo aparecía en `service.go`), 2 (gates: sin inyección `Clock:` en producción y sin uso de `Clock` en tests), 5 (gate: sin lectores de `SandboxResult.Error`), 6 (gate: `isAllowed` solo tenía su declaración y una llamada), 7 (ambos `validateRelativePath` pass-through conservan el mensaje byte-idéntico), 8 (gate: `createWorktreeTool` no tiene registro real y no existe executor para `CapRunCommand`) y 9 (gate: un helper y una llamada; inline con comportamiento byte-idéntico). Se saltaron 3 (gate fallido: `internal/adapter/toolfactory/toolfactory_test.go:602` lee `op.Actor`) y 4 (gate fallido: `internal/usecase/sandbox/service_test.go:205` y `internal/adapter/fssandbox/sandbox_test.go:74,109` leen `OutputBytes`). Commit `1aa7e5e` (`+8/-56`, neto **−48**); acumulado **−343**. No se modificaron tests.
+- A13c2: `ponytail-review` usado. Registro completo de los cinco hallazgos, con localización original:
+
+| Hallazgo | Localización original | Veredicto y motivo |
+|---|---|---|
+| #1 extracción/merge trusted-entity | `curator.go:82,86-93,149-165`; test `curator_test.go:103-126` | **SALTADO**: requiere borrar o editar tests; la regla de no tocar tests lo excluye. |
+| #2 recuperación de substring JSON (`extractJSONObject`) | `curator.go:242,281-290` | **APLICADO**: gate aprobado; no había referencias en tests. Se dejó `strings.TrimSpace(response)`. |
+| #3 `ModelCalls` duplicado | `curator.go:31,50,69` | **APLICADO**: gate aprobado; no había referencias al campo en tests. Se usa `c.config.ModelCalls`. |
+| #4 branch de timeout negativo | `curator.go:64-68` | **APLICADO**: gate aprobado; no había configuraciones `Timeout` negativas ni dependencia del branch en tests. |
+| #5 receiver de `parsePatch` y `emptyPatchLLM` | `curator.go:241`; tests `curator_test.go:129-133,135,140,149-154` | **SALTADO**: requiere tocar call sites y fake de tests; la regla de no tocar tests lo excluye. |
+
+- A13c2 commit de producción: `53886f3`, `git show --shortstat`: `+6/-22`, neto **−16**. El segundo commit de este batch es esta actualización documental; su hash y shortstat se registran en el reporte de cierre.
 ---
