@@ -55,7 +55,11 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 			c.metrics.Observe(domain.MetricContextCompileDuration, time.Since(started).Seconds(), nil)
 		}
 	}()
-	beforeChars, err := domain.ContentCost(req.Contents)
+	inputContents := domain.CloneContents(req.Contents)
+	if err := normalizeProjectionKeys(inputContents); err != nil {
+		return domain.CompileResult{}, fmt.Errorf("context compiler: normalize reserved response keys: %w", err)
+	}
+	beforeChars, err := domain.ContentCost(inputContents)
 	if err != nil {
 		return domain.CompileResult{}, fmt.Errorf("context compiler: measure before: %w", err)
 	}
@@ -67,7 +71,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	}
 	diag := domain.CompileDiagnostics{RequestCodePointsBefore: beforeChars, HardLimitTokens: hardLimit}
 
-	turns, activeStart, err := domain.ClassifyConversationTurns(req.Contents,
+	turns, activeStart, err := domain.ClassifyConversationTurns(inputContents,
 		domain.TurnClassificationOptions{OpenInvocationIDs: req.OpenInvocationIDs})
 	if err != nil {
 		return domain.CompileResult{}, fmt.Errorf("context compiler: classify turns: %w", err)
@@ -84,7 +88,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	}
 
 	completed := turns[:activeTurnIdx]
-	activeContents := domain.CloneContents(req.Contents[activeStart:])
+	activeContents := domain.CloneContents(inputContents[activeStart:])
 
 	// Classify active parts into protected and reducible.
 	protectedParts, reducibleParts := classifyActiveParts(activeContents)
@@ -208,6 +212,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	optionalEvicted := false
 	var reducibleForAlloc []reduciblePart
 	var minEnvForAlloc []int
+	var plannedProjections []projectionMutation
 	for i, rp := range reducibleParts {
 		if minEnvCosts[i] < rp.cost {
 			reducibleForAlloc = append(reducibleForAlloc, rp)
@@ -264,18 +269,21 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 		}
 	}
 	if count.Tokens > allocationLimit && len(reducibleForAlloc) > 0 {
-		if c.resultStore == nil {
-			return domain.CompileResult{Diagnostics: diag}, errors.New("context compiler: recoverable result store is required for response reduction")
-		}
 		optionalCost := sumCosts([]int{turnCost(summaryContent), turnCost(selectedTurns), turnCost(capsuleContent)})
 		available := allocationLimit - req.FixedRequestTokens - protectedCost - totalEffectiveMin - optionalCost
 		if available < 0 {
 			available = 0
 		}
 		allocations := allocateResponseBudgets(reducibleForAlloc, minEnvForAlloc, available)
-		responseCodePointsRemoved, responsesExternalized, err = c.reduceResponses(ctx, req, reducibleForAlloc, allocations, activeContents)
+		_, plannedProjections, err = c.reduceResponses(ctx, req, reducibleForAlloc, allocations, activeContents)
 		if err != nil {
 			return domain.CompileResult{}, err
+		}
+		if len(plannedProjections) > 0 {
+			activeContents, responseCodePointsRemoved, responsesExternalized, err = c.materializeProjections(ctx, req, activeContents, plannedProjections)
+			if err != nil {
+				return domain.CompileResult{}, err
+			}
 		}
 	}
 	diag.ResponsesExternalized = responsesExternalized
@@ -308,7 +316,7 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	}
 	diag.ResponseTokensRemoved = responseTokensRemoved
 	if count.Tokens > hardLimit {
-		lateContents, lateRemoved, lateExternalized, lateErr := c.lateExternalize(ctx, req, activeContents, hardLimit)
+		lateContents, lateRemoved, lateExternalized, lateErr := c.lateExternalize(ctx, req, activeContents, reducibleParts, plannedProjections, hardLimit)
 		if lateErr != nil {
 			diag.RequestTokensAfter = lateRemoved
 			diag.ReductionReason = "min_irreducible"
@@ -457,7 +465,11 @@ func triggerTokens(hard, trigger int) int {
 	return trigger
 }
 
-const projectionReferenceShape = 64
+const (
+	projectionReferenceShape = 64
+	projectionMarkerKey      = "_local_agent_context_projection"
+	toolProjectionMarkerKey  = "_tool_local_agent_context_projection"
+)
 
 func dryRunProjectionMarker(reason string, originalBytes int) domain.ContextProjectionMarker {
 	return domain.ContextProjectionMarker{
@@ -484,7 +496,7 @@ func projectionResponse(response *domain.FunctionResponse, marker domain.Context
 	} else {
 		result.Response = make(map[string]any, 1)
 	}
-	result.Response["_local_agent_context_projection"] = marker
+	result.Response[projectionMarkerKey] = marker
 	return result
 }
 
@@ -503,18 +515,24 @@ func dryRunActiveContents(active []domain.Content, parts []reduciblePart) []doma
 }
 
 // lateExternalize is the single coarse fallback after optional context and
-// existing excerpts have been removed. The dry run is deliberately performed
-// with the production reference and digest shapes before any result is stored.
-func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileRequest, active []domain.Content, hard int) ([]domain.Content, int, int, error) {
-	_, parts := classifyActiveParts(active)
+// existing excerpts have been removed. It uses the initial analysis rather
+// than classifying already projected input again.
+func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileRequest, active []domain.Content, analyzed []reduciblePart, planned []projectionMutation, hard int) ([]domain.Content, int, int, error) {
+	plannedIndexes := make(map[projectionIndex]struct{}, len(planned))
+	for _, projection := range planned {
+		plannedIndexes[projectionIndex{contentIndex: projection.contentIndex, partIndex: projection.partIndex}] = struct{}{}
+	}
+	parts := make([]reduciblePart, 0, len(analyzed))
+	for _, part := range analyzed {
+		if _, alreadyProjected := plannedIndexes[projectionIndex{contentIndex: part.contentIndex, partIndex: part.partIndex}]; alreadyProjected {
+			continue
+		}
+		parts = append(parts, part)
+	}
 	if len(parts) == 0 {
 		return nil, 0, 0, nil
 	}
-	// Production result stores require both ownership bindings. Legacy injected
-	// compilers without those bindings cannot safely perform the late write.
-	if len(parts) == 1 && req.Actor == "" && req.ConversationKey == "" {
-		return nil, hard + 1, 0, &domain.IrreducibleContextError{MinimumTokens: hard + 1, HardTokens: hard}
-	}
+
 	minimum := domain.CloneContents(active)
 	for _, part := range parts {
 		full, err := fullResponseJSON(part.part.FunctionResponse)
@@ -534,44 +552,16 @@ func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileReques
 	if minimumCount.Tokens > hard {
 		return nil, minimumCount.Tokens, 0, &domain.IrreducibleContextError{MinimumTokens: minimumCount.Tokens, HardTokens: hard}
 	}
-	if c.resultStore == nil {
-		return nil, minimumCount.Tokens, 0, errors.New("context compiler: recoverable result store is required for late externalization")
-	}
 
-	result := domain.CloneContents(active)
-	removed := 0
+	projections := make([]projectionMutation, 0, len(parts))
 	for _, part := range parts {
-		response := part.part.FunctionResponse
-		full, err := fullResponseJSON(response)
-		if err != nil {
-			return nil, 0, 0, fmt.Errorf("context compiler: serialize late response %s: %w", response.ID, err)
+		projection, planErr := newProjectionMutation(part, 0, "late_externalization")
+		if planErr != nil {
+			return nil, 0, 0, planErr
 		}
-		digest := sha256.Sum256(full)
-		sha := fmt.Sprintf("%x", digest[:])
-		stored, err := c.resultStore.Put(ctx, port.PutResultRequest{
-			Actor: req.Actor, ConversationKey: req.ConversationKey,
-			Kind: "context_projection", Content: string(full),
-		})
-		if err != nil {
-			return nil, 0, 0, fmt.Errorf("context compiler: store late result for %s: %w", response.ID, err)
-		}
-		if stored.Ref == "" {
-			return nil, 0, 0, fmt.Errorf("context compiler: store late result for %s returned an empty reference", response.ID)
-		}
-		marker := domain.ContextProjectionMarker{Reason: "late_externalization", ResultRef: stored.Ref, SHA256: sha, OriginalBytes: len(full), Complete: false}
-		result[part.contentIndex].Parts[part.partIndex] = domain.ContentPart{FunctionResponse: projectionResponse(response, marker, "", false)}
-		minCost := part.cost
-		if cost, costErr := (domain.ContentPart{FunctionResponse: projectionResponse(response, marker, "", false)}).Cost(); costErr == nil {
-			minCost = cost
-		}
-		if part.cost > minCost {
-			removed += part.cost - minCost
-		}
+		projections = append(projections, projection)
 	}
-	if err := validateProjectedContents(result, req.OpenInvocationIDs); err != nil {
-		return nil, 0, 0, fmt.Errorf("context compiler: validate late projection: %w", err)
-	}
-	return result, removed, len(parts), nil
+	return c.materializeProjections(ctx, req, active, projections)
 }
 
 func assembleContents(summary, recent, capsule, active []domain.Content) []domain.Content {
@@ -589,11 +579,11 @@ func stripProjectedExcerpts(contents []domain.Content) {
 			if response == nil {
 				continue
 			}
-			if _, projected := response.Response["_local_agent_context_projection"]; !projected {
+			if _, projected := response.Response[projectionMarkerKey]; !projected {
 				continue
 			}
 			for key, value := range response.Response {
-				if key == "_local_agent_context_projection" {
+				if key == projectionMarkerKey {
 					continue
 				}
 				if text, ok := value.(string); ok && len(text) > 256 {
@@ -620,15 +610,35 @@ type reduciblePart struct {
 	cost         int
 }
 
-// reduceResponses externalizes oversized FunctionResponse payloads. It
-// modifies activeContents in place. Returns tokens removed and count.
+type projectionIndex struct {
+	contentIndex int
+	partIndex    int
+}
+
+// projectionMutation contains all deterministic work needed before storage.
+// It is private so untrusted input cannot provide a ready-to-materialize marker.
+type projectionMutation struct {
+	contentIndex int
+	partIndex    int
+	fullJSON     []byte
+	digest       string
+	reason       string
+	excerpt      string
+	budget       int
+	keepExcerpt  bool
+	response     *domain.FunctionResponse
+	sourceCost   int
+}
+
+// reduceResponses plans oversized FunctionResponse payloads without writing
+// results or changing activeContents.
 func (c *Compiler) reduceResponses(
-	ctx context.Context,
+	_ context.Context,
 	req domain.CompileRequest,
 	parts []reduciblePart,
 	allocations []int,
-	activeContents []domain.Content,
-) (tokensRemoved int, externalized int, err error) {
+	_ []domain.Content,
+) (tokensRemoved int, projections []projectionMutation, err error) {
 	for i, rp := range parts {
 		currentCost := rp.cost
 		allocation := allocations[i]
@@ -642,79 +652,115 @@ func (c *Compiler) reduceResponses(
 		}
 		tokensRemoved += removed
 
-		fr := rp.part.FunctionResponse
-
-		fullJSON, marshalErr := fullResponseJSON(fr)
-		if marshalErr != nil {
-			return 0, 0, fmt.Errorf("context compiler: serialize response %s: %w", fr.ID, marshalErr)
+		projection, planErr := newProjectionMutation(rp, allocation, "request_budget")
+		if planErr != nil {
+			return 0, nil, planErr
 		}
-		digest := sha256.Sum256(fullJSON)
-		fullSHA256 := fmt.Sprintf("%x", digest[:])
-
-		putReq := port.PutResultRequest{
-			Actor:           req.Actor,
-			ConversationKey: req.ConversationKey,
-			Kind:            "context_projection",
-			Content:         string(fullJSON),
-		}
-		stored, storeErr := c.resultStore.Put(ctx, putReq)
-		if storeErr != nil {
-			return 0, 0, fmt.Errorf("context compiler: store result for %s: %w", fr.ID, storeErr)
-		}
-
-		// Measure the minimum envelope cost (identity + marker, no inline text).
-		placeholderMarker := domain.ContextProjectionMarker{
-			Reason:        "request_budget",
-			ResultRef:     stored.Ref,
-			SHA256:        fullSHA256,
-			OriginalBytes: len(fullJSON),
-			InlineBytes:   0,
-			Complete:      false,
-		}
-		minFR := &domain.FunctionResponse{
-			ID:           fr.ID,
-			Name:         fr.Name,
-			WillContinue: fr.WillContinue,
-			Response:     map[string]any{"_local_agent_context_projection": placeholderMarker},
-		}
-		minCost, costErr := domain.ContentPart{FunctionResponse: minFR}.Cost()
-		if costErr != nil {
-			minCost = 300
-		}
-
-		inlineBudget := allocation - minCost
-		if inlineBudget < 0 {
-			inlineBudget = 0
-		}
-
-		// Extract primary text from response.
-		respText := extractResponseText(fr.Response)
-		excerpt := truncateToCodePoints(respText, inlineBudget)
-
-		// Build the reduced response with truncated text and marker.
-		reducedResp := cloneMapShallow(fr.Response)
-		reduceResponseFields(reducedResp, excerpt)
-		reducedResp["_local_agent_context_projection"] = domain.ContextProjectionMarker{
-			Reason:        "request_budget",
-			ResultRef:     stored.Ref,
-			SHA256:        fullSHA256,
-			OriginalBytes: len(fullJSON),
-			InlineBytes:   utf8.RuneCountInString(excerpt),
-			Complete:      false,
-		}
-		reducedFR := &domain.FunctionResponse{
-			ID:           fr.ID,
-			Name:         fr.Name,
-			WillContinue: fr.WillContinue,
-			Response:     reducedResp,
-		}
-
-		activeContents[rp.contentIndex].Parts[rp.partIndex] = domain.ContentPart{
-			FunctionResponse: reducedFR,
-		}
-		externalized++
+		projections = append(projections, projection)
 	}
-	return tokensRemoved, externalized, nil
+	return tokensRemoved, projections, nil
+}
+
+func newProjectionMutation(part reduciblePart, budget int, reason string) (projectionMutation, error) {
+	response := part.part.FunctionResponse
+	fullJSON, err := fullResponseJSON(response)
+	if err != nil {
+		return projectionMutation{}, fmt.Errorf("context compiler: serialize response %s: %w", response.ID, err)
+	}
+	digest := sha256.Sum256(fullJSON)
+	projection := projectionMutation{
+		contentIndex: part.contentIndex,
+		partIndex:    part.partIndex,
+		fullJSON:     fullJSON,
+		digest:       fmt.Sprintf("%x", digest[:]),
+		reason:       reason,
+		budget:       budget,
+		keepExcerpt:  budget > 0,
+		response:     response,
+		sourceCost:   part.cost,
+	}
+
+	marker := dryRunProjectionMarker(reason, len(fullJSON))
+	minimumResponse := &domain.FunctionResponse{
+		ID:           response.ID,
+		Name:         response.Name,
+		WillContinue: response.WillContinue,
+		Response:     map[string]any{projectionMarkerKey: marker},
+	}
+	minimumCost, costErr := domain.ContentPart{FunctionResponse: minimumResponse}.Cost()
+	if costErr != nil {
+		minimumCost = 300
+	}
+	inlineBudget := budget - minimumCost
+	if inlineBudget < 0 {
+		inlineBudget = 0
+	}
+	projection.excerpt = truncateToCodePoints(extractResponseText(response.Response), inlineBudget)
+	return projection, nil
+}
+
+func (c *Compiler) materializeProjections(ctx context.Context, req domain.CompileRequest, active []domain.Content, projections []projectionMutation) ([]domain.Content, int, int, error) {
+	if len(projections) == 0 {
+		return domain.CloneContents(active), 0, 0, nil
+	}
+	if c.resultStore == nil {
+		return nil, 0, 0, errors.New("context compiler: recoverable result store is required for projection materialization")
+	}
+	if strings.TrimSpace(req.Actor) == "" {
+		return nil, 0, 0, errors.New("context compiler: actor is required before projection storage")
+	}
+	if strings.TrimSpace(req.ConversationKey) == "" {
+		return nil, 0, 0, errors.New("context compiler: conversation key is required before projection storage")
+	}
+	for _, projection := range projections {
+		if projection.response == nil || projection.reason == "" || projection.digest == "" || len(projection.fullJSON) == 0 {
+			return nil, 0, 0, errors.New("context compiler: invalid projection mutation")
+		}
+		if projection.contentIndex < 0 || projection.contentIndex >= len(active) || projection.partIndex < 0 || projection.partIndex >= len(active[projection.contentIndex].Parts) {
+			return nil, 0, 0, errors.New("context compiler: projection mutation index is out of range")
+		}
+	}
+
+	refs := make([]string, len(projections))
+	for i, projection := range projections {
+		stored, err := c.resultStore.Put(ctx, port.PutResultRequest{
+			Actor: req.Actor, ConversationKey: req.ConversationKey,
+			Kind: "context_projection", Content: string(projection.fullJSON),
+		})
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("context compiler: store result for %s: %w", projection.response.ID, err)
+		}
+		if stored.Ref == "" {
+			return nil, 0, 0, fmt.Errorf("context compiler: store result for %s returned an empty reference", projection.response.ID)
+		}
+		refs[i] = stored.Ref
+	}
+
+	result := domain.CloneContents(active)
+	removed := 0
+	for i, projection := range projections {
+		marker := domain.ContextProjectionMarker{
+			Reason:        projection.reason,
+			ResultRef:     refs[i],
+			SHA256:        projection.digest,
+			OriginalBytes: len(projection.fullJSON),
+			InlineBytes:   utf8.RuneCountInString(projection.excerpt),
+			Complete:      false,
+		}
+		projected := projectionResponse(projection.response, marker, projection.excerpt, projection.keepExcerpt)
+		result[projection.contentIndex].Parts[projection.partIndex] = domain.ContentPart{FunctionResponse: projected}
+		projectedCost, err := result[projection.contentIndex].Parts[projection.partIndex].Cost()
+		if err != nil {
+			return nil, 0, 0, fmt.Errorf("context compiler: measure projected response %s: %w", projection.response.ID, err)
+		}
+		if projection.sourceCost > projectedCost {
+			removed += projection.sourceCost - projectedCost
+		}
+	}
+	if err := validateProjectedContents(result, req.OpenInvocationIDs); err != nil {
+		return nil, 0, 0, fmt.Errorf("context compiler: validate projection materialization: %w", err)
+	}
+	return result, removed, len(projections), nil
 }
 
 // allocateResponseBudgets reserves every response envelope, then fills the
@@ -788,10 +834,33 @@ func allocateResponseBudgets(parts []reduciblePart, minimums []int, available in
 // Classification helpers
 // ---------------------------------------------------------------------------
 
+// normalizeProjectionKeys moves reserved projection keys from the initial
+// input into the tool-data namespace. A collision fails closed so no tool data
+// is silently overwritten.
+func normalizeProjectionKeys(contents []domain.Content) error {
+	for contentIndex := range contents {
+		for partIndex := range contents[contentIndex].Parts {
+			response := contents[contentIndex].Parts[partIndex].FunctionResponse
+			if response == nil {
+				continue
+			}
+			if _, reserved := response.Response[projectionMarkerKey]; !reserved {
+				continue
+			}
+			if _, collision := response.Response[toolProjectionMarkerKey]; collision {
+				return fmt.Errorf("reserved response key collision at content %d part %d", contentIndex, partIndex)
+			}
+			response.Response[toolProjectionMarkerKey] = response.Response[projectionMarkerKey]
+			delete(response.Response, projectionMarkerKey)
+		}
+	}
+	return nil
+}
+
 // classifyActiveParts splits active contents into protected content and
 // reducible FunctionResponse parts. User text, model text, function calls,
 // and confirmation responses are protected. Non-confirmation FunctionResponses
-// in any role are reducible.
+// in any role are reducible. Projection markers are never trusted here.
 func classifyActiveParts(contents []domain.Content) (protected []domain.Content, reducible []reduciblePart) {
 	protected = make([]domain.Content, 0, len(contents))
 	for ci, content := range contents {
@@ -800,16 +869,6 @@ func classifyActiveParts(contents []domain.Content) (protected []domain.Content,
 		hasReducible := false
 		for pi, part := range content.Parts {
 			if part.FunctionResponse != nil && part.FunctionResponse.Name != domain.ConfirmationFunctionName {
-				if raw, projected := part.FunctionResponse.Response["_local_agent_context_projection"]; projected && !validProjectionMarker(raw) {
-					delete(part.FunctionResponse.Response, "_local_agent_context_projection")
-					part.FunctionResponse.Response["_tool_local_agent_context_projection"] = raw
-					contents[ci].Parts[pi] = part
-				}
-				if validProjectionMarker(part.FunctionResponse.Response["_local_agent_context_projection"]) {
-					protectedContent.Parts = append(protectedContent.Parts, part)
-					hasProtected = true
-					continue
-				}
 				cost, err := part.Cost()
 				if err != nil {
 					cost = 0
@@ -850,7 +909,7 @@ func minEnvelopeCosts(parts []reduciblePart) []int {
 			Name:         fr.Name,
 			WillContinue: fr.WillContinue,
 			Response: map[string]any{
-				"_local_agent_context_projection": dryRunProjectionMarker("request_budget", len(full)),
+				projectionMarkerKey: dryRunProjectionMarker("request_budget", len(full)),
 			},
 		}
 		cost, err := domain.ContentPart{FunctionResponse: minFR}.Cost()
@@ -865,23 +924,6 @@ func minEnvelopeCosts(parts []reduciblePart) []int {
 // ---------------------------------------------------------------------------
 // Text and map helpers
 // ---------------------------------------------------------------------------
-
-func validProjectionMarker(value any) bool {
-	switch marker := value.(type) {
-	case domain.ContextProjectionMarker:
-		return marker.ResultRef != "" && len(marker.SHA256) == projectionReferenceShape && !marker.Complete
-	case map[string]any:
-		ref, refOK := marker["result_ref"].(string)
-		sha, shaOK := marker["sha256"].(string)
-		_, reasonOK := marker["reason"].(string)
-		_, originalOK := marker["original_bytes"].(float64)
-		_, inlineOK := marker["inline_bytes"].(float64)
-		complete, completeOK := marker["complete"].(bool)
-		return refOK && shaOK && reasonOK && originalOK && inlineOK && completeOK && !complete && ref != "" && len(sha) == projectionReferenceShape
-	default:
-		return false
-	}
-}
 
 // extractResponseText returns the primary text payload from a response map.
 func extractResponseText(response map[string]any) string {
@@ -907,7 +949,7 @@ func reduceResponseFields(m map[string]any, excerpt string) {
 		"path": true, "sha256": true, "sha": true, "digest": true,
 		"status": true, "kind": true, "type": true,
 		"id": true, "name": true,
-		"_local_agent_context_projection": true,
+		projectionMarkerKey: true,
 	}
 	for k, v := range m {
 		if metaKeys[strings.ToLower(k)] {
