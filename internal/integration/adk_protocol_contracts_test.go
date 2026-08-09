@@ -350,7 +350,8 @@ func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
 		// The retry makes the orphaned call part of the retained active suffix.
 		// FR-11 and section 7.3 require structural acceptance here; completeness
 		// belongs to the later provider-readiness/preflight boundary.
-		compiler := contextcompiler.New(nil, protocolTokenCounter{})
+		budget := domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000}
+		compiler := &recordingProtocolCompiler{delegate: contextcompiler.New(nil, protocolTokenCounter{})}
 		recoveryModel := &scriptedProtocolLLM{steps: []scriptedModelStep{{responses: []*model.LLMResponse{
 			protocolTextResponse("recovery response"),
 		}}}}
@@ -360,7 +361,7 @@ func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
 			Model:           recoveryModel,
 			SessionService:  reopenedService,
 			ContextCompiler: compiler,
-			ContextBudget:   domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000},
+			ContextBudget:   budget,
 			StaticTools:     []tool.Tool{newProtocolTool(t, "inspect_project", false, nil)},
 			ProviderFamily:  domain.ProviderFamilyOpenAICompatible,
 		})
@@ -389,6 +390,19 @@ func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
 		if !containsString(requests[0].functionCallIDs, callID) || !containsString(requests[0].texts, "retry after restart") {
 			_ = reopened.Close()
 			t.Fatalf("recovery model request = %#v, want orphaned call and new retry", requests[0])
+		}
+		compiled := compiler.snapshots()
+		if len(compiled) != 1 {
+			_ = reopened.Close()
+			t.Fatalf("compiler requests = %d, want one", len(compiled))
+		}
+		if len(compiled[0].Contents) != 3 || compiled[0].Actor != protocolActor || compiled[0].ConversationKey != string(key) || compiled[0].ModelBudget != budget {
+			_ = reopened.Close()
+			t.Fatalf("compiler request identity = %#v, want contents, actor, conversation, and budget", compiled[0])
+		}
+		if _, ok := compiled[0].OpenInvocationIDs[callID]; !ok {
+			_ = reopened.Close()
+			t.Fatalf("compiler open invocation IDs = %#v, want orphaned call %q", compiled[0].OpenInvocationIDs, callID)
 		}
 		afterRestart := readProtocolEvents(t, reopenedService, key)
 		if len(afterRestart) != len(beforeRestart)+2 {
@@ -438,7 +452,7 @@ func TestADKCrashBoundaryReproducesMissingResponse(t *testing.T) {
 }
 
 // TestADKCallbackWarningDocumentsCurrentBehavior verifies that the callback
-// uses supported session-service access and does not call ctx.Session().
+// does not call ctx.Session() and tolerates a failed additional session read.
 func TestADKCallbackWarningDocumentsCurrentBehavior(t *testing.T) {
 	var output bytes.Buffer
 	logMu.Lock()
@@ -457,17 +471,19 @@ func TestADKCallbackWarningDocumentsCurrentBehavior(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	service := sqlite.NewAdkSessionService(store)
+	service := &failAfterFirstSessionReadService{Service: sqlite.NewAdkSessionService(store)}
 	model := &scriptedProtocolLLM{steps: []scriptedModelStep{{responses: []*model.LLMResponse{
 		protocolTextResponse("callback warning captured"),
 	}}}}
+	budget := domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000}
+	compiler := &recordingProtocolCompiler{}
 	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
 		AgentName:       "Protocol Contract Agent",
 		Instruction:     "Answer the test request.",
 		Model:           model,
 		SessionService:  service,
-		ContextCompiler: noOpProtocolCompiler{},
-		ContextBudget:   domain.RequestBudget{HardTokens: 1_000_000, TargetTokens: 1_000_000},
+		ContextCompiler: compiler,
+		ContextBudget:   budget,
 		ProviderFamily:  domain.ProviderFamilyOpenAICompatible,
 	})
 	if err != nil {
@@ -481,6 +497,16 @@ func TestADKCallbackWarningDocumentsCurrentBehavior(t *testing.T) {
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
+	if service.readCount() != 1 {
+		t.Fatalf("session reads = %d, want one normal runner read", service.readCount())
+	}
+	compiled := compiler.snapshots()
+	if len(compiled) != 1 || len(compiled[0].Contents) != 1 || compiled[0].Contents[0].Parts[0].Text != "capture callback warning" {
+		t.Fatalf("compiler request contents = %#v, want current user content", compiled)
+	}
+	if compiled[0].Actor != protocolActor || compiled[0].ConversationKey != "slack:T12345678:dm:DCALLBACK1" || compiled[0].ModelBudget != budget || compiled[0].OpenInvocationIDs == nil {
+		t.Fatalf("compiler request metadata = %#v, want actor, conversation, budget, and open IDs", compiled[0])
+	}
 	if strings.Contains(output.String(), "Session() is not supported for callback context") {
 		t.Fatalf("callback log = %q, contains unsupported Session warning", output.String())
 	}
@@ -488,10 +514,35 @@ func TestADKCallbackWarningDocumentsCurrentBehavior(t *testing.T) {
 
 var logMu sync.Mutex
 
-type noOpProtocolCompiler struct{}
+type recordingProtocolCompiler struct {
+	delegate port.ContextCompiler
+	mu       sync.Mutex
+	requests []domain.CompileRequest
+}
 
-func (noOpProtocolCompiler) Compile(_ context.Context, request domain.CompileRequest) (domain.CompileResult, error) {
+func (c *recordingProtocolCompiler) Compile(ctx context.Context, request domain.CompileRequest) (domain.CompileResult, error) {
+	c.mu.Lock()
+	request.OpenInvocationIDs = cloneOpenInvocationIDs(request.OpenInvocationIDs)
+	c.requests = append(c.requests, request)
+	c.mu.Unlock()
+	if c.delegate != nil {
+		return c.delegate.Compile(ctx, request)
+	}
 	return domain.CompileResult{Contents: request.Contents}, nil
+}
+
+func (c *recordingProtocolCompiler) snapshots() []domain.CompileRequest {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]domain.CompileRequest(nil), c.requests...)
+}
+
+func cloneOpenInvocationIDs(ids map[string]struct{}) map[string]struct{} {
+	clone := make(map[string]struct{}, len(ids))
+	for id := range ids {
+		clone[id] = struct{}{}
+	}
+	return clone
 }
 
 type protocolTokenCounter struct{}
@@ -513,6 +564,29 @@ func (s *crashBeforeToolResponseService) AppendEvent(ctx context.Context, curren
 		}
 	}
 	return s.Service.AppendEvent(ctx, current, event)
+}
+
+type failAfterFirstSessionReadService struct {
+	session.Service
+	mu    sync.Mutex
+	reads int
+}
+
+func (s *failAfterFirstSessionReadService) Get(ctx context.Context, request *session.GetRequest) (*session.GetResponse, error) {
+	s.mu.Lock()
+	s.reads++
+	read := s.reads
+	s.mu.Unlock()
+	if read > 1 {
+		return nil, errors.New("simulated additional session read failure")
+	}
+	return s.Service.Get(ctx, request)
+}
+
+func (s *failAfterFirstSessionReadService) readCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reads
 }
 
 type recordedAppend struct {

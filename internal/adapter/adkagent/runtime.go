@@ -145,7 +145,7 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, injectEphemeralReference(reference))
 		}
 		if r.contextCompiler != nil {
-			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, CompilerBeforeModelCallbackWithSnapshot(r.contextCompiler, r.contextBudget, r.continuityStore, r.summaryStore, r.sessionService, r.contextCompaction, ephemeral.actor))
+			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, CompilerBeforeModelCallback(r.contextCompiler, r.contextBudget, r.continuityStore, r.summaryStore, r.contextCompaction, ephemeral.actor))
 		}
 	}
 
