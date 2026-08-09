@@ -22,6 +22,28 @@ type RequestBudget struct {
 	TargetTokens  int
 }
 
+func ValidateRequestBudget(budget RequestBudget) error {
+	if budget.HardTokens <= 0 {
+		return fmt.Errorf("request budget: hard tokens must be positive, got %d", budget.HardTokens)
+	}
+	if budget.TriggerTokens < 0 {
+		return fmt.Errorf("request budget: trigger tokens must not be negative, got %d", budget.TriggerTokens)
+	}
+	if budget.TargetTokens < 0 {
+		return fmt.Errorf("request budget: target tokens must not be negative, got %d", budget.TargetTokens)
+	}
+	if budget.TriggerTokens > 0 && budget.TriggerTokens > budget.HardTokens {
+		return fmt.Errorf("request budget: trigger tokens %d exceed hard tokens %d", budget.TriggerTokens, budget.HardTokens)
+	}
+	if budget.TargetTokens > 0 && budget.TargetTokens > budget.HardTokens {
+		return fmt.Errorf("request budget: target tokens %d exceed hard tokens %d", budget.TargetTokens, budget.HardTokens)
+	}
+	if budget.TargetTokens > 0 && budget.TriggerTokens > 0 && budget.TargetTokens > budget.TriggerTokens {
+		return fmt.Errorf("request budget: target tokens %d exceed trigger tokens %d", budget.TargetTokens, budget.TriggerTokens)
+	}
+	return nil
+}
+
 func ValidateContextWindow(tokens int) error {
 	if tokens <= 0 {
 		return ErrContextWindowNegative

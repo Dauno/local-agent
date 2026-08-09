@@ -36,6 +36,19 @@ func New(resultStore port.RecoverableResultStore, counter port.RequestTokenCount
 
 // Compile executes the context compilation stages.
 func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (domain.CompileResult, error) {
+	if c == nil {
+		return domain.CompileResult{}, errors.New("context compiler: compiler is required")
+	}
+	if c.tokenCounter == nil {
+		return domain.CompileResult{}, errors.New("context compiler: request token counter is required")
+	}
+	if req.FixedRequestTokens < 0 {
+		return domain.CompileResult{}, fmt.Errorf("context compiler: fixed request tokens must not be negative, got %d", req.FixedRequestTokens)
+	}
+	if err := domain.ValidateRequestBudget(req.ModelBudget); err != nil {
+		return domain.CompileResult{}, fmt.Errorf("context compiler: validate request budget: %w", err)
+	}
+
 	started := time.Now()
 	defer func() {
 		if c != nil && c.metrics != nil {
@@ -167,9 +180,6 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 		return domain.CompileResult{}, fmt.Errorf("context compiler: validate projection: %w", err)
 	}
 
-	if c.tokenCounter == nil {
-		return domain.CompileResult{}, errors.New("context compiler: request token counter is required")
-	}
 	count, err := c.countProjection(ctx, resultContents, req.FixedRequestTokens)
 	if err != nil {
 		return domain.CompileResult{}, err
@@ -418,6 +428,9 @@ func (c *Compiler) countProjection(ctx context.Context, contents []domain.Conten
 	count, err := c.tokenCounter.CountRequest(ctx, port.ModelRequestEnvelope{SerializerID: port.SerializerContextProjectionV1, Serialized: string(serialized)})
 	if err != nil {
 		return port.TokenCount{}, fmt.Errorf("request_token_count_unavailable: %w", err)
+	}
+	if count.Tokens < 0 {
+		return port.TokenCount{}, errors.New("request_token_count_unavailable: counter returned a negative token count")
 	}
 	// A non-empty request with a zero count is not a meaningful counter result.
 	// Treat it as a malformed byte-bound sample rather than allowing an empty

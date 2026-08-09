@@ -174,6 +174,72 @@ func TestNewRequestBudgetGuaranteesTargetLeqTriggerLeqHard(t *testing.T) {
 	}
 }
 
+func TestValidateRequestBudgetRejectsInvalidLimits(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		budget domain.RequestBudget
+		want   string
+	}{
+		{
+			name:   "hard zero",
+			budget: domain.RequestBudget{},
+			want:   "hard tokens must be positive",
+		},
+		{
+			name:   "trigger above hard",
+			budget: domain.RequestBudget{HardTokens: 100, TriggerTokens: 101},
+			want:   "trigger tokens",
+		},
+		{
+			name:   "target above hard",
+			budget: domain.RequestBudget{HardTokens: 100, TargetTokens: 101},
+			want:   "target tokens",
+		},
+		{
+			name:   "target above trigger",
+			budget: domain.RequestBudget{HardTokens: 100, TriggerTokens: 50, TargetTokens: 51},
+			want:   "target tokens 51 exceed trigger tokens 50",
+		},
+		{
+			name:   "negative trigger",
+			budget: domain.RequestBudget{HardTokens: 100, TriggerTokens: -1},
+			want:   "must not be negative",
+		},
+		{
+			name:   "negative target",
+			budget: domain.RequestBudget{HardTokens: 100, TargetTokens: -1},
+			want:   "must not be negative",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := domain.ValidateRequestBudget(tc.budget)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("ValidateRequestBudget(%#v) = %v, want error containing %q", tc.budget, err, tc.want)
+			}
+		})
+	}
+}
+
+func TestValidateRequestBudgetAcceptsOptionalZeroLimits(t *testing.T) {
+	t.Parallel()
+
+	for _, budget := range []domain.RequestBudget{
+		{HardTokens: 100},
+		{HardTokens: 100, TriggerTokens: 50},
+		{HardTokens: 100, TargetTokens: 50},
+	} {
+		if err := domain.ValidateRequestBudget(budget); err != nil {
+			t.Fatalf("ValidateRequestBudget(%#v) = %v, want nil", budget, err)
+		}
+	}
+}
+
 func TestDerivePercentagesStandard(t *testing.T) {
 	t.Parallel()
 
