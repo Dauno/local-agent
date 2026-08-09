@@ -9,7 +9,6 @@ import (
 	"fmt"
 	"iter"
 	"strings"
-	"sync/atomic"
 
 	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
@@ -48,10 +47,6 @@ type SSEError struct {
 	PayloadPresent bool
 }
 
-type StreamMetrics struct {
-	SSEDecodeFailures atomic.Uint64
-}
-
 func (e *SSEError) Error() string {
 	if e == nil {
 		return ""
@@ -87,7 +82,6 @@ type OpenAICompatibleLLM struct {
 	model                  string
 	reasoningEffort        string
 	extraBody              map[string]any
-	metrics                *StreamMetrics
 	requestCounter         port.RequestTokenCounter
 	requestBudget          domain.RequestBudget
 	profileID              string
@@ -117,22 +111,7 @@ func New(options ...Option) (*OpenAICompatibleLLM, error) {
 		model:           cfg.model,
 		reasoningEffort: cfg.reasoningEffort,
 		extraBody:       cfg.extraBody,
-		metrics:         &StreamMetrics{},
 	}, nil
-}
-
-func (m *OpenAICompatibleLLM) Metrics() *StreamMetrics {
-	if m == nil {
-		return nil
-	}
-	return m.metrics
-}
-
-func (m *OpenAICompatibleLLM) Counters() map[string]uint64 {
-	if m == nil || m.metrics == nil {
-		return map[string]uint64{}
-	}
-	return map[string]uint64{"sse_decode_failures": m.metrics.SSEDecodeFailures.Load()}
 }
 
 // Name returns the configured provider model identifier.
@@ -144,14 +123,6 @@ func (m *OpenAICompatibleLLM) Name() string {
 }
 
 func (m *OpenAICompatibleLLM) SupportsStreaming() bool { return m != nil }
-
-// ConfigureMetrics attaches an optional observational recorder without
-// changing the mandatory request-guard behavior.
-func (m *OpenAICompatibleLLM) ConfigureMetrics(recorder port.MetricRecorder) {
-	if m != nil {
-		m.recorder = recorder
-	}
-}
 
 // ConfigureRequestGuard installs the mandatory final request guard. It must be
 // called during composition, before the model is shared with any runtime.
@@ -297,9 +268,6 @@ func (m *OpenAICompatibleLLM) generateStream(ctx context.Context, params openai.
 	}
 	if err := stream.Err(); err != nil {
 		category := classifyStreamReadError(err)
-		if category == SSEErrorDecode && m.metrics != nil {
-			m.metrics.SSEDecodeFailures.Add(1)
-		}
 		yield(nil, &SSEError{Category: category, Err: err})
 		return
 	}

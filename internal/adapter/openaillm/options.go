@@ -4,8 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
-	"sort"
+	"slices"
 	"strings"
 
 	"github.com/openai/openai-go/v3/option"
@@ -146,12 +147,7 @@ func (cfg settings) clientOptions() []option.RequestOption {
 		option.WithAPIKey(cfg.apiKey),
 		option.WithBaseURL(cfg.baseURL),
 	}
-	headerNames := make([]string, 0, len(cfg.headers))
-	for name := range cfg.headers {
-		headerNames = append(headerNames, name)
-	}
-	sort.Strings(headerNames)
-	for _, name := range headerNames {
+	for _, name := range slices.Sorted(maps.Keys(cfg.headers)) {
 		options = append(options, option.WithHeader(name, cfg.headers[name]))
 	}
 	return options
