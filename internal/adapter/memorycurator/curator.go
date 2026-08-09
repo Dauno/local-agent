@@ -26,9 +26,8 @@ type Config struct {
 }
 
 type Curator struct {
-	llm        LLM
-	config     Config
-	modelCalls port.ModelCallLimiter
+	llm    LLM
+	config Config
 }
 
 const (
@@ -47,7 +46,7 @@ func New(llm LLM, config Config) (*Curator, error) {
 	if config.ModelCalls == nil {
 		config.ModelCalls = unlimitedModelCalls{}
 	}
-	return &Curator{llm: llm, config: config, modelCalls: config.ModelCalls}, nil
+	return &Curator{llm: llm, config: config}, nil
 }
 
 func (c *Curator) ProposePatch(
@@ -61,12 +60,9 @@ func (c *Curator) ProposePatch(
 		return domain.MemoryPatch{}, nil
 	}
 	prompt := c.buildPrompt(conversationKey, messages, topics)
-	if c.config.Timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.config.Timeout)
-		defer cancel()
-	}
-	release, acquired := c.modelCalls.TryAcquire()
+	ctx, cancel := context.WithTimeout(ctx, c.config.Timeout)
+	defer cancel()
+	release, acquired := c.config.ModelCalls.TryAcquire()
 	if !acquired {
 		return domain.MemoryPatch{}, port.ErrModelCallLimitReached
 	}
@@ -239,7 +235,6 @@ type curatorOpResponse struct {
 }
 
 func (c *Curator) parsePatch(conversationKey domain.ConversationKey, exchangeTS string, response string) (domain.MemoryPatch, error) {
-	response = extractJSONObject(response)
 	trimmed := strings.TrimSpace(response)
 	if trimmed == "" {
 		return domain.MemoryPatch{}, errors.New("curator returned empty response; JSON object with operations array is required")
@@ -276,15 +271,4 @@ func (c *Curator) parsePatch(conversationKey domain.ConversationKey, exchangeTS 
 		})
 	}
 	return patch, nil
-}
-
-func extractJSONObject(text string) string {
-	text = strings.TrimSpace(text)
-	if idx := strings.Index(text, "{"); idx >= 0 {
-		text = text[idx:]
-		if idx := strings.LastIndex(text, "}"); idx >= 0 {
-			text = text[:idx+1]
-		}
-	}
-	return text
 }
