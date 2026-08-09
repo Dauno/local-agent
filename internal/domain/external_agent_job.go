@@ -597,10 +597,7 @@ func ValidArtifactResult(artifactRef, sha256Hex string, bytes int64) bool {
 		return false
 	}
 	sha256Hex = strings.ToLower(sha256Hex)
-	if !validSHA256Hex(sha256Hex) || bytes <= 0 {
-		return false
-	}
-	return true
+	return validSHA256Hex(sha256Hex) && bytes > 0
 }
 
 // CanonicalArtifactReference returns the exact artifact filename bound to a

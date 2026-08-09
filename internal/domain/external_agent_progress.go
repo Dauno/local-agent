@@ -48,16 +48,6 @@ const (
 	ACPHealthTerminal        ACPProgressHealth = "terminal"
 )
 
-func ValidACPProgressHealth(health ACPProgressHealth) bool {
-	switch health {
-	case ACPHealthActive, ACPHealthQuiet, ACPHealthPossiblyStalled,
-		ACPHealthDisconnected, ACPHealthTerminal:
-		return true
-	default:
-		return false
-	}
-}
-
 // ACPToolStatus is the bounded internal tool status retained from ACP updates.
 type ACPToolStatus string
 
@@ -173,23 +163,6 @@ type ACPToolProgress struct {
 	CallID string        `json:"call_id"`
 	Kind   ACPToolKind   `json:"kind"`
 	Status ACPToolStatus `json:"status"`
-}
-
-func (t ACPToolProgress) Validate() bool {
-	if t.CallID == "" || len(t.CallID) > 256 {
-		return false
-	}
-	for _, r := range t.CallID {
-		if r < ' ' || r == '\x7f' {
-			return false
-		}
-	}
-	// Kind may be omitted by a partial tool_call_update. The projection then
-	// preserves the last known kind for this call.
-	if t.Kind != "" && !ValidACPToolKind(t.Kind) {
-		return false
-	}
-	return ValidACPToolStatus(t.Status)
 }
 
 // ACPProgressEvent is a content-free protocol event emitted by the ACP
