@@ -170,7 +170,7 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 	} else if strings.TrimSpace(request.ExistingSummary) != "" {
 		summaryFallback = true
 	}
-	selectedContents := flattenTurns(selected)
+	selectedContents := domain.FlattenTurns(selected)
 	resultContents := append(summary, selectedContents...)
 	resultContents = append(resultContents, active...)
 	if err := validateProjectedContents(resultContents); err != nil {
@@ -226,16 +226,8 @@ func cloneContents(contents []domain.Content) []domain.Content {
 	return clone
 }
 
-func flattenTurns(turns []domain.ConversationTurn) []domain.Content {
-	var result []domain.Content
-	for _, turn := range turns {
-		result = append(result, cloneContents(turn.Contents)...)
-	}
-	return result
-}
-
 func validateSelectedTurns(turns []domain.ConversationTurn, active bool) error {
-	return validateProtocol(flattenTurns(turns), active)
+	return validateProtocol(domain.FlattenTurns(turns), active)
 }
 
 func validateProtocol(contents []domain.Content, active bool) error {

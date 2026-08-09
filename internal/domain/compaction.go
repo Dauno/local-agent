@@ -176,6 +176,18 @@ func (t ConversationTurn) Clone() ConversationTurn {
 	return clone
 }
 
+// FlattenTurns returns the cloned contents of all turns, in order.
+// It returns nil when turns is empty.
+func FlattenTurns(turns []ConversationTurn) []Content {
+	var result []Content
+	for _, turn := range turns {
+		for _, content := range turn.Contents {
+			result = append(result, content.Clone())
+		}
+	}
+	return result
+}
+
 // TurnClassificationOptions carries invocation state that is known outside the
 // content ledger, such as a confirmation that is pending in a delivery store.
 type TurnClassificationOptions struct {
