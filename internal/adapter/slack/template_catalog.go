@@ -82,16 +82,6 @@ func LoadTemplateCatalogFromFS(fsys fs.FS) (*TemplateCatalog, error) {
 	return loadTemplateCatalog(fsys)
 }
 
-// MustLoadTemplateCatalog returns the embedded catalog or panics. It is useful
-// only for process setup where an invalid embedded catalog is unrecoverable.
-func MustLoadTemplateCatalog() *TemplateCatalog {
-	catalog, err := LoadTemplateCatalog()
-	if err != nil {
-		panic(err)
-	}
-	return catalog
-}
-
 // Names returns the fixed catalog names in deterministic order.
 func (c *TemplateCatalog) Names() []string {
 	if c == nil {

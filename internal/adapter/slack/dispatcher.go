@@ -90,11 +90,6 @@ func NewInteractiveDispatcher(registrations []InteractiveRegistration) (*Interac
 	return dispatcher, nil
 }
 
-// NewDispatcher is an explicit short constructor alias.
-func NewDispatcher(registrations []InteractiveRegistration) (*InteractiveDispatcher, error) {
-	return NewInteractiveDispatcher(registrations)
-}
-
 func validateInteractiveRegistration(registration InteractiveRegistration) error {
 	if strings.TrimSpace(registration.ID) == "" {
 		return errors.New("interactive registration ID is required")

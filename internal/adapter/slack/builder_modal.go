@@ -3,7 +3,6 @@ package slack
 import (
 	"fmt"
 
-	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	slackapi "github.com/slack-go/slack"
 )
@@ -18,14 +17,6 @@ type BuilderModalPresenter struct {
 	profiles  []BuilderProviderProfile
 	renderer  *TemplateRenderer
 	renderErr error
-}
-
-func NewBuilderModalPresenter(allowedProfiles []string) *BuilderModalPresenter {
-	profiles := make([]BuilderProviderProfile, 0, len(allowedProfiles))
-	for _, profile := range allowedProfiles {
-		profiles = append(profiles, BuilderProviderProfile{Reference: profile, ProviderType: agentdef.ProviderTypeOpenAICompatible})
-	}
-	return NewBuilderModalPresenterWithProviders(profiles)
 }
 
 func NewBuilderModalPresenterWithProviders(profiles []BuilderProviderProfile) *BuilderModalPresenter {
@@ -56,12 +47,6 @@ func (p *BuilderModalPresenter) InitializationError() error {
 		return fmt.Errorf("builder modal presenter is required")
 	}
 	return p.renderErr
-}
-
-// BuildView returns a ModalViewRequest for the agent creation form.
-func (p *BuilderModalPresenter) BuildView() slackapi.ModalViewRequest {
-	view, _ := p.BuildViewResult()
-	return view
 }
 
 // BuildViewResult returns the initial builder modal or a bounded hydration
