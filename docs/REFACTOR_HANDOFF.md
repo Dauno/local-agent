@@ -5,9 +5,9 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 21 batches de refactor completados + docs update, 24 commits de refactor (A8, A11 y A13a-ext divididos en dos commits), neto acumulado **−359 líneas**. A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`. A13c2 aplicó los cortes 2, 3 y 4; saltó 1 y 5 por la regla de no tocar tests.
+- 22 batches de refactor completados + docs update, 25 commits de refactor (A8, A11 y A13a-ext divididos en dos commits), neto acumulado **−397 líneas** (`−359` previo + `−38` del Commit 2 de A13c3). A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`. A13c2 aplicó los cortes 2, 3 y 4; saltó 1 y 5 por la regla de no tocar tests. A13c3 aplicó los siete cortes permitidos; el Commit 1 incorporó trabajo preexistente por decisión explícita del usuario y queda fuera del acumulado de refactor.
 - Tests verdes en todo momento; los commits del refactor no modificaron archivos de test.
-- Los cambios preexistentes sin stagear quedan fuera de estos commits.
+- Los cambios preexistentes de `memory_core.go`, `redact.go` y `memory/service.go` se incorporaron en el Commit 1 de A13c3 por decisión explícita del usuario. El diff real correspondía a `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go`; no existían los dos primeros bajo `internal/usecase/memory`.
 
 ## Commits por batch
 
@@ -39,20 +39,23 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A13b1.2 (corte 2) | `internal/port/agentbuilder.go` + `internal/usecase/agentbuilder/service.go` | **SALTADO (no aplicado)**: `TestDependencyDirection`; `internal/port` no puede depender de `agentdef` y `current any` es desacoplamiento deliberado de la interfaz. Propuesto en `f61abc2`, revertido en `2e61b22`; acumulado se mantiene en **−295** (neto 0) |
 | A13c1.1 (cortes 1, 2, 5, 6, 7, 8 y 9) | `internal/usecase/sandbox/service.go` | `1aa7e5e` (`+8/-56`, neto **−48**) |
 | A13c2.1 (cortes 2, 3 y 4) | `internal/adapter/memorycurator/curator.go` | `53886f3` (`+6/-22`, neto **−16**) |
+| A13c3.0 | cambios preexistentes de memory core, redaction y validación de operaciones | `4ea1941` (`+12/-31`, neto **−19**) (excluido del acumulado de refactor) |
+| A13c3.1 (cortes 1, 2, 3, 5, 6, 7 y 8) | `internal/usecase/memory/service.go` + `runner.go` | `4883914` (`+50/-88`, neto **−38**) |
+| A13c3.2 | actualización de este handoff | este commit; hash y shortstat se reportan en el cierre |
 
 ## Proceso y reglas por batch
 
 - Leer producción; decidir y anotar si se usa `ponytail-review`; presentar hallazgos en tabla con neto y caveats.
 - Ejecutar solo tras aprobación explícita; Luna usa job durable y máximo 2–3 archivos por invocación.
-- No modificar tests; preservar mensajes de error/log exactos; revisar `git status` antes y dejar cambios preexistentes fuera.
+- No modificar tests; preservar mensajes de error/log exactos; revisar `git status` antes y dejar cambios preexistentes fuera, salvo decisión explícita del usuario como en A13c3.
 - Crear un commit conventional por batch y verificar `go build ./...`, `go vet ./...`, `go test` (paquete y suite) y `git diff --check`.
-- Cada commit debe tener neto < 0; revertirlo si no cumple. No invocar workers sobre carpetas completas ni sobre todo el contexto.
+- Cada commit de refactor debe tener neto < 0; revertirlo si no cumple. No invocar workers sobre carpetas completas ni sobre todo el contexto.
 
 ## Pendientes
 
 - Revisión pendiente: clasificación de ambigüedad en `internal/adapter/slack` (`canvas_creator.go` vs `generated_file_uploader.go`), resto de `internal/domain`, `internal/port` y adapters, y tracking opcional en Slack Canvas.
 - `RequestBudgetPolicy`, diagnósticos no métricos y el comportamiento más estricto de `unicode.IsControl` en A2 se conservan; revisar solo con alcance ampliado.
-- `memory_core.go`: cambios preexistentes sin stagear quedaron intactos; A3 se aplicó con stage selectivo.
+- `memory_core.go`: A3 se aplicó con stage selectivo. Los cambios preexistentes posteriores de `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go` se incorporaron por decisión del usuario en `4ea1941`.
 - A4: el grep global no permitió eliminar `ContinuityItem.Kind` (sin lecturas directas, pero con construcciones en `adkagent` y tests), `ContinuityCapsule.Superseded` (uso en `adkagent`, persistencia SQLite y test), ni `SourceEventOrdinal`, `SourceSessionRevision`, `SourceDigest`, `SupersedesID` (escritura en `adkagent`, validación SQLite y tests). `AgentContext.MaxChars` también se conserva: Slack lo construye, `adkagent` lo lee como budget y hay referencia en test. No se eliminó ninguno de estos campos.
 - A5: el grep global de los ítems 6-8 no permitió eliminar las formas largas de `MessageSource` (consumidores externos en producción e integración/tests), `WithInferredSource` (dos consumidores SQLite) ni `ValidateACPAllowlist` (dos llamadores en `agentbuilder`). Las reducciones mecánicas sí eliminaron ramas de validación duplicadas, la clonación innecesaria de mensajes y las construcciones repetidas del error de kind.
 - A7: las nueve reducciones aprobadas en `internal/usecase/bot` se aplicaron tras grep global sin consumidores externos. Commit de refactor: `+34/-37`, neto **−3 líneas**; build y suite del paquete verdes; tests sin cambios.
@@ -75,4 +78,25 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | #5 receiver de `parsePatch` y `emptyPatchLLM` | `curator.go:241`; tests `curator_test.go:129-133,135,140,149-154` | **SALTADO**: requiere tocar call sites y fake de tests; la regla de no tocar tests lo excluye. |
 
 - A13c2 commit de producción: `53886f3`, `git show --shortstat`: `+6/-22`, neto **−16**. El segundo commit de este batch es esta actualización documental; su hash y shortstat se registran en el reporte de cierre.
+
+- A13c3: `ponytail-review` usado. Registro completo de los doce hallazgos, con localización original y decisión:
+
+| Hallazgo | Localización original | Veredicto y motivo |
+|---|---|---|
+| #1 outcomes de Recall | `internal/usecase/memory/service.go:29-31,61-64,128-157` | **APLICADO** en `4883914`: el gate mostró referencias solo en `service.go` y no hubo referencias en tests; el cuerpo quedó en `Recall` y devuelve snippets + error. |
+| #2 wrapper `Validate` | `internal/usecase/memory/service.go:284-288` | **APLICADO** en `4883914`: el gate mostró solo el wrapper y la llamada de `runner.go`, sin uso en tests; `runner.go` llama `validatePatch` directamente. |
+| #3 callback de `validateReferenceFields` | `internal/usecase/memory/service.go:293-312,329-336` | **APLICADO** en `4883914`: el gate mostró una declaración y dos llamadas, sin uso en tests; el helper recibe prefix y llama `add` directamente. |
+| #4 switch de operation type | `internal/usecase/memory/service.go:318-324` | **SALTADO**: era parte del trabajo preexistente ya presente antes de A13c3 y quedó en `4ea1941`; no se volvió a tocar en el commit de cortes. |
+| #5 goroutine de supervisión | `internal/usecase/memory/runner.go:75-85` | **APLICADO** en `4883914`: el gate encontró solo `done`, `close(done)` y `<-done` en este bloque; la recuperación quedó inline. |
+| #6 cancelación y timer | `internal/usecase/memory/runner.go:87-100` | **APLICADO** en `4883914`: `NewTimer`, `timer.Stop` y `timer.C` solo aparecían en este bloque; se dejó un `select` con `time.After`. |
+| #7 wrappers de retry | `internal/usecase/memory/runner.go:141-225` | **APLICADO** en `4883914`: el gate mostró siete llamadas y dos declaraciones, sin uso en tests; logger y `retryOutbox` quedaron directos en cada sitio. |
+| #8 wrapper `rescheduleOutbox` | `internal/usecase/memory/runner.go:167,236-238` | **APLICADO** en `4883914`: el gate mostró dos referencias; `RescheduleOutboxItem` quedó inlineado. |
+| #9 estado muerto de `coverageStore` | `internal/usecase/memory/outbox_coverage_test.go:146,212-216,279-281` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
+| #10 wrapper `newCoverageStore` | `internal/usecase/memory/outbox_coverage_test.go:60-63,222-229` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
+| #11 helper `itemKey` | `internal/usecase/memory/outbox_coverage_test.go:105,321-323` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
+| #12 retorno `key` no usado | `internal/usecase/memory/runner_test.go:25,60` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
+
+- A13c3 Commit 1: `4ea1941`, `git show --shortstat`: `+12/-31`, neto **−19**; contiene solo los tres archivos reales del diff preexistente y queda fuera del acumulado de refactor por decisión del usuario.
+- A13c3 Commit 2: `4883914`, `git show --shortstat`: `+50/-88`, neto **−38**; no modificó tests. El acumulado de refactor queda en **−397** (`−359 − 38`).
+- A13c3 Commit 3: esta actualización documental. Su hash y shortstat se reportan en el cierre; no se puede insertar su propio hash en el contenido sin crear un cuarto commit.
 ---
