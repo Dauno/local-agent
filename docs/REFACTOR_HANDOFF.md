@@ -5,7 +5,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 22 batches de refactor completados + docs update, 25 commits de refactor (A8, A11 y A13a-ext divididos en dos commits), neto acumulado **−397 líneas** (`−359` previo + `−38` del Commit 2 de A13c3). A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`. A13c2 aplicó los cortes 2, 3 y 4; saltó 1 y 5 por la regla de no tocar tests. A13c3 aplicó los siete cortes permitidos; el Commit 1 incorporó trabajo preexistente por decisión explícita del usuario y queda fuera del acumulado de refactor.
+- 23 batches de refactor completados + docs update, 37 commits de refactor (A8, A11 y A13a-ext divididos en dos commits; A13c7 dividido en doce commits), neto acumulado **−790 líneas** (`−502` tras A13c6 + `−288` de A13c7). A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`. A13c2 aplicó los cortes 2, 3 y 4; saltó 1 y 5 por la regla de no tocar tests. A13c3 aplicó los siete cortes permitidos; el Commit 1 incorporó trabajo preexistente por decisión explícita del usuario y queda fuera del acumulado de refactor.
 - Tests verdes en todo momento; los commits del refactor no modificaron archivos de test.
 - Los cambios preexistentes de `memory_core.go`, `redact.go` y `memory/service.go` se incorporaron en el Commit 1 de A13c3 por decisión explícita del usuario. El diff real correspondía a `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go`; no existían los dos primeros bajo `internal/usecase/memory`.
 
@@ -42,6 +42,18 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A13c3.0 | cambios preexistentes de memory core, redaction y validación de operaciones | `4ea1941` (`+12/-31`, neto **−19**) (excluido del acumulado de refactor) |
 | A13c3.1 (cortes 1, 2, 3, 5, 6, 7 y 8) | `internal/usecase/memory/service.go` + `runner.go` | `4883914` (`+50/-88`, neto **−38**) |
 | A13c3.2 | actualización de este handoff | este commit; hash y shortstat se reportan en el cierre |
+| A13c7.1 | `internal/domain`: elimina `ValidACPProgressHealth`, `ACPToolProgress.Validate` y `newProtocolLedger`; inlinea el retorno de `ValidArtifactResult` | `71d6865` (`+2/-36`, neto −34) |
+| A13c7.2 | `internal/adapter/toolfactory`: elimina las herramientas `create_worktree` y `remove_worktree`, elimina `isAllowedUser` y usa helpers stdlib para claves/autorización | `afad535` (`+6/-66`, neto −60) |
+| A13c7.3 | `internal/adapter/toolrunner`: elimina `Executor.Tools`; usa `slices.Contains` y `maps.Keys`/`slices.Sorted` | `0504525` (`+4/-24`, neto −20) |
+| A13c7.4 | `internal/adapter/openaillm`: elimina métricas de stream y `ConfigureMetrics`; usa `maps.Keys`/`slices.Sorted` para headers | `5cb2d2c` (`+3/-39`, neto −36) |
+| A13c7.5 | `internal/adapter/adkagent`: elimina `CompactionMetrics` y sus snapshots/contadores; elimina helper local `min` | `c25f472` (`+1/-51`, neto −50) |
+| A13c7.6 | C2: `port.SystemClock` en lugar de 2 duplicaciones locales (`bot` + `externalagent`) | `8269644` (`+3/-11`, neto −8) |
+| A13c7.7 | D8 (bounds muertos + parámetros artifact store), S2 (builtin min), S3a (`context.WithTimeout`), S6 (concatenación directa) en `acpclient` + `app/composition` | `3105eee` (`+11/-38`, neto −27) |
+| A13c7.8 | C3: `ambiguousSlackError` compartido entre `canvas_creator.go` y `generated_file_uploader.go` | `7d79e63` (`+14/-19`, neto −5) |
+| A13c7.9 | S3b (`withTimeout`→`context.WithTimeout`) + S4 (`containsString`→`slices.Contains`) en manager+shim | `cb615ce` (`+4/-19`, neto −15) |
+| A13c7.10 | S9 (`minInt64`/`maxInt64`→builtin min/max; `maxInt()`→`math.MaxInt`) + S10 (2 locales `^uint(0)>>1`→`math.MaxInt`) en stores+tokencounter | `c44a15c7` (`+10/-28`, neto −18) |
+| A13c7.11 | D9 (maps muertos `topicByID` + params muertos en `writeRootIndex`/`writeNestedIndex`) + D11 (campo kind redundante en key + `metricKey` sin param kind) en okf+recorder | `53fc486d` (`+8/-19`, neto −11) |
+| A13c7.12 | C1: `domain.FlattenTurns` (inlina `Content.Clone()`) + eliminadas 2 copias locales `flattenTurns` + 5 call sites | `73ce7fde` (`+17/-21`, neto −4) |
 
 ## Proceso y reglas por batch
 
@@ -170,3 +182,36 @@ Revisión propia; no se invocó `ponytail`. Se aplicaron los cortes #1 y #3 sin 
 - Commit de documentación: este commit; su hash real se reporta en el cierre. No se puede insertar su propio hash en el contenido sin crear un tercer commit.
 - Acumulado de refactor tras A13c6: **−502** (`−451 − 51`). El commit documental no suma al acumulado.
 ---
+
+## A13c7
+
+- Revisión propia; no se invocó ponytail-review; hallazgos verificados con evidencia del repo antes de cada commit.
+
+### Commits y acumulado
+
+| Commit | Shortstat | Neto |
+|---|---|---|
+| `71d6865` | `+2/-36` | −34 |
+| `afad535` | `+6/-66` | −60 |
+| `0504525` | `+4/-24` | −20 |
+| `5cb2d2c` | `+3/-39` | −36 |
+| `c25f472` | `+1/-51` | −50 |
+| `8269644` | `+3/-11` | −8 |
+| `3105eee` | `+11/-38` | −27 |
+| `7d79e63` | `+14/-19` | −5 |
+| `cb615ce` | `+4/-19` | −15 |
+| `c44a15c7` | `+10/-28` | −18 |
+| `53fc486d` | `+8/-19` | −11 |
+| `73ce7fde` | `+17/-21` | −4 |
+
+- Acumulado de refactor tras A13c7: **−790** (`−502 − 288`).
+
+### Cortes no aplicados
+
+- S7c (fsproject): NO APLICADO — confirmado por el usuario («S7c no aplicado», 2026-08-09). No se identificó un hallazgo verificable con evidencia del repo; los candidatos (doble rejectSymlinkComponents, doble Close(), guard Windows de syncDirectory) implican cambios de comportamiento/seguridad que no se ejecutan sin especificación aprobada.
+- S10-discovery (lspdiscovery): NO APLICADO — sin hallazgo verificable (isInside/computeSHA256 son lógica real con caller único, no wrappers de stdlib).
+- S11 (openaillm): NO APLICADO — skip justificado durante la revisión del Commit 4 (5cb2d2c).
+- cloneContents duplicada: REMANENTE — internal/usecase/contextcompiler/compiler.go y internal/adapter/adkagent/compaction.go conservan copias locales byte-idénticas de cloneContents (usadas en 4+2 sites); candidato futuro de consolidación a domain vía Content.Clone. No se aplicó en A13c7 por alcance del batch.
+
+- Desviación deliberada (Commit 10): variable local maxInt en internal/usecase/contextcompiler/compiler.go:939 se conservó — fuera de alcance del batch.
+- Nota de cierre: este commit documental no suma al acumulado de refactor (patrón establecido en A13c5/A13c6); su propio hash no puede insertarse en el contenido sin crear un commit adicional.
