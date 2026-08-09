@@ -77,7 +77,7 @@ func (m *Manager) Rollback(ctx context.Context) (domain.OpenCodeManagementResult
 }
 
 func (m *Manager) version(ctx context.Context) (string, error) {
-	ctx, cancel := withTimeout(ctx, 30*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
 	if strings.TrimSpace(m.command) == "" {
 		return "", errors.New("OpenCode command is empty")
@@ -95,7 +95,7 @@ func (m *Manager) version(ctx context.Context) (string, error) {
 }
 
 func (m *Manager) run(ctx context.Context, args ...string) error {
-	ctx, cancel := withTimeout(ctx, 5*time.Minute)
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Minute)
 	defer cancel()
 	command := exec.CommandContext(ctx, m.command, args...)
 	command.Stdout = io.Discard
@@ -104,11 +104,4 @@ func (m *Manager) run(ctx context.Context, args ...string) error {
 		return fmt.Errorf("OpenCode management command failed: %w", err)
 	}
 	return nil
-}
-
-func withTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
-	if deadline, exists := ctx.Deadline(); exists && time.Until(deadline) <= timeout {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, timeout)
 }

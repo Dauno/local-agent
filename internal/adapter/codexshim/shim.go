@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/Dauno/slack-local-agent/internal/cliprotocol"
@@ -192,7 +193,7 @@ func validate(ctx context.Context, executor Executor, request cliprotocol.Reques
 		return cliprotocol.NewError(id, cliprotocol.CodeInvalidRequest,
 			fmt.Sprintf("model %q is not available in the bundled Codex model catalog", profile.Model), false)
 	}
-	if profile.Variant != "" && !containsString(selected.Efforts, profile.Variant) {
+	if profile.Variant != "" && !slices.Contains(selected.Efforts, profile.Variant) {
 		return cliprotocol.NewError(id, cliprotocol.CodeInvalidRequest,
 			fmt.Sprintf("reasoning effort %q is not supported by Codex model %q", profile.Variant, profile.Model), false)
 	}
@@ -262,15 +263,6 @@ func runModel(ctx context.Context, executor Executor, request cliprotocol.Reques
 	default:
 		writeResponse(out, cliprotocol.NewResult(id, strings.TrimSpace(parsed.Text)))
 	}
-}
-
-func containsString(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func classifyExecutorError(err error) string {
