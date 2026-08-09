@@ -36,14 +36,14 @@ func New(projectRoot string, logOutput io.Writer) (*Application, error) {
 	if strings.TrimSpace(projectRoot) == "" {
 		return nil, errors.New("project root is required")
 	}
-	root, err := filepath.Abs(projectRoot)
+	root, err := fsproject.New().CanonicalRoot(projectRoot)
 	if err != nil {
-		return nil, fmt.Errorf("resolve project root: %w", err)
+		return nil, err
 	}
 	if logOutput == nil {
 		logOutput = io.Discard
 	}
-	return &Application{root: filepath.Clean(root), logOutput: logOutput, forceShutdown: make(chan struct{})}, nil
+	return &Application{root: root, logOutput: logOutput, forceShutdown: make(chan struct{})}, nil
 }
 
 // ForceShutdown skips the configured drain period while preserving durable

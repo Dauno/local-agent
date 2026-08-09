@@ -24,7 +24,6 @@ const (
 )
 
 type ProjectFiles interface {
-	CanonicalRoot(projectRoot string) (string, error)
 	EnsureDirectory(ctx context.Context, path string, mode fs.FileMode) error
 	CheckRegularFileOrMissing(ctx context.Context, path string) error
 	ReadFile(ctx context.Context, path string) ([]byte, error)
@@ -101,10 +100,7 @@ type Secrets struct {
 // EnsureBaseArtifacts is phase one. It creates only missing defaults, never
 // creates .env, and initializes rather than replaces the configured database.
 func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (Snapshot, error) {
-	root, err := s.files.CanonicalRoot(projectRoot)
-	if err != nil {
-		return Snapshot{}, err
-	}
+	root := projectRoot
 	if err := checkContext(ctx); err != nil {
 		return Snapshot{}, err
 	}
@@ -313,13 +309,7 @@ func (s *Service) ApplyConfirmedUpdates(
 	access AccessControl,
 	secrets Secrets,
 ) (Snapshot, error) {
-	root, err := s.files.CanonicalRoot(snapshot.ProjectRoot)
-	if err != nil {
-		return Snapshot{}, err
-	}
-	if filepath.Clean(root) != filepath.Clean(snapshot.ProjectRoot) {
-		return Snapshot{}, errors.New("bootstrap snapshot project root changed")
-	}
+	root := snapshot.ProjectRoot
 	if err := checkContext(ctx); err != nil {
 		return Snapshot{}, err
 	}
