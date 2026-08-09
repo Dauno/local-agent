@@ -18,7 +18,6 @@ type CompileRequest struct {
 	FixedRequestTokens int
 	Actor              string
 	ConversationKey    string
-	SessionRevision    int64
 	OpenInvocationIDs  map[string]struct{}
 }
 
