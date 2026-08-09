@@ -315,7 +315,11 @@ func (s *Service) validatePatch(patch domain.MemoryPatch) error {
 		if err := domain.ValidateMemoryReferenceText(op.Type); err != nil {
 			add("%s: operation type: %v", prefix, err)
 		}
-		if !domain.ValidMemoryOps[op.Type] {
+		switch op.Type {
+		case domain.MemoryOpCreateTopic, domain.MemoryOpRevise, domain.MemoryOpDecide,
+			domain.MemoryOpQuestionAdd, domain.MemoryOpQuestionResolve, domain.MemoryOpLinkAdd,
+			domain.MemoryOpLinkRemove, domain.MemoryOpCorrect:
+		default:
 			add("%s: unknown operation type %q", prefix, op.Type)
 			continue
 		}

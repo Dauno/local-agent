@@ -13,7 +13,10 @@ const (
 	maskMarker  = "****"
 )
 
-var credentialPattern = regexp.MustCompile(`(?:xox[a-z]-[A-Za-z0-9-]{8,}|xapp-[A-Za-z0-9-]{8,}|sk-[A-Za-z0-9_-]{8,})`)
+// Mirrors domain's token prefixes and body shapes. The matcher remains local
+// because domain must stay independent of secure; secure also redacts the
+// additional Slack xox* variants it recognizes.
+var credentialPattern = regexp.MustCompile(`(?i)(?:sk|xox[a-z]|xapp|ghp|gho|glpat)[-_][a-z0-9_=-]{4,}`)
 
 // Mask returns a recognizable representation of a secret without revealing it.
 // Known token prefixes and, for sufficiently long values, the last four

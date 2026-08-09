@@ -38,6 +38,9 @@ const (
 
 var slugPattern = regexp.MustCompile(`^[a-z0-9]+(-[a-z0-9]+)*$`)
 
+// Keep these matchers local because domain may depend only on the standard
+// library. internal/secure mirrors the token prefixes and body shapes for
+// output redaction; domain also covers assignment and bearer forms below.
 var credentialValuePattern = regexp.MustCompile(`(?i)\b(?:sk|xoxb|xapp|ghp|gho|glpat)[-_][a-z0-9_=-]{4,}\b`)
 
 var credentialAssignmentPattern = regexp.MustCompile(`(?i)\b(?:api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|client[_ -]?secret|secret|password|bearer|private[_ -]?key)\b\s*(?:=|:)\s*\S+`)
@@ -160,40 +163,11 @@ const (
 	MemoryOpCorrect         = "correct"
 )
 
-var ValidMemoryOps = map[string]bool{
-	MemoryOpCreateTopic:     true,
-	MemoryOpRevise:          true,
-	MemoryOpDecide:          true,
-	MemoryOpQuestionAdd:     true,
-	MemoryOpQuestionResolve: true,
-	MemoryOpLinkAdd:         true,
-	MemoryOpLinkRemove:      true,
-	MemoryOpCorrect:         true,
-}
-
 type MemoryRecallConfig struct {
 	MaxTopics int
 	MaxChars  int
 	Timeout   time.Duration
 	Enabled   bool
-}
-
-type MemoryCuratorConfig struct {
-	Timeout        time.Duration
-	MaxRetries     int
-	WorkerInterval time.Duration
-}
-
-type MemoryConfig struct {
-	Enabled       bool
-	Directory     string
-	Recall        MemoryRecallConfig
-	Curator       MemoryCuratorConfig
-	RetentionDays int
-	MaxTopics     int
-	MaxLinks      int
-	MaxTopicChars int
-	MaxPatchOps   int
 }
 
 type MemoryLimits struct {
