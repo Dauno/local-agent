@@ -137,7 +137,3 @@ func (p *BuilderModalPresenter) BuildViewForKindResult(kind domain.AgentKind, va
 	}
 	return view, nil
 }
-
-func (p *BuilderModalPresenter) profilesForKind(kind domain.AgentKind) []BuilderProviderProfile {
-	return builderProfilesForKind(kind, p.profiles)
-}

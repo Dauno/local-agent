@@ -59,10 +59,6 @@ type InteractiveDispatcher struct {
 	views   map[string]ViewSubmissionHandler
 }
 
-// Dispatcher is a short alias for callers that do not need the transport
-// qualifier in the type name.
-type Dispatcher = InteractiveDispatcher
-
 // NewInteractiveDispatcher validates and copies registrations into immutable
 // action and view tables.
 func NewInteractiveDispatcher(registrations []InteractiveRegistration) (*InteractiveDispatcher, error) {
