@@ -7,8 +7,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"unicode/utf8"
@@ -88,11 +90,7 @@ func (e *Executor) Execute(ctx context.Context, op sandbox.SandboxOperation) (sa
 }
 
 func (e *Executor) listRepos() (sandbox.SandboxResult, error) {
-	names := make([]string, 0, len(e.projects))
-	for name := range e.projects {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(e.projects))
 	return sandbox.SandboxResult{
 		Output: strings.Join(names, "\n"),
 	}, nil
