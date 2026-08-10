@@ -13,19 +13,13 @@ const (
 )
 
 type CanvasOperation struct {
-	ID             string
+	ID              string
 	ConversationKey ConversationKey
-	Actor          string
-	Title          string
-	ContentSHA256  string
-	Status         CanvasOperationStatus
-	CanvasID       string
-	CreatedAt      time.Time
-	UpdatedAt      time.Time
+	Actor           string
+	Title           string
+	ContentSHA256   string
+	Status          CanvasOperationStatus
+	CanvasID        string
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
-
-const (
-	MaxCanvasTitleRunes   = 150
-	MaxCanvasContentRunes = 50000
-	MaxCanvasContentBytes = 5 * 1024 * 1024
-)

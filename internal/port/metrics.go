@@ -1,6 +1,6 @@
 package port
 
-import "sort"
+import "maps"
 
 // MetricLabels contains only bounded, non-sensitive dimensions. Implementations
 // must ignore keys that are not part of the allowlist.
@@ -43,14 +43,5 @@ func CloneMetricLabels(labels MetricLabels) MetricLabels {
 	if len(labels) == 0 {
 		return nil
 	}
-	keys := make([]string, 0, len(labels))
-	for key := range labels {
-		keys = append(keys, key)
-	}
-	sort.Strings(keys)
-	result := make(MetricLabels, len(keys))
-	for _, key := range keys {
-		result[key] = labels[key]
-	}
-	return result
+	return maps.Clone(labels)
 }
