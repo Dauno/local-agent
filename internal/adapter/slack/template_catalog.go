@@ -8,7 +8,9 @@ import (
 	"fmt"
 	"io"
 	"io/fs"
+	"maps"
 	"path"
+	"slices"
 	"sort"
 	"strconv"
 	"strings"
@@ -87,12 +89,7 @@ func (c *TemplateCatalog) Names() []string {
 	if c == nil {
 		return nil
 	}
-	names := make([]string, 0, len(c.templates))
-	for name := range c.templates {
-		names = append(names, name)
-	}
-	sort.Strings(names)
-	return names
+	return slices.Sorted(maps.Keys(c.templates))
 }
 
 // Has reports whether name is in the validated catalog.
@@ -220,10 +217,8 @@ func appendTemplateID(ids *[]string, value string) {
 	if value == "" {
 		return
 	}
-	for _, existing := range *ids {
-		if existing == value {
-			return
-		}
+	if slices.Contains(*ids, value) {
+		return
 	}
 	*ids = append(*ids, value)
 }
@@ -239,7 +234,6 @@ type templateDocument struct {
 }
 
 type templateModalPayload struct {
-	Type            string
 	Title           *templateText
 	Submit          *templateText
 	Close           *templateText
@@ -288,7 +282,6 @@ type templateElement struct {
 	FocusOnLoad          bool
 	Options              []templateOption
 	OptionsToken         string
-	OptionsPresent       bool
 	InitialOption        *templateOption
 	InitialOptionToken   string
 	InitialOptionPresent bool
@@ -522,7 +515,6 @@ func parseModalPayload(data []byte, templateName string) (templateModalPayload, 
 		return templateModalPayload{}, err
 	}
 	payload := templateModalPayload{
-		Type:            raw.Type,
 		Title:           title,
 		CallbackID:      raw.CallbackID,
 		PrivateMetadata: raw.PrivateMetadata,
@@ -747,10 +739,12 @@ func parseOption(data []byte, templateName, fieldPath string) (templateOption, e
 	if err := rejectUnknownObjectKeys(keys, map[string]struct{}{"text": {}, "value": {}, "description": {}, "url": {}}); err != nil {
 		return templateOption{}, fmt.Errorf("%s: %w", fieldPath, err)
 	}
-	if len(raw.Text) == 0 || !containsObjectKey(keys, "text") {
+	_, ok := keys["text"]
+	if len(raw.Text) == 0 || !ok {
 		return templateOption{}, fmt.Errorf("%s.text is required", fieldPath)
 	}
-	if !containsObjectKey(keys, "value") {
+	_, ok = keys["value"]
+	if !ok {
 		return templateOption{}, fmt.Errorf("%s.value is required", fieldPath)
 	}
 	if raw.Value == "" {
@@ -854,7 +848,7 @@ func parseElement(data []byte, templateName, fieldPath string) (*templateElement
 			if err := decodeStrictJSON(raw.DispatchActionConfig, &config); err != nil {
 				return nil, fmt.Errorf("%s.dispatch_action_config: %w", fieldPath, err)
 			}
-			element.DispatchActionConfig = &templateDispatchActionConfig{TriggerActionsOn: append([]string(nil), config.TriggerActionsOn...)}
+			element.DispatchActionConfig = &templateDispatchActionConfig{TriggerActionsOn: slices.Clone(config.TriggerActionsOn)}
 		}
 	case "static_select":
 		if raw.ActionID == "" {
@@ -869,7 +863,6 @@ func parseElement(data []byte, templateName, fieldPath string) (*templateElement
 		if len(raw.Options) == 0 {
 			return nil, fmt.Errorf("%s.options is required", fieldPath)
 		}
-		element.OptionsPresent = true
 		var optionsToken string
 		if err := decodeStrictJSON(raw.Options, &optionsToken); err == nil {
 			token, ok, tokenErr := parseTemplateString(optionsToken)
@@ -1030,8 +1023,7 @@ func validateScalarPlacements(doc templateDocument) error {
 		}
 		return validate(text.Text, placement, "")
 	}
-	var validateElement func(*templateElement) error
-	validateElement = func(element *templateElement) error {
+	validateElement := func(element *templateElement) error {
 		if element == nil {
 			return nil
 		}
@@ -1040,10 +1032,8 @@ func validateScalarPlacements(doc templateDocument) error {
 				return err
 			}
 		}
-		for _, text := range []*templateText{element.Placeholder} {
-			if err := validateText(text, placementOther); err != nil {
-				return err
-			}
+		if err := validateText(element.Placeholder, placementOther); err != nil {
+			return err
 		}
 		if err := validate(element.Value, placementElementValue, element.ActionID); err != nil {
 			return err
@@ -1359,9 +1349,6 @@ func validateElement(doc templateDocument, element *templateElement, modal bool,
 	if !allowedTypes[element.Type] {
 		return fmt.Errorf("%s element type %q is not valid for its parent block", fieldPath, element.Type)
 	}
-	if !modal && element.Type == "plain_text_input" {
-		return fmt.Errorf("%s input element is not valid on message surface", fieldPath)
-	}
 	if element.ActionID == "" {
 		return fmt.Errorf("%s.action_id is required", fieldPath)
 	}
@@ -1655,11 +1642,6 @@ func objectKeys(data []byte) (map[string]struct{}, error) {
 		keys[key] = struct{}{}
 	}
 	return keys, nil
-}
-
-func containsObjectKey(keys map[string]struct{}, key string) bool {
-	_, ok := keys[key]
-	return ok
 }
 
 func rejectUnknownObjectKeys(keys map[string]struct{}, allowed map[string]struct{}) error {
