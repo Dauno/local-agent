@@ -60,8 +60,8 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	if len(state.turns) == 0 {
 		return domain.CompileResult{Contents: nil, Diagnostics: state.diagnostics}, nil
 	}
-	if c.metrics != nil && state.capsuleCodePoints > 0 {
-		c.metrics.Observe(domain.MetricContinuityCheckpointRenderCodePoints, float64(state.capsuleCodePoints), nil)
+	if c.metrics != nil && state.diagnostics.ContinuityCodePoints > 0 {
+		c.metrics.Observe(domain.MetricContinuityCheckpointRenderCodePoints, float64(state.diagnostics.ContinuityCodePoints), nil)
 	}
 
 	state, err = assembleCompilation(state)
@@ -84,7 +84,6 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 }
 
 func (c *Compiler) countCompilation(ctx context.Context, state compilationState, initial bool) (compilationState, error) {
-	state = state.markStage("admission")
 	count, err := c.countProjection(ctx, state.result.Contents, state.request.FixedRequestTokens)
 	if err != nil {
 		return state, err
@@ -117,10 +116,10 @@ func (c *Compiler) completeCompilation(state compilationState, unchanged bool) (
 		state.diagnostics.ReductionReason = "unchanged"
 	} else {
 		switch {
-		case state.responsesExternalized > 0 && state.diagnostics.LateExternalized:
+		case state.diagnostics.ResponsesExternalized > 0 && state.diagnostics.LateExternalized:
 			state.diagnostics.ReductionReason = "request_budget"
 			state.diagnostics.ReductionStage = "late"
-		case state.responsesExternalized > 0:
+		case state.diagnostics.ResponsesExternalized > 0:
 			state.diagnostics.ReductionReason = "request_budget"
 			state.diagnostics.ReductionStage = "planned"
 		case state.optionalEvicted || len(state.result.Contents) != len(state.request.Contents):
@@ -130,7 +129,6 @@ func (c *Compiler) completeCompilation(state compilationState, unchanged bool) (
 			state.diagnostics.ReductionReason = "unchanged"
 		}
 	}
-	state = state.markStage("finalization")
 	c.recordDiagnostics(state.diagnostics, false)
 	return domain.CompileResult{Contents: state.result.Contents, Diagnostics: state.diagnostics}, nil
 }

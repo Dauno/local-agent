@@ -291,66 +291,6 @@ func (c *sequenceTokenCounter) CountRequest(context.Context, port.ModelRequestEn
 	return port.TokenCount{Tokens: c.counts[index], Strategy: "exact"}, nil
 }
 
-func TestCompilerPhaseOrder(t *testing.T) {
-	tests := []struct {
-		name   string
-		req    domain.CompileRequest
-		counts []int
-		want   []string
-	}{
-		{
-			name: "admitted without reduction",
-			req: domain.CompileRequest{
-				Contents:    []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "hello"}}}},
-				ModelBudget: domain.RequestBudget{HardTokens: 100, TargetTokens: 100},
-			},
-			counts: []int{1},
-			want:   []string{"analysis", "assembly", "admission"},
-		},
-		{
-			name: "evicts optional context before reduction",
-			req: domain.CompileRequest{
-				Contents: []domain.Content{
-					{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
-					{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
-					{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
-				},
-				ExistingSummary: "summary",
-				ModelBudget:     domain.RequestBudget{HardTokens: 100, TriggerTokens: 80, TargetTokens: 70},
-			},
-			counts: []int{81, 70},
-			want:   []string{"analysis", "assembly", "admission", "optional_eviction", "admission"},
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			compiler := New(newFakeResultStore(), &sequenceTokenCounter{counts: tc.counts})
-			state, err := analyzeCompilation(tc.req)
-			if err != nil {
-				t.Fatal(err)
-			}
-			state, err = assembleCompilation(state)
-			if err != nil {
-				t.Fatal(err)
-			}
-			state, err = compiler.countCompilation(t.Context(), state, true)
-			if err != nil {
-				t.Fatal(err)
-			}
-			if state.count.Tokens > triggerTokens(state.hardLimit, tc.req.ModelBudget.TriggerTokens) {
-				state, err = compiler.reduceCompilation(t.Context(), state)
-				if err != nil {
-					t.Fatal(err)
-				}
-			}
-			if !reflect.DeepEqual(state.stageOrder, tc.want) {
-				t.Fatalf("phase order = %v, want %v", state.stageOrder, tc.want)
-			}
-		})
-	}
-}
-
 func TestCompilerAnalysisSerializesEachResponseOnce(t *testing.T) {
 	contents := largeProjectionContents(false, false)
 	counts := make(map[string]int)
@@ -375,7 +315,7 @@ func TestCompilerAnalysisSerializesEachResponseOnce(t *testing.T) {
 			t.Fatal(projectionErr)
 		}
 		if !reflect.DeepEqual(projection.fullJSON, part.canonicalJSON) {
-			t.Fatalf("projection for %s did not reuse analyzed canonical JSON", part.response.ID)
+			t.Fatalf("projection for %s did not reuse analyzed canonical JSON", part.part.FunctionResponse.ID)
 		}
 	}
 }
