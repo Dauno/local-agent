@@ -165,11 +165,10 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 	var content []byte
 	var err error
 	if result.ArtifactRef != "" {
-		verified, ok := d.artifacts.(port.VerifiedResultArtifactStore)
-		if !ok {
+		if d.artifacts == nil {
 			return domain.AcpInvocationResult{}, errors.New("ACP result artifact cannot be verified")
 		}
-		content, err = verified.Get(ctx, job.ID, result.ArtifactRef, result.ResultSHA256, d.policy.MaxResultArtifactBytes)
+		content, err = d.artifacts.Get(ctx, job.ID, result.ArtifactRef, result.ResultSHA256, d.policy.MaxResultArtifactBytes)
 		if err != nil {
 			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("verified ACP result artifact is unavailable")}
 		}
@@ -192,11 +191,10 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 		ownerID := job.ID + "-delivery"
 		artifact, putErr := d.artifacts.Put(ctx, ownerID, text)
 		if putErr != nil {
-			verified, verifiedOK := d.artifacts.(port.VerifiedResultArtifactStore)
-			if !verifiedOK {
+			if d.artifacts == nil {
 				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
 			}
-			if _, readErr := verified.Get(ctx, ownerID, ownerID+".result", contentSHA, d.policy.MaxFileBytes); readErr != nil {
+			if _, readErr := d.artifacts.Get(ctx, ownerID, ownerID+".result", contentSHA, d.policy.MaxFileBytes); readErr != nil {
 				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
 			}
 			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: size}
@@ -327,12 +325,11 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	if err != nil {
 		return nil, nil, err
 	}
-	verifiedArtifacts, ok := models.artifactStore.(port.VerifiedResultArtifactStore)
-	if !ok {
+	if models.artifactStore == nil {
 		return nil, nil, errors.New("initialize durable ACP result delivery: verified artifact store is unavailable")
 	}
 	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
-	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, verifiedArtifacts, store, infra.api, cfg.Slack.PartLabels)
+	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, models.artifactStore, store, infra.api, cfg.Slack.PartLabels)
 	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher, HostCompleter: service, Logger: models.logger, Metrics: models.metrics})
 	if err != nil {
 		return nil, nil, err

@@ -112,10 +112,6 @@ type ResultArtifactStore interface {
 	Get(ctx context.Context, ownerID, reference, expectedSHA256 string, maxBytes int64) ([]byte, error)
 }
 
-// VerifiedResultArtifactStore is retained as a descriptive alias at call
-// sites where a verified read, rather than only a write, is required.
-type VerifiedResultArtifactStore = ResultArtifactStore
-
 // ResultArtifactChunkReader provides bounded, paginated reads in addition to
 // the complete verified read exposed by ResultArtifactStore.
 type ResultArtifactChunkReader interface {

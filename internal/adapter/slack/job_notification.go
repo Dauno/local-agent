@@ -23,7 +23,7 @@ type JobNotificationPublisher struct {
 	publisher     *Publisher
 	history       *HistoryReader
 	uploader      port.GeneratedFileUploader
-	artifacts     port.VerifiedResultArtifactStore
+	artifacts     port.ResultArtifactStore
 	deliveryStore port.ExternalAgentJobDeliveryStore
 	fileClient    *slackapi.Client
 	partLabels    bool
@@ -33,7 +33,7 @@ func NewJobNotificationPublisher(publisher *Publisher, history *HistoryReader) *
 	return &JobNotificationPublisher{publisher: publisher, history: history}
 }
 
-func NewDurableJobNotificationPublisher(publisher *Publisher, history *HistoryReader, uploader port.GeneratedFileUploader, artifacts port.VerifiedResultArtifactStore, deliveryStore port.ExternalAgentJobDeliveryStore, fileClient *slackapi.Client, partLabels ...bool) *JobNotificationPublisher {
+func NewDurableJobNotificationPublisher(publisher *Publisher, history *HistoryReader, uploader port.GeneratedFileUploader, artifacts port.ResultArtifactStore, deliveryStore port.ExternalAgentJobDeliveryStore, fileClient *slackapi.Client, partLabels ...bool) *JobNotificationPublisher {
 	labels := false
 	if len(partLabels) > 0 {
 		labels = partLabels[0]
