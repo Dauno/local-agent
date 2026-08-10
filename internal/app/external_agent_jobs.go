@@ -191,9 +191,6 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 		ownerID := job.ID + "-delivery"
 		artifact, putErr := d.artifacts.Put(ctx, ownerID, text)
 		if putErr != nil {
-			if d.artifacts == nil {
-				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
-			}
 			if _, readErr := d.artifacts.Get(ctx, ownerID, ownerID+".result", contentSHA, d.policy.MaxFileBytes); readErr != nil {
 				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
 			}
