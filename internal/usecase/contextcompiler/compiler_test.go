@@ -4,11 +4,22 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"iter"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 	"unicode/utf8"
 
+	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/model"
+	"google.golang.org/adk/v2/session"
+	"google.golang.org/adk/v2/tool"
+	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/genai"
+
+	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -19,19 +30,136 @@ import (
 // ---------------------------------------------------------------------------
 
 type fakeResultStore struct {
-	results  map[string]string
-	nextRef  int
-	putCalls int
+	results    map[string]string
+	nextRef    int
+	putCalls   int
+	emptyRef   bool
+	failPutAt  int
+	putFailure error
 }
 
 func newFakeResultStore() *fakeResultStore {
 	return &fakeResultStore{results: make(map[string]string)}
 }
 
+type callbackLedgerProbeLLM struct {
+	mu                     sync.Mutex
+	modelCalls             int
+	secondRequestHasMarker bool
+}
+
+func (*callbackLedgerProbeLLM) Name() string { return "callback-ledger-probe" }
+
+func (m *callbackLedgerProbeLLM) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	return func(yield func(*model.LLMResponse, error) bool) {
+		m.mu.Lock()
+		m.modelCalls++
+		call := m.modelCalls
+		if call == 2 {
+			m.secondRequestHasMarker = genaiContentsHaveProjectionMarker(request.Contents)
+		}
+		m.mu.Unlock()
+
+		if call == 1 {
+			yield(&model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+				ID: "probe-call", Name: "probe_bulk", Args: map[string]any{},
+			}}}}, TurnComplete: true}, nil)
+			return
+		}
+		yield(&model.LLMResponse{Content: genai.NewContentFromText("probe complete", genai.RoleModel), TurnComplete: true}, nil)
+	}
+}
+
+func genaiContentsHaveProjectionMarker(contents []*genai.Content) bool {
+	for _, content := range contents {
+		if content == nil {
+			continue
+		}
+		for _, part := range content.Parts {
+			if part != nil && part.FunctionResponse != nil {
+				if _, ok := part.FunctionResponse.Response["_local_agent_context_projection"]; ok {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func TestADKCallbackProjectionDoesNotPersistInLedger(t *testing.T) {
+	bulkTool, err := functiontool.New(functiontool.Config{
+		Name:        "probe_bulk",
+		Description: "Return a large probe payload.",
+	}, func(agent.Context, struct{}) (map[string]any, error) {
+		return map[string]any{"text": strings.Repeat("probe payload ", 20_000)}, nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	service := session.InMemoryService()
+	llm := &callbackLedgerProbeLLM{}
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
+		AgentName:       "Probe Agent",
+		Model:           llm,
+		SessionService:  service,
+		ContextCompiler: New(newFakeResultStore(), serializedByteCounter{}),
+		ContextBudget:   domain.RequestBudget{WindowTokens: 128_000, HardTokens: 5_000, TargetTokens: 5_000},
+		StaticTools:     []tool.Tool{bulkTool},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	turn, err := runtime.Run(t.Context(), port.AgentRequest{
+		ConversationKey: key,
+		Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "run the probe tool"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if turn.Text != "probe complete" {
+		t.Fatalf("turn text = %q, want probe complete", turn.Text)
+	}
+	llm.mu.Lock()
+	modelCalls := llm.modelCalls
+	secondRequestHasMarker := llm.secondRequestHasMarker
+	llm.mu.Unlock()
+	if modelCalls != 2 {
+		t.Fatalf("model calls = %d, want two model steps", modelCalls)
+	}
+	if !secondRequestHasMarker {
+		t.Fatal("second model request did not receive the callback projection")
+	}
+
+	loaded, err := service.Get(t.Context(), &session.GetRequest{
+		AppName: "local-agent", UserID: "local_user", SessionID: "adk:" + string(key),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for index := 0; index < loaded.Session.Events().Len(); index++ {
+		event := loaded.Session.Events().At(index)
+		if event != nil && genaiContentsHaveProjectionMarker([]*genai.Content{event.Content}) {
+			t.Fatalf("ADK persisted callback projection in ledger event %d; stop before changing classification", index)
+		}
+	}
+}
+
 func (s *fakeResultStore) Put(_ context.Context, req port.PutResultRequest) (domain.RecoverableResult, error) {
 	s.putCalls++
+	if s.failPutAt > 0 && s.putCalls == s.failPutAt {
+		if s.putFailure != nil {
+			return domain.RecoverableResult{}, s.putFailure
+		}
+		return domain.RecoverableResult{}, errors.New("injected result-store failure")
+	}
 	s.nextRef++
 	ref := fmt.Sprintf("ref-%d", s.nextRef)
+	if s.emptyRef {
+		ref = ""
+	}
 	s.results[ref] = req.Content
 	return domain.RecoverableResult{
 		Ref:        ref,
@@ -161,6 +289,199 @@ func (c *sequenceTokenCounter) CountRequest(context.Context, port.ModelRequestEn
 	}
 	c.calls++
 	return port.TokenCount{Tokens: c.counts[index], Strategy: "exact"}, nil
+}
+
+func TestCompilerAnalysisSerializesEachResponseOnce(t *testing.T) {
+	contents := largeProjectionContents(false, false)
+	counts := make(map[string]int)
+	state, err := analyzeCompilationWithSerializer(domain.CompileRequest{
+		Contents:    contents,
+		ModelBudget: domain.RequestBudget{HardTokens: 100_000, TargetTokens: 100_000},
+	}, func(response *domain.FunctionResponse) ([]byte, error) {
+		counts[response.ID]++
+		return fullResponseJSON(response)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{"call-1", "call-2"} {
+		if counts[id] != 1 {
+			t.Errorf("response %s serialized %d times, want once", id, counts[id])
+		}
+	}
+	for _, part := range state.reducible {
+		projection, projectionErr := newProjectionMutation(part, 0, "request_budget")
+		if projectionErr != nil {
+			t.Fatal(projectionErr)
+		}
+		if !reflect.DeepEqual(projection.fullJSON, part.canonicalJSON) {
+			t.Fatalf("projection for %s did not reuse analyzed canonical JSON", part.part.FunctionResponse.ID)
+		}
+	}
+}
+
+func TestCompilerOutputDeterministicExceptOpaqueReferences(t *testing.T) {
+	contents := largeProjectionContents(false, false)
+	req := domain.CompileRequest{
+		Contents:        contents,
+		ModelBudget:     domain.RequestBudget{HardTokens: 2_000, TargetTokens: 1_500},
+		Actor:           "U1",
+		ConversationKey: "deterministic-output",
+	}
+	firstStore := newFakeResultStore()
+	secondStore := newFakeResultStore()
+	secondStore.nextRef = 100
+	first, err := New(firstStore, serializedByteCounter{}).Compile(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := New(secondStore, serializedByteCounter{}).Compile(t.Context(), req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Diagnostics.ResponsesExternalized != second.Diagnostics.ResponsesExternalized ||
+		first.Diagnostics.ReductionReason != second.Diagnostics.ReductionReason ||
+		first.Diagnostics.ReductionStage != second.Diagnostics.ReductionStage {
+		t.Fatalf("stable diagnostics differ: first=%#v second=%#v", first.Diagnostics, second.Diagnostics)
+	}
+	for _, result := range []*domain.CompileResult{&first, &second} {
+		for contentIndex := range result.Contents {
+			for partIndex := range result.Contents[contentIndex].Parts {
+				response := result.Contents[contentIndex].Parts[partIndex].FunctionResponse
+				if response == nil {
+					continue
+				}
+				if marker, ok := response.Response[projectionMarkerKey].(domain.ContextProjectionMarker); ok {
+					marker.ResultRef = "<opaque>"
+					response.Response[projectionMarkerKey] = marker
+				}
+			}
+		}
+	}
+	firstJSON, err := domain.CanonicalJSON(first.Contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secondJSON, err := domain.CanonicalJSON(second.Contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatal("compiler output changed beyond opaque result references")
+	}
+}
+
+func TestCompilerCounterCallsRemainBoundedAcrossFixtures(t *testing.T) {
+	tests := []struct {
+		name string
+		req  domain.CompileRequest
+		max  int
+	}{
+		{
+			name: "optional eviction",
+			req: domain.CompileRequest{
+				Contents: []domain.Content{
+					{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
+					{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
+					{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
+				},
+				ExistingSummary: "summary",
+				ModelBudget:     domain.RequestBudget{HardTokens: 100, TriggerTokens: 80, TargetTokens: 70},
+			},
+			max: 8,
+		},
+		{
+			name: "minimum guard",
+			req: domain.CompileRequest{
+				Contents:    largeProjectionContents(false, false),
+				ModelBudget: domain.RequestBudget{HardTokens: 100, TargetTokens: 80},
+			},
+			max: 8,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &sequenceTokenCounter{counts: []int{101, 101, 101, 101, 101, 101, 101, 101}}
+			_, _ = New(newFakeResultStore(), counter).Compile(t.Context(), tc.req)
+			if counter.calls > tc.max {
+				t.Fatalf("counter calls = %d, want at most %d", counter.calls, tc.max)
+			}
+		})
+	}
+}
+
+func TestCompilerRejectsNilCompiler(t *testing.T) {
+	var compiler *Compiler
+	_, err := compiler.Compile(t.Context(), domain.CompileRequest{ModelBudget: domain.RequestBudget{HardTokens: 100}})
+	if err == nil || !strings.Contains(err.Error(), "compiler is required") {
+		t.Fatalf("Compile() error = %v, want nil compiler error", err)
+	}
+}
+
+func TestCompilerRejectsNilCounterForEmptyContents(t *testing.T) {
+	_, err := New(newFakeResultStore(), nil).Compile(t.Context(), domain.CompileRequest{
+		ModelBudget: domain.RequestBudget{HardTokens: 100},
+	})
+	if err == nil || !strings.Contains(err.Error(), "request token counter is required") {
+		t.Fatalf("Compile() error = %v, want missing counter error", err)
+	}
+}
+
+func TestCompilerRejectsNegativeFixedRequestTokens(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{1}}
+	_, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents:           []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "hello"}}}},
+		ModelBudget:        domain.RequestBudget{HardTokens: 100},
+		FixedRequestTokens: -1,
+	})
+	if err == nil || !strings.Contains(err.Error(), "fixed request tokens must not be negative") {
+		t.Fatalf("Compile() error = %v, want negative fixed-cost error", err)
+	}
+	if counter.calls != 0 {
+		t.Fatalf("counter calls = %d, want zero for invalid request", counter.calls)
+	}
+}
+
+func TestCompilerRejectsInvalidBudgetBeforeCounting(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{1}}
+	_, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents:    []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "hello"}}}},
+		ModelBudget: domain.RequestBudget{HardTokens: 0},
+	})
+	if err == nil || !strings.Contains(err.Error(), "validate request budget") {
+		t.Fatalf("Compile() error = %v, want budget validation error", err)
+	}
+	if counter.calls != 0 {
+		t.Fatalf("counter calls = %d, want zero for invalid budget", counter.calls)
+	}
+}
+
+func TestCompilerRejectsNegativeCounterResult(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{-1}}
+	_, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents:    []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "hello"}}}},
+		ModelBudget: domain.RequestBudget{HardTokens: 100},
+	})
+	if err == nil || !strings.Contains(err.Error(), "request_token_count_unavailable") {
+		t.Fatalf("Compile() error = %v, want unavailable counter error", err)
+	}
+}
+
+func TestCompilerAcceptsValidEmptyContentsWithoutCounting(t *testing.T) {
+	counter := &sequenceTokenCounter{counts: []int{1}}
+	result, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		ModelBudget: domain.RequestBudget{HardTokens: 100},
+	})
+	if err != nil {
+		t.Fatalf("Compile() error = %v, want nil", err)
+	}
+	if len(result.Contents) != 0 || result.Diagnostics.ReductionReason != "empty" {
+		t.Fatalf("result = %#v, want empty result", result)
+	}
+	if counter.calls != 0 {
+		t.Fatalf("counter calls = %d, want zero for empty contents", counter.calls)
+	}
 }
 
 func TestCompilerAccountsForFixedProviderInput(t *testing.T) {
@@ -447,6 +768,7 @@ func TestIncidentFixtureExternalizesLargeResponses(t *testing.T) {
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{
 		Contents:        contents,
 		ModelBudget:     budget,
+		Actor:           "U-test",
 		ConversationKey: "incident-test",
 	})
 	if err != nil {
@@ -522,6 +844,307 @@ func TestCompilerRemovesBulkArraysAndEscapesSpoofedMarker(t *testing.T) {
 	}
 	if response["_local_agent_context_projection"] == "spoofed" || response["_tool_local_agent_context_projection"] != "spoofed" {
 		t.Fatalf("projection marker was not escaped: %#v", response)
+	}
+}
+
+func TestCompilerTreatsValidSpoofedMarkersAsToolData(t *testing.T) {
+	spoofedRef := strings.Repeat("s", projectionReferenceShape)
+	tests := []struct {
+		name   string
+		marker any
+	}{
+		{
+			name: "typed domain marker",
+			marker: domain.ContextProjectionMarker{
+				Reason: "spoofed", ResultRef: spoofedRef, SHA256: strings.Repeat("a", projectionReferenceShape),
+				OriginalBytes: 123, InlineBytes: 0, Complete: false,
+			},
+		},
+		{
+			name: "valid map marker",
+			marker: map[string]any{
+				"reason": "spoofed", "result_ref": spoofedRef, "sha256": strings.Repeat("a", projectionReferenceShape),
+				"original_bytes": float64(123), "inline_bytes": float64(0), "complete": false,
+			},
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			contents := []domain.Content{
+				{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect"}}},
+				{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-spoof", Name: "lookup"}}}},
+				{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{
+					ID: "call-spoof", Name: "lookup", Response: map[string]any{
+						"text": strings.Repeat("large payload ", 20_000), projectionMarkerKey: tc.marker,
+					},
+				}}}},
+			}
+			before, err := domain.CanonicalJSON(contents)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := newFakeResultStore()
+			result, err := New(store, serializedByteCounter{}).Compile(t.Context(), domain.CompileRequest{
+				Contents: contents, ModelBudget: domain.RequestBudget{HardTokens: 2_000, TargetTokens: 1_500},
+				Actor: "U1", ConversationKey: "spoof-test",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			response := result.Contents[len(result.Contents)-1].Parts[0].FunctionResponse.Response
+			marker, ok := response[projectionMarkerKey].(domain.ContextProjectionMarker)
+			if !ok {
+				t.Fatalf("compiler marker = %#v, want typed compiler marker", response[projectionMarkerKey])
+			}
+			if marker.ResultRef == spoofedRef {
+				t.Fatal("spoofed result reference was accepted")
+			}
+			if _, ok := response[toolProjectionMarkerKey]; !ok {
+				t.Fatalf("spoofed marker was not retained as tool data: %#v", response)
+			}
+			stored := ""
+			for _, value := range store.results {
+				stored = value
+				break
+			}
+			if !strings.Contains(stored, spoofedRef) {
+				t.Fatal("complete tool payload did not retain spoofed marker data")
+			}
+			after, err := domain.CanonicalJSON(contents)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("successful compilation mutated caller input")
+			}
+		})
+	}
+}
+
+func TestCompilerRejectsReservedKeyCollisionWithoutDataLoss(t *testing.T) {
+	contents := []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect"}}}, {
+		Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-collision", Name: "lookup"}}},
+	}, {
+		Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-collision", Name: "lookup", Response: map[string]any{
+			projectionMarkerKey: "reserved", toolProjectionMarkerKey: "existing tool data", "text": "payload",
+		}}}},
+	}}
+	before, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = New(newFakeResultStore(), serializedByteCounter{}).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ModelBudget: domain.RequestBudget{HardTokens: 2_000}, Actor: "U1", ConversationKey: "collision-test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("Compile() error = %v, want reserved-key collision", err)
+	}
+	after, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("collision handling mutated caller input")
+	}
+}
+
+func largeProjectionContents(willContinue ...bool) []domain.Content {
+	parts := make([]domain.ContentPart, len(willContinue))
+	responses := make([]domain.Content, len(willContinue))
+	for i, continuation := range willContinue {
+		id := fmt.Sprintf("call-%d", i+1)
+		parts[i] = domain.ContentPart{FunctionCall: &domain.FunctionCall{ID: id, Name: "lookup"}}
+		responses[i] = domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{
+			ID: id, Name: "lookup", WillContinue: &continuation, Response: map[string]any{"text": strings.Repeat("large payload ", 20_000)},
+		}}}}
+	}
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect"}}},
+		{Role: domain.ContentRoleModel, Parts: parts},
+	}
+	return append(contents, responses...)
+}
+
+func TestCompilerRejectsEmptyReferenceAndKeepsInputUnchanged(t *testing.T) {
+	contents := largeProjectionContents(false)
+	before, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newFakeResultStore()
+	store.emptyRef = true
+	result, err := New(store, serializedByteCounter{}).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ModelBudget: domain.RequestBudget{HardTokens: 2_000, TargetTokens: 1_500}, Actor: "U1", ConversationKey: "empty-ref-test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "empty reference") {
+		t.Fatalf("Compile() error = %v, want empty reference error", err)
+	}
+	if len(result.Contents) != 0 || store.putCalls != 1 {
+		t.Fatalf("result=%#v writes=%d, want no projected result and one attempted Put", result, store.putCalls)
+	}
+	after, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("empty-reference failure mutated caller input")
+	}
+}
+
+func TestCompilerSecondPutFailureDoesNotPublishPartialProjection(t *testing.T) {
+	contents := largeProjectionContents(false, false)
+	before, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := newFakeResultStore()
+	store.failPutAt = 2
+	store.putFailure = errors.New("second put failed")
+	result, err := New(store, serializedByteCounter{}).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ModelBudget: domain.RequestBudget{HardTokens: 2_000, TargetTokens: 1_500}, Actor: "U1", ConversationKey: "second-put-test",
+	})
+	if err == nil || !strings.Contains(err.Error(), "second put failed") {
+		t.Fatalf("Compile() error = %v, want second Put error", err)
+	}
+	if len(result.Contents) != 0 || store.putCalls != 2 {
+		t.Fatalf("result=%#v writes=%d, want no projected result and two Put attempts", result, store.putCalls)
+	}
+	after, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("second-Put failure mutated caller input")
+	}
+}
+
+func TestCompilerRequiresBindingsBeforeProjectionStorage(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  domain.CompileRequest
+	}{
+		{name: "actor", req: domain.CompileRequest{ConversationKey: "binding-test"}},
+		{name: "conversation", req: domain.CompileRequest{Actor: "U1"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			contents := largeProjectionContents(false)
+			before, err := domain.CanonicalJSON(contents)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store := newFakeResultStore()
+			tc.req.Contents = contents
+			tc.req.ModelBudget = domain.RequestBudget{HardTokens: 2_000, TargetTokens: 1_500}
+			_, err = New(store, serializedByteCounter{}).Compile(t.Context(), tc.req)
+			if err == nil {
+				t.Fatal("Compile() succeeded without projection binding")
+			}
+			if store.putCalls != 0 {
+				t.Fatalf("Put calls = %d, want zero before binding validation", store.putCalls)
+			}
+			after, err := domain.CanonicalJSON(contents)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if string(before) != string(after) {
+				t.Fatal("binding failure mutated caller input")
+			}
+		})
+	}
+}
+
+func lateProjectionHardLimit(t *testing.T, contents []domain.Content, parts []reduciblePart) int {
+	t.Helper()
+	compiler := New(newFakeResultStore(), serializedByteCounter{})
+	minimum := dryRunActiveContents(contents, parts)
+	count, err := compiler.countProjection(t.Context(), minimum, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return count.Tokens
+}
+
+func TestLateExternalizationUsesBatchValidation(t *testing.T) {
+	contents := largeProjectionContents(false, false)
+	before, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parts := classifyActiveParts(contents)
+	store := newFakeResultStore()
+	store.emptyRef = true
+	compiler := New(store, serializedByteCounter{})
+	_, _, _, err = compiler.lateExternalize(t.Context(), domain.CompileRequest{
+		Actor: "U1", ConversationKey: "late-empty-ref", ModelBudget: domain.RequestBudget{HardTokens: 2_000},
+	}, contents, parts, nil, lateProjectionHardLimit(t, contents, parts))
+	if err == nil || !strings.Contains(err.Error(), "empty reference") {
+		t.Fatalf("lateExternalize() error = %v, want empty reference error", err)
+	}
+	if store.putCalls != 1 {
+		t.Fatalf("late Put calls = %d, want one", store.putCalls)
+	}
+	after, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("late empty-reference failure mutated caller input")
+	}
+}
+
+func TestLateExternalizationDoesNotPublishAfterSecondPutFailure(t *testing.T) {
+	contents := largeProjectionContents(false, false)
+	before, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, parts := classifyActiveParts(contents)
+	store := newFakeResultStore()
+	store.failPutAt = 2
+	store.putFailure = errors.New("late second put failed")
+	compiler := New(store, serializedByteCounter{})
+	result, _, _, err := compiler.lateExternalize(t.Context(), domain.CompileRequest{
+		Actor: "U1", ConversationKey: "late-second-put", ModelBudget: domain.RequestBudget{HardTokens: 2_000},
+	}, contents, parts, nil, lateProjectionHardLimit(t, contents, parts))
+	if err == nil || !strings.Contains(err.Error(), "late second put failed") {
+		t.Fatalf("lateExternalize() error = %v, want second Put error", err)
+	}
+	if result != nil || store.putCalls != 2 {
+		t.Fatalf("late result=%#v writes=%d, want no result and two Put attempts", result, store.putCalls)
+	}
+	after, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatal("late second-Put failure mutated caller input")
+	}
+}
+
+func TestCompilerPreservesResponseIdentityAndOrderAfterProjection(t *testing.T) {
+	contents := largeProjectionContents(false, false)
+	result, err := New(newFakeResultStore(), serializedByteCounter{}).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ModelBudget: domain.RequestBudget{HardTokens: 2_000, TargetTokens: 1_500}, Actor: "U1", ConversationKey: "identity-test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var responses []*domain.FunctionResponse
+	for _, content := range result.Contents {
+		for _, part := range content.Parts {
+			if part.FunctionResponse != nil {
+				responses = append(responses, part.FunctionResponse)
+			}
+		}
+	}
+	if len(responses) != 2 {
+		t.Fatalf("projected responses = %d, want two", len(responses))
+	}
+	for i, response := range responses {
+		if response.ID != fmt.Sprintf("call-%d", i+1) || response.Name != "lookup" || response.WillContinue == nil || *response.WillContinue {
+			t.Fatalf("response %d identity = %#v, want preserved ID/name/WillContinue/order", i, response)
+		}
 	}
 }
 
@@ -705,6 +1328,7 @@ func TestHugeResponseExternalizedWithTightBudget(t *testing.T) {
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{
 		Contents:        contents,
 		ModelBudget:     budget,
+		Actor:           "U-test",
 		ConversationKey: "tight-budget",
 	})
 	if err != nil {
@@ -764,6 +1388,7 @@ func TestAllHugeResponsesFairDivision(t *testing.T) {
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{
 		Contents:        contents,
 		ModelBudget:     budget,
+		Actor:           "U-test",
 		ConversationKey: "fair-division",
 	})
 	if err != nil {
@@ -809,6 +1434,7 @@ func TestSmallResponseDonatesUnusedAllocationToLargeResponse(t *testing.T) {
 	result, err := newCompiler().Compile(t.Context(), domain.CompileRequest{
 		Contents:        contents,
 		ModelBudget:     domain.RequestBudget{HardTokens: hard, TargetTokens: hard},
+		Actor:           "U-test",
 		ConversationKey: "fair-water-fill",
 	})
 	if err != nil {
@@ -901,6 +1527,7 @@ func TestConfirmationsNeverReduced(t *testing.T) {
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{
 		Contents:          contents,
 		ModelBudget:       budget,
+		Actor:             "U-test",
 		OpenInvocationIDs: map[string]struct{}{"call-delete": {}},
 		ConversationKey:   "confirmation-test",
 	})
@@ -971,6 +1598,7 @@ func TestConfirmationsProtectedWhenBudgetForcesExternalization(t *testing.T) {
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{
 		Contents:          contents,
 		ModelBudget:       budget,
+		Actor:             "U-test",
 		OpenInvocationIDs: map[string]struct{}{"call-del": {}},
 		ConversationKey:   "conf-protection",
 	})

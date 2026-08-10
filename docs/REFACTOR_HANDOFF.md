@@ -5,8 +5,8 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- 23 batches de refactor completados + docs update, 37 commits de refactor (A8, A11 y A13a-ext divididos en dos commits; A13c7 dividido en doce commits), neto acumulado **−790 líneas** (`−502` tras A13c6 + `−288` de A13c7). A13a-ext aplicó los cortes 3, 9 y 10; el corte 8 se saltó por falta de contrato de directorios padre en `ProjectFiles.CreateFile`. A13c2 aplicó los cortes 2, 3 y 4; saltó 1 y 5 por la regla de no tocar tests. A13c3 aplicó los siete cortes permitidos; el Commit 1 incorporó trabajo preexistente por decisión explícita del usuario y queda fuera del acumulado de refactor.
-- Tests verdes en todo momento; los commits del refactor no modificaron archivos de test.
+- El acumulado de refactor hasta A13c8 era **−797 líneas**. La cadena A13d (001 → 003 → 002 → 004 → 005) está completada en `refactor/context-compiler-improvements` con cinco commits, sin merge a `main`; el acumulado contabilizado de la cadena es **+756** y el acumulado global queda en **−41** (`−797 + 756`).
+- Gates en verde: `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent`. Queda pendiente el merge a `main` con el visto bueno final del usuario.
 - Los cambios preexistentes de `memory_core.go`, `redact.go` y `memory/service.go` se incorporaron en el Commit 1 de A13c3 por decisión explícita del usuario. El diff real correspondía a `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go`; no existían los dos primeros bajo `internal/usecase/memory`.
 
 ## Commits por batch
@@ -54,6 +54,11 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 | A13c7.10 | S9 (`minInt64`/`maxInt64`→builtin min/max; `maxInt()`→`math.MaxInt`) + S10 (2 locales `^uint(0)>>1`→`math.MaxInt`) en stores+tokencounter | `c44a15c7` (`+10/-28`, neto −18) |
 | A13c7.11 | D9 (maps muertos `topicByID` + params muertos en `writeRootIndex`/`writeNestedIndex`) + D11 (campo kind redundante en key + `metricKey` sin param kind) en okf+recorder | `53fc486d` (`+8/-19`, neto −11) |
 | A13c7.12 | C1: `domain.FlattenTurns` (inlina `Content.Clone()`) + eliminadas 2 copias locales `flattenTurns` + 5 call sites | `73ce7fde` (`+17/-21`, neto −4) |
+| A13d.001 | Fail-Closed Compiler Contract: validaciones fail-closed en `contextcompiler` | `0a776a2e` (`+177/-3`, neto +174) |
+| A13d.003 | Remove Unused Session Snapshot: elimina `SessionRevision`/snapshot sin uso | `5cba0147` (`+86/-43`, neto +43) |
+| A13d.002 | Trusted Projection Materialization (P0): proyecciones solo desde resultados almacenados; `compiler.go`, `compiler_test.go`, `adversarial_test.go` | `d7908f4` (`+635/-159`, neto +476) |
+| A13d.004 | Compiler Phase Structure (P2): `Compile` orquesta fases; `analysis.go`/`allocation.go`/`externalization.go` | `8c2e6109` (`+1392/-934`, neto +458) |
+| A13d.005 | Cleanup Post-Review: aplica 8 hallazgos de ponytail-review; `maps.Clone`, `slices.Reverse`, elimina `TestCompilerPhaseOrder` | `b7c0e81` (`+105/-283`, neto −178) |
 
 ## Proceso y reglas por batch
 
@@ -65,6 +70,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Pendientes
 
+- La cadena A13d está completa; queda pendiente el merge a `main`, sujeto a autorización y visto bueno final del usuario.
 - Revisión pendiente: clasificación de ambigüedad en `internal/adapter/slack` (`canvas_creator.go` vs `generated_file_uploader.go`), resto de `internal/domain`, `internal/port` y adapters, y tracking opcional en Slack Canvas.
 - `RequestBudgetPolicy`, diagnósticos no métricos y el comportamiento más estricto de `unicode.IsControl` en A2 se conservan; revisar solo con alcance ampliado.
 - `memory_core.go`: A3 se aplicó con stage selectivo. Los cambios preexistentes posteriores de `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go` se incorporaron por decisión del usuario en `4ea1941`.
@@ -227,3 +233,37 @@ Revisión propia; no se invocó `ponytail`. Se aplicaron los cortes #1 y #3 sin 
 
 - Acumulado de refactor tras A13c8: **−797**.
 - Nota de cierre: este commit documental no suma al acumulado (patrón A13c5/A13c6); su propio hash no puede insertarse en el contenido sin crear un commit adicional.
+
+## A13d
+
+### Cortes aplicados
+
+Ponytail-review: se aplicaron los ocho hallazgos siguientes:
+
+| Hallazgo | Localización original | Veredicto y motivo |
+|---|---|---|
+| #1 `responsePlan` duplicaba `reduciblePart` | `internal/usecase/contextcompiler/analysis.go` | **APLICADO**: queda un solo `reduciblePart` y se conserva la condición `cost > minimumCost`. |
+| #2 `compilationState` tenía 14 valores | `internal/usecase/contextcompiler/analysis.go` | **APLICADO**: se sustituyó por variables locales; solo cruzan fases los datos necesarios. |
+| #3 `reduceResponses` tenía receptor y parámetros ignorados, y `codePointsRemoved` no se usaba | `internal/usecase/contextcompiler/allocation.go` | **APLICADO**: se reemplazó por `planProjections(parts, allocations)`. |
+| #4 Las ramas de respaldo reconstruían response/JSON/digest | `internal/usecase/contextcompiler/externalization.go` | **APLICADO**: leen esos campos desde `reduciblePart`. |
+| #5 `cloneMapShallow` era una clonación manual | `internal/usecase/contextcompiler/externalization.go` | **APLICADO**: se usa `maps.Clone` (Go 1.25.0). |
+| #6 Había un bucle manual de inversión | `internal/usecase/contextcompiler/allocation.go` | **APLICADO**: se usa `slices.Reverse`. |
+| #7 Se mantenían `stage`/`stageOrder`/`markStage` y `TestCompilerPhaseOrder` | `internal/usecase/contextcompiler/analysis.go`, `compiler_test.go` | **APLICADO**: se eliminó la instrumentación y la prueba de orden de fases. |
+| #8 `projectionMutation.budget` se escribía y nunca se leía | `internal/usecase/contextcompiler/externalization.go` | **APLICADO**: se eliminó el campo. |
+
+### Hallazgo clave del ítem 002
+
+La prueba ADK de dos pasos demostró que ADK **NO persiste** la proyección del callback en el ledger: el segundo request sí la recibe. Por ello, la clasificación estricta de marcadores es segura y el escape hatch no se activó.
+
+### Commits y acumulado
+
+| Commit | Shortstat | Neto |
+|---|---|---|
+| `0a776a2e` | `+177/-3` | +174 |
+| `5cba0147` | `+86/-43` | +43 |
+| `d7908f4` | `+635/-159` | +476 |
+| `8c2e6109` | `+1392/-934` | +458 |
+| `b7c0e81` | `+105/-283` | −178 |
+
+- Acumulado contabilizado de la cadena: **+756** (`+476 + 458 − 178`), según el corte de los ítems 002, 004 y 005. Los ítems 001 y 003 quedan registrados con netos +174 y +43, pero no se suman a este acumulado.
+- El commit documental no suma al acumulado de refactor; su hash y shortstat se reportan en el cierre.

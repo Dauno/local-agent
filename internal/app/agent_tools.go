@@ -540,7 +540,7 @@ func newAgentToolAgentWithContext(definition agentdef.AgentDef, globalInstructio
 	}
 	if contextConfig != nil && contextConfig.compiler != nil {
 		cfg.BeforeModelCallbacks = append(cfg.BeforeModelCallbacks,
-			adkagent.CompilerBeforeModelCallback(contextConfig.compiler, contextConfig.budget, nil, nil, contextConfig.actor))
+			adkagent.CompilerBeforeModelCallback(contextConfig.compiler, contextConfig.budget, nil, nil, domain.ContextCompactionSettings{}, contextConfig.actor))
 	}
 	return llmagent.New(cfg)
 }

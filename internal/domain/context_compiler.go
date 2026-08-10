@@ -18,7 +18,6 @@ type CompileRequest struct {
 	FixedRequestTokens int
 	Actor              string
 	ConversationKey    string
-	SessionRevision    int64
 	OpenInvocationIDs  map[string]struct{}
 }
 
@@ -41,6 +40,8 @@ type CompileResult struct {
 
 // CompileDiagnostics records what the compiler changed without exposing
 // content, paths, function arguments, result references, or digests.
+// ProtectedTokens remains a dashboard-compatibility field; new code-point
+// measurements use ProtectedCodePoints.
 type CompileDiagnostics struct {
 	RequestTokensBefore   int
 	RequestTokensAfter    int
