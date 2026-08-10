@@ -4,13 +4,13 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 func assembleCompilation(state compilationState) (compilationState, error) {
-	state = state.markStage("assembly")
 	state.result.Contents = assembleContents(state.summary, state.recent, state.capsule, state.active)
 	if err := validateProjectedContents(state.result.Contents, state.request.OpenInvocationIDs); err != nil {
 		return state, fmt.Errorf("context compiler: validate projection: %w", err)
@@ -26,7 +26,6 @@ func reassembleCompilation(state compilationState) compilationState {
 // evictOptionalContext removes lower-priority history before active response
 // reduction. It performs no counting and does not mutate the prior state.
 func evictOptionalContext(state compilationState) compilationState {
-	state = state.markStage("optional_eviction")
 	state.summary = nil
 	state.recent = nil
 	state.optionalEvicted = true
@@ -46,19 +45,18 @@ func evictContinuityAndExcerpts(state compilationState) compilationState {
 
 // prepareReduction builds the dry-run minimum and the allocation candidates.
 // Counting and durable storage remain outside this pure preparation phase.
-func prepareReduction(state compilationState) compilationState {
-	state = state.markStage("reduction_preparation")
-	state.reducibleForAlloc = make([]reduciblePart, 0, len(state.reducible))
-	state.minEnvForAlloc = make([]int, 0, len(state.reducible))
+func prepareReduction(state compilationState) ([]reduciblePart, []int, []domain.Content) {
+	reducibleForAlloc := make([]reduciblePart, 0, len(state.reducible))
+	minEnvForAlloc := make([]int, 0, len(state.reducible))
 	for _, part := range state.reducible {
-		if part.overMinimumCost <= 0 {
+		if part.cost <= part.minimumCost {
 			continue
 		}
-		state.reducibleForAlloc = append(state.reducibleForAlloc, part)
-		state.minEnvForAlloc = append(state.minEnvForAlloc, part.minimumCost)
+		reducibleForAlloc = append(reducibleForAlloc, part)
+		minEnvForAlloc = append(minEnvForAlloc, part.minimumCost)
 	}
-	state.minimumContents = assembleContents(nil, nil, nil, dryRunActiveContents(state.active, state.reducibleForAlloc))
-	return state
+	minimumContents := assembleContents(nil, nil, nil, dryRunActiveContents(state.active, reducibleForAlloc))
+	return reducibleForAlloc, minEnvForAlloc, minimumContents
 }
 
 func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState) (compilationState, error) {
@@ -66,6 +64,14 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 		return state, nil
 	}
 
+	var (
+		reducibleForAlloc     []reduciblePart
+		minEnvForAlloc        []int
+		minimumContents       []domain.Content
+		plannedProjections    []projectionMutation
+		responseCountBefore   int
+		responseTokensRemoved int
+	)
 	state = evictOptionalContext(state)
 	var err error
 	state, err = c.countCompilation(ctx, state, false)
@@ -84,9 +90,9 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 	}
 
 	if state.count.Tokens > state.allocationLimit {
-		state = prepareReduction(state)
-		if len(state.reducibleForAlloc) > 0 {
-			minimumCount, countErr := c.countProjection(ctx, state.minimumContents, state.request.FixedRequestTokens)
+		reducibleForAlloc, minEnvForAlloc, minimumContents = prepareReduction(state)
+		if len(reducibleForAlloc) > 0 {
+			minimumCount, countErr := c.countProjection(ctx, minimumContents, state.request.FixedRequestTokens)
 			if countErr != nil {
 				return state, countErr
 			}
@@ -105,47 +111,43 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 		}
 	}
 
-	if state.count.Tokens > state.allocationLimit && len(state.reducibleForAlloc) > 0 {
-		state = state.markStage("allocation")
+	if state.count.Tokens > state.allocationLimit && len(reducibleForAlloc) > 0 {
 		optionalCost := sumCosts([]int{turnCost(state.summary), turnCost(state.recent), turnCost(state.capsule)})
 		available := state.allocationLimit - state.request.FixedRequestTokens - state.protectedCost - state.totalMinimumCost - optionalCost
 		if available < 0 {
 			available = 0
 		}
-		allocations := allocateResponseBudgets(state.reducibleForAlloc, state.minEnvForAlloc, available)
-		_, planned, planErr := c.reduceResponses(ctx, state.request, state.reducibleForAlloc, allocations, state.active)
+		allocations := allocateResponseBudgets(reducibleForAlloc, minEnvForAlloc, available)
+		planned, planErr := planProjections(reducibleForAlloc, allocations)
 		if planErr != nil {
 			return state, planErr
 		}
-		state.plannedProjections = planned
+		plannedProjections = planned
 		if len(planned) > 0 {
-			state = state.markStage("materialization")
 			var removed, externalized int
 			state.active, removed, externalized, err = c.materializeProjections(ctx, state.request, state.active, planned)
 			if err != nil {
 				return state, err
 			}
-			state.responseCodePointsRemoved = removed
-			state.responsesExternalized = externalized
 			state.diagnostics.ResponsesExternalized = externalized
 			state.diagnostics.ResponseCodePointsRemoved = removed
 		}
 	}
 
-	if state.responsesExternalized > 0 {
-		state.responseCountBefore = state.count.Tokens
+	if state.diagnostics.ResponsesExternalized > 0 {
+		responseCountBefore = state.count.Tokens
 		state = reassembleCompilation(state)
 		state, err = c.countCompilation(ctx, state, false)
 		if err != nil {
 			return state, err
 		}
 		state.diagnostics.RecountPasses++
-		if state.responseCountBefore > state.count.Tokens {
-			state.responseTokensRemoved = state.responseCountBefore - state.count.Tokens
+		if responseCountBefore > state.count.Tokens {
+			responseTokensRemoved = responseCountBefore - state.count.Tokens
 		}
 	}
 
-	if state.count.Tokens > state.allocationLimit && state.responsesExternalized > 0 {
+	if state.count.Tokens > state.allocationLimit && state.diagnostics.ResponsesExternalized > 0 {
 		state.active = domain.CloneContents(state.active)
 		stripProjectedExcerpts(state.active)
 		state = reassembleCompilation(state)
@@ -154,15 +156,14 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 			return state, err
 		}
 		state.diagnostics.RecountPasses++
-		if state.responseCountBefore > state.count.Tokens {
-			state.responseTokensRemoved = state.responseCountBefore - state.count.Tokens
+		if responseCountBefore > state.count.Tokens {
+			responseTokensRemoved = responseCountBefore - state.count.Tokens
 		}
 	}
-	state.diagnostics.ResponseTokensRemoved = state.responseTokensRemoved
+	state.diagnostics.ResponseTokensRemoved = responseTokensRemoved
 
 	if state.count.Tokens > state.hardLimit {
-		state = state.markStage("late_externalization")
-		lateContents, lateRemoved, lateExternalized, lateErr := c.lateExternalize(ctx, state.request, state.active, state.reducible, state.plannedProjections, state.hardLimit)
+		lateContents, lateRemoved, lateExternalized, lateErr := c.lateExternalize(ctx, state.request, state.active, state.reducible, plannedProjections, state.hardLimit)
 		if lateErr != nil {
 			state.diagnostics.RequestTokensAfter = lateRemoved
 			state.diagnostics.ReductionReason = "min_irreducible"
@@ -179,10 +180,8 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 			state.diagnostics.LateExternalized = true
 			state.diagnostics.ReductionStage = "late"
 			state.active = lateContents
-			state.responsesExternalized += lateExternalized
-			state.responseCodePointsRemoved += lateRemoved
-			state.diagnostics.ResponsesExternalized = state.responsesExternalized
-			state.diagnostics.ResponseCodePointsRemoved = state.responseCodePointsRemoved
+			state.diagnostics.ResponsesExternalized += lateExternalized
+			state.diagnostics.ResponseCodePointsRemoved += lateRemoved
 			state.result.Contents = state.active
 			beforeLateCount := state.count.Tokens
 			state, err = c.countCompilation(ctx, state, false)
@@ -191,24 +190,19 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 			}
 			state.diagnostics.RecountPasses++
 			if beforeLateCount > state.count.Tokens {
-				state.responseTokensRemoved += beforeLateCount - state.count.Tokens
-				state.diagnostics.ResponseTokensRemoved = state.responseTokensRemoved
+				responseTokensRemoved += beforeLateCount - state.count.Tokens
+				state.diagnostics.ResponseTokensRemoved = responseTokensRemoved
 			}
 		}
 	}
 	return state, nil
 }
 
-// reduceResponses plans oversized FunctionResponse payloads without writing
+// planProjections plans oversized FunctionResponse payloads without writing
 // results or changing active content. Costs in the water-fill allocation are
 // Unicode code-point costs; model token admission is performed separately.
-func (c *Compiler) reduceResponses(
-	_ context.Context,
-	_ domain.CompileRequest,
-	parts []reduciblePart,
-	allocations []int,
-	_ []domain.Content,
-) (codePointsRemoved int, projections []projectionMutation, err error) {
+func planProjections(parts []reduciblePart, allocations []int) ([]projectionMutation, error) {
+	var projections []projectionMutation
 	for i, part := range parts {
 		currentCost := part.cost
 		allocation := allocations[i]
@@ -216,19 +210,13 @@ func (c *Compiler) reduceResponses(
 			continue
 		}
 
-		removed := currentCost - allocation
-		if removed < 0 {
-			removed = 0
-		}
-		codePointsRemoved += removed
-
 		projection, planErr := newProjectionMutation(part, allocation, "request_budget")
 		if planErr != nil {
-			return 0, nil, planErr
+			return nil, planErr
 		}
 		projections = append(projections, projection)
 	}
-	return codePointsRemoved, projections, nil
+	return projections, nil
 }
 
 // allocateResponseBudgets reserves every response envelope, then fills the
@@ -327,9 +315,7 @@ func selectRecentTurns(turns []domain.ConversationTurn, remaining, limit int) ([
 		selected = append(selected, turn.Clone())
 		codePointsLeft -= turn.CharCount
 	}
-	for left, right := 0, len(selected)-1; left < right; left, right = left+1, right-1 {
-		selected[left], selected[right] = selected[right], selected[left]
-	}
+	slices.Reverse(selected)
 	return domain.FlattenTurns(selected), len(selected)
 }
 

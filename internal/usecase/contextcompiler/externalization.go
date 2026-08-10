@@ -2,9 +2,9 @@ package contextcompiler
 
 import (
 	"context"
-	"crypto/sha256"
 	"errors"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 	"unicode/utf8"
@@ -28,7 +28,6 @@ type projectionMutation struct {
 	digest       string
 	reason       string
 	excerpt      string
-	budget       int
 	keepExcerpt  bool
 	response     *domain.FunctionResponse
 	sourceCost   int
@@ -48,7 +47,10 @@ func dryRunProjectionMarker(reason string, originalBytes int) domain.ContextProj
 func projectionResponse(response *domain.FunctionResponse, marker domain.ContextProjectionMarker, excerpt string, keepExcerpt bool) *domain.FunctionResponse {
 	result := &domain.FunctionResponse{ID: response.ID, Name: response.Name, WillContinue: response.WillContinue}
 	if keepExcerpt {
-		result.Response = cloneMapShallow(response.Response)
+		result.Response = maps.Clone(response.Response)
+		if result.Response == nil {
+			result.Response = make(map[string]any, 1)
+		}
 		reduceResponseFields(result.Response, excerpt)
 	} else {
 		result.Response = make(map[string]any, 1)
@@ -60,15 +62,8 @@ func projectionResponse(response *domain.FunctionResponse, marker domain.Context
 func dryRunActiveContents(active []domain.Content, parts []reduciblePart) []domain.Content {
 	result := domain.CloneContents(active)
 	for _, part := range parts {
-		response := part.response
-		if response == nil {
-			response = part.part.FunctionResponse
-		}
-		full := part.canonicalJSON
-		if len(full) == 0 {
-			full, _ = fullResponseJSON(response)
-		}
-		marker := dryRunProjectionMarker("late_externalization", len(full))
+		marker := dryRunProjectionMarker("late_externalization", len(part.canonicalJSON))
+		response := part.part.FunctionResponse
 		result[part.contentIndex].Parts[part.partIndex] = domain.ContentPart{FunctionResponse: projectionResponse(response, marker, "", false)}
 	}
 	return result
@@ -94,19 +89,8 @@ func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileReques
 
 	minimum := domain.CloneContents(active)
 	for _, part := range parts {
-		response := part.response
-		if response == nil {
-			response = part.part.FunctionResponse
-		}
-		full := part.canonicalJSON
-		if len(full) == 0 {
-			var err error
-			full, err = fullResponseJSON(response)
-			if err != nil {
-				return nil, 0, 0, fmt.Errorf("context compiler: serialize late response %s: %w", response.ID, err)
-			}
-		}
-		marker := dryRunProjectionMarker("late_externalization", len(full))
+		marker := dryRunProjectionMarker("late_externalization", len(part.canonicalJSON))
+		response := part.part.FunctionResponse
 		minimum[part.contentIndex].Parts[part.partIndex] = domain.ContentPart{FunctionResponse: projectionResponse(response, marker, "", false)}
 	}
 	if err := validateProjectedContents(assembleContents(nil, nil, nil, minimum), req.OpenInvocationIDs); err != nil {
@@ -132,47 +116,23 @@ func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileReques
 }
 
 func newProjectionMutation(part reduciblePart, budget int, reason string) (projectionMutation, error) {
-	response := part.response
-	if response == nil {
-		response = part.part.FunctionResponse
-	}
+	response := part.part.FunctionResponse
 	if response == nil {
 		return projectionMutation{}, errors.New("context compiler: projection response is required")
 	}
 	fullJSON := append([]byte(nil), part.canonicalJSON...)
-	if len(fullJSON) == 0 {
-		var err error
-		fullJSON, err = fullResponseJSON(response)
-		if err != nil {
-			return projectionMutation{}, fmt.Errorf("context compiler: serialize response %s: %w", response.ID, err)
-		}
-	}
-	digest := part.digest
-	if digest == "" {
-		digestBytes := sha256.Sum256(fullJSON)
-		digest = fmt.Sprintf("%x", digestBytes[:])
-	}
-	minimumCost := part.minimumCost
-	if minimumCost == 0 {
-		minimumCost = minimumResponseCost(response, "request_budget", len(fullJSON))
-	}
-	sourceCost := part.originalCost
-	if sourceCost == 0 {
-		sourceCost = part.cost
-	}
 	projection := projectionMutation{
 		contentIndex: part.contentIndex,
 		partIndex:    part.partIndex,
 		fullJSON:     fullJSON,
-		digest:       digest,
+		digest:       part.digest,
 		reason:       reason,
-		budget:       budget,
 		keepExcerpt:  budget > 0,
 		response:     response,
-		sourceCost:   sourceCost,
+		sourceCost:   part.cost,
 	}
 
-	inlineBudget := budget - minimumCost
+	inlineBudget := budget - part.minimumCost
 	if inlineBudget < 0 {
 		inlineBudget = 0
 	}
@@ -313,14 +273,6 @@ func reduceResponseFields(values map[string]any, excerpt string) {
 			values[key] = nil
 		}
 	}
-}
-
-func cloneMapShallow(input map[string]any) map[string]any {
-	output := make(map[string]any, len(input)+2)
-	for key, value := range input {
-		output[key] = value
-	}
-	return output
 }
 
 // truncateToCodePoints returns the first maxCodePoints Unicode code points.

@@ -10,30 +10,21 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-// responsePlan is the immutable analysis record for one reducible response.
-// canonicalJSON is also the exact payload later stored behind its projection.
-type responsePlan struct {
-	contentIndex    int
-	partIndex       int
-	response        *domain.FunctionResponse
-	canonicalJSON   []byte
-	digest          string
-	originalCost    int
-	minimumCost     int
-	overMinimumCost int
-}
-
 type serializedResponse struct {
 	canonicalJSON []byte
 	cost          int
 }
 
-// reduciblePart keeps the existing private helper shape while carrying the
-// complete response plan. cost is a code-point cost, not a token count.
+// reduciblePart carries the complete analysis for one response. cost is a
+// code-point cost, not a token count.
 type reduciblePart struct {
-	responsePlan
-	part domain.ContentPart
-	cost int
+	contentIndex  int
+	partIndex     int
+	part          domain.ContentPart
+	canonicalJSON []byte
+	digest        string
+	cost          int
+	minimumCost   int
 }
 
 type projectionIndex struct {
@@ -46,54 +37,28 @@ type projectionIndex struct {
 type compilationState struct {
 	request domain.CompileRequest
 
-	inputContents    []domain.Content
-	hardLimit        int
-	allocationLimit  int
-	beforeCodePoints int
+	hardLimit       int
+	allocationLimit int
 
-	turns       []domain.ConversationTurn
-	activeStart int
-	completed   []domain.ConversationTurn
-	protected   []domain.Content
-	reducible   []reduciblePart
+	turns     []domain.ConversationTurn
+	reducible []reduciblePart
 
 	summary []domain.Content
 	recent  []domain.Content
 	capsule []domain.Content
 	active  []domain.Content
 
-	capsuleCodePoints  int
-	protectedCost      int
-	totalMinimumCost   int
-	minEnvelopeCosts   []int
-	effectiveMinCosts  []int
-	reducibleForAlloc  []reduciblePart
-	minEnvForAlloc     []int
-	minimumContents    []domain.Content
-	plannedProjections []projectionMutation
+	protectedCost    int
+	totalMinimumCost int
 
 	result domain.CompileResult
 	count  port.TokenCount
 
-	responseCountBefore       int
-	responseTokensRemoved     int
-	responseCodePointsRemoved int
-	responsesExternalized     int
-	optionalEvicted           bool
+	optionalEvicted bool
 
 	diagnostics              domain.CompileDiagnostics
-	stage                    string
-	stageOrder               []string
 	exposeDiagnosticsOnError bool
 	diagnosticsIrreducible   bool
-}
-
-func (s compilationState) markStage(stage string) compilationState {
-	s.stage = stage
-	if len(s.stageOrder) == 0 || s.stageOrder[len(s.stageOrder)-1] != stage {
-		s.stageOrder = append(append([]string(nil), s.stageOrder...), stage)
-	}
-	return s
 }
 
 func analyzeCompilation(req domain.CompileRequest) (compilationState, error) {
@@ -111,17 +76,15 @@ func analyzeCompilationWithSerializer(req domain.CompileRequest, serialize respo
 		hardLimit:       req.ModelBudget.HardTokens,
 		allocationLimit: req.ModelBudget.TargetTokens,
 	}
-	state = state.markStage("analysis")
 
-	state.inputContents = domain.CloneContents(req.Contents)
-	if err := normalizeProjectionKeys(state.inputContents); err != nil {
+	inputContents := domain.CloneContents(req.Contents)
+	if err := normalizeProjectionKeys(inputContents); err != nil {
 		return state, fmt.Errorf("context compiler: normalize reserved response keys: %w", err)
 	}
-	beforeCodePoints, serialized, err := measureContents(state.inputContents, serialize)
+	beforeCodePoints, serialized, err := measureContents(inputContents, serialize)
 	if err != nil {
 		return state, fmt.Errorf("context compiler: measure before: %w", err)
 	}
-	state.beforeCodePoints = beforeCodePoints
 	state.diagnostics = domain.CompileDiagnostics{
 		RequestCodePointsBefore: beforeCodePoints,
 		HardLimitTokens:         state.hardLimit,
@@ -130,13 +93,12 @@ func analyzeCompilationWithSerializer(req domain.CompileRequest, serialize respo
 		state.allocationLimit = state.hardLimit
 	}
 
-	turns, activeStart, err := domain.ClassifyConversationTurns(state.inputContents,
+	turns, activeStart, err := domain.ClassifyConversationTurns(inputContents,
 		domain.TurnClassificationOptions{OpenInvocationIDs: req.OpenInvocationIDs})
 	if err != nil {
 		return state, fmt.Errorf("context compiler: classify turns: %w", err)
 	}
 	state.turns = turns
-	state.activeStart = activeStart
 	if len(turns) == 0 {
 		state.diagnostics.RequestTokensAfter = 0
 		state.diagnostics.ReductionReason = "empty"
@@ -147,28 +109,30 @@ func analyzeCompilationWithSerializer(req domain.CompileRequest, serialize respo
 	if activeTurnIdx < 0 || activeTurnIdx >= len(turns) {
 		return state, fmt.Errorf("context compiler: active start %d maps to no turn", activeStart)
 	}
-	state.completed = turns[:activeTurnIdx]
-	state.active = domain.CloneContents(state.inputContents[activeStart:])
-	state.protected, state.reducible = classifyActivePartsWithSerializations(state.active, activeStart, serialized)
+	completed := turns[:activeTurnIdx]
+	active := domain.CloneContents(inputContents[activeStart:])
+	protected, reducible := classifyActivePartsWithSerializations(active, activeStart, serialized)
+	state.active = active
+	state.reducible = reducible
 
-	protectedCost, err := domain.ContentCost(state.protected)
+	protectedCost, err := domain.ContentCost(protected)
 	if err != nil {
 		return state, fmt.Errorf("context compiler: measure protected: %w", err)
 	}
 	state.protectedCost = protectedCost
-	state.minEnvelopeCosts = minEnvelopeCosts(state.reducible)
-	state.effectiveMinCosts = make([]int, len(state.reducible))
-	for i, part := range state.reducible {
-		state.effectiveMinCosts[i] = min(part.cost, state.minEnvelopeCosts[i])
+	minimumCosts := minEnvelopeCosts(reducible)
+	effectiveMinimumCosts := make([]int, len(reducible))
+	for i, part := range reducible {
+		effectiveMinimumCosts[i] = min(part.cost, minimumCosts[i])
 	}
-	state.totalMinimumCost = sumCosts(state.effectiveMinCosts)
+	state.totalMinimumCost = sumCosts(effectiveMinimumCosts)
 	state.diagnostics.ProtectedCodePoints = sumCosts([]int{protectedCost, state.totalMinimumCost})
 
 	optionalBudget := state.hardLimit - req.FixedRequestTokens
 	if req.Compaction.Enabled && req.Compaction.MaxHistoryChars > 0 {
 		optionalBudget = req.Compaction.MaxHistoryChars
 	} else {
-		activeCost, costErr := contentCostWithPlans(state.active, state.reducible)
+		activeCost, costErr := contentCostWithPlans(active, reducible)
 		if costErr != nil {
 			return state, fmt.Errorf("context compiler: measure active: %w", costErr)
 		}
@@ -182,23 +146,24 @@ func analyzeCompilationWithSerializer(req domain.CompileRequest, serialize respo
 	// The continuity cost is measured in Unicode code points. The legacy
 	// ContinuityTokens diagnostic remains zero for metric compatibility.
 	rendered := domain.RenderContinuityCapsule(req.Continuity, remaining)
+	capsuleCodePoints := 0
 	if rendered != "" {
 		candidate := []domain.Content{{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: rendered}}}}
 		candidateCost, costErr := domain.ContentCost(candidate)
 		if costErr == nil && candidateCost <= remaining {
 			state.capsule = candidate
-			state.capsuleCodePoints = candidateCost
+			capsuleCodePoints = candidateCost
 			remaining -= candidateCost
 		}
 	}
-	state.diagnostics.ContinuityCodePoints = state.capsuleCodePoints
+	state.diagnostics.ContinuityCodePoints = capsuleCodePoints
 	state.diagnostics.ContinuityTokens = 0
 
 	recentLimit := 0
 	if req.Compaction.Enabled {
 		recentLimit = req.Compaction.RecentTurns
 	}
-	state.recent, state.diagnostics.RecentTurnsRetained = selectRecentTurns(state.completed, remaining, recentLimit)
+	state.recent, state.diagnostics.RecentTurnsRetained = selectRecentTurns(completed, remaining, recentLimit)
 	remaining -= turnCost(state.recent)
 
 	summaryAllowed := strings.TrimSpace(req.ExistingSummary) != ""
@@ -286,27 +251,19 @@ func classifyActivePartsWithSerializations(contents []domain.Content, sourceOffs
 		for partIndex, part := range content.Parts {
 			if part.FunctionResponse != nil && part.FunctionResponse.Name != domain.ConfirmationFunctionName {
 				serializedResponse := serialized[projectionIndex{contentIndex: sourceOffset + contentIndex, partIndex: partIndex}]
-				plan := responsePlan{
+				plan := reduciblePart{
 					contentIndex:  contentIndex,
 					partIndex:     partIndex,
-					response:      part.FunctionResponse,
+					part:          part,
 					canonicalJSON: serializedResponse.canonicalJSON,
-					originalCost:  serializedResponse.cost,
+					cost:          serializedResponse.cost,
 				}
 				if len(plan.canonicalJSON) > 0 {
 					digest := sha256.Sum256(plan.canonicalJSON)
 					plan.digest = fmt.Sprintf("%x", digest[:])
 				}
 				plan.minimumCost = minimumResponseCost(part.FunctionResponse, "request_budget", len(plan.canonicalJSON))
-				plan.overMinimumCost = plan.originalCost - plan.minimumCost
-				if plan.overMinimumCost < 0 {
-					plan.overMinimumCost = 0
-				}
-				reducible = append(reducible, reduciblePart{
-					responsePlan: plan,
-					part:         part,
-					cost:         plan.originalCost,
-				})
+				reducible = append(reducible, plan)
 				hasReducible = true
 			} else {
 				protectedContent.Parts = append(protectedContent.Parts, part)
@@ -326,16 +283,16 @@ func classifyActivePartsWithSerializations(contents []domain.Content, sourceOffs
 }
 
 func contentCostWithPlans(contents []domain.Content, parts []reduciblePart) (int, error) {
-	plans := make(map[projectionIndex]responsePlan, len(parts))
+	plans := make(map[projectionIndex]int, len(parts))
 	for _, part := range parts {
-		plans[projectionIndex{contentIndex: part.contentIndex, partIndex: part.partIndex}] = part.responsePlan
+		plans[projectionIndex{contentIndex: part.contentIndex, partIndex: part.partIndex}] = part.cost
 	}
 	total := 0
 	for contentIndex, content := range contents {
 		for partIndex, part := range content.Parts {
 			if part.FunctionResponse != nil {
-				if plan, ok := plans[projectionIndex{contentIndex: contentIndex, partIndex: partIndex}]; ok {
-					total += plan.originalCost
+				if cost, ok := plans[projectionIndex{contentIndex: contentIndex, partIndex: partIndex}]; ok {
+					total += cost
 					continue
 				}
 			}
@@ -353,17 +310,6 @@ func minEnvelopeCosts(parts []reduciblePart) []int {
 	costs := make([]int, len(parts))
 	for i, part := range parts {
 		costs[i] = part.minimumCost
-		if costs[i] == 0 {
-			response := part.response
-			if response == nil {
-				response = part.part.FunctionResponse
-			}
-			if response == nil {
-				costs[i] = 300
-				continue
-			}
-			costs[i] = minimumResponseCost(response, "request_budget", len(part.canonicalJSON))
-		}
 	}
 	return costs
 }
