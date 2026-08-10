@@ -66,11 +66,6 @@ type ACPConfigOption struct {
 	Value any
 }
 
-type ACPPermissionOption struct {
-	Kind string
-	ID   string
-}
-
 type ACPAgentInfo struct {
 	Name    string
 	Version string
