@@ -8,6 +8,8 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - El acumulado de refactor hasta A13c8 era **−797 líneas**. La cadena A13d (001 → 003 → 002 → 004 → 005) está completada en `refactor/context-compiler-improvements` con cinco commits, sin merge a `main`; el acumulado contabilizado de la cadena es **+756** y el acumulado global queda en **−41** (`−797 + 756`).
 - Gates en verde: `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent`. Queda pendiente el merge a `main` con el visto bueno final del usuario.
 - Los cambios preexistentes de `memory_core.go`, `redact.go` y `memory/service.go` se incorporaron en el Commit 1 de A13c3 por decisión explícita del usuario. El diff real correspondía a `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go`; no existían los dos primeros bajo `internal/usecase/memory`.
+- A13e (03, 04, 05) aplicado en `main` con acumulado A13e **−53**; A13e-06 saltado (justificación abajo). El merge de la cadena A13d sigue pendiente.
+- El flujo de trabajo cambió a: **improve_agent → orquestador → luna_worker → ponytail** (ver «Proceso y reglas por batch»).
 
 ## Commits por batch
 
@@ -62,11 +64,14 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Proceso y reglas por batch
 
-- Leer producción; decidir y anotar si se usa `ponytail-review`; presentar hallazgos en tabla con neto y caveats.
-- Ejecutar solo tras aprobación explícita; Luna usa job durable y máximo 2–3 archivos por invocación.
+- **improve_agent** audita el código y produce hallazgos priorizados.
+- El **orquestador** (agente raíz) organiza los hallazgos en batches acotados (máx. 2–3 archivos de producción) y verifica cada uno con evidencia del repo (`rg`, `read_file`, `read_file_range`) antes de presentarlo al usuario.
+- **luna_worker** ejecuta el batch como job durable tras aprobación explícita del usuario para cada invocación.
+- **ponytail-review** valida el resultado (sobre-ingeniería residual); los hallazgos van al siguiente batch o se documentan.
+- Si la evidencia contradice el plan del auditor, el batch se re-define o se salta con justificación documentada (caso A13e-06).
 - No modificar tests; preservar mensajes de error/log exactos; revisar `git status` antes y dejar cambios preexistentes fuera, salvo decisión explícita del usuario como en A13c3.
 - Crear un commit conventional por batch y verificar `go build ./...`, `go vet ./...`, `go test` (paquete y suite) y `git diff --check`.
-- Cada commit de refactor debe tener neto < 0; revertirlo si no cumple. No invocar workers sobre carpetas completas ni sobre todo el contexto.
+- Cada commit de refactor debe tener neto < 0; las excepciones solo se documentan por decisión explícita del usuario (precedente S11 en A13c8). No invocar workers sobre carpetas completas ni sobre todo el contexto.
 
 ## Pendientes
 
@@ -267,3 +272,17 @@ La prueba ADK de dos pasos demostró que ADK **NO persiste** la proyección del 
 
 - Acumulado contabilizado de la cadena: **+756** (`+476 + 458 − 178`), según el corte de los ítems 002, 004 y 005. Los ítems 001 y 003 quedan registrados con netos +174 y +43, pero no se suman a este acumulado.
 - El commit documental no suma al acumulado de refactor; su hash y shortstat se reportan en el cierre.
+
+## A13e
+
+### Commits y acumulado
+
+| Batch | Alcance | Commit | Shortstat | Neto |
+|---|---|---|---|---|
+| A13e-03 | dead render/dispatcher | `c04deda` | +4/-33 | −29 |
+| A13e-04 | consolidación de timeout en `slackTimeout` | `afa9a20` | +18/-30 | −12 |
+| A13e-05 | `slackTimeout` en retry loops y preview | `3cb5e1e` | +3/-15 | −12 |
+
+- **A13e-06: NO APLICADO** — la consolidación sustantiva (default único `defaultProgressLabels` + `ResolveProgressLabels` con `maps.Clone`) ya estaba presente en `standard_publisher.go:296-311`; `canvas_creator.go` y `generated_file_uploader.go` no tienen inicializadores de progress labels (0 coincidencias verificadas con `rg`). El remanente (renombre cosmético `progressLabels` → `slackProgressLabels`) da neto ≈ 0 y no cumple la regla neto < 0; se saltó por decisión del usuario.
+- Acumulado A13e: **−53** (`−29 −12 −12`).
+- Acumulado global de refactor: **−94** (`−41` tras A13d contabilizado `−53`).
