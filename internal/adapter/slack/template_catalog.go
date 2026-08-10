@@ -214,13 +214,9 @@ func collectTemplateElementID(ids *TemplateInteractiveIDs, element *templateElem
 }
 
 func appendTemplateID(ids *[]string, value string) {
-	if value == "" {
-		return
+	if value != "" && !slices.Contains(*ids, value) {
+		*ids = append(*ids, value)
 	}
-	if slices.Contains(*ids, value) {
-		return
-	}
-	*ids = append(*ids, value)
 }
 
 var embeddedTemplateCatalog, embeddedTemplateCatalogErr = loadTemplateCatalog(embeddedTemplates)
@@ -739,12 +735,10 @@ func parseOption(data []byte, templateName, fieldPath string) (templateOption, e
 	if err := rejectUnknownObjectKeys(keys, map[string]struct{}{"text": {}, "value": {}, "description": {}, "url": {}}); err != nil {
 		return templateOption{}, fmt.Errorf("%s: %w", fieldPath, err)
 	}
-	_, ok := keys["text"]
-	if len(raw.Text) == 0 || !ok {
+	if _, ok := keys["text"]; len(raw.Text) == 0 || !ok {
 		return templateOption{}, fmt.Errorf("%s.text is required", fieldPath)
 	}
-	_, ok = keys["value"]
-	if !ok {
+	if _, ok := keys["value"]; !ok {
 		return templateOption{}, fmt.Errorf("%s.value is required", fieldPath)
 	}
 	if raw.Value == "" {
