@@ -83,7 +83,7 @@ func NewStandardPublisher(client *slackapi.Client, botUserID string, timeout tim
 	var blocks blockPostClient
 	if client != nil {
 		standard = sdkStandardMessageClient{client: client}
-		blocks = sdkBlockPostClient{client: client}
+		blocks = sdkPostClient{client: client}
 	}
 	renderer, renderErr := NewEmbeddedTemplateRenderer()
 	return &StandardPublisher{client: standard, blockClient: blocks, botUserID: botUserID, timeout: timeout, renderer: renderer, renderErr: renderErr, progressLabels: progressLabels}

@@ -32,27 +32,6 @@ type blockPostClient interface {
 	PostBlocks(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error)
 }
 
-type sdkBlockPostClient struct {
-	client *slackapi.Client
-}
-
-func (c sdkBlockPostClient) PostBlocks(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
-	options := []slackapi.MsgOption{
-		slackapi.MsgOptionText(fallbackText, false),
-		slackapi.MsgOptionBlocks(blocks...),
-		slackapi.MsgOptionDisableLinkUnfurl(),
-		slackapi.MsgOptionDisableMediaUnfurl(),
-	}
-	if threadTS != "" {
-		options = append(options, slackapi.MsgOptionTS(threadTS))
-	}
-	if metadata.EventType != "" {
-		options = append(options, slackapi.MsgOptionMetadata(metadata))
-	}
-	_, timestamp, err := c.client.PostMessageContext(ctx, channelID, options...)
-	return timestamp, err
-}
-
 type BlockPublisher struct {
 	client   blockPostClient
 	timeout  time.Duration
@@ -66,7 +45,7 @@ type BlockPublisher struct {
 func NewBlockPublisher(client *slackapi.Client, timeout time.Duration, logger port.Logger) *BlockPublisher {
 	var poster blockPostClient
 	if client != nil {
-		poster = sdkBlockPostClient{client: client}
+		poster = sdkPostClient{client: client}
 	}
 	return newBlockPublisher(poster, timeout, logger)
 }

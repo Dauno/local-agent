@@ -18,8 +18,6 @@ type builderLauncherPublisher struct {
 	recoveryClient standardMessageClient
 	store          port.BuilderLauncherDeliveryStore
 	botUserID      string
-	publisher      port.ResponsePublisher
-	logger         port.Logger
 	renderer       *TemplateRenderer
 	renderErr      error
 }
@@ -32,7 +30,7 @@ func NewBuilderLauncherPublisherWithStore(client *slackapi.Client, publisher por
 	var poster blockPostClient
 	var recovery standardMessageClient
 	if client != nil {
-		poster = sdkBlockPostClient{client: client}
+		poster = sdkPostClient{client: client}
 		recovery = sdkStandardMessageClient{client: client}
 	}
 	return newBuilderLauncherPublisherWithDependencies(poster, recovery, store, botUserID, publisher, logger)
@@ -42,7 +40,7 @@ func newBuilderLauncherPublisherWithDependencies(client blockPostClient, recover
 	renderer, renderErr := NewEmbeddedTemplateRenderer()
 	return &builderLauncherPublisher{
 		client: client, recoveryClient: recovery, store: store, botUserID: botUserID,
-		publisher: publisher, logger: loggerOrDiscard(logger), renderer: renderer, renderErr: renderErr,
+		renderer: renderer, renderErr: renderErr,
 	}
 }
 
