@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
 
@@ -97,7 +98,7 @@ func (p *StandardPublisher) PublishProgress(ctx context.Context, target domain.R
 	if err != nil {
 		return port.PublishedResponse{}, err
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	timestamp, err := p.client.PostStandard(callCtx, target.ChannelID, target.ThreadTS, markdown, progressMetadata(operation))
 	if err != nil {
@@ -117,7 +118,7 @@ func (p *StandardPublisher) UpdateProgress(ctx context.Context, operation domain
 	if err != nil {
 		return err
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	if err := p.client.UpdateStandard(callCtx, operation.ChannelID, operation.MessageTS, markdown, progressMetadata(operation)); err != nil {
 		return fmt.Errorf("update Slack progress: %w", err)
@@ -129,7 +130,7 @@ func (p *StandardPublisher) RecoverProgress(ctx context.Context, operation domai
 	if err := p.validateProgress(operation); err != nil {
 		return port.PublishedResponse{}, false, err
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	messages, hasMore, err := p.client.StandardMessages(callCtx, operation.ChannelID, operation.ThreadTS, progressRecoveryLimit)
 	if err != nil {
@@ -172,7 +173,7 @@ func (p *StandardPublisher) PublishSuggestedPrompts(ctx context.Context, target 
 	if len([]rune(markdown)) > SlackMarkdownChunkRunes {
 		return port.PublishedResponse{}, errors.New("Slack suggested prompts exceed one message")
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	metadata := slackapi.SlackMetadata{EventType: promptMetadataEventType, EventPayload: map[string]any{"delivery_id": deliveryID}}
 	timestamp, err := p.client.PostStandard(callCtx, target.ChannelID, target.ThreadTS, markdown, metadata)
@@ -210,7 +211,7 @@ func (p *StandardPublisher) PublishOnboarding(ctx context.Context, target domain
 	if err != nil {
 		return port.PublishedResponse{}, fmt.Errorf("render onboarding message: %w", err)
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	timestamp, err := p.blockClient.PostBlocks(callCtx, target.ChannelID, fallback, blocks, onboardingMetadata(request.DeliveryID), target.ThreadTS)
 	if err != nil {
@@ -229,7 +230,7 @@ func (p *StandardPublisher) RecoverOnboarding(ctx context.Context, target domain
 	if target.ChannelID == "" || deliveryID == "" {
 		return port.PublishedResponse{}, false, errors.New("Slack onboarding recovery identity is required")
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	messages, hasMore, err := p.client.StandardMessages(callCtx, target.ChannelID, target.ThreadTS, progressRecoveryLimit)
 	if err != nil {
@@ -308,10 +309,7 @@ var defaultProgressLabels = map[domain.ProgressState]string{
 // so an absent or partial map behaves exactly like the current hardcoded
 // behavior.
 func ResolveProgressLabels(configured map[domain.ProgressState]string) map[domain.ProgressState]string {
-	resolved := make(map[domain.ProgressState]string, len(defaultProgressLabels))
-	for state, label := range defaultProgressLabels {
-		resolved[state] = label
-	}
+	resolved := maps.Clone(defaultProgressLabels)
 	for state, label := range configured {
 		if strings.TrimSpace(label) == "" {
 			continue
@@ -360,7 +358,7 @@ func (p *StandardPublisher) progressMarkdown(state domain.ProgressState) (string
 	return markdown, nil
 }
 
-func standardTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
+func slackTimeout(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc) {
 	if timeout <= 0 {
 		return ctx, func() {}
 	}
@@ -385,7 +383,7 @@ func (p *StandardPublisher) CreateIncremental(ctx context.Context, target domain
 	if err := p.validateIncremental(operation, false); err != nil {
 		return port.PublishedResponse{}, err
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	timestamp, err := p.client.PostStandard(callCtx, target.ChannelID, target.ThreadTS, markdown, incrementalMetadata(operation))
 	if err != nil {
@@ -402,7 +400,7 @@ func (p *StandardPublisher) UpdateIncremental(ctx context.Context, operation dom
 	if err := p.validateIncremental(operation, true); err != nil {
 		return err
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	if err := p.client.UpdateStandard(callCtx, operation.ChannelID, operation.MessageTS, markdown, incrementalMetadata(operation)); err != nil {
 		return fmt.Errorf("update Slack incremental message: %w", err)
@@ -425,7 +423,7 @@ func (p *StandardPublisher) FinalizeIncremental(ctx context.Context, operation d
 		"correlation_id": assistantCorrelationID, "render_mode": markdownRenderMode,
 		"part_index": 1, "part_count": 1, "content_sha256": contentSHA256(markdown),
 	}}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	if err := p.client.UpdateStandard(callCtx, operation.ChannelID, operation.MessageTS, markdown, metadata); err != nil {
 		return fmt.Errorf("finalize Slack incremental message: %w", err)
@@ -444,7 +442,7 @@ func (p *StandardPublisher) RecoverIncremental(ctx context.Context, operation do
 	if err := p.validateIncremental(operation, false); err != nil {
 		return port.PublishedResponse{}, false, err
 	}
-	callCtx, cancel := standardTimeout(ctx, p.timeout)
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	messages, hasMore, err := p.client.StandardMessages(callCtx, operation.ChannelID, operation.ThreadTS, progressRecoveryLimit)
 	if err != nil {
