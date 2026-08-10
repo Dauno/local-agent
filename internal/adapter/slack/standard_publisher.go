@@ -325,20 +325,7 @@ func (p *StandardPublisher) progressLabel(state domain.ProgressState) string {
 			return label
 		}
 	}
-	switch state {
-	case domain.ProgressWorking:
-		return "Working"
-	case domain.ProgressWaitingConfirmation:
-		return "Waiting for approval"
-	case domain.ProgressFinalizing:
-		return "Finalizing"
-	case domain.ProgressCleared:
-		return "Completed"
-	case domain.ProgressFailed, domain.ProgressInterrupted:
-		return "Interrupted"
-	default:
-		return ""
-	}
+	return defaultProgressLabels[state]
 }
 
 // progressMarkdown resolves the label for a state to publishable Slack
