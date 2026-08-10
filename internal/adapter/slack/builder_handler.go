@@ -463,11 +463,7 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 		_, err := p.Publish(ctx, target, fallbackText)
 		return err
 	}
-	callCtx := ctx
-	cancel := func() {}
-	if p.timeout > 0 {
-		callCtx, cancel = context.WithTimeout(ctx, p.timeout)
-	}
+	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
 	timestamp, err := poster.PostBlocks(callCtx, target.ChannelID, fallbackText, blocks, slackapi.SlackMetadata{}, target.ThreadTS)
 	if err != nil {
