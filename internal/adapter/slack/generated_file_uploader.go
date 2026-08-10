@@ -34,7 +34,7 @@ func (u *GeneratedFileUploader) requestUploadURL(ctx context.Context, filename s
 	if u == nil || u.client == nil {
 		return port.GeneratedFileUploadTarget{}, errors.New("generated file client is not configured")
 	}
-	ctx, cancel := u.withTimeout(ctx)
+	ctx, cancel := slackTimeout(ctx, u.timeout)
 	defer cancel()
 	response, err := u.client.GetUploadURLExternalContext(ctx, slackapi.GetUploadURLExternalParameters{FileName: filename, FileSize: sizeBytes, SnippetType: snippetType})
 	if err != nil {
@@ -47,7 +47,7 @@ func (u *GeneratedFileUploader) UploadBytes(ctx context.Context, target port.Gen
 	if u == nil || u.client == nil {
 		return errors.New("generated file client is not configured")
 	}
-	ctx, cancel := u.withTimeout(ctx)
+	ctx, cancel := slackTimeout(ctx, u.timeout)
 	defer cancel()
 	err := u.client.UploadToURL(ctx, slackapi.UploadToURLParameters{UploadURL: target.UploadURL, Reader: bytes.NewReader(content), Filename: "generated-file"})
 	if err != nil {
@@ -63,7 +63,7 @@ func (u *GeneratedFileUploader) CompleteUpload(ctx context.Context, fileID, chan
 	if u == nil || u.client == nil {
 		return errors.New("generated file client is not configured")
 	}
-	ctx, cancel := u.withTimeout(ctx)
+	ctx, cancel := slackTimeout(ctx, u.timeout)
 	defer cancel()
 	_, err := u.client.CompleteUploadExternalContext(ctx, slackapi.CompleteUploadExternalParameters{
 		Files: []slackapi.FileSummary{{ID: fileID, Title: title}}, Channel: channelID, ThreadTimestamp: threadTS,
@@ -72,13 +72,6 @@ func (u *GeneratedFileUploader) CompleteUpload(ctx context.Context, fileID, chan
 		return uploadError("complete Slack generated file upload", err)
 	}
 	return nil
-}
-
-func (u *GeneratedFileUploader) withTimeout(ctx context.Context) (context.Context, context.CancelFunc) {
-	if u.timeout <= 0 {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, u.timeout)
 }
 
 func uploadError(operation string, err error) error {

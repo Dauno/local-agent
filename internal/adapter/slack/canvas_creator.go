@@ -23,11 +23,8 @@ func (c *CanvasCreator) CreateCanvas(ctx context.Context, title string, document
 	if c == nil || c.client == nil {
 		return port.CanvasCreateResult{}, fmt.Errorf("canvas client is not configured")
 	}
-	if c.timeout > 0 {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, c.timeout)
-		defer cancel()
-	}
+	ctx, cancel := slackTimeout(ctx, c.timeout)
+	defer cancel()
 	canvasID, err := c.client.CreateCanvasContext(ctx, title, slackapi.DocumentContent{
 		Type:     "markdown",
 		Markdown: documentContent,
