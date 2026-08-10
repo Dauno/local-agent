@@ -11,8 +11,6 @@ import (
 )
 
 const (
-	ProviderTypeACP        = "acp"
-	ProviderFamilyACP      = ProviderTypeACP
 	ACPProtocolVersion     = "1"
 	ACPClientIdentity      = "slack-local-agent"
 	ACPClientVersion       = "v1"
@@ -73,13 +71,6 @@ type ACPPermissionOption struct {
 	ID   string
 }
 
-type ACPPermissionRequest struct {
-	SessionID string
-	RequestID string
-	Options   []ACPPermissionOption
-	Path      string
-}
-
 type ACPAgentInfo struct {
 	Name    string
 	Version string
@@ -94,30 +85,11 @@ type ACPSessionCapabilities struct {
 type ACPInitResult struct {
 	ProtocolVersion     string
 	AgentInfo           ACPAgentInfo
-	ClientCapabilities  map[string]any
-	ServerCapabilities  map[string]any
 	SessionCapabilities ACPSessionCapabilities
 }
 
 type ACPConfigState struct {
 	Options []ACPConfigOption
-}
-
-type ACPPromptResult struct {
-	StopReason string
-	Text       string
-	Usage      ACPUsage
-}
-
-type ACPUsage struct {
-	InputTokens  int
-	OutputTokens int
-}
-
-type ACPToolActivity struct {
-	Kind   string
-	Status string
-	Name   string
 }
 
 type AcpInvocationRequest struct {
@@ -155,8 +127,6 @@ type AcpInvocationResult struct {
 	ArtifactRef               string
 	ResultSHA256              string
 	ResultBytes               int64
-	Usage                     ACPUsage
-	Error                     string
 	DeliveryMode              JobResultDeliveryMode
 	DeliveryCanonicalMarkdown string
 	DeliveryPolicyVersion     string
