@@ -673,16 +673,11 @@ func (c *Client) initialize(proc *process) (domain.ACPInitResult, error) {
 		return domain.ACPInitResult{}, errors.New("ACP agent identity is missing or invalid")
 	}
 
-	serverCapabilities := make(map[string]any, len(response.Capabilities))
-	for name, value := range response.Capabilities {
-		serverCapabilities[name] = json.RawMessage(append([]byte(nil), value...))
-	}
 	sessionCaps := capabilityObject(response.Capabilities["sessionCapabilities"])
 	loadSession := capabilityEnabled(response.Capabilities["loadSession"]) || capabilityEnabled(sessionCaps["loadSession"])
 	return domain.ACPInitResult{
-		ProtocolVersion:    version,
-		AgentInfo:          *response.AgentInfo,
-		ServerCapabilities: serverCapabilities,
+		ProtocolVersion: version,
+		AgentInfo:       *response.AgentInfo,
 		SessionCapabilities: domain.ACPSessionCapabilities{
 			Close:       capabilityEnabled(sessionCaps["close"]),
 			LoadSession: loadSession,
@@ -1065,12 +1060,9 @@ func (c *promptCollector) result(ctx context.Context) (domain.AcpInvocationResul
 }
 
 func containsUnsafeControl(value string) bool {
-	for _, r := range value {
-		if unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t' {
-			return true
-		}
-	}
-	return false
+	return strings.ContainsFunc(value, func(r rune) bool {
+		return unicode.IsControl(r) && r != '\n' && r != '\r' && r != '\t'
+	})
 }
 
 func (c *promptCollector) handlePermission(proc *process, id json.RawMessage, raw json.RawMessage) error {
