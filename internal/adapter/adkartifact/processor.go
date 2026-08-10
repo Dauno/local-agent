@@ -1,6 +1,7 @@
 package adkartifact
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -171,7 +172,7 @@ func (p *Processor) processText(ctx context.Context, request port.AttachmentRequ
 	if !utf8.Valid(data) {
 		return port.ProcessedAttachment{}, errors.New("text file is not valid UTF-8")
 	}
-	if containsNUL(data) {
+	if bytes.IndexByte(data, 0) >= 0 {
 		return port.ProcessedAttachment{}, errors.New("text file contains NUL bytes")
 	}
 
@@ -335,13 +336,4 @@ func IsAudioMIME(mimeType string) bool {
 	default:
 		return false
 	}
-}
-
-func containsNUL(data []byte) bool {
-	for _, b := range data {
-		if b == 0 {
-			return true
-		}
-	}
-	return false
 }
