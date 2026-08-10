@@ -1449,31 +1449,29 @@ func validateTemplateRepresentatives(doc templateDocument) error {
 		}
 		return nil
 	}
-	values := map[string]string{}
+	context := TemplateContext{Values: map[string]string{}}
 	switch doc.Name {
 	case "confirmation_message":
-		values = map[string]string{
+		context.Values = map[string]string{
 			"summary": "A confirmation summary", "original_call_id": "call-1",
 			"expires_at": "2030-01-01T00:00:00Z", "wrapper_call_id": "wrapper-1",
 			"fallback_text": "Confirmation required: A confirmation summary",
 		}
 	case "agent_preview":
-		values = map[string]string{
+		context.Values = map[string]string{
 			"name": "incident_analyst", "agent_class": "LlmAgent", "provider_profile": "openai/fast",
 			"execution_mode": domain.ExecutionModeForeground, "timeout": "no aplica",
 			"sha256": "digest", "draft_id": "draft-1", "fallback_text": "Agent preview",
 		}
-		_, _, err := compileMessageTemplate(doc, TemplateContext{Values: values, PreviewYAMLParts: []string{"```yaml\nname: incident_analyst\n```"}})
-		return err
+		context.PreviewYAMLParts = []string{"```yaml\nname: incident_analyst\n```"}
 	case "onboarding_message":
-		values = map[string]string{
+		context.Values = map[string]string{
 			"builder_context": `{"v":1,"actor_id":"U12345678","conversation_key":"slack:T12345678:dm:D12345678"}`,
 			"intro":           "Welcome", "describe_prompt": "Describe a need",
 		}
-		_, _, err := compileMessageTemplate(doc, TemplateContext{Values: values, SuggestedPrompts: []string{"Ask one thing"}})
-		return err
+		context.SuggestedPrompts = []string{"Ask one thing"}
 	}
-	_, _, err := compileMessageTemplate(doc, TemplateContext{Values: values})
+	_, _, err := compileMessageTemplate(doc, context)
 	return err
 }
 

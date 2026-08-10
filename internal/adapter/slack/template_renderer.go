@@ -82,11 +82,7 @@ func (r *TemplateRenderer) CompileModal(templateName string, context TemplateCon
 	if doc.Surface != "modal" {
 		return slackapi.ModalViewRequest{}, fmt.Errorf("template %q is not a modal", templateName)
 	}
-	view, err := compileModalTemplate(doc, context)
-	if err != nil {
-		return slackapi.ModalViewRequest{}, err
-	}
-	return view, nil
+	return compileModalTemplate(doc, context)
 }
 
 // CompileMessage compiles a message template into bounded Slack blocks. The
