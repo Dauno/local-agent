@@ -8,8 +8,23 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - El acumulado de refactor hasta A13c8 era **−797 líneas**. La cadena A13d (001 → 003 → 002 → 004 → 005) está completada y fusionada en `main` (verificado 2026-08-10) con cinco commits; el acumulado contabilizado de la cadena es **+756** y el acumulado global queda en **−41** (`−797 + 756`).
 - Gates en verde: `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent`. El merge de A13d a `main` está completado y fue verificado el 2026-08-10.
 - Los cambios preexistentes de `memory_core.go`, `redact.go` y `memory/service.go` se incorporaron en el Commit 1 de A13c3 por decisión explícita del usuario. El diff real correspondía a `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go`; no existían los dos primeros bajo `internal/usecase/memory`.
-- A13e (01, 02, 03, 04, 05, B1, B1.1, B2 y B3) aplicado en `main` con acumulado A13e **−162**; A13e-06 saltado (justificación abajo).
-- HEAD de `main`: `6079ac3` (B3.1); el flujo actualizado es: **improve_agent → orquestador → luna_worker → ponytail** (ver «Proceso y reglas por batch»).
+- A13e (01, 02, 03, 04, 05, B1, B1.1, B2, B3 y B3.1) aplicado en `main` con acumulado A13e **−168**; A13e-06 saltado (justificación abajo).
+- El barrido post-A13e está COMPLETO y validado por ponytail. Cada batch recibió «Lean already» o shrink aplicado en micro-batches. Total: **−86** (estimado del plan: ≈ −80; superado).
+
+| Batch | Alcance | Commit | Neto |
+|---|---|---|---|
+| 001 | ACP muerto | `8f30537` | −38 |
+| 001.1 | `ACPPermissionOption` | `b0984e9` | −5 |
+| 002 | alias store | `e3a08d5` | −7 |
+| 002.1 | check inalcanzable | `29dd300` | −3 |
+| 003 | límites muertos + `maps.Clone` | `f7bee97` | −15 |
+| 004 | stdlib membership | `25a97b4` | −13 |
+| 005 | sorted map keys | `4c23e2d` | −5 |
+| **TOTAL barrido** |  |  | **−86** |
+
+- HEAD de `main`: `4c23e2d` (Batch 005); el flujo actualizado es: **improve_agent → orquestador → luna_worker → ponytail** (ver «Proceso y reglas por batch»).
+- La ambigüedad Slack entre `CanvasCreator` y `GeneratedFileUploader` quedó resuelta por el audit: es lógica relacionada, no duplicación consolidable; se descarta la consolidación.
+- Cortes omitidos durante el barrido: `slack_client.go` y `slack_message.go` no existían (B3 anterior); `okf.go` usa `filepath.WalkDir` (005).
 
 ## Commits por batch
 
@@ -75,53 +90,9 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Pendientes
 
-- La cadena A13d está completa y fusionada en `main` (verificado 2026-08-10). La rama local `refactor/context-compiler-improvements` queda disponible para limpieza opcional con `git branch -d`.
-- Revisión pendiente: clasificación de ambigüedad en `internal/adapter/slack` (`canvas_creator.go` vs `generated_file_uploader.go`), resto de `internal/domain`, `internal/port` y adapters, y tracking opcional en Slack Canvas.
-- `RequestBudgetPolicy`, diagnósticos no métricos y el comportamiento más estricto de `unicode.IsControl` en A2 se conservan; revisar solo con alcance ampliado.
-- `memory_core.go`: A3 se aplicó con stage selectivo. Los cambios preexistentes posteriores de `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go` se incorporaron por decisión del usuario en `4ea1941`.
-- A4: el grep global no permitió eliminar `ContinuityItem.Kind` (sin lecturas directas, pero con construcciones en `adkagent` y tests), `ContinuityCapsule.Superseded` (uso en `adkagent`, persistencia SQLite y test), ni `SourceEventOrdinal`, `SourceSessionRevision`, `SourceDigest`, `SupersedesID` (escritura en `adkagent`, validación SQLite y tests). `AgentContext.MaxChars` también se conserva: Slack lo construye, `adkagent` lo lee como budget y hay referencia en test. No se eliminó ninguno de estos campos.
-- A5: el grep global de los ítems 6-8 no permitió eliminar las formas largas de `MessageSource` (consumidores externos en producción e integración/tests), `WithInferredSource` (dos consumidores SQLite) ni `ValidateACPAllowlist` (dos llamadores en `agentbuilder`). Las reducciones mecánicas sí eliminaron ramas de validación duplicadas, la clonación innecesaria de mensajes y las construcciones repetidas del error de kind.
-- A7: las nueve reducciones aprobadas en `internal/usecase/bot` se aplicaron tras grep global sin consumidores externos. Commit de refactor: `+34/-37`, neto **−3 líneas**; build y suite del paquete verdes; tests sin cambios.
-- A8: C1, C2 y C4 aplicados en `877994b` (`+6/-15`, neto **−9**); C3 se conservó por referencias en tests y declaraciones de domain, y C5 por fakes de contadores inyectados y la cobertura vigente del guard byte-bound. S1 y S2 aplicados en `2712523` (`+12/-34`, neto **−22**); build y suites de ambos paquetes verdes; tests sin cambios. El bug latente de `responseCountBefore` stale en el segundo recount fue confirmado y queda fuera de este refactor.
-- A9: `hasControl` y `destination` eliminados en `8336f08` (`+4/-19`, neto **−15**); se reutilizó `domain.ConversationReplyTarget` y se preservó el mensaje de destino inválido. Paquete generatedfile verde; tests sin cambios.
-- A10: `activationErrorRetryable` y `currentActivation` inlineados, y `systemClock` sustituido por `port.SystemClock`, en `6e693c2` (`+4/-17`, neto **−13**); `noopLogger` se conservó porque no existe `port.NoopLogger`. Paquete externalagent verde tras repetir un timeout intermitente; tests sin cambios.
-- A11: ponytail-review usado. En doctor se eliminaron el alias `summarizerCompatible`, el caso `transcriptionResolved == nil` inalcanzable y `Report.Passed()` sin callers; en opencode se reemplazó el loop de autorización por `slices.Contains` preservando deny-if-empty. El corte de parámetros duplicados de `Probe` se saltó porque `service_test.go` pasa valores explícitos distintos de `deps`; no se tocaron tests. Commits `4fada2b` (`+2/-5`, neto **−3**) y `731130a` (`+2/-6`, neto **−4**); build, vet, suite y `git diff --check` verdes.
-- A12a: se reutilizaron los hallazgos de ponytail-review de A11; no se invocó una revisión nueva. A12a.1 extrajo el chequeo duplicado de token counter en `a8b4fbb` (`+18/-26`, neto **−8**), preservando mensajes, remediaciones y orden. A12a.2 se saltó: `validateTranscriptionModel` solo exige URL no vacía y usa mensajes distintos, mientras `validateAudioTranscriptionProfile` exige URL absoluta HTTP/HTTPS y rechaza credenciales o fragmentos; compartir helper cambiaría comportamiento. No se modificaron tests. A12b aplicó el hallazgo #14 de ponytail-review: `Status`, `Probe`, `Upgrade` y `Rollback` devuelven `domain.OpenCodeManagementResult`; se eliminaron `opencode.Result`, `resultFromManager` y la conversión 1:1 del tool, preservando mensajes. Commit `c2fd485` (`+33/-58`, neto **−25**); no se modificaron tests.
-- A13a-ext: `ponytail-review` usado en el segundo intento, exitoso. Corte 3 aplicado en `43d2503`; no hubo callers/tests de `Preview` dependientes del alias `Model`. Cortes 9/10 aplicados en `501cd5e`; `CanonicalRoot` se resolvió una vez en `app.New`, y se preservaron mensajes y firmas. Corte 8 **saltado**: aunque el adapter crea padres, `ProjectFiles.CreateFile` no lo promete en su contrato y bootstrap no debe depender de ese detalle concreto. No se modificaron tests.
-- A13b1: `ponytail-review` hallazgo #2 inválido por arquitectura. El corte 2 se marcó **SALTADO (no aplicado)** porque `TestDependencyDirection` prohíbe que `internal/port` dependa de `agentdef`; `current any` es desacoplamiento deliberado de la interfaz. La propuesta `f61abc2` fue revertida en `2e61b22`; acumulado **−295** (neto 0 del revert). No se modificaron tests.
-- A13c1: `ponytail-review` usado. Aplicados los cortes 1 (gate: `ErrUnauthorized` solo aparecía en `service.go`), 2 (gates: sin inyección `Clock:` en producción y sin uso de `Clock` en tests), 5 (gate: sin lectores de `SandboxResult.Error`), 6 (gate: `isAllowed` solo tenía su declaración y una llamada), 7 (ambos `validateRelativePath` pass-through conservan el mensaje byte-idéntico), 8 (gate: `createWorktreeTool` no tiene registro real y no existe executor para `CapRunCommand`) y 9 (gate: un helper y una llamada; inline con comportamiento byte-idéntico). Se saltaron 3 (gate fallido: `internal/adapter/toolfactory/toolfactory_test.go:602` lee `op.Actor`) y 4 (gate fallido: `internal/usecase/sandbox/service_test.go:205` y `internal/adapter/fssandbox/sandbox_test.go:74,109` leen `OutputBytes`). Commit `1aa7e5e` (`+8/-56`, neto **−48**); acumulado **−343**. No se modificaron tests.
-- A13c2: `ponytail-review` usado. Registro completo de los cinco hallazgos, con localización original:
-
-| Hallazgo | Localización original | Veredicto y motivo |
-|---|---|---|
-| #1 extracción/merge trusted-entity | `curator.go:82,86-93,149-165`; test `curator_test.go:103-126` | **SALTADO**: requiere borrar o editar tests; la regla de no tocar tests lo excluye. |
-| #2 recuperación de substring JSON (`extractJSONObject`) | `curator.go:242,281-290` | **APLICADO**: gate aprobado; no había referencias en tests. Se dejó `strings.TrimSpace(response)`. |
-| #3 `ModelCalls` duplicado | `curator.go:31,50,69` | **APLICADO**: gate aprobado; no había referencias al campo en tests. Se usa `c.config.ModelCalls`. |
-| #4 branch de timeout negativo | `curator.go:64-68` | **APLICADO**: gate aprobado; no había configuraciones `Timeout` negativas ni dependencia del branch en tests. |
-| #5 receiver de `parsePatch` y `emptyPatchLLM` | `curator.go:241`; tests `curator_test.go:129-133,135,140,149-154` | **SALTADO**: requiere tocar call sites y fake de tests; la regla de no tocar tests lo excluye. |
-
-- A13c2 commit de producción: `53886f3`, `git show --shortstat`: `+6/-22`, neto **−16**. El segundo commit de este batch es esta actualización documental; su hash y shortstat se registran en el reporte de cierre.
-
-- A13c3: `ponytail-review` usado. Registro completo de los doce hallazgos, con localización original y decisión:
-
-| Hallazgo | Localización original | Veredicto y motivo |
-|---|---|---|
-| #1 outcomes de Recall | `internal/usecase/memory/service.go:29-31,61-64,128-157` | **APLICADO** en `4883914`: el gate mostró referencias solo en `service.go` y no hubo referencias en tests; el cuerpo quedó en `Recall` y devuelve snippets + error. |
-| #2 wrapper `Validate` | `internal/usecase/memory/service.go:284-288` | **APLICADO** en `4883914`: el gate mostró solo el wrapper y la llamada de `runner.go`, sin uso en tests; `runner.go` llama `validatePatch` directamente. |
-| #3 callback de `validateReferenceFields` | `internal/usecase/memory/service.go:293-312,329-336` | **APLICADO** en `4883914`: el gate mostró una declaración y dos llamadas, sin uso en tests; el helper recibe prefix y llama `add` directamente. |
-| #4 switch de operation type | `internal/usecase/memory/service.go:318-324` | **SALTADO**: era parte del trabajo preexistente ya presente antes de A13c3 y quedó en `4ea1941`; no se volvió a tocar en el commit de cortes. |
-| #5 goroutine de supervisión | `internal/usecase/memory/runner.go:75-85` | **APLICADO** en `4883914`: el gate encontró solo `done`, `close(done)` y `<-done` en este bloque; la recuperación quedó inline. |
-| #6 cancelación y timer | `internal/usecase/memory/runner.go:87-100` | **APLICADO** en `4883914`: `NewTimer`, `timer.Stop` y `timer.C` solo aparecían en este bloque; se dejó un `select` con `time.After`. |
-| #7 wrappers de retry | `internal/usecase/memory/runner.go:141-225` | **APLICADO** en `4883914`: el gate mostró siete llamadas y dos declaraciones, sin uso en tests; logger y `retryOutbox` quedaron directos en cada sitio. |
-| #8 wrapper `rescheduleOutbox` | `internal/usecase/memory/runner.go:167,236-238` | **APLICADO** en `4883914`: el gate mostró dos referencias; `RescheduleOutboxItem` quedó inlineado. |
-| #9 estado muerto de `coverageStore` | `internal/usecase/memory/outbox_coverage_test.go:146,212-216,279-281` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
-| #10 wrapper `newCoverageStore` | `internal/usecase/memory/outbox_coverage_test.go:60-63,222-229` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
-| #11 helper `itemKey` | `internal/usecase/memory/outbox_coverage_test.go:105,321-323` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
-| #12 retorno `key` no usado | `internal/usecase/memory/runner_test.go:25,60` | **SALTADO**: corte en tests; la regla de no tocar tests lo prohíbe. |
-
-- A13c3 Commit 1: `4ea1941`, `git show --shortstat`: `+12/-31`, neto **−19**; contiene solo los tres archivos reales del diff preexistente y queda fuera del acumulado de refactor por decisión del usuario.
-- A13c3 Commit 2: `4883914`, `git show --shortstat`: `+50/-88`, neto **−38**; no modificó tests. El acumulado de refactor queda en **−397** (`−359 − 38`).
-- A13c3 Commit 3: esta actualización documental. Su hash y shortstat se reportan en el cierre; no se puede insertar su propio hash en el contenido sin crear un cuarto commit.
+- Tracking opcional en Slack Canvas.
+- Conservados para alcance ampliado: `RequestBudgetPolicy`, diagnósticos no métricos y el comportamiento más estricto de `unicode.IsControl` en A2.
+- Limpieza opcional de la rama local A13d `refactor/context-compiler-improvements` con `git branch -d`.
 
 ## A13c4
 
@@ -288,8 +259,9 @@ La prueba ADK de dos pasos demostró que ADK **NO persiste** la proyección del 
 | B1.1 | simplificación de `appendTemplateID` y comprobaciones de claves | `2d74776` | +4/-10 | −6 |
 | B2 | consolidación de etiquetas de progreso y helpers stdlib | `ecb0cfb` | +7/-39 | −32 |
 | B3 | simplificación del renderer y helpers de mensajes | `d8e12b4` | +56/-62 | −6 |
+| B3.1 | compresión de render de modales y compilación de mensajes | `6079ac3` | +8/-14 | −6 |
 
 - **A13e-06: NO APLICADO** — la consolidación sustantiva (default único `defaultProgressLabels` + `ResolveProgressLabels` con `maps.Clone`) ya estaba presente en `internal/adapter/slack/standard_publisher.go:296-312`; `internal/adapter/slack/canvas_creator.go` y `internal/adapter/slack/generated_file_uploader.go` no tienen inicializadores de progress labels (0 coincidencias verificadas con `rg`). El remanente (renombre cosmético `progressLabels` → `slackProgressLabels`) da neto ≈ 0 y no cumple la regla neto < 0; se saltó por decisión del usuario.
 - B3 queda reconciliado con su neto real **−6** (`+56/-62`); no quedan batches de código A13e pendientes después de saltar A13e-06.
-- Acumulado A13e: **−162** (`−23 −24 −29 −12 −12 −18 −6 −32 −6`).
-- Acumulado global de refactor: **−203** (`−41` tras A13d contabilizado `−162`).
+- Acumulado A13e: **−168** (`−23 −24 −29 −12 −12 −18 −6 −32 −6 −6`).
+- Acumulado global de refactor: **−209** (`−41` tras A13d contabilizado `−168`).
