@@ -8,7 +8,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 - El acumulado de refactor hasta A13c8 era **−797 líneas**. La cadena A13d (001 → 003 → 002 → 004 → 005) está completada en `refactor/context-compiler-improvements` con cinco commits, sin merge a `main`; el acumulado contabilizado de la cadena es **+756** y el acumulado global queda en **−41** (`−797 + 756`).
 - Gates en verde: `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent`. Queda pendiente el merge a `main` con el visto bueno final del usuario.
 - Los cambios preexistentes de `memory_core.go`, `redact.go` y `memory/service.go` se incorporaron en el Commit 1 de A13c3 por decisión explícita del usuario. El diff real correspondía a `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go`; no existían los dos primeros bajo `internal/usecase/memory`.
-- A13e (03, 04, 05) aplicado en `main` con acumulado A13e **−53**; A13e-06 saltado (justificación abajo). El merge de la cadena A13d sigue pendiente.
+- A13e (01, 02, 03, 04, 05, B1, B1.1, B2 y B3) aplicado en `main` con acumulado A13e **−162**; A13e-06 saltado (justificación abajo). El merge de la cadena A13d sigue pendiente.
 - El flujo de trabajo cambió a: **improve_agent → orquestador → luna_worker → ponytail** (ver «Proceso y reglas por batch»).
 
 ## Commits por batch
@@ -279,10 +279,17 @@ La prueba ADK de dos pasos demostró que ADK **NO persiste** la proyección del 
 
 | Batch | Alcance | Commit | Shortstat | Neto |
 |---|---|---|---|---|
+| A13e-01 | eliminación del adaptador duplicado `sdkBlockPostClient` | `019eae3` | +4/-27 | −23 |
+| A13e-02 | consolidación de helpers literales e interfaces | `3dd6c16` | +5/-29 | −24 |
 | A13e-03 | dead render/dispatcher | `c04deda` | +4/-33 | −29 |
 | A13e-04 | consolidación de timeout en `slackTimeout` | `afa9a20` | +18/-30 | −12 |
 | A13e-05 | `slackTimeout` en retry loops y preview | `3cb5e1e` | +3/-15 | −12 |
+| B1 | consolidación de helpers del catálogo de templates | `eca8e9a` | +13/-31 | −18 |
+| B1.1 | simplificación de `appendTemplateID` y comprobaciones de claves | `2d74776` | +4/-10 | −6 |
+| B2 | consolidación de etiquetas de progreso y helpers stdlib | `ecb0cfb` | +7/-39 | −32 |
+| B3 | simplificación del renderer y helpers de mensajes | `d8e12b4` | +56/-62 | −6 |
 
-- **A13e-06: NO APLICADO** — la consolidación sustantiva (default único `defaultProgressLabels` + `ResolveProgressLabels` con `maps.Clone`) ya estaba presente en `standard_publisher.go:296-311`; `canvas_creator.go` y `generated_file_uploader.go` no tienen inicializadores de progress labels (0 coincidencias verificadas con `rg`). El remanente (renombre cosmético `progressLabels` → `slackProgressLabels`) da neto ≈ 0 y no cumple la regla neto < 0; se saltó por decisión del usuario.
-- Acumulado A13e: **−53** (`−29 −12 −12`).
-- Acumulado global de refactor: **−94** (`−41` tras A13d contabilizado `−53`).
+- **A13e-06: NO APLICADO** — la consolidación sustantiva (default único `defaultProgressLabels` + `ResolveProgressLabels` con `maps.Clone`) ya estaba presente en `internal/adapter/slack/standard_publisher.go:296-312`; `internal/adapter/slack/canvas_creator.go` y `internal/adapter/slack/generated_file_uploader.go` no tienen inicializadores de progress labels (0 coincidencias verificadas con `rg`). El remanente (renombre cosmético `progressLabels` → `slackProgressLabels`) da neto ≈ 0 y no cumple la regla neto < 0; se saltó por decisión del usuario.
+- B3 queda reconciliado con su neto real **−6** (`+56/-62`); no quedan batches de código A13e pendientes después de saltar A13e-06.
+- Acumulado A13e: **−162** (`−23 −24 −29 −12 −12 −18 −6 −32 −6`).
+- Acumulado global de refactor: **−203** (`−41` tras A13d contabilizado `−162`).
