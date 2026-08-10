@@ -146,11 +146,7 @@ func (p *BlockPublisher) waitForChannel(ctx context.Context, channel *channelPac
 
 func (p *BlockPublisher) postWithRetry(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		callCtx := ctx
-		cancel := func() {}
-		if p.timeout > 0 {
-			callCtx, cancel = context.WithTimeout(ctx, p.timeout)
-		}
+		callCtx, cancel := slackTimeout(ctx, p.timeout)
 		timestamp, err := p.client.PostBlocks(callCtx, channelID, fallbackText, blocks, metadata, threadTS)
 		cancel()
 		if err == nil {

@@ -173,11 +173,7 @@ func (p *Publisher) waitForChannel(ctx context.Context, channel *channelPace) er
 
 func (p *Publisher) postWithRetry(ctx context.Context, req postRequest) (string, error) {
 	for attempt := 0; attempt < 2; attempt++ {
-		callCtx := ctx
-		cancel := func() {}
-		if p.timeout > 0 {
-			callCtx, cancel = context.WithTimeout(ctx, p.timeout)
-		}
+		callCtx, cancel := slackTimeout(ctx, p.timeout)
 		timestamp, err := p.client.PostMessage(callCtx, req)
 		cancel()
 		if err == nil {
