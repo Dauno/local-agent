@@ -4,7 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"maps"
+	"slices"
 	"strings"
 
 	slackapi "github.com/slack-go/slack"
@@ -138,12 +139,7 @@ func (d *InteractiveDispatcher) RegisteredActionIDs() []string {
 	if d == nil {
 		return nil
 	}
-	ids := make([]string, 0, len(d.actions))
-	for id := range d.actions {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
+	return slices.Sorted(maps.Keys(d.actions))
 }
 
 // RegisteredViewIDs returns a copy of registered callback IDs for startup
@@ -152,12 +148,7 @@ func (d *InteractiveDispatcher) RegisteredViewIDs() []string {
 	if d == nil {
 		return nil
 	}
-	ids := make([]string, 0, len(d.views))
-	for id := range d.views {
-		ids = append(ids, id)
-	}
-	sort.Strings(ids)
-	return ids
+	return slices.Sorted(maps.Keys(d.views))
 }
 
 // HandleAction looks up actionID and invokes its handler only for a well-formed

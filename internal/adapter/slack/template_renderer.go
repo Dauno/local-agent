@@ -95,18 +95,8 @@ func (r *TemplateRenderer) CompileModal(templateName string, context TemplateCon
 // CompileMessage compiles a message template into bounded Slack blocks. The
 // accessible fallback can be obtained with CompileMessageWithFallback.
 func (r *TemplateRenderer) CompileMessage(templateName string, context TemplateContext) ([]slackapi.Block, error) {
-	doc, err := r.document(templateName)
-	if err != nil {
-		return nil, err
-	}
-	if doc.Surface != "message" {
-		return nil, fmt.Errorf("template %q is not a message", templateName)
-	}
-	compiled, err := compileTemplateDocument(doc, context)
-	if err != nil {
-		return nil, err
-	}
-	return compiled.Blocks, nil
+	_, blocks, err := r.CompileMessageWithFallback(templateName, context)
+	return blocks, err
 }
 
 // CompileMessageWithFallback returns both message components needed by a
