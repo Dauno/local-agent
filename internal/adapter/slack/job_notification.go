@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"slices"
 	"strings"
 	"time"
 
@@ -691,12 +692,9 @@ func (p *JobNotificationPublisher) fileSharedInThread(ctx context.Context, notif
 }
 
 func containsSlackFile(files []slackapi.File, fileID string) bool {
-	for _, file := range files {
-		if file.ID == fileID && fileID != "" {
-			return true
-		}
-	}
-	return false
+	return fileID != "" && slices.ContainsFunc(files, func(file slackapi.File) bool {
+		return file.ID == fileID
+	})
 }
 
 func (p *JobNotificationPublisher) inspectFile(ctx context.Context, notification domain.ExternalAgentJobNotification, requireVisible bool) (*slackapi.File, error) {
@@ -725,12 +723,9 @@ func fileVisibleInChannel(file *slackapi.File, channelID string) bool {
 	if file == nil || channelID == "" {
 		return false
 	}
-	for _, candidate := range append(append(append([]string{}, file.Channels...), file.Groups...), file.IMs...) {
-		if candidate == channelID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(file.Channels, channelID) ||
+		slices.Contains(file.Groups, channelID) ||
+		slices.Contains(file.IMs, channelID)
 }
 
 var _ port.JobNotificationPublisher = (*JobNotificationPublisher)(nil)
