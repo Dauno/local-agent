@@ -8,10 +8,11 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"maps"
 	"os"
 	"path/filepath"
 	"runtime"
-	"sort"
+	"slices"
 	"strings"
 )
 
@@ -183,11 +184,7 @@ func (*FS) WriteBatch(
 	if err := contextError(ctx); err != nil {
 		return err
 	}
-	paths := make([]string, 0, len(contents))
-	for path := range contents {
-		paths = append(paths, path)
-	}
-	sort.Strings(paths)
+	paths := slices.Sorted(maps.Keys(contents))
 
 	staged := make([]stagedFile, 0, len(paths))
 	cleanup := func() {
