@@ -5,11 +5,11 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Estado actual
 
-- El acumulado de refactor hasta A13c8 era **−797 líneas**. La cadena A13d (001 → 003 → 002 → 004 → 005) está completada en `refactor/context-compiler-improvements` con cinco commits, sin merge a `main`; el acumulado contabilizado de la cadena es **+756** y el acumulado global queda en **−41** (`−797 + 756`).
-- Gates en verde: `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent`. Queda pendiente el merge a `main` con el visto bueno final del usuario.
+- El acumulado de refactor hasta A13c8 era **−797 líneas**. La cadena A13d (001 → 003 → 002 → 004 → 005) está completada y fusionada en `main` (verificado 2026-08-10) con cinco commits; el acumulado contabilizado de la cadena es **+756** y el acumulado global queda en **−41** (`−797 + 756`).
+- Gates en verde: `go test ./...`, `go vet ./...` y `go build -trimpath ./cmd/local-agent`. El merge de A13d a `main` está completado y fue verificado el 2026-08-10.
 - Los cambios preexistentes de `memory_core.go`, `redact.go` y `memory/service.go` se incorporaron en el Commit 1 de A13c3 por decisión explícita del usuario. El diff real correspondía a `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go`; no existían los dos primeros bajo `internal/usecase/memory`.
-- A13e (01, 02, 03, 04, 05, B1, B1.1, B2 y B3) aplicado en `main` con acumulado A13e **−162**; A13e-06 saltado (justificación abajo). El merge de la cadena A13d sigue pendiente.
-- El flujo de trabajo cambió a: **improve_agent → orquestador → luna_worker → ponytail** (ver «Proceso y reglas por batch»).
+- A13e (01, 02, 03, 04, 05, B1, B1.1, B2 y B3) aplicado en `main` con acumulado A13e **−162**; A13e-06 saltado (justificación abajo).
+- HEAD de `main`: `6079ac3` (B3.1); el flujo actualizado es: **improve_agent → orquestador → luna_worker → ponytail** (ver «Proceso y reglas por batch»).
 
 ## Commits por batch
 
@@ -75,7 +75,7 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Pendientes
 
-- La cadena A13d está completa; queda pendiente el merge a `main`, sujeto a autorización y visto bueno final del usuario.
+- La cadena A13d está completa y fusionada en `main` (verificado 2026-08-10). La rama local `refactor/context-compiler-improvements` queda disponible para limpieza opcional con `git branch -d`.
 - Revisión pendiente: clasificación de ambigüedad en `internal/adapter/slack` (`canvas_creator.go` vs `generated_file_uploader.go`), resto de `internal/domain`, `internal/port` y adapters, y tracking opcional en Slack Canvas.
 - `RequestBudgetPolicy`, diagnósticos no métricos y el comportamiento más estricto de `unicode.IsControl` en A2 se conservan; revisar solo con alcance ampliado.
 - `memory_core.go`: A3 se aplicó con stage selectivo. Los cambios preexistentes posteriores de `internal/domain/memory_core.go`, `internal/secure/redact.go` e `internal/usecase/memory/service.go` se incorporaron por decisión del usuario en `4ea1941`.
