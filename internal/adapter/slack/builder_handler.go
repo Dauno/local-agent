@@ -285,9 +285,9 @@ func builderDraftFromCallback(callback slackapi.InteractionCallback) (domain.Age
 	if kind == string(domain.AgentKindLLM) {
 		model = selectedValue(values, "model", "model")
 	}
-	executionMode := valueFromState(values, "execution_mode", "execution_mode")
+	executionMode := selectedValue(values, "execution_mode", "execution_mode")
 	timeoutSeconds := 0
-	if timeoutText := valueFromState(values, "timeout_seconds", "timeout_seconds"); timeoutText != "" {
+	if timeoutText := selectedValue(values, "timeout_seconds", "timeout_seconds"); timeoutText != "" {
 		timeoutSeconds, _ = strconv.Atoi(timeoutText)
 	}
 	return domain.AgentDraft{
@@ -303,18 +303,6 @@ func builderDraftFromCallback(callback slackapi.InteractionCallback) (domain.Age
 }
 
 func selectedValue(values map[string]map[string]slackapi.BlockAction, blockID, actionID string) string {
-	if block, ok := values[blockID]; ok {
-		if action, ok := block[actionID]; ok {
-			if action.Value != "" {
-				return action.Value
-			}
-			return action.SelectedOption.Value
-		}
-	}
-	return ""
-}
-
-func valueFromState(values map[string]map[string]slackapi.BlockAction, blockID, actionID string) string {
 	if block, ok := values[blockID]; ok {
 		if action, ok := block[actionID]; ok {
 			if action.Value != "" {
@@ -354,7 +342,7 @@ func validateBuilderDraft(callback slackapi.InteractionCallback, draft domain.Ag
 	}
 	// Parse the raw value so malformed numeric input is not silently treated as zero.
 	if callback.View.State != nil {
-		if raw := valueFromState(callback.View.State.Values, "timeout_seconds", "timeout_seconds"); raw != "" {
+		if raw := selectedValue(callback.View.State.Values, "timeout_seconds", "timeout_seconds"); raw != "" {
 			if _, err := strconv.Atoi(raw); err != nil {
 				return errors.New("timeout_seconds debe ser un numero entero")
 			}
@@ -441,10 +429,6 @@ func builderPreviewMarkdown(draft domain.AgentDraft, definition port.AgentDefPre
 		neutralizeUnsafeControls(draft.Name), definition.AgentClass, neutralizeUnsafeControls(profile), definition.ExecutionMode, timeout, neutralizeUnsafeControls(yaml), sha256)
 }
 
-type builderBlockPoster interface {
-	PostBlocks(context.Context, string, string, []slackapi.Block, slackapi.SlackMetadata, string) (string, error)
-}
-
 func (c sdkPostClient) PostBlocks(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
 	options := []slackapi.MsgOption{
 		slackapi.MsgOptionText(fallbackText, false),
@@ -474,7 +458,7 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 	if err != nil {
 		return fmt.Errorf("render agent preview template: %w", err)
 	}
-	poster, ok := p.client.(builderBlockPoster)
+	poster, ok := p.client.(blockPostClient)
 	if !ok {
 		_, err := p.Publish(ctx, target, fallbackText)
 		return err
@@ -515,15 +499,7 @@ func compileBuilderPreviewMessage(renderer *TemplateRenderer, draft domain.Agent
 }
 
 func compileMessageWithParts(renderer *TemplateRenderer, templateName string, values map[string]string, parts []string) (string, []slackapi.Block, error) {
-	return compileMessageContext(renderer, templateName, TemplateContext{Values: values, PreviewYAMLParts: parts})
-}
-
-func compileMessageContext(renderer *TemplateRenderer, templateName string, context TemplateContext) (string, []slackapi.Block, error) {
-	fallback, blocks, err := renderer.CompileMessageWithFallback(templateName, context)
-	if err != nil {
-		return "", nil, err
-	}
-	return fallback, blocks, nil
+	return renderer.CompileMessageWithFallback(templateName, TemplateContext{Values: values, PreviewYAMLParts: parts})
 }
 
 func builderPreviewTemplateValues(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) map[string]string {
