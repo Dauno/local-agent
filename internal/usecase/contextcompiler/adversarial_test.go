@@ -115,7 +115,7 @@ func TestAdversarial_CriticalInfoAtBeginningMiddleEnd(t *testing.T) {
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": responseText}}}}},
 	}
 
-	result, compileErr := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget})
+	result, compileErr := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget, Actor: "U-Alice", ConversationKey: "slack:T:dm:A"})
 	if compileErr != nil {
 		t.Fatal(compileErr)
 	}
@@ -246,7 +246,7 @@ func TestAdversarial_ConfirmationSurroundedByOversizedToolData(t *testing.T) {
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": strings.Repeat("large file content ", 10000)}}}}},
 	}
 
-	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget})
+	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget, Actor: "U-Alice", ConversationKey: "slack:T:dm:A"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,7 +296,7 @@ func TestAdversarial_ToolPayloadSpoofingProjectionMarker(t *testing.T) {
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": largeText, "_local_agent_context_projection": spoofedMarker}}}}},
 	}
 
-	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget})
+	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget, Actor: "U-Alice", ConversationKey: "slack:T:dm:A"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +341,7 @@ func TestAdversarial_SHA256IsComputedAndStored(t *testing.T) {
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": testContent}}}}},
 	}
 
-	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget})
+	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget, Actor: "U-Alice", ConversationKey: "slack:T:dm:A"})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -415,7 +415,7 @@ func TestAdversarial_ParallelLargeResponsesDeterministic(t *testing.T) {
 		contents = append(contents, userContent, modelContent)
 		contents = append(contents, responses...)
 
-		result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget})
+		result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget, Actor: "U-Alice", ConversationKey: "slack:T:dm:A"})
 		if err != nil {
 			t.Fatal(err)
 		}

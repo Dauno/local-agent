@@ -3,29 +3,16 @@ package adkagent
 import (
 	"encoding/json"
 	"errors"
-	"fmt"
 
 	"google.golang.org/adk/v2/agent"
 	"google.golang.org/adk/v2/agent/llmagent"
 	"google.golang.org/adk/v2/model"
-	"google.golang.org/adk/v2/session"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-func CompilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.RequestBudget, continuity port.ContinuityStore, summaries port.SummaryStore, actor string) llmagent.BeforeModelCallback {
-	return compilerBeforeModelCallback(compiler, budget, continuity, summaries, nil, domain.ContextCompactionSettings{}, actor)
-}
-
-// CompilerBeforeModelCallbackWithSnapshot is the production callback. ADK's
-// callback wrapper deliberately does not expose Session(); durable metadata is
-// loaded through the supported session service instead.
-func CompilerBeforeModelCallbackWithSnapshot(compiler port.ContextCompiler, budget domain.RequestBudget, continuity port.ContinuityStore, summaries port.SummaryStore, sessions session.Service, compaction domain.ContextCompactionSettings, actor string) llmagent.BeforeModelCallback {
-	return compilerBeforeModelCallback(compiler, budget, continuity, summaries, sessions, compaction, actor)
-}
-
-func compilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.RequestBudget, continuity port.ContinuityStore, summaries port.SummaryStore, sessions session.Service, compaction domain.ContextCompactionSettings, actor string) llmagent.BeforeModelCallback {
+func CompilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.RequestBudget, continuity port.ContinuityStore, summaries port.SummaryStore, compaction domain.ContextCompactionSettings, actor string) llmagent.BeforeModelCallback {
 	return func(ctx agent.Context, request *model.LLMRequest) (*model.LLMResponse, error) {
 		if request == nil || compiler == nil {
 			return nil, errors.New("ADK context compiler and request are required")
@@ -58,26 +45,9 @@ func compilerBeforeModelCallback(compiler port.ContextCompiler, budget domain.Re
 			}
 		}
 		openInvocationIDs := visibleOpenInvocationIDs(contents)
-		var sessionRevision int64
-		if ctx != nil && sessions != nil {
-			loaded, snapshotErr := sessions.Get(ctx, &session.GetRequest{AppName: ctx.AppName(), UserID: ctx.UserID(), SessionID: ctx.SessionID()})
-			if snapshotErr != nil || loaded == nil || loaded.Session == nil {
-				if snapshotErr == nil {
-					snapshotErr = errors.New("session snapshot is empty")
-				}
-				return nil, fmt.Errorf("ADK context snapshot unavailable: %w", snapshotErr)
-			}
-			events := loaded.Session.Events()
-			if events != nil {
-				sessionRevision = int64(events.Len())
-			}
-			if revisioned, ok := loaded.Session.(interface{ Revision() int64 }); ok {
-				sessionRevision = revisioned.Revision()
-			}
-		}
 		result, err := compiler.Compile(ctx, domain.CompileRequest{Contents: contents, Continuity: capsule,
 			ExistingSummary: summary, Compaction: compaction, ModelBudget: budget, FixedRequestTokens: fixed, Actor: actor,
-			ConversationKey: conversationKeyFromSession(ctx), SessionRevision: sessionRevision,
+			ConversationKey:   conversationKeyFromSession(ctx),
 			OpenInvocationIDs: openInvocationIDs})
 		if err != nil {
 			return nil, err
