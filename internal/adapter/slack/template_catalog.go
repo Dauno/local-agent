@@ -1443,7 +1443,7 @@ func validateTemplateRepresentatives(doc templateDocument) error {
 					"timeout_seconds": "7200",
 				},
 			}
-			if _, err := compileTemplateDocument(doc, ctx); err != nil {
+			if _, err := compileModalTemplate(doc, ctx); err != nil {
 				return err
 			}
 		}
@@ -1463,17 +1463,17 @@ func validateTemplateRepresentatives(doc templateDocument) error {
 			"execution_mode": domain.ExecutionModeForeground, "timeout": "no aplica",
 			"sha256": "digest", "draft_id": "draft-1", "fallback_text": "Agent preview",
 		}
-		_, err := compileTemplateDocument(doc, TemplateContext{Values: values, PreviewYAMLParts: []string{"```yaml\nname: incident_analyst\n```"}})
+		_, _, err := compileMessageTemplate(doc, TemplateContext{Values: values, PreviewYAMLParts: []string{"```yaml\nname: incident_analyst\n```"}})
 		return err
 	case "onboarding_message":
 		values = map[string]string{
 			"builder_context": `{"v":1,"actor_id":"U12345678","conversation_key":"slack:T12345678:dm:D12345678"}`,
 			"intro":           "Welcome", "describe_prompt": "Describe a need",
 		}
-		_, err := compileTemplateDocument(doc, TemplateContext{Values: values, SuggestedPrompts: []string{"Ask one thing"}})
+		_, _, err := compileMessageTemplate(doc, TemplateContext{Values: values, SuggestedPrompts: []string{"Ask one thing"}})
 		return err
 	}
-	_, err := compileTemplateDocument(doc, TemplateContext{Values: values})
+	_, _, err := compileMessageTemplate(doc, TemplateContext{Values: values})
 	return err
 }
 

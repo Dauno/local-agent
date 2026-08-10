@@ -82,14 +82,11 @@ func (r *TemplateRenderer) CompileModal(templateName string, context TemplateCon
 	if doc.Surface != "modal" {
 		return slackapi.ModalViewRequest{}, fmt.Errorf("template %q is not a modal", templateName)
 	}
-	compiled, err := compileTemplateDocument(doc, context)
+	view, err := compileModalTemplate(doc, context)
 	if err != nil {
 		return slackapi.ModalViewRequest{}, err
 	}
-	if compiled.Modal == nil {
-		return slackapi.ModalViewRequest{}, errors.New("compiled modal is missing")
-	}
-	return *compiled.Modal, nil
+	return view, nil
 }
 
 // CompileMessage compiles a message template into bounded Slack blocks. The
@@ -109,11 +106,7 @@ func (r *TemplateRenderer) CompileMessageWithFallback(templateName string, conte
 	if doc.Surface != "message" {
 		return "", nil, fmt.Errorf("template %q is not a message", templateName)
 	}
-	compiled, err := compileTemplateDocument(doc, context)
-	if err != nil {
-		return "", nil, err
-	}
-	return compiled.Fallback, compiled.Blocks, nil
+	return compileMessageTemplate(doc, context)
 }
 
 func (r *TemplateRenderer) document(name string) (templateDocument, error) {
@@ -127,12 +120,6 @@ func (r *TemplateRenderer) document(name string) (templateDocument, error) {
 	return doc, nil
 }
 
-type compiledTemplate struct {
-	Modal    *slackapi.ModalViewRequest
-	Fallback string
-	Blocks   []slackapi.Block
-}
-
 type renderEnvironment struct {
 	templateName     string
 	kind             domain.AgentKind
@@ -143,73 +130,80 @@ type renderEnvironment struct {
 	suggestedPrompts []string
 }
 
-func compileTemplateDocument(doc templateDocument, context TemplateContext) (compiledTemplate, error) {
+func compileModalTemplate(doc templateDocument, context TemplateContext) (slackapi.ModalViewRequest, error) {
 	env, err := newRenderEnvironment(doc.Name, context)
 	if err != nil {
-		return compiledTemplate{}, err
+		return slackapi.ModalViewRequest{}, err
 	}
-	if doc.Modal != nil {
-		modal := doc.Modal
-		blocks, err := compileBlocks(doc.Name, modal.Blocks, env)
-		if err != nil {
-			return compiledTemplate{}, err
-		}
-		if len(blocks) > maxRendererBlocksPerModal {
-			return compiledTemplate{}, fmt.Errorf("modal exceeds %d block limit", maxRendererBlocksPerModal)
-		}
-		title, err := compileText(modal.Title, env, false, maxRendererModalTitleLength)
-		if err != nil {
-			return compiledTemplate{}, fmt.Errorf("compile modal title: %w", err)
-		}
-		view := slackapi.ModalViewRequest{
-			Type:            slackapi.VTModal,
-			Title:           title,
-			CallbackID:      modal.CallbackID,
-			PrivateMetadata: modal.PrivateMetadata,
-			Blocks:          slackapi.Blocks{BlockSet: blocks},
-		}
-		if modal.Submit != nil {
-			view.Submit, err = compileText(modal.Submit, env, false, maxRendererModalSubmitCloseLength)
-			if err != nil {
-				return compiledTemplate{}, fmt.Errorf("compile modal submit: %w", err)
-			}
-		}
-		if modal.Close != nil {
-			view.Close, err = compileText(modal.Close, env, false, maxRendererModalSubmitCloseLength)
-			if err != nil {
-				return compiledTemplate{}, fmt.Errorf("compile modal close: %w", err)
-			}
-		}
-		if err := validateCompiledView(doc.Name, view); err != nil {
-			return compiledTemplate{}, err
-		}
-		return compiledTemplate{Modal: &view}, nil
+	if doc.Modal == nil {
+		return slackapi.ModalViewRequest{}, errors.New("template payload is missing")
 	}
+	modal := doc.Modal
+	blocks, err := compileBlocks(doc.Name, modal.Blocks, env)
+	if err != nil {
+		return slackapi.ModalViewRequest{}, err
+	}
+	if len(blocks) > maxRendererBlocksPerModal {
+		return slackapi.ModalViewRequest{}, fmt.Errorf("modal exceeds %d block limit", maxRendererBlocksPerModal)
+	}
+	title, err := compileText(modal.Title, env, false, maxRendererModalTitleLength)
+	if err != nil {
+		return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal title: %w", err)
+	}
+	view := slackapi.ModalViewRequest{
+		Type:            slackapi.VTModal,
+		Title:           title,
+		CallbackID:      modal.CallbackID,
+		PrivateMetadata: modal.PrivateMetadata,
+		Blocks:          slackapi.Blocks{BlockSet: blocks},
+	}
+	if modal.Submit != nil {
+		view.Submit, err = compileText(modal.Submit, env, false, maxRendererModalSubmitCloseLength)
+		if err != nil {
+			return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal submit: %w", err)
+		}
+	}
+	if modal.Close != nil {
+		view.Close, err = compileText(modal.Close, env, false, maxRendererModalSubmitCloseLength)
+		if err != nil {
+			return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal close: %w", err)
+		}
+	}
+	if err := validateCompiledView(doc.Name, view); err != nil {
+		return slackapi.ModalViewRequest{}, err
+	}
+	return view, nil
+}
 
+func compileMessageTemplate(doc templateDocument, context TemplateContext) (string, []slackapi.Block, error) {
+	env, err := newRenderEnvironment(doc.Name, context)
+	if err != nil {
+		return "", nil, err
+	}
 	if doc.Message == nil {
-		return compiledTemplate{}, errors.New("template payload is missing")
+		return "", nil, errors.New("template payload is missing")
 	}
 	fallback, err := resolveString(doc.Message.FallbackText, env, false)
 	if err != nil {
-		return compiledTemplate{}, fmt.Errorf("compile fallback_text: %w", err)
+		return "", nil, fmt.Errorf("compile fallback_text: %w", err)
 	}
 	if strings.TrimSpace(fallback) == "" {
-		return compiledTemplate{}, errors.New("compiled fallback_text must not be empty")
+		return "", nil, errors.New("compiled fallback_text must not be empty")
 	}
 	if utf8.RuneCountInString(fallback) > maxFallbackText {
-		return compiledTemplate{}, fmt.Errorf("fallback_text exceeds %d character limit", maxFallbackText)
+		return "", nil, fmt.Errorf("fallback_text exceeds %d character limit", maxFallbackText)
 	}
 	blocks, err := compileBlocks(doc.Name, doc.Message.Blocks, env)
 	if err != nil {
-		return compiledTemplate{}, err
+		return "", nil, err
 	}
 	if len(blocks) > maxBlocksPerMessage {
-		return compiledTemplate{}, fmt.Errorf("message exceeds %d block limit", maxBlocksPerMessage)
+		return "", nil, fmt.Errorf("message exceeds %d block limit", maxBlocksPerMessage)
 	}
 	if err := validateCompiledBlocks(doc.Name, blocks, false); err != nil {
-		return compiledTemplate{}, err
+		return "", nil, err
 	}
-	return compiledTemplate{Fallback: fallback, Blocks: blocks}, nil
+	return fallback, blocks, nil
 }
 
 func newRenderEnvironment(templateName string, context TemplateContext) (renderEnvironment, error) {
