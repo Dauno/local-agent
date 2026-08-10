@@ -64,10 +64,10 @@ Estado del refactor de sobre-ingeniería/duplicación por batches. Este document
 
 ## Proceso y reglas por batch
 
-- **improve_agent** audita el código y produce hallazgos priorizados.
-- El **orquestador** (agente raíz) organiza los hallazgos en batches acotados (máx. 2–3 archivos de producción) y verifica cada uno con evidencia del repo (`rg`, `read_file`, `read_file_range`) antes de presentarlo al usuario.
-- **luna_worker** ejecuta el batch como job durable tras aprobación explícita del usuario para cada invocación.
-- **ponytail-review** valida el resultado (sobre-ingeniería residual); los hallazgos van al siguiente batch o se documentan.
+- **improve_agent** audita el código y produce el plan con hallazgos priorizados.
+- El **organizador/orquestador** descompone el plan en batches acotados (máx. 2–3 archivos de producción), verifica cada uno con evidencia del repo (`rg`, `read_file`, `read_file_range`) y coordina el flujo.
+- **luna_worker** ejecuta cada batch como job durable y aplica los gates obligatorios tras la aprobación explícita del usuario para cada invocación.
+- **ponytail** valida cada diff por sobre-ingeniería antes del siguiente batch; los hallazgos van al siguiente batch o se documentan.
 - Si la evidencia contradice el plan del auditor, el batch se re-define o se salta con justificación documentada (caso A13e-06).
 - No modificar tests; preservar mensajes de error/log exactos; revisar `git status` antes y dejar cambios preexistentes fuera, salvo decisión explícita del usuario como en A13c3.
 - Crear un commit conventional por batch y verificar `go build ./...`, `go vet ./...`, `go test` (paquete y suite) y `git diff --check`.
