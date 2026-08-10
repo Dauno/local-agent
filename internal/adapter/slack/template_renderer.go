@@ -37,18 +37,10 @@ const (
 type TemplateContext struct {
 	Values           map[string]string
 	Profiles         []BuilderProviderProfile
-	ProviderProfiles []BuilderProviderProfile
 	PreviewYAMLParts []string
 	SuggestedPrompts []string
 	Kind             domain.AgentKind
-	AgentKind        domain.AgentKind
-	IsACP            bool
 }
-
-// TemplateRenderContext and RenderContext are descriptive aliases for callers
-// that prefer to name the value as a render context.
-type TemplateRenderContext = TemplateContext
-type RenderContext = TemplateContext
 
 // TemplateRenderer compiles validated catalog entries into slack-go values.
 // It has no Slack client and cannot publish or mutate application state.
@@ -232,31 +224,18 @@ func compileTemplateDocument(doc templateDocument, context TemplateContext) (com
 
 func newRenderEnvironment(templateName string, context TemplateContext) (renderEnvironment, error) {
 	kind := context.Kind
-	if kind != "" && context.AgentKind != "" && kind != context.AgentKind {
-		return renderEnvironment{}, errors.New("template context has conflicting agent kinds")
-	}
-	if kind == "" {
-		kind = context.AgentKind
-	}
 	if kind == "" {
 		kind = domain.AgentKindLLM
 	}
 	if kind != domain.AgentKindLLM && kind != domain.AgentKindACP {
 		return renderEnvironment{}, fmt.Errorf("unsupported template agent kind %q", kind)
 	}
-	if context.IsACP && kind != domain.AgentKindACP {
-		return renderEnvironment{}, errors.New("template context marks an LLM as ACP")
-	}
-	profiles := context.Profiles
-	if profiles == nil {
-		profiles = context.ProviderProfiles
-	}
 	return renderEnvironment{
 		templateName:     templateName,
 		kind:             kind,
-		isACP:            kind == domain.AgentKindACP || context.IsACP,
+		isACP:            kind == domain.AgentKindACP,
 		values:           context.Values,
-		profiles:         append([]BuilderProviderProfile(nil), profiles...),
+		profiles:         append([]BuilderProviderProfile(nil), context.Profiles...),
 		previewYAMLParts: append([]string(nil), context.PreviewYAMLParts...),
 		suggestedPrompts: append([]string(nil), context.SuggestedPrompts...),
 	}, nil
@@ -276,7 +255,7 @@ func compileBlocks(templateName string, source []templateBlock, env renderEnviro
 		if sourceBlock.Condition == "is_acp" && !env.isACP {
 			continue
 		}
-		block, err := compileBlock(templateName, sourceBlock, env, fmt.Sprintf("blocks[%d]", index))
+		block, err := compileBlock(sourceBlock, env, fmt.Sprintf("blocks[%d]", index))
 		if err != nil {
 			return nil, err
 		}
@@ -333,7 +312,7 @@ func compileCollectionBlocks(token string, env renderEnvironment, fieldPath stri
 	return blocks, nil
 }
 
-func compileBlock(templateName string, source templateBlock, env renderEnvironment, fieldPath string) (slackapi.Block, error) {
+func compileBlock(source templateBlock, env renderEnvironment, fieldPath string) (slackapi.Block, error) {
 	switch source.Type {
 	case "section":
 		var text *slackapi.TextBlockObject
