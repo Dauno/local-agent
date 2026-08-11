@@ -30,6 +30,7 @@ import (
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
+	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
 var _ port.AgentToolFactory = (*Factory)(nil)
@@ -62,6 +63,7 @@ type Factory struct {
 	metrics            port.MetricRecorder
 	declarativeTools   map[string]tooldef.ToolDef
 	declarativeRunner  DeclarativeToolExecutor
+	workstreams        *workstreamusecase.Service
 }
 
 func (f *Factory) WithCodeReaders(readers map[string]port.CodeReader) *Factory {
@@ -170,6 +172,13 @@ func (f *Factory) WithExternalAgentJobs(reader port.ExternalAgentJobReader) *Fac
 	return f
 }
 
+func (f *Factory) WithWorkstreams(service *workstreamusecase.Service) *Factory {
+	if f != nil {
+		f.workstreams = service
+	}
+	return f
+}
+
 // WithAllowedUserIDs configures the users allowed to install agent definitions.
 func (f *Factory) WithAllowedUserIDs(ids []string) *Factory {
 	f.allowedUserIDs = append([]string(nil), ids...)
@@ -197,6 +206,25 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, fmt.Errorf("build list_messages tool: %w", err)
 	}
 	tools = append(tools, ro)
+	if f.workstreams != nil {
+		getTool, err := f.workstreamGetTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_get tool: %w", err)
+		}
+		activeTool, err := f.workstreamActiveTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_active tool: %w", err)
+		}
+		createTool, err := f.workstreamCreateTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_create tool: %w", err)
+		}
+		transitionTool, err := f.workstreamTransitionTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_transition tool: %w", err)
+		}
+		tools = append(tools, getTool, activeTool, createTool, transitionTool)
+	}
 	if f.externalJobs != nil {
 		statusTool, err := f.jobStatusTool(actor, key)
 		if err != nil {

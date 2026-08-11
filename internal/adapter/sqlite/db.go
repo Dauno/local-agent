@@ -12,7 +12,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 32
+const SchemaVersion = 33
 
 var (
 	ErrDatabaseNotFound       = errors.New("SQLite database not found")

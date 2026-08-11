@@ -103,6 +103,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 		OpenCode:         config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
 		ACP:              config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, ProgressWarningSeconds: 900, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
 		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
+		Orchestration:    config.OrchestrationConfig{Workstreams: config.WorkstreamConfig{Enabled: false, MaxNonTerminalTasks: 32, MaxDependenciesPerTask: 8}},
 	}
 
 	got := config.Default()
@@ -314,8 +315,13 @@ code_intelligence:
   initialization_timeout_seconds: 20
   request_timeout_seconds: 10
   lsp_servers: []
-  lsp_routes: {}
-         `
+   lsp_routes: {}
+orchestration:
+  workstreams:
+    enabled: false
+    max_non_terminal_tasks: 32
+    max_dependencies_per_task: 8
+          `
 
 	if !reflect.DeepEqual(strings.Fields(string(got)), strings.Fields(want)) {
 		t.Fatalf("default YAML fields mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
@@ -701,6 +707,38 @@ func TestValidateRejectsInvalidMemoryLimits(t *testing.T) {
 	var validation *config.ValidationError
 	if !errors.As(err, &validation) || !validation.Has("memory.recall_timeout_seconds") || !validation.Has("memory.max_patch_ops") {
 		t.Fatalf("Validate() error = %v", err)
+	}
+}
+
+func TestValidateWorkstreamLimitsAndParseGate(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Orchestration.Workstreams.Enabled = true
+	cfg.Orchestration.Workstreams.MaxNonTerminalTasks = domain.HardMaxWorkstreamTasks + 1
+	cfg.Orchestration.Workstreams.MaxDependenciesPerTask = domain.HardMaxWorkstreamDependencies + 1
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) || !validation.Has("orchestration.workstreams.max_non_terminal_tasks") || !validation.Has("orchestration.workstreams.max_dependencies_per_task") {
+		t.Fatalf("workstream validation = %v", err)
+	}
+	parsed, err := config.Parse([]byte(`orchestration:
+  workstreams:
+    enabled: true
+    max_non_terminal_tasks: 12
+    max_dependencies_per_task: 4
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Orchestration.Workstreams.Enabled || parsed.Orchestration.Workstreams.MaxNonTerminalTasks != 12 || parsed.Orchestration.Workstreams.MaxDependenciesPerTask != 4 {
+		t.Fatalf("parsed workstream config = %+v", parsed.Orchestration.Workstreams)
+	}
+	emptyRegistry := config.Default()
+	emptyRegistry.Orchestration.Workstreams.Enabled = true
+	emptyRegistry.Sandbox.Projects = nil
+	err = emptyRegistry.Validate()
+	if !errors.As(err, &validation) || !validation.Has("orchestration.workstreams") {
+		t.Fatalf("workstream project registry validation = %v", err)
 	}
 }
 

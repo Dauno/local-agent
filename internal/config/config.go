@@ -37,6 +37,7 @@ type Config struct {
 	OpenCode         OpenCodeConfig          `yaml:"opencode"`
 	ACP              ACPConfig               `yaml:"acp"`
 	CodeIntelligence *CodeIntelligenceConfig `yaml:"code_intelligence"`
+	Orchestration    OrchestrationConfig     `yaml:"orchestration"`
 
 	document *sourceDocument
 }
@@ -231,6 +232,16 @@ type ExportsConfig struct {
 	TimeoutSeconds   int  `yaml:"timeout_seconds"`
 }
 
+type OrchestrationConfig struct {
+	Workstreams WorkstreamConfig `yaml:"workstreams"`
+}
+
+type WorkstreamConfig struct {
+	Enabled                bool `yaml:"enabled"`
+	MaxNonTerminalTasks    int  `yaml:"max_non_terminal_tasks"`
+	MaxDependenciesPerTask int  `yaml:"max_dependencies_per_task"`
+}
+
 // Default returns a new Config populated with the PRD defaults.
 func Default() Config {
 	return Config{
@@ -337,5 +348,9 @@ func Default() Config {
 		CodeIntelligence: &CodeIntelligenceConfig{
 			Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10,
 		},
+		Orchestration: OrchestrationConfig{Workstreams: WorkstreamConfig{
+			Enabled: false, MaxNonTerminalTasks: domain.DefaultMaxWorkstreamTasks,
+			MaxDependenciesPerTask: domain.DefaultMaxWorkstreamDependencies,
+		}},
 	}
 }

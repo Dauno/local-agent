@@ -774,13 +774,76 @@ func extractConfirmation(fc *genai.FunctionCall) *domain.PendingConfirmation {
 		paramHash = fmt.Sprintf("%x", hash.Sum(nil))[:16]
 	}
 
+	summary := confirmationHint(fc)
+	if strings.TrimSpace(summary) == "" {
+		summary = fmt.Sprintf("Tool %q requires confirmation", originalCall.Name)
+	}
+	payload, ok := confirmationPayload(fc, originalCall)
+	if !ok {
+		return nil
+	}
 	return &domain.PendingConfirmation{
 		WrapperCallID:  fc.ID,
 		OriginalCallID: originalCall.ID,
-		Summary:        fmt.Sprintf("Tool %q requires confirmation", originalCall.Name),
+		Summary:        summary,
+		Payload:        payload,
 		ParameterHash:  paramHash,
 		Expiry:         time.Now().Add(15 * time.Minute),
 	}
+}
+
+func confirmationPayload(wrapper, call *genai.FunctionCall) (string, bool) {
+	if call == nil || !strings.HasPrefix(call.Name, "workstream_") {
+		return "", true
+	}
+	confirmation, ok := requestedToolConfirmation(wrapper)
+	if !ok || confirmation.Payload == nil {
+		return "", false
+	}
+	encoded, err := json.Marshal(confirmation.Payload)
+	if err != nil {
+		return "", false
+	}
+	return string(encoded), true
+}
+
+func confirmationHint(fc *genai.FunctionCall) string {
+	confirmation, ok := requestedToolConfirmation(fc)
+	if !ok {
+		return ""
+	}
+	return usableConfirmationHint(confirmation.Hint)
+}
+
+func requestedToolConfirmation(fc *genai.FunctionCall) (toolconfirmation.ToolConfirmation, bool) {
+	if fc == nil || fc.Args == nil {
+		return toolconfirmation.ToolConfirmation{}, false
+	}
+	raw, ok := fc.Args["toolConfirmation"]
+	if !ok {
+		return toolconfirmation.ToolConfirmation{}, false
+	}
+	switch confirmation := raw.(type) {
+	case toolconfirmation.ToolConfirmation:
+		return confirmation, true
+	case *toolconfirmation.ToolConfirmation:
+		if confirmation != nil {
+			return *confirmation, true
+		}
+	case map[string]any:
+		hint, _ := confirmation["hint"].(string)
+		payload, exists := confirmation["payload"]
+		return toolconfirmation.ToolConfirmation{Hint: hint, Payload: payload}, exists
+	}
+	return toolconfirmation.ToolConfirmation{}, false
+}
+
+func usableConfirmationHint(hint string) string {
+	hint = strings.TrimSpace(hint)
+	if strings.Contains(hint, "FunctionResponse") {
+		return ""
+	}
+	return hint
 }
 
 // --- ephemeral context (before-model callback) ---

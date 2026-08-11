@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
@@ -21,6 +22,7 @@ import (
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
+	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
 type stubConversationStore struct {
@@ -202,6 +204,58 @@ type stubToolContext struct {
 	ctx    context.Context
 }
 
+type recordingConfirmationContext struct {
+	stubToolContext
+	requested bool
+	hint      string
+	payload   any
+	confirmed *toolconfirmation.ToolConfirmation
+}
+
+func (c *recordingConfirmationContext) RequestConfirmation(hint string, payload any) error {
+	c.requested = true
+	c.hint = hint
+	c.payload = payload
+	return nil
+}
+
+func (c *recordingConfirmationContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
+	return c.confirmed
+}
+
+type stubWorkstreamStore struct {
+	workstream     domain.Workstream
+	lastTransition domain.WorkstreamTransition
+}
+
+func (s *stubWorkstreamStore) Create(_ context.Context, workstream domain.Workstream, _ domain.WorkstreamTransitionSource, _ string) error {
+	s.workstream = workstream
+	return nil
+}
+
+func (s *stubWorkstreamStore) Get(_ context.Context, id string) (domain.Workstream, error) {
+	if s.workstream.ID != id {
+		return domain.Workstream{}, port.ErrWorkstreamNotFound
+	}
+	return s.workstream, nil
+}
+
+func (s *stubWorkstreamStore) ActiveForConversation(_ context.Context, key domain.ConversationKey) (domain.Workstream, error) {
+	if s.workstream.ID == "" || s.workstream.ConversationKey != key || s.workstream.Status.Terminal() {
+		return domain.Workstream{}, port.ErrWorkstreamNotFound
+	}
+	return s.workstream, nil
+}
+
+func (s *stubWorkstreamStore) Apply(_ context.Context, transition domain.WorkstreamTransition, limits domain.WorkstreamLimits, now time.Time) (domain.WorkstreamTransitionRecord, error) {
+	s.lastTransition = transition
+	return (&s.workstream).ApplyTransitionWithLimits(transition, limits, now)
+}
+
+func (s *stubWorkstreamStore) Transitions(_ context.Context, _ string) ([]domain.WorkstreamTransitionRecord, error) {
+	return nil, nil
+}
+
 func (c *stubToolContext) FunctionCallID() string      { return c.callID }
 func (c *stubToolContext) Deadline() (time.Time, bool) { return c.context().Deadline() }
 func (c *stubToolContext) Done() <-chan struct{}       { return c.context().Done() }
@@ -232,6 +286,113 @@ func TestFactoryWithoutSandboxExposesOnlyConversationTools(t *testing.T) {
 	}
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool without sandbox, got %d", len(tools))
+	}
+}
+
+func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	store := &stubWorkstreamStore{workstream: domain.Workstream{
+		ID: "ws-1", ConversationKey: key, OwnerActor: "U12345678", Project: "workspace",
+		Status: domain.WorkstreamProposed, Revision: 0, Objective: "bounded objective",
+	}}
+	service, err := workstreamusecase.New(workstreamusecase.Config{
+		Enabled:         true,
+		AllowedProjects: map[string]struct{}{"workspace": {}},
+	}, workstreamusecase.Dependencies{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithWorkstreams(service)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]runnableFunctionTool)
+	for _, raw := range tools {
+		if candidate, ok := raw.(runnableFunctionTool); ok {
+			byName[candidate.Name()] = candidate
+		}
+	}
+	for _, name := range []string{"workstream_get", "workstream_active", "workstream_create", "workstream_transition"} {
+		if byName[name] == nil {
+			t.Fatalf("%s tool was not registered", name)
+		}
+	}
+
+	if _, err := byName["workstream_get"].Run(&stubToolContext{callID: "get-1"}, map[string]any{"workstream_id": "ws-1", "project": "workspace"}); err != nil {
+		t.Fatalf("bound workstream read failed: %v", err)
+	}
+	if _, err := byName["workstream_transition"].Run(&stubToolContext{callID: "transition-1"}, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 0,
+		"action": "propose_task", "task_id": "task-1", "task_description": "inspect",
+	}); err != nil {
+		t.Fatalf("planning transition failed: %v", err)
+	}
+	if store.lastTransition.Actor != "U12345678" || store.lastTransition.Project != "workspace" || store.lastTransition.ConversationKey != key || store.lastTransition.Source != domain.WorkstreamSourceRoot {
+		t.Fatalf("tool supplied untrusted transition binding: %+v", store.lastTransition)
+	}
+	if _, err := byName["workstream_transition"].Run(&stubToolContext{callID: "unverified-result-1"}, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "link_completed_result",
+	}); err == nil {
+		t.Fatal("unverified result-link action was accepted")
+	}
+
+	confirmationContext := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "activate-1"}}
+	if _, err := byName["workstream_transition"].Run(confirmationContext, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "activate_workstream",
+	}); err != nil {
+		t.Fatalf("confirmation request failed: %v", err)
+	}
+	if !confirmationContext.requested || !strings.Contains(confirmationContext.hint, "ws-1") || !strings.Contains(confirmationContext.hint, "revision 1") {
+		t.Fatalf("confirmation request = %+v", confirmationContext)
+	}
+	if store.workstream.Revision != 1 {
+		t.Fatalf("authority transition executed before confirmation: revision %d", store.workstream.Revision)
+	}
+	rejectTaskConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "reject-task-1"}}
+	if _, err := byName["workstream_transition"].Run(rejectTaskConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "reject_task", "task_id": "task-1",
+	}); err != nil {
+		t.Fatalf("task rejection confirmation request failed: %v", err)
+	}
+	if !rejectTaskConfirmation.requested {
+		t.Fatal("root task rejection did not require confirmation")
+	}
+	blockConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "block-1"}}
+	if _, err := byName["workstream_transition"].Run(blockConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "block_workstream",
+	}); err == nil || blockConfirmation.requested {
+		t.Fatalf("root block action remained exposed: requested=%t err=%v", blockConfirmation.requested, err)
+	}
+	invalidConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "complete-1"}}
+	if _, err := byName["workstream_transition"].Run(invalidConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "complete_workstream",
+	}); err == nil || invalidConfirmation.requested {
+		t.Fatalf("invalid action was presented for confirmation: requested=%t err=%v", invalidConfirmation.requested, err)
+	}
+	createConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "create-1"}}
+	if _, err := byName["workstream_create"].Run(createConfirmation, map[string]any{
+		"workstream_id": "ws-2", "project": "workspace", "objective": "second objective",
+	}); err == nil || createConfirmation.requested {
+		t.Fatalf("conflicting creation was presented for confirmation: requested=%t err=%v", createConfirmation.requested, err)
+	}
+	confirmedContext := &recordingConfirmationContext{
+		stubToolContext: stubToolContext{callID: "activate-1"},
+		confirmed:       &toolconfirmation.ToolConfirmation{Confirmed: true},
+	}
+	if _, err := byName["workstream_transition"].Run(confirmedContext, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "activate_workstream",
+	}); err != nil {
+		t.Fatalf("confirmed authority transition failed: %v", err)
+	}
+	if store.workstream.Status != domain.WorkstreamActive || store.workstream.Revision != 2 {
+		t.Fatalf("confirmed transition state = %+v", store.workstream)
 	}
 }
 

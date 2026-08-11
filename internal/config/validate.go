@@ -276,6 +276,15 @@ func Validate(cfg Config) error {
 	if cfg.Memory.MaxPatchOps <= 0 {
 		add("memory.max_patch_ops", "must be greater than zero")
 	}
+	if cfg.Orchestration.Workstreams.MaxNonTerminalTasks <= 0 || cfg.Orchestration.Workstreams.MaxNonTerminalTasks > domain.HardMaxWorkstreamTasks {
+		add("orchestration.workstreams.max_non_terminal_tasks", fmt.Sprintf("must be between 1 and %d", domain.HardMaxWorkstreamTasks))
+	}
+	if cfg.Orchestration.Workstreams.MaxDependenciesPerTask <= 0 || cfg.Orchestration.Workstreams.MaxDependenciesPerTask > domain.HardMaxWorkstreamDependencies {
+		add("orchestration.workstreams.max_dependencies_per_task", fmt.Sprintf("must be between 1 and %d", domain.HardMaxWorkstreamDependencies))
+	}
+	if cfg.Orchestration.Workstreams.Enabled && len(cfg.Sandbox.Projects) == 0 {
+		add("orchestration.workstreams", "requires at least one registered sandbox project when enabled")
+	}
 	if cfg.Sandbox.Enabled {
 		if len(cfg.Sandbox.Projects) == 0 {
 			add("sandbox.projects", "must contain at least one registered project when enabled")
