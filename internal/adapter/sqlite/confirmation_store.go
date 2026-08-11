@@ -36,8 +36,9 @@ func (s *ConfirmationStore) CreateDelivery(ctx context.Context, delivery port.Co
 	}
 	presentation, err := json.Marshal(struct {
 		Summary       string `json:"summary"`
+		Payload       string `json:"payload"`
 		ParameterHash string `json:"parameter_hash"`
-	}{Summary: delivery.Summary, ParameterHash: delivery.ParameterHash})
+	}{Summary: delivery.Summary, Payload: delivery.Payload, ParameterHash: delivery.ParameterHash})
 	if err != nil {
 		return fmt.Errorf("encode confirmation presentation: %w", err)
 	}
@@ -153,6 +154,7 @@ func (s *ConfirmationStore) GetByWrapperCallID(ctx context.Context, wrapperCallI
 	key := deliveryConversationKey(teamID, channelID, threadTS)
 	var presentation struct {
 		Summary       string `json:"summary"`
+		Payload       string `json:"payload"`
 		ParameterHash string `json:"parameter_hash"`
 	}
 	if err := json.Unmarshal([]byte(presentationJSON), &presentation); err != nil {
@@ -169,6 +171,7 @@ func (s *ConfirmationStore) GetByWrapperCallID(ctx context.Context, wrapperCallI
 		ThreadTS:        threadTS,
 		ConversationKey: key,
 		Summary:         presentation.Summary,
+		Payload:         presentation.Payload,
 		ParameterHash:   presentation.ParameterHash,
 		Status:          port.ConfirmationDeliveryStatus(status),
 		CorrelationID:   correlationID,
@@ -208,12 +211,14 @@ func (s *ConfirmationStore) ListPending(ctx context.Context) ([]port.Confirmatio
 		d.Status = port.ConfirmationDeliveryStatus(status)
 		var presentation struct {
 			Summary       string `json:"summary"`
+			Payload       string `json:"payload"`
 			ParameterHash string `json:"parameter_hash"`
 		}
 		if err := json.Unmarshal([]byte(presentationJSON), &presentation); err != nil {
 			return nil, fmt.Errorf("decode confirmation presentation: %w", err)
 		}
 		d.Summary = presentation.Summary
+		d.Payload = presentation.Payload
 		d.ParameterHash = presentation.ParameterHash
 		d.CorrelationID = correlationID
 		d.SlackMessageTS = slackMessageTS

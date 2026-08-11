@@ -7,6 +7,7 @@ import (
 	"regexp"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	slackapi "github.com/slack-go/slack"
 
@@ -258,13 +259,39 @@ func renderConfirmationBlocks(delivery port.ConfirmationDelivery) []slackapi.Blo
 }
 
 func compileConfirmationMessage(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
-	return renderer.CompileMessageWithFallback("confirmation_message", TemplateContext{Values: map[string]string{
+	fallback, blocks, err := renderer.CompileMessageWithFallback("confirmation_message", TemplateContext{Values: map[string]string{
 		"summary":          fmt.Sprintf(":lock: %s", neutralizeUnsafeControls(delivery.Summary)),
 		"original_call_id": fmt.Sprintf("*Call ID:*\n`%s`", delivery.OriginalCallID),
 		"expires_at":       fmt.Sprintf("*Expires:*\n%s UTC", delivery.Expiry.UTC().Format("15:04")),
 		"wrapper_call_id":  delivery.WrapperCallID,
 		"fallback_text":    confirmationFallbackText(delivery),
 	}})
+	if err != nil || strings.TrimSpace(delivery.Payload) == "" {
+		return fallback, blocks, err
+	}
+	payloadBlocks := make([]slackapi.Block, 0)
+	for _, chunk := range confirmationPayloadChunks(neutralizeUnsafeControls(delivery.Payload), 2800) {
+		payloadBlocks = append(payloadBlocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("plain_text", "Proposed payload:\n"+chunk, false, false), nil, nil))
+	}
+	blocks = append(payloadBlocks, blocks...)
+	return fallback, blocks, nil
+}
+
+func confirmationPayloadChunks(value string, maxRunes int) []string {
+	runes := []rune(value)
+	if len(runes) == 0 || maxRunes <= 0 {
+		return nil
+	}
+	chunks := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
+	for len(runes) > 0 {
+		end := maxRunes
+		if end > len(runes) {
+			end = len(runes)
+		}
+		chunks = append(chunks, string(runes[:end]))
+		runes = runes[end:]
+	}
+	return chunks
 }
 
 func confirmationContentDigest(delivery port.ConfirmationDelivery) string {
@@ -272,8 +299,16 @@ func confirmationContentDigest(delivery port.ConfirmationDelivery) string {
 }
 
 func confirmationFallbackText(delivery port.ConfirmationDelivery) string {
-	return fmt.Sprintf("Confirmation required: %s\nCall ID: %s\nExpires: %s UTC",
+	text := fmt.Sprintf("Confirmation required: %s\nCall ID: %s\nExpires: %s UTC",
 		neutralizeUnsafeControls(delivery.Summary), delivery.OriginalCallID, delivery.Expiry.UTC().Format("15:04"))
+	if delivery.Payload != "" {
+		withPayload := text + "\nProposed payload: " + neutralizeUnsafeControls(delivery.Payload)
+		if utf8.RuneCountInString(withPayload) <= maxFallbackText {
+			return withPayload
+		}
+		text += "\nThe complete proposed payload is shown in the message blocks before the approval buttons."
+	}
+	return text
 }
 
 func confirmationMetadata(delivery port.ConfirmationDelivery) slackapi.SlackMetadata {

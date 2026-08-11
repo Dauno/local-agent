@@ -69,6 +69,7 @@ type Dependencies struct {
 	IncrementalPublisher  port.IncrementalPublisher
 	SummaryScheduler      port.SummaryScheduler
 	ExchangeFinder        port.AssistantExchangeFinder
+	Workstreams           port.WorkstreamService
 }
 
 type Outcome string
@@ -115,6 +116,7 @@ type Service struct {
 	incrementalPublisher  port.IncrementalPublisher
 	summaryScheduler      port.SummaryScheduler
 	exchangeFinder        port.AssistantExchangeFinder
+	workstreams           port.WorkstreamService
 }
 
 type confirmationExpirer interface {
@@ -217,6 +219,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		streamingRuntime:     deps.StreamingRuntime,
 		incrementalPublisher: deps.IncrementalPublisher,
 		summaryScheduler:     deps.SummaryScheduler, exchangeFinder: deps.ExchangeFinder,
+		workstreams: deps.Workstreams,
 	}, nil
 }
 
@@ -265,6 +268,43 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	key, err := invocation.ConversationKey()
 	if err != nil {
 		return "", err
+	}
+	if s.workstreams != nil {
+		command, handled, parseErr := parseHumanWorkstreamCommand(invocation.Text)
+		if handled {
+			if parseErr != nil {
+				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Invalid workstream command: "+parseErr.Error())); publishErr != nil {
+					return OutcomePublishFailed, nil
+				}
+				return OutcomeResponded, nil
+			}
+			binding := port.WorkstreamBinding{Actor: invocation.UserID, ConversationKey: key, Project: command.Project}
+			if command.Transition.Action == domain.WorkstreamActionCreateWorkstream {
+				if _, createErr := s.workstreams.CreateHuman(ctx, binding, command.WorkstreamID, command.Objective, "slack-human:"+invocation.EventID); createErr != nil {
+					if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Workstream creation rejected: "+createErr.Error())); publishErr != nil {
+						return OutcomePublishFailed, nil
+					}
+					return OutcomeResponded, nil
+				}
+				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "Workstream `"+command.WorkstreamID+"` created at revision `0`."); publishErr != nil {
+					return OutcomePublishFailed, nil
+				}
+				return OutcomeResponded, nil
+			}
+			command.Transition.SourceID = "slack-human:" + invocation.EventID
+			record, _, applyErr := s.workstreams.ApplyHuman(ctx, binding, command.Transition)
+			if applyErr != nil {
+				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Workstream transition rejected: "+applyErr.Error())); publishErr != nil {
+					return OutcomePublishFailed, nil
+				}
+				return OutcomeResponded, nil
+			}
+			message := fmt.Sprintf("Workstream `%s` applied human action `%s` at revision `%d`.", record.WorkstreamID, record.Action, record.ToRevision)
+			if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), message); publishErr != nil {
+				return OutcomePublishFailed, nil
+			}
+			return OutcomeResponded, nil
+		}
 	}
 	if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
 		return outcome, nil
@@ -673,6 +713,7 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 	pc.ConversationKey = key
 	pc.Actor = invocation.UserID
 	pc.Summary = s.sanitize(pc.Summary)
+	pc.Payload = s.sanitize(pc.Payload)
 	if strings.TrimSpace(pc.Summary) == "" {
 		pc.Summary = "A tool action requires confirmation"
 	}
@@ -692,6 +733,7 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 		ThreadTS:        invocation.ReplyTarget().ThreadTS,
 		ConversationKey: key,
 		Summary:         pc.Summary,
+		Payload:         pc.Payload,
 		ParameterHash:   pc.ParameterHash,
 		Status:          port.ConfirmationPending,
 		CorrelationID:   correlationID,
@@ -725,7 +767,7 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 		return OutcomeResponded, nil
 	}
 
-	confirmText := confirmationPrompt(pc.Summary, pc.OriginalCallID, pc.WrapperCallID, pc.Expiry)
+	confirmText := confirmationPrompt(pc.Summary, pc.Payload, pc.OriginalCallID, pc.WrapperCallID, pc.Expiry)
 
 	safeText := s.sanitize(confirmText)
 	target := invocation.ReplyTarget()
@@ -1024,7 +1066,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 			return fmt.Errorf("recover legacy confirmation %s: assistant exchange finder is unavailable", delivery.WrapperCallID)
 		}
 		correlationID := confirmationCorrelationID(delivery.WrapperCallID)
-		prompt := confirmationPrompt(delivery.Summary, delivery.OriginalCallID, delivery.WrapperCallID, delivery.Expiry)
+		prompt := confirmationPrompt(delivery.Summary, delivery.Payload, delivery.OriginalCallID, delivery.WrapperCallID, delivery.Expiry)
 		safePrompt := s.sanitize(prompt)
 		channelKind := channelKindForChannel(delivery.ChannelID)
 		_, found, err := finder.FindPublishedAssistantExchange(ctx, port.AssistantExchangeIntent{
@@ -1052,9 +1094,12 @@ func confirmationCorrelationID(wrapperCallID string) string {
 	return "confirmation:" + wrapperCallID
 }
 
-func confirmationPrompt(summary, originalCallID, wrapperCallID string, expiry time.Time) string {
-	return fmt.Sprintf(":lock: %s\n\n**Call ID**: `%s`\n**Expires**: %s\n\nReply `approve %s` or `reject %s` to proceed.",
-		summary, originalCallID, expiry.Format("15:04"), wrapperCallID, wrapperCallID)
+func confirmationPrompt(summary, payload, originalCallID, wrapperCallID string, expiry time.Time) string {
+	prompt := fmt.Sprintf(":lock: %s\n\n**Call ID**: `%s`\n**Expires**: %s", summary, originalCallID, expiry.Format("15:04"))
+	if strings.TrimSpace(payload) != "" {
+		prompt += "\n\n**Proposed payload**:\n```json\n" + payload + "\n```"
+	}
+	return prompt + fmt.Sprintf("\n\nReply `approve %s` or `reject %s` to proceed.", wrapperCallID, wrapperCallID)
 }
 
 func (s *Service) enrich(ctx context.Context, invocation domain.Invocation) domain.AgentContext {

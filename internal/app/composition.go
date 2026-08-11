@@ -59,6 +59,7 @@ import (
 	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
 	opencodeusecase "github.com/Dauno/slack-local-agent/internal/usecase/opencode"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
+	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
 const defaultAttachmentTimeout = 120 * time.Second
@@ -604,8 +605,12 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var summaryScheduler port.SummaryScheduler
 	var continuityStore port.ContinuityStore
 	var resultStore *recoverableresult.Store
+	var workstreamService *workstreamusecase.Service
 	features := cfg.Context.ContextFeatures
 	var err error
+	if models.rootIsAgentCLI && cfg.Orchestration.Workstreams.Enabled {
+		return nil, errors.New("orchestration.workstreams.enabled requires an openai_compatible root agent")
+	}
 	if !models.rootIsAgentCLI && features != nil && features.ContinuityCapsuleEnabled {
 		continuityStore = adaptersqlite.NewContinuityStore(infra.store)
 	}
@@ -709,6 +714,25 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			}
 		}
 		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence).WithMetrics(models.metrics)
+		if cfg.Orchestration.Workstreams.Enabled {
+			allowedProjects := make(map[string]struct{}, len(paths.SandboxProjectRoots))
+			for project := range paths.SandboxProjectRoots {
+				allowedProjects[project] = struct{}{}
+			}
+			if len(allowedProjects) == 0 {
+				return nil, errors.New("initialize workstream service: at least one registered sandbox project is required")
+			}
+			var workstreamErr error
+			workstreamService, workstreamErr = workstreamusecase.New(workstreamusecase.Config{
+				Enabled:         true,
+				Limits:          domain.WorkstreamLimits{MaxNonTerminalTasks: cfg.Orchestration.Workstreams.MaxNonTerminalTasks, MaxDependenciesPerTask: cfg.Orchestration.Workstreams.MaxDependenciesPerTask},
+				AllowedProjects: allowedProjects,
+			}, workstreamusecase.Dependencies{Store: adaptersqlite.NewWorkstreamStore(infra.store), Clock: port.SystemClock{}})
+			if workstreamErr != nil {
+				return nil, models.redactor.Error(fmt.Errorf("initialize workstream service: %w", workstreamErr))
+			}
+			factory.WithWorkstreams(workstreamService)
+		}
 		// Configurar Agent Builder (preview + install tools).
 		if agentBuilderSvc != nil && defs != nil {
 			agentsDir := filepath.Join(paths.StateDir, "agents")
@@ -841,7 +865,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		RetainMessages: cfg.Context.RetainMessagesPerConversation, MaxConcurrentCalls: cfg.Runtime.MaxConcurrentModelCalls,
 		ModelTimeout: time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second, BusyMessage: cfg.Runtime.BusyMessage, ModelErrorMessage: cfg.Runtime.ModelErrorMessage, UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 		ProgressEnabled: cfg.Slack.StandardAgent.ProgressEnabled, PromptsEnabled: cfg.Slack.StandardAgent.PromptsEnabled, SuggestedPrompts: cfg.Slack.StandardAgent.SuggestedPrompts, StreamingEnabled: cfg.Slack.StandardAgent.StreamingEnabled, UpdateInterval: time.Duration(cfg.Slack.StandardAgent.UpdateIntervalSeconds) * time.Second, StreamingCarryRunes: models.redactor.StreamingCarryRunes(),
-	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, ActivationStore: activationStore, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler})
+	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, ActivationStore: activationStore, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler, Workstreams: workstreamService})
 	if err != nil {
 		return nil, err
 	}

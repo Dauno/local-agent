@@ -170,6 +170,13 @@ var configSchema = []schemaField{
 		{name: "lsp_servers"},
 		{name: "lsp_routes"},
 	}},
+	{name: "orchestration", children: []schemaField{
+		{name: "workstreams", children: []schemaField{
+			{name: "enabled"},
+			{name: "max_non_terminal_tasks"},
+			{name: "max_dependencies_per_task"},
+		}},
+	}},
 }
 
 // Load reads, applies defaults to, and validates a YAML config file.
