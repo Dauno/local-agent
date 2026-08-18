@@ -49,6 +49,12 @@ type Invocation struct {
 
 var slackTimestampPattern = regexp.MustCompile(`^[0-9]+\.[0-9]+$`)
 
+// ValidSlackTimestamp reports whether value matches the canonical Slack
+// timestamp shape used by the conversation ledger.
+func ValidSlackTimestamp(value string) bool {
+	return slackTimestampPattern.MatchString(value)
+}
+
 func (i Invocation) Validate() error {
 	if !PlausibleTeamID(i.TeamID) {
 		return fmt.Errorf("invalid Slack team ID %q", i.TeamID)

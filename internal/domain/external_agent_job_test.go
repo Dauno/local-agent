@@ -101,7 +101,7 @@ func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing
 }
 
 func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testing.T) {
-	job := domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678"}
+	job := domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678", WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1"}
 	resultText := "safe &lt;result>"
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(resultText)))
 	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
@@ -119,6 +119,9 @@ func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testi
 	}
 	if notification.NotificationSHA256 == notification.ResultSHA256 {
 		t.Fatal("notification and result identity collide")
+	}
+	if notification.CanonicalMarkdown != "OpenCode job `job_1` completed. Root integration is pending." {
+		t.Fatalf("activation notification repeated result prose: %q", notification.CanonicalMarkdown)
 	}
 	if notification.ResultSHA256 != digest || notification.ResultBytes != int64(len([]byte(resultText))) {
 		t.Fatalf("result identity = %q/%d, want %q/%d", notification.ResultSHA256, notification.ResultBytes, digest, len([]byte(resultText)))
@@ -143,9 +146,24 @@ func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testi
 	}
 }
 
+func TestDetachedActivationLegacyNotificationUsesTerminalMarker(t *testing.T) {
+	job := domain.ExternalAgentJob{
+		ID: "job_1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 2,
+		ResultSummary: "full result must not be repeated", ConversationKey: "slack:T12345678:dm:D12345678",
+		WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1",
+	}
+	notification, err := domain.NewExternalAgentJobNotification(job)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !notification.RootActivationRequired || notification.CanonicalMarkdown != "OpenCode job `job_1` completed. Root integration is pending." {
+		t.Fatalf("activation notification = %+v", notification)
+	}
+}
+
 func TestLegacyNotificationConstructorSetsRouteAndIdentityByMode(t *testing.T) {
 	now := time.Now().UTC()
-	base := domain.ExternalAgentJob{ID: "job_1", Status: domain.JobFailed, StatusRevision: 1, ConversationKey: "slack:T12345678:dm:D12345678", ErrorCode: "acp_process_exit", CreatedAt: now, UpdatedAt: now}
+	base := domain.ExternalAgentJob{ID: "job_1", Status: domain.JobFailed, StatusRevision: 1, ConversationKey: "slack:T12345678:dm:D12345678", WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1", ErrorCode: "acp_process_exit", CreatedAt: now, UpdatedAt: now}
 
 	foreground := base
 	foreground.Mode = domain.JobForeground
@@ -169,8 +187,8 @@ func TestLegacyNotificationConstructorSetsRouteAndIdentityByMode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !detachedNotification.RootActivationRequired {
-		t.Fatal("detached notification is not marked activation-required")
+	if detachedNotification.RootActivationRequired {
+		t.Fatal("failed detached notification is marked activation-required")
 	}
 
 	completed := base
@@ -185,6 +203,14 @@ func TestLegacyNotificationConstructorSetsRouteAndIdentityByMode(t *testing.T) {
 	}
 	if completedNotification.ResultSHA256 != completed.ResultSHA256 || completedNotification.ResultBytes != completed.ResultBytes {
 		t.Fatalf("completed result identity = %q/%d, want %q/%d", completedNotification.ResultSHA256, completedNotification.ResultBytes, completed.ResultSHA256, completed.ResultBytes)
+	}
+	completed.Mode = domain.JobDetached
+	completedNotification, err = domain.NewExternalAgentJobNotification(completed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !completedNotification.RootActivationRequired {
+		t.Fatal("completed detached notification is not marked activation-required")
 	}
 }
 

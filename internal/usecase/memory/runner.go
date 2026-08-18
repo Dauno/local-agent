@@ -94,6 +94,16 @@ func nextPanicBackoff(current time.Duration) time.Duration {
 }
 
 func (r *Runner) runWorker(ctx context.Context) {
+	// Startup recovery removes promotion residue (leftover staging or
+	// backup directories) without requiring an outbox item, so forgotten
+	// content from an interrupted cleanup never survives a restart even
+	// when no new trigger is pending. It is mutex-serialized with
+	// promotions by the shared projector.
+	if ctx.Err() == nil {
+		if err := r.projector.Recover(r.cfg.MemoryDir); err != nil {
+			r.logger.Warn("memory projection startup recovery failed", "error", r.sanitize(err.Error()))
+		}
+	}
 	ticker := time.NewTicker(r.cfg.Interval)
 	defer ticker.Stop()
 	for {
@@ -196,6 +206,25 @@ func (r *Runner) processOutbox(ctx context.Context) {
 			return
 		}
 		if err := r.projector.Project(ctx, r.reader, r.cfg.MemoryDir); err != nil {
+			if ctx.Err() != nil {
+				// Cancellation during a projection must not settle the
+				// item: the lease expires and a later run recovers it.
+				r.logger.Debug("memory projection interrupted by shutdown; lease recovery will re-render", "item_id", item.ID)
+				return
+			}
+			if errors.Is(err, port.ErrProjectionCleanup) {
+				// The live bundle is consistent (the promoted snapshot or
+				// the restored previous bundle), but promotion residue
+				// cleanup failed and the residue can retain forgotten
+				// content. The item must not complete and must never
+				// exhaust through the normal retry budget: reschedule
+				// attempt-neutrally until the residue is actually removed.
+				r.logger.Warn("memory projection residue cleanup incomplete; outbox item kept pending", "item_id", item.ID, "error", r.sanitize(err.Error()))
+				if rescheduleErr := r.store.RescheduleOutboxItem(ctx, item.ID, item.LeaseUntil, r.clock.Now().UTC()); rescheduleErr != nil {
+					r.logger.Warn("memory projection cleanup reschedule failed", "item_id", item.ID, "error", rescheduleErr)
+				}
+				return
+			}
 			r.logger.Error("memory projection failed", "error", err)
 			r.retryOutbox(ctx, item, err)
 			return

@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -175,6 +176,13 @@ func (s *WorkstreamStore) ActiveForConversation(ctx context.Context, conversatio
 }
 
 func (s *WorkstreamStore) Apply(ctx context.Context, transition domain.WorkstreamTransition, limits domain.WorkstreamLimits, now time.Time) (domain.WorkstreamTransitionRecord, error) {
+	if transition.Action == domain.WorkstreamActionLinkCompletedResult {
+		return domain.WorkstreamTransitionRecord{}, domain.ErrResultInvalid
+	}
+	return s.apply(ctx, transition, limits, now, nil)
+}
+
+func (s *WorkstreamStore) apply(ctx context.Context, transition domain.WorkstreamTransition, limits domain.WorkstreamLimits, now time.Time, after func(context.Context, *sql.Tx, domain.WorkstreamTransitionRecord, domain.Workstream) error) (domain.WorkstreamTransitionRecord, error) {
 	if s == nil || s.db == nil {
 		return domain.WorkstreamTransitionRecord{}, fmt.Errorf("%w: workstream store is not configured", port.ErrWorkstreamUnavailable)
 	}
@@ -268,11 +276,85 @@ func (s *WorkstreamStore) Apply(ctx context.Context, transition domain.Workstrea
 		}
 		return domain.WorkstreamTransitionRecord{}, fmt.Errorf("%w: append workstream transition: %v", port.ErrWorkstreamUnavailable, err)
 	}
+	if after != nil {
+		if err := after(ctx, tx, record, next); err != nil {
+			return domain.WorkstreamTransitionRecord{}, err
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return domain.WorkstreamTransitionRecord{}, fmt.Errorf("%w: commit workstream transition: %v", port.ErrWorkstreamUnavailable, err)
 	}
 	return record, nil
 }
+
+// CommitVerifiedResultLink joins the verified identity to the same SQLite
+// transaction that persists the workstream transition and its child link.
+func (s *WorkstreamStore) CommitVerifiedResultLink(ctx context.Context, request port.WorkstreamResultLinkCommit) (domain.WorkstreamTransitionRecord, error) {
+	if s == nil || s.db == nil {
+		return domain.WorkstreamTransitionRecord{}, fmt.Errorf("%w: workstream store is not configured", port.ErrWorkstreamUnavailable)
+	}
+	if err := request.VerifiedIdentity.VerifyWorkstreamEligible(); err != nil {
+		return domain.WorkstreamTransitionRecord{}, err
+	}
+	if request.Transition.Action != domain.WorkstreamActionLinkCompletedResult || request.Transition.ResultLink == nil ||
+		request.Transition.ResultLink.ResultIdentity != request.VerifiedIdentity.ResultID ||
+		request.Verification.ResultID != request.VerifiedIdentity.ResultID ||
+		request.Transition.WorkstreamID != request.Verification.WorkstreamID ||
+		request.Transition.Actor != request.Verification.Actor ||
+		string(request.Transition.ConversationKey) != request.Verification.Conversation ||
+		request.Transition.Project != request.Verification.Project {
+		return domain.WorkstreamTransitionRecord{}, domain.ErrResultInvalid
+	}
+	if request.Now.IsZero() {
+		request.Now = time.Now().UTC()
+	}
+	return s.apply(ctx, request.Transition, request.Limits, request.Now, func(ctx context.Context, tx *sql.Tx, record domain.WorkstreamTransitionRecord, _ domain.Workstream) error {
+		var producerKind, producerID, storageKind, storageKey, sha256Hex, mediaType, actor, teamID, conversationKey, project, retention, state string
+		var producerRevision int
+		var bytes, createdAt int64
+		err := tx.QueryRowContext(ctx, `SELECT producer_kind, producer_id, producer_revision, storage_kind, storage_key,
+			sha256, bytes, media_type, actor, team_id, conversation_key, project, retention_class, created_at, state
+			FROM result_records WHERE result_id = ?`, request.VerifiedIdentity.ResultID).Scan(
+			&producerKind, &producerID, &producerRevision, &storageKind, &storageKey, &sha256Hex, &bytes, &mediaType,
+			&actor, &teamID, &conversationKey, &project, &retention, &createdAt, &state)
+		if errors.Is(err, sql.ErrNoRows) {
+			return domain.ErrResultUnavailable
+		}
+		if err != nil {
+			return fmt.Errorf("read verified result for workstream link: %w", err)
+		}
+		canonical := domain.ResultIdentity{
+			ResultID: request.VerifiedIdentity.ResultID,
+			Producer: domain.ResultProducer{Kind: domain.ResultProducerKind(producerKind), ID: producerID, Revision: producerRevision},
+			Storage:  domain.ResultStorage{Kind: domain.ResultStorageKind(storageKind), Key: storageKey},
+			SHA256:   sha256Hex, Bytes: bytes, MediaType: mediaType,
+			Scope:     domain.ResultScope{Actor: actor, TeamID: teamID, ConversationKey: conversationKey, Project: project},
+			Retention: domain.ResultRetentionClass(retention), CreatedAt: time.Unix(0, createdAt).UTC(), State: domain.ResultState(state),
+		}
+		if err := canonical.VerifyWorkstreamEligible(); err != nil || canonical != request.VerifiedIdentity {
+			return domain.ErrResultUnavailable
+		}
+		if canonical.Scope.Actor != request.Verification.Actor || canonical.Scope.TeamID != request.Verification.TeamID ||
+			canonical.Scope.ConversationKey != request.Verification.Conversation || canonical.Scope.Project != request.Verification.Project {
+			return domain.ErrResultScopeMismatch
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workstream_result_link_results
+			(workstream_id, result_link_id, result_id, verified_at) VALUES (?, ?, ?, ?)`,
+			record.WorkstreamID, request.Transition.ResultLink.ID, canonical.ResultID, request.Now.UTC().UnixNano()); err != nil {
+			return fmt.Errorf("bind verified workstream result: %w", err)
+		}
+		ownerID := record.WorkstreamID + ":" + request.Transition.ResultLink.ID
+		digest := sha256.Sum256([]byte("workstream_result_link\x00" + ownerID + "\x00" + canonical.ResultID))
+		if _, err := tx.ExecContext(ctx, `INSERT INTO result_references
+			(reference_id, result_id, owner_kind, owner_id, state, created_at) VALUES (?, ?, 'workstream_result_link', ?, 'live', ?)`,
+			fmt.Sprintf("%x", digest), canonical.ResultID, ownerID, request.Now.UTC().UnixNano()); err != nil {
+			return fmt.Errorf("insert workstream result reference: %w", err)
+		}
+		return nil
+	})
+}
+
+var _ port.WorkstreamResultLinkCommitter = (*WorkstreamStore)(nil)
 
 func (s *WorkstreamStore) Transitions(ctx context.Context, workstreamID string) ([]domain.WorkstreamTransitionRecord, error) {
 	if s == nil || s.db == nil {
@@ -695,6 +777,32 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		}
 		if affected, err := updated.RowsAffected(); err != nil || affected != 1 {
 			return fmt.Errorf("%w: update workstream task delta affected %d rows", port.ErrWorkstreamUnavailable, affected)
+		}
+	case domain.WorkstreamActionStartTask:
+		task, ok := findTask(transition.TaskID)
+		if !ok {
+			return fmt.Errorf("%w: task delta is missing", port.ErrWorkstreamValidation)
+		}
+		confirmationStatus := task.ConfirmationStatus
+		if confirmationStatus == "" {
+			confirmationStatus = domain.TaskConfirmationNotRequired
+		}
+		updated, err := tx.ExecContext(ctx, `UPDATE workstream_tasks SET status = ?, execution_identity = ?, confirmation_status = ?, integrated = ? WHERE workstream_id = ? AND task_id = ?`, string(task.Status), task.ExecutionIdentity, string(confirmationStatus), boolInt(task.Integrated), next.ID, task.ID)
+		if err != nil {
+			return fmt.Errorf("%w: update workstream task start delta: %v", port.ErrWorkstreamUnavailable, err)
+		}
+		if affected, err := updated.RowsAffected(); err != nil || affected != 1 {
+			return fmt.Errorf("%w: update workstream task start delta affected %d rows", port.ErrWorkstreamUnavailable, affected)
+		}
+	case domain.WorkstreamActionLinkCompletedResult:
+		if transition.ResultLink == nil {
+			return fmt.Errorf("%w: result link delta is missing", port.ErrWorkstreamValidation)
+		}
+		if _, err := tx.ExecContext(ctx, `INSERT INTO workstream_result_links
+			(workstream_id, result_link_id, task_id, result_identity, description)
+			VALUES (?, ?, ?, ?, ?)`, next.ID, transition.ResultLink.ID, transition.ResultLink.TaskID,
+			transition.ResultLink.ResultIdentity, transition.ResultLink.Description); err != nil {
+			return fmt.Errorf("%w: insert workstream result link delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	}
 	return nil

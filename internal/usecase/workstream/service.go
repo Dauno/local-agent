@@ -5,6 +5,8 @@ package workstream
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -16,27 +18,36 @@ import (
 )
 
 var ErrDisabled = errors.New("workstream orchestration is disabled")
+var ErrResultHandlesDisabled = errors.New("native result handles are disabled")
 
 type Config struct {
-	Enabled         bool
-	Limits          domain.WorkstreamLimits
-	AllowedProjects map[string]struct{}
+	Enabled              bool
+	ResultHandlesEnabled bool
+	Limits               domain.WorkstreamLimits
+	AllowedProjects      map[string]struct{}
 }
 
 type Dependencies struct {
-	Store port.WorkstreamStore
-	Clock port.Clock
+	Store          port.WorkstreamStore
+	Clock          port.Clock
+	ResultVerifier port.ResultIdentityVerifier
+	LinkCommitter  port.WorkstreamResultLinkCommitter
+	ResultReader   port.TrustedResultStore
 }
 
 type Binding = port.WorkstreamBinding
 
 type Service struct {
-	cfg   Config
-	store port.WorkstreamStore
-	clock port.Clock
+	cfg           Config
+	store         port.WorkstreamStore
+	clock         port.Clock
+	verifier      port.ResultIdentityVerifier
+	linkCommitter port.WorkstreamResultLinkCommitter
+	resultReader  port.TrustedResultStore
 }
 
 var _ port.WorkstreamMutator = (*Service)(nil)
+var _ port.WorkstreamSnapshotReader = (*Service)(nil)
 var _ port.WorkstreamService = (*Service)(nil)
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
@@ -61,7 +72,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		allowedProjects[project] = struct{}{}
 	}
 	cfg.AllowedProjects = allowedProjects
-	return &Service{cfg: cfg, store: deps.Store, clock: deps.Clock}, nil
+	return &Service{cfg: cfg, store: deps.Store, clock: deps.Clock, verifier: deps.ResultVerifier, linkCommitter: deps.LinkCommitter, resultReader: deps.ResultReader}, nil
 }
 
 func (s *Service) Create(ctx context.Context, binding Binding, id, objective string) (domain.WorkstreamSnapshot, error) {
@@ -147,6 +158,71 @@ func (s *Service) Get(ctx context.Context, binding Binding, id string) (domain.W
 	return workstream.Snapshot(), nil
 }
 
+// SnapshotForActivation reads the current trusted workstream state without
+// accepting a project selector from the activation payload. Publication has
+// already admitted the binding; this second read keeps the frame fail-closed
+// if the workstream is no longer active or has become invalid.
+func (s *Service) SnapshotForActivation(ctx context.Context, workstreamID, actor string, conversationKey domain.ConversationKey) (domain.WorkstreamSnapshot, error) {
+	if err := s.requireEnabled(); err != nil {
+		return domain.WorkstreamSnapshot{}, err
+	}
+	if strings.TrimSpace(workstreamID) == "" || strings.TrimSpace(actor) == "" || strings.TrimSpace(string(conversationKey)) == "" {
+		return domain.WorkstreamSnapshot{}, errors.New("activation workstream binding is required")
+	}
+	workstream, err := s.store.Get(ctx, workstreamID)
+	if err != nil {
+		return domain.WorkstreamSnapshot{}, fmt.Errorf("get activation workstream: %w", err)
+	}
+	if err := workstream.ValidateBinding(actor, conversationKey, workstream.Project); err != nil {
+		return domain.WorkstreamSnapshot{}, err
+	}
+	if err := s.validateBinding(Binding{Actor: actor, ConversationKey: conversationKey, Project: workstream.Project}); err != nil {
+		return domain.WorkstreamSnapshot{}, err
+	}
+	if workstream.Status != domain.WorkstreamActive {
+		return domain.WorkstreamSnapshot{}, fmt.Errorf("%w: status is %q", domain.ErrWorkstreamNotActive, workstream.Status)
+	}
+	if err := workstream.ValidateWithLimits(s.cfg.Limits); err != nil {
+		return domain.WorkstreamSnapshot{}, err
+	}
+	return workstream.Snapshot(), nil
+}
+
+// CompletionBindingForTask returns a binding only for an exact task already
+// running in the caller's active workstream. No model value can choose the
+// workstream, task ID, execution identity, or revision.
+func (s *Service) CompletionBindingForTask(ctx context.Context, actor string, conversationKey domain.ConversationKey, project, task string) (domain.ExternalAgentJobCompletionBinding, bool, error) {
+	if err := s.requireEnabled(); err != nil {
+		return domain.ExternalAgentJobCompletionBinding{}, false, err
+	}
+	binding := Binding{Actor: actor, ConversationKey: conversationKey, Project: project}
+	if err := s.validateBinding(binding); err != nil {
+		return domain.ExternalAgentJobCompletionBinding{}, false, err
+	}
+	workstream, err := s.store.ActiveForConversation(ctx, conversationKey)
+	if errors.Is(err, port.ErrWorkstreamNotFound) {
+		return domain.ExternalAgentJobCompletionBinding{}, false, nil
+	}
+	if err != nil {
+		return domain.ExternalAgentJobCompletionBinding{}, false, fmt.Errorf("get active workstream for external-agent job: %w", err)
+	}
+	if err := workstream.ValidateBinding(actor, conversationKey, project); err != nil {
+		return domain.ExternalAgentJobCompletionBinding{}, false, err
+	}
+	if workstream.Status != domain.WorkstreamActive {
+		return domain.ExternalAgentJobCompletionBinding{}, false, nil
+	}
+	for _, candidate := range workstream.Tasks {
+		if candidate.Project == project && candidate.Description == task && candidate.Status == domain.TaskRunning && candidate.ExecutionIdentity != "" {
+			return domain.ExternalAgentJobCompletionBinding{
+				WorkstreamID: workstream.ID, TaskID: candidate.ID, ExecutionIdentity: candidate.ExecutionIdentity, AdmissionRevision: workstream.Revision,
+				RequiredInputs: append([]string(nil), candidate.RequiredInputs...),
+			}, true, nil
+		}
+	}
+	return domain.ExternalAgentJobCompletionBinding{}, false, nil
+}
+
 func (s *Service) Active(ctx context.Context, binding Binding) (domain.WorkstreamSnapshot, error) {
 	if err := s.requireEnabled(); err != nil {
 		return domain.WorkstreamSnapshot{}, err
@@ -208,6 +284,100 @@ func (s *Service) ApplyHuman(ctx context.Context, binding Binding, transition do
 	return s.Apply(ctx, binding, domain.WorkstreamSourceHuman, transition)
 }
 
+// LinkCompletedResult admits only a fully verified result into the durable
+// workstream journal. Result scope is rebuilt from the trusted invocation; the
+// model-provided link can never select its own identity or scope.
+func (s *Service) LinkCompletedResult(ctx context.Context, binding Binding, teamID, resultID string, transition domain.WorkstreamTransition, confirmationID string) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+	if err := s.requireEnabled(); err != nil {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
+	}
+	if !s.cfg.ResultHandlesEnabled {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, ErrResultHandlesDisabled
+	}
+	if err := s.validateBinding(binding); err != nil {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
+	}
+	if s.verifier == nil || s.linkCommitter == nil || strings.TrimSpace(teamID) == "" || strings.TrimSpace(confirmationID) == "" {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, domain.ErrResultUnavailable
+	}
+	if transition.Action != domain.WorkstreamActionLinkCompletedResult || transition.ResultLink == nil || strings.TrimSpace(transition.WorkstreamID) == "" {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, domain.ErrResultInvalid
+	}
+	verification, identity, err := s.verifyResultForWorkstream(ctx, binding, teamID, resultID, transition.WorkstreamID)
+	if err != nil {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
+	}
+	transition.Source = domain.WorkstreamSourceRoot
+	transition.SourceID = confirmationID
+	transition.Actor = binding.Actor
+	transition.ConversationKey = binding.ConversationKey
+	transition.Project = binding.Project
+	transition.ResultLink.ResultIdentity = identity.ResultID
+	transition.Confirmation = &domain.WorkstreamConfirmation{
+		ID: confirmationID, WorkstreamID: transition.WorkstreamID, ExpectedRevision: transition.ExpectedRevision,
+		Actor: binding.Actor, ConversationKey: binding.ConversationKey, Project: binding.Project,
+		Action: transition.Action, PayloadDigest: transition.PayloadDigestValue(), Approved: true,
+		ExpiresAt: s.clock.Now().UTC().Add(time.Minute),
+	}
+	record, err := s.linkCommitter.CommitVerifiedResultLink(ctx, port.WorkstreamResultLinkCommit{
+		Verification: verification, VerifiedIdentity: identity, Transition: transition, Limits: s.cfg.Limits, Now: s.clock.Now().UTC(),
+	})
+	if err != nil {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
+	}
+	var applied domain.Workstream
+	if err := json.Unmarshal([]byte(record.StateJSON), &applied); err != nil || !domain.VerifyWorkstreamStateJSON(record.StateJSON, record.StateDigest) {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, domain.ErrResultUnavailable
+	}
+	if err := applied.ValidateBinding(binding.Actor, binding.ConversationKey, binding.Project); err != nil {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
+	}
+	return record, applied.Snapshot(), nil
+}
+
+// ResultHandleForWorkstream returns only the bounded handle after binding the
+// requested result to the active trusted workstream.
+func (s *Service) ResultHandleForWorkstream(ctx context.Context, binding Binding, teamID, resultID, workstreamID string) (domain.ResultHandle, error) {
+	_, identity, err := s.verifyResultForWorkstream(ctx, binding, teamID, resultID, workstreamID)
+	if err != nil {
+		return domain.ResultHandle{}, err
+	}
+	if s.resultReader == nil {
+		return domain.ResultHandle{}, domain.ErrResultUnavailable
+	}
+	_, handle, err := s.resultReader.Resolve(ctx, identity.ResultID, identity.Scope)
+	return handle, err
+}
+
+// ReadResultChunkForWorkstream returns one fully verified bounded range. The
+// result scope is taken from the verified identity, never from tool arguments.
+func (s *Service) ReadResultChunkForWorkstream(ctx context.Context, binding Binding, teamID, resultID, workstreamID string, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
+	_, identity, err := s.verifyResultForWorkstream(ctx, binding, teamID, resultID, workstreamID)
+	if err != nil {
+		return domain.ResultChunk{}, err
+	}
+	if s.resultReader == nil {
+		return domain.ResultChunk{}, domain.ErrResultUnavailable
+	}
+	return s.resultReader.ReadRange(ctx, identity.ResultID, identity.Scope, offsetBytes, maxBytes)
+}
+
+func (s *Service) verifyResultForWorkstream(ctx context.Context, binding Binding, teamID, resultID, workstreamID string) (port.WorkstreamResultVerification, domain.ResultIdentity, error) {
+	if err := s.requireEnabled(); err != nil {
+		return port.WorkstreamResultVerification{}, domain.ResultIdentity{}, err
+	}
+	if err := s.validateBinding(binding); err != nil {
+		return port.WorkstreamResultVerification{}, domain.ResultIdentity{}, err
+	}
+	if s.verifier == nil || strings.TrimSpace(teamID) == "" || strings.TrimSpace(resultID) == "" || strings.TrimSpace(workstreamID) == "" {
+		return port.WorkstreamResultVerification{}, domain.ResultIdentity{}, domain.ErrResultUnavailable
+	}
+	verification := port.WorkstreamResultVerification{ResultID: resultID, WorkstreamID: workstreamID, Actor: binding.Actor,
+		TeamID: teamID, Conversation: string(binding.ConversationKey), Project: binding.Project}
+	identity, err := s.verifier.VerifyForWorkstream(ctx, verification)
+	return verification, identity, err
+}
+
 // ValidateProposal checks the exact transition and resulting bounded state
 // without writing it. Confirmation-required root actions use it before asking
 // the owner to approve a proposal that could not be committed.
@@ -264,10 +434,21 @@ func (s *Service) apply(ctx context.Context, binding Binding, source domain.Work
 	if strings.TrimSpace(transition.WorkstreamID) == "" {
 		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, errors.New("workstream ID is required")
 	}
+	if transition.Action == domain.WorkstreamActionLinkCompletedResult {
+		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, domain.ErrResultInvalid
+	}
 	transition.Source = source
 	transition.Actor = binding.Actor
 	transition.ConversationKey = binding.ConversationKey
 	transition.Project = binding.Project
+	if transition.Action == domain.WorkstreamActionStartTask {
+		// The execution identity is always host-owned and derived from the
+		// trusted binding plus the caller's provenance identity. A caller-
+		// supplied value is never persisted, and a replay of the same
+		// source identity resolves the same execution identity, so the
+		// journaled payload digest stays stable.
+		transition.ExecutionIdentity = executionIdentityFor(transition.WorkstreamID, transition.TaskID, transition.SourceID)
+	}
 	if transition.TransitionPayloadDigest == "" {
 		transition.TransitionPayloadDigest = transition.PayloadDigestValue()
 	}
@@ -310,6 +491,15 @@ func (s *Service) requireEnabled() error {
 		return ErrDisabled
 	}
 	return nil
+}
+
+// executionIdentityFor derives the host-owned execution identity from the
+// trusted workstream, task, and provenance identity. It never accepts a
+// caller-supplied value and is stable across replays of the same source
+// identity, keeping the journaled transition payload digest deterministic.
+func executionIdentityFor(workstreamID, taskID, sourceID string) string {
+	digest := sha256.Sum256([]byte(workstreamID + "\x00" + taskID + "\x00" + sourceID))
+	return "exec_" + hex.EncodeToString(digest[:])
 }
 
 func (s *Service) validateBinding(binding Binding) error {

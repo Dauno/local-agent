@@ -3,6 +3,7 @@ package workstream_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -64,6 +65,50 @@ func TestServiceRejectsForeignActorForReadAndMutation(t *testing.T) {
 	}
 }
 
+func TestServiceSnapshotForActivationRechecksTrustedActiveBinding(t *testing.T) {
+	stored := testWorkstream()
+	stored.Status = domain.WorkstreamActive
+	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "run task", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}}
+	store := &fakeStore{workstream: stored}
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := service.SnapshotForActivation(ctx(), "ws-1", "U12345678", stored.ConversationKey)
+	if err != nil {
+		t.Fatalf("snapshot for activation: %v", err)
+	}
+	if snapshot.ID != "ws-1" || snapshot.Status != domain.WorkstreamActive || len(snapshot.Tasks) != 1 {
+		t.Fatalf("activation snapshot = %+v", snapshot)
+	}
+	if _, err := service.SnapshotForActivation(ctx(), "ws-1", "UOTHER123", stored.ConversationKey); !errors.Is(err, domain.ErrWorkstreamOwnerMismatch) {
+		t.Fatalf("foreign activation actor error = %v", err)
+	}
+	store.workstream.Status = domain.WorkstreamPaused
+	if _, err := service.SnapshotForActivation(ctx(), "ws-1", "U12345678", stored.ConversationKey); !errors.Is(err, domain.ErrWorkstreamNotActive) {
+		t.Fatalf("paused activation workstream error = %v", err)
+	}
+}
+
+func TestCompletionBindingForTaskRequiresExactRunningTask(t *testing.T) {
+	stored := testWorkstream()
+	stored.Status = domain.WorkstreamActive
+	stored.Revision = 7
+	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "run task", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}}
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: &fakeStore{workstream: stored}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding, found, err := service.CompletionBindingForTask(ctx(), "U12345678", stored.ConversationKey, "workspace", "run task")
+	if err != nil || !found || binding.WorkstreamID != stored.ID || binding.TaskID != "task-1" || binding.ExecutionIdentity != "exec-1" || binding.AdmissionRevision != 7 {
+		t.Fatalf("binding = %+v, found=%t, err=%v", binding, found, err)
+	}
+	if _, found, err := service.CompletionBindingForTask(ctx(), "U12345678", stored.ConversationKey, "workspace", "other task"); err != nil || found {
+		t.Fatalf("nonmatching task found=%t, err=%v", found, err)
+	}
+}
+
 func TestServiceCreationAndFeatureGate(t *testing.T) {
 	store := &fakeStore{}
 	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
@@ -112,6 +157,51 @@ func TestServiceEnabledRequiresRegisteredProjects(t *testing.T) {
 	}
 }
 
+func TestServiceStartTaskGeneratesHostExecutionIdentity(t *testing.T) {
+	stored := testWorkstream()
+	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "admit me", Status: domain.TaskProposed}}
+	store := &fakeStore{workstream: stored}
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
+	// A caller-supplied identity must never be persisted.
+	_, _, err = service.ApplyHuman(ctx(), binding, domain.WorkstreamTransition{
+		WorkstreamID: "ws-1", ExpectedRevision: 0, SourceID: "slack-human:event-start",
+		Action: domain.WorkstreamActionStartTask, TaskID: "task-1", ExecutionIdentity: "forged-identity",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.lastTransition.Action != domain.WorkstreamActionStartTask || strings.TrimSpace(store.lastTransition.ExecutionIdentity) == "" {
+		t.Fatalf("start task transition = %+v", store.lastTransition)
+	}
+	if store.lastTransition.ExecutionIdentity == "forged-identity" || !strings.HasPrefix(store.lastTransition.ExecutionIdentity, "exec_") {
+		t.Fatalf("generated execution identity = %q", store.lastTransition.ExecutionIdentity)
+	}
+	firstIdentity := store.lastTransition.ExecutionIdentity
+
+	// The derivation is deterministic per trusted binding and provenance: the
+	// same command on a fresh store resolves the same execution identity, so a
+	// replay keeps the journaled payload digest stable.
+	fresh := &fakeStore{workstream: testWorkstream()}
+	fresh.workstream.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "admit me", Status: domain.TaskProposed}}
+	replay, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: fresh})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := replay.ApplyHuman(ctx(), binding, domain.WorkstreamTransition{
+		WorkstreamID: "ws-1", ExpectedRevision: 0, SourceID: "slack-human:event-start",
+		Action: domain.WorkstreamActionStartTask, TaskID: "task-1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if fresh.lastTransition.ExecutionIdentity != firstIdentity {
+		t.Fatalf("replayed identity = %q, want %q", fresh.lastTransition.ExecutionIdentity, firstIdentity)
+	}
+}
+
 func TestServiceHumanMutationRecordsHumanProvenance(t *testing.T) {
 	store := &fakeStore{workstream: testWorkstream()}
 	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
@@ -127,6 +217,26 @@ func TestServiceHumanMutationRecordsHumanProvenance(t *testing.T) {
 	}
 	if store.lastTransition.Source != domain.WorkstreamSourceHuman || store.lastTransition.Actor != "U12345678" {
 		t.Fatalf("human transition = %+v", store.lastTransition)
+	}
+}
+
+func TestServiceRejectsGenericResultLinkMutation(t *testing.T) {
+	store := &fakeStore{workstream: testWorkstream()}
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
+	_, _, err = service.ApplyHuman(ctx(), binding, domain.WorkstreamTransition{
+		WorkstreamID: "ws-1", ExpectedRevision: 0, SourceID: "slack-human:event-link",
+		Action:     domain.WorkstreamActionLinkCompletedResult,
+		ResultLink: &domain.WorkstreamResultLink{ID: "forged-link", ResultIdentity: "forged-result"},
+	})
+	if !errors.Is(err, domain.ErrResultInvalid) {
+		t.Fatalf("generic result-link error = %v, want %v", err, domain.ErrResultInvalid)
+	}
+	if store.lastTransition.Action != "" || store.workstream.Revision != 0 {
+		t.Fatalf("generic result link reached store: transition=%+v workstream=%+v", store.lastTransition, store.workstream)
 	}
 }
 
@@ -163,6 +273,83 @@ func TestServiceDoesNotAcceptModelSuppliedConfirmation(t *testing.T) {
 	confirmation := domain.WorkstreamConfirmation{ID: "host-confirmation", Approved: true, ExpiresAt: time.Now().Add(time.Hour)}
 	if _, _, err := service.ApplyConfirmed(ctx(), binding, domain.WorkstreamSourceRoot, proposal, confirmation); err != nil {
 		t.Fatalf("host-confirmed transition rejected: %v", err)
+	}
+}
+
+func TestServiceLinksOnlyVerifierIdentityAndTrustedScope(t *testing.T) {
+	store := &fakeStore{workstream: testWorkstream()}
+	identity := testVerifiedResultIdentity()
+	verifier := &fakeResultVerifier{identity: identity}
+	committer := &fakeResultLinkCommitter{workstream: testWorkstream()}
+	clock := fixedClock{at: time.Unix(10, 0).UTC()}
+	service, err := workstream.New(workstream.Config{Enabled: true, ResultHandlesEnabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{
+		Store: store, Clock: clock, ResultVerifier: verifier, LinkCommitter: committer,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
+	transition := domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
+		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: "model-forged-id"}}
+	record, snapshot, err := service.LinkCompletedResult(ctx(), binding, "T12345678", identity.ResultID, transition, "confirmation-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ToRevision != 1 || snapshot.Revision != 1 || len(snapshot.ResultLinks) != 1 {
+		t.Fatalf("link result = %+v / %+v", record, snapshot)
+	}
+	if verifier.request.Actor != binding.Actor || verifier.request.TeamID != "T12345678" || verifier.request.Conversation != string(binding.ConversationKey) || verifier.request.Project != binding.Project {
+		t.Fatalf("untrusted verifier scope = %+v", verifier.request)
+	}
+	if committer.request.Transition.ResultLink.ResultIdentity != identity.ResultID || committer.request.VerifiedIdentity != identity {
+		t.Fatalf("committer request = %+v", committer.request)
+	}
+}
+
+func TestServiceResultHandleGateBlocksNewLinksButPreservesReads(t *testing.T) {
+	identity := testVerifiedResultIdentity()
+	store := &fakeStore{workstream: testWorkstream()}
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{
+		Store: store, ResultVerifier: &fakeResultVerifier{identity: identity}, LinkCommitter: &fakeResultLinkCommitter{workstream: testWorkstream()}, ResultReader: &fakeResultReader{identity: identity},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
+	transition := domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
+		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: identity.ResultID}}
+	if _, _, err := service.LinkCompletedResult(ctx(), binding, "T12345678", identity.ResultID, transition, "confirmation-1"); !errors.Is(err, workstream.ErrResultHandlesDisabled) {
+		t.Fatalf("disabled result link error = %v", err)
+	}
+	if store.lastTransition.Action != "" {
+		t.Fatalf("disabled result link reached store: %+v", store.lastTransition)
+	}
+	if handle, err := service.ResultHandleForWorkstream(ctx(), binding, "T12345678", identity.ResultID, "ws-1"); err != nil || handle.ResultID != identity.ResultID {
+		t.Fatalf("existing result remains readable: %+v, %v", handle, err)
+	}
+}
+
+func TestServiceReadsBoundedResultOnlyThroughVerifiedWorkstreamScope(t *testing.T) {
+	identity := testVerifiedResultIdentity()
+	verifier := &fakeResultVerifier{identity: identity}
+	reader := &fakeResultReader{identity: identity}
+	service, err := workstream.New(workstream.Config{Enabled: true, ResultHandlesEnabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{
+		Store: &fakeStore{workstream: testWorkstream()}, ResultVerifier: verifier, ResultReader: reader,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
+	handle, err := service.ResultHandleForWorkstream(ctx(), binding, "T12345678", identity.ResultID, "ws-1")
+	if err != nil || handle.ResultID != identity.ResultID {
+		t.Fatalf("verified handle = %+v, %v", handle, err)
+	}
+	chunk, err := service.ReadResultChunkForWorkstream(ctx(), binding, "T12345678", identity.ResultID, "ws-1", 0, 8)
+	if err != nil || chunk.Content != "chunk" {
+		t.Fatalf("verified chunk = %+v, %v", chunk, err)
+	}
+	if reader.scope != identity.Scope || reader.reads != 1 || verifier.request.Project != binding.Project {
+		t.Fatalf("bound reader scope/calls = %+v/%d; verifier = %+v", reader.scope, reader.reads, verifier.request)
 	}
 }
 
@@ -218,3 +405,63 @@ func testWorkstream() domain.Workstream {
 }
 
 func ctx() context.Context { return context.Background() }
+
+type fakeResultVerifier struct {
+	request  port.WorkstreamResultVerification
+	identity domain.ResultIdentity
+	err      error
+}
+
+func (f *fakeResultVerifier) VerifyForWorkstream(_ context.Context, request port.WorkstreamResultVerification) (domain.ResultIdentity, error) {
+	f.request = request
+	return f.identity, f.err
+}
+
+type fakeResultLinkCommitter struct {
+	workstream domain.Workstream
+	request    port.WorkstreamResultLinkCommit
+}
+
+type fakeResultReader struct {
+	identity domain.ResultIdentity
+	scope    domain.ResultScope
+	reads    int
+}
+
+func (f *fakeResultReader) Materialize(context.Context, port.ResultMaterialization) (domain.ResultHandle, error) {
+	return domain.ResultHandle{}, domain.ErrResultUnavailable
+}
+
+func (f *fakeResultReader) Resolve(_ context.Context, resultID string, scope domain.ResultScope) (domain.ResultIdentity, domain.ResultHandle, error) {
+	f.scope = scope
+	if resultID != f.identity.ResultID || scope != f.identity.Scope {
+		return domain.ResultIdentity{}, domain.ResultHandle{}, domain.ErrResultScopeMismatch
+	}
+	handle, err := f.identity.Handle([]domain.ResultAvailability{domain.ResultAvailabilityRangeRead}, nil)
+	return f.identity, handle, err
+}
+
+func (f *fakeResultReader) ReadRange(_ context.Context, resultID string, scope domain.ResultScope, offset, max int64) (domain.ResultChunk, error) {
+	f.scope = scope
+	f.reads++
+	if resultID != f.identity.ResultID || scope != f.identity.Scope || offset != 0 || max != 8 {
+		return domain.ResultChunk{}, domain.ErrResultScopeMismatch
+	}
+	return domain.ResultChunk{Content: "chunk", OffsetBytes: 0, NextOffsetBytes: 5, EOF: true, SHA256: f.identity.SHA256}, nil
+}
+
+func (f *fakeResultLinkCommitter) CommitVerifiedResultLink(_ context.Context, request port.WorkstreamResultLinkCommit) (domain.WorkstreamTransitionRecord, error) {
+	f.request = request
+	return (&f.workstream).ApplyTransitionWithLimits(request.Transition, request.Limits, request.Now)
+}
+
+func testVerifiedResultIdentity() domain.ResultIdentity {
+	return domain.ResultIdentity{
+		ResultID: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerToolOperation, ID: "tool-1", Revision: 1},
+		Storage:  domain.ResultStorage{Kind: domain.ResultStorageRecoverable, Key: "payload-1"},
+		SHA256:   "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789",
+		Bytes:    12, MediaType: "text/plain", Scope: domain.ResultScope{Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Project: "workspace"},
+		Retention: domain.ResultRetentionWorkstream, CreatedAt: time.Unix(1, 0).UTC(), State: domain.ResultAvailable,
+	}
+}

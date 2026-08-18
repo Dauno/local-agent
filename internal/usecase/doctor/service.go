@@ -75,6 +75,7 @@ type LiveChecker interface {
 	CheckSlackExports(ctx context.Context, botToken string) error
 	CheckModel(ctx context.Context, model config.ModelConfig, apiKey string) error
 	CheckResolvedModel(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error
+	CheckKnowledgeEmbedding(ctx context.Context, cfg config.KnowledgeEmbeddingConfig, apiKey string) error
 }
 
 type AttachmentLiveChecker interface {
@@ -115,17 +116,34 @@ type CounterChecker interface {
 	CheckCounter(strategy, id string) error
 }
 
+// KnowledgeChecker is the optional offline content-free check for the
+// reconstructible retrieval state. It reports bounded counts or fails with
+// bounded remediation; it never returns source text, FTS bodies, vector
+// bytes, identities, digests, or credentials.
+type KnowledgeChecker interface {
+	CheckKnowledgeRetrievalState(ctx context.Context, path string) (domain.KnowledgeRetrievalHealth, error)
+}
+
+// ResultRetentionChecker is the optional offline observability check for
+// the TRD 02 V2 result retention classes. No deletion worker exists yet
+// (TRD 02 finding 6); this check reports bounded per-class counts only.
+type ResultRetentionChecker interface {
+	CheckResultRetention(ctx context.Context, path string, ages domain.ResultRetentionAges, now time.Time) (domain.ResultRetentionHealth, error)
+}
+
 type Dependencies struct {
-	ConfigPath string
-	LoadConfig func(path string) (config.Config, error)
-	Secrets    SecretResolver
-	Database   DatabaseChecker
-	Artifacts  ArtifactChecker
-	Jobs       JobStoreChecker
-	Live       LiveChecker
-	CLI        CLIProviderChecker
-	ACP        ACPProviderChecker
-	Counter    CounterChecker
+	ConfigPath      string
+	LoadConfig      func(path string) (config.Config, error)
+	Secrets         SecretResolver
+	Database        DatabaseChecker
+	Artifacts       ArtifactChecker
+	Jobs            JobStoreChecker
+	Live            LiveChecker
+	CLI             CLIProviderChecker
+	ACP             ACPProviderChecker
+	Counter         CounterChecker
+	Knowledge       KnowledgeChecker
+	ResultRetention ResultRetentionChecker
 }
 
 type Status string
@@ -371,7 +389,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	if transcriptionProfile != "" {
 		transcriptionDefs := defs
 		if transcriptionDefs == nil {
-			transcriptionDefs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody)
+			transcriptionDefs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody, cfg.Model.ResultHandles.MaxDirectInlineBytes)
 		}
 		if transcriptionDefs == nil {
 			transcriptionResolveErr = errors.New("no provider registry is available")
@@ -405,12 +423,17 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	if resolvedModel != nil && !rootCLIProvider {
 		modelAPIKeyEnv = resolvedModel.APIKeyEnv
 	}
+	embeddingCfg := cfg.Orchestration.Knowledge.Retrieval.Embedding
+	embeddingEnabled := embeddingCfg.Enabled && strings.TrimSpace(embeddingCfg.APIKeyEnv) != ""
 	keys := []string{modelAPIKeyEnv, SlackBotTokenKey, SlackAppTokenKey}
 	if defs != nil {
 		keys = append(keys, defs.RequiredAPIKeyEnvs()...)
 	}
 	if transcriptionResolved != nil && transcriptionResolved.Type() == agentdef.ProviderTypeOpenAICompatible && strings.TrimSpace(transcriptionResolved.APIKeyEnv) != "" {
 		keys = append(keys, transcriptionResolved.APIKeyEnv)
+	}
+	if embeddingCfg.Enabled && strings.TrimSpace(embeddingCfg.APIKeyEnv) != "" {
+		keys = append(keys, embeddingCfg.APIKeyEnv)
 	}
 	keys = uniqueStrings(keys)
 	values, err := s.deps.Secrets.Resolve(keys...)
@@ -457,6 +480,10 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	checkSecret("Slack bot token", SlackBotTokenKey, "xoxb-", "Set a Bot User OAuth Token beginning with xoxb-.")
 	checkSecret("Slack app token", SlackAppTokenKey, "xapp-", "Set an app-level Socket Mode token beginning with xapp- and connections:write.")
 
+	if embeddingEnabled {
+		checkSecret("knowledge embedding API key", embeddingCfg.APIKeyEnv, "", "Set "+embeddingCfg.APIKeyEnv+" in the process environment or .env.")
+	}
+
 	audioTranscriptionReady := false
 	if transcriptionProfile != "" {
 		switch {
@@ -485,6 +512,34 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			report.fail("SQLite", redactor.String(err.Error()), remediation, false)
 		} else {
 			report.pass("SQLite", "database exists, is migrated, and is readable/writable")
+		}
+		if s.deps.Knowledge != nil {
+			health, healthErr := s.deps.Knowledge.CheckKnowledgeRetrievalState(ctx, paths.DatabaseFile)
+			if healthErr != nil {
+				report.fail("knowledge retrieval state", redactor.String(healthErr.Error()), "Run: local-agent knowledge rebuild-index to rebuild the reconstructible lexical index, or restart the agent so the lexical and embedding workers can reconcile normally.", false)
+			} else {
+				report.pass("knowledge retrieval state", fmt.Sprintf("lexical queue pending=%d processing=%d stale=%d repairable=%d; embedding queue pending=%d processing=%d stale=%d repairable=%d", health.LexicalQueuePending, health.LexicalQueueProcessing, health.LexicalQueueStaleProcessing, health.LexicalRepairableMismatch, health.EmbeddingQueuePending, health.EmbeddingQueueProcessing, health.EmbeddingQueueStaleProcessing, health.EmbeddingRepairableMismatch))
+			}
+		}
+		if s.deps.ResultRetention != nil {
+			ages := domain.ResultRetentionAges{
+				Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
+				Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
+				Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
+			}
+			health, retentionErr := s.deps.ResultRetention.CheckResultRetention(ctx, paths.DatabaseFile, ages, time.Now().UTC())
+			if retentionErr != nil {
+				report.fail("v2 result retention", redactor.String(retentionErr.Error()), "Fix the configured database path and retry.", false)
+			} else {
+				detail := "no deletion worker is implemented yet (TRD 02 finding 6, deferred to TRD 09); this reports bounded candidate counts only"
+				for _, class := range health.Classes {
+					detail += fmt.Sprintf("; %s candidates=%d reference_protected=%d materialization_pending=%d", class.Class, class.Candidates, class.ReferenceProtected, class.MaterializationPending)
+				}
+				if health.ExportedNotImplemented {
+					detail += "; exported class is never scanned: its age anchor is a verified-publication event that does not exist yet"
+				}
+				report.pass("v2 result retention", detail)
+			}
 		}
 		if s.deps.Artifacts != nil {
 			if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ACP.MaxResultArtifactBytes); err != nil {
@@ -769,6 +824,16 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			} else {
 				report.pass("audio transcription endpoint", "dedicated multipart /audio/transcriptions request passed")
 			}
+		}
+	}
+	if embeddingEnabled && validSecrets[embeddingCfg.APIKeyEnv] {
+		liveCtx, cancel := checkTimeout(ctx, embeddingCfg.TimeoutSeconds)
+		err := s.deps.Live.CheckKnowledgeEmbedding(liveCtx, embeddingCfg, values[embeddingCfg.APIKeyEnv])
+		cancel()
+		if err != nil {
+			report.fail("knowledge embedding endpoint", redactor.String(err.Error()), "Verify orchestration.knowledge.retrieval.embedding base_url, model, dimensions, and API key.", false)
+		} else {
+			report.pass("knowledge embedding endpoint", "minimal embeddings request passed with the configured dimensions")
 		}
 	}
 	for _, selected := range selectedModels {

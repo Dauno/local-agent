@@ -30,10 +30,11 @@ type Config struct {
 }
 
 type Dependencies struct {
-	Store     port.ExternalAgentJobStore
-	Runtime   port.ExternalAgentJobRuntime
-	Publisher port.ExternalAgentJobPublisher
-	Artifacts port.ResultArtifactStore
+	Store         port.ExternalAgentJobStore
+	Runtime       port.ExternalAgentJobRuntime
+	Publisher     port.ExternalAgentJobPublisher
+	Artifacts     port.ResultArtifactStore
+	NativeResults port.TrustedResultStore
 	// ProgressStore and ProcessRegistry are optional live-observability
 	// dependencies. Without them, status projection reports no live fields.
 	ProgressStore   port.ExternalAgentJobProgressStore
@@ -55,6 +56,7 @@ type Service struct {
 	runtime             port.ExternalAgentJobRuntime
 	publisher           port.ExternalAgentJobPublisher
 	artifacts           port.ResultArtifactStore
+	nativeResults       port.TrustedResultStore
 	progressStore       port.ExternalAgentJobProgressStore
 	processRegistry     port.ACPProcessRegistry
 	maxResultBytes      int64
@@ -69,10 +71,14 @@ type Service struct {
 }
 
 var _ port.ExternalAgentJobReader = (*Service)(nil)
+var _ port.ExternalAgentJobNativeResultReader = (*Service)(nil)
 var _ port.ExternalAgentJobActivationReader = (*Service)(nil)
 var _ port.ExternalAgentJobHostCompleter = (*Service)(nil)
 
-const defaultResultChunkBytes int64 = 16 * 1024
+const (
+	defaultResultChunkBytes       int64 = 16 * 1024
+	foregroundCancellationTimeout       = 5 * time.Second
+)
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
 	if cfg.DefaultTimeout <= 0 || cfg.MaxTimeout < cfg.DefaultTimeout || cfg.LeaseTTL <= 0 || cfg.PollInterval <= 0 || cfg.Concurrency <= 0 || cfg.MaxAttempts <= 0 {
@@ -105,7 +111,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		metrics = port.NoopMetricRecorder{}
 	}
 	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
-		artifacts: deps.Artifacts, progressStore: deps.ProgressStore, processRegistry: deps.ProcessRegistry,
+		artifacts: deps.Artifacts, nativeResults: deps.NativeResults, progressStore: deps.ProgressStore, processRegistry: deps.ProcessRegistry,
 		maxResultBytes: deps.MaxResultBytes, maxResultChunkBytes: deps.MaxResultChunkBytes,
 		clock: deps.Clock, logger: logger, metrics: metrics,
 		stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
@@ -137,7 +143,9 @@ func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequ
 		PrimaryProject: request.PrimaryProject, RegistryRevision: request.RegistryRevision,
 		Task: request.Task, RequestSHA256: domain.ExternalAgentJobRequestDigest(request),
 		WrapperCallID: request.WrapperCallID, OriginalCallID: request.OriginalCallID, Actor: request.Actor, TeamID: request.TeamID,
-		ConversationKey: request.ConversationKey, Status: domain.JobQueued, TimeoutAt: now.Add(timeout), CreatedAt: now, UpdatedAt: now,
+		ConversationKey: request.ConversationKey, WorkstreamID: request.WorkstreamID, TaskID: request.TaskID,
+		ExecutionIdentity: request.ExecutionIdentity, AdmissionRevision: request.AdmissionRevision,
+		Status: domain.JobQueued, TimeoutAt: now.Add(timeout), CreatedAt: now, UpdatedAt: now,
 	}
 	if job.OriginalCallID == "" {
 		job.OriginalCallID = job.ID
@@ -178,9 +186,10 @@ func (s *Service) StartAndWait(ctx context.Context, request domain.ExternalAgent
 			return domain.AcpInvocationResult{}, fmt.Errorf("external-agent job ended with status %s: %s", current.Status, current.ErrorCode)
 		}
 		if !current.TimeoutAt.After(s.clock.Now().UTC()) {
-			// A queued foreground job can outlive its total budget; do not wait forever.
+			// A queued foreground job can outlive its total budget. Cancellation is
+			// best effort, but must not keep the synchronous caller past that budget.
 			if current.Status == domain.JobQueued {
-				_, _ = s.Cancel(context.WithoutCancel(ctx), job.ID, request.Actor)
+				s.cancelForegroundAsync(ctx, job.ID, request.Actor)
 			}
 			return domain.AcpInvocationResult{}, errors.New("external-agent job ended with status failed: acp_job_timeout")
 		}
@@ -188,11 +197,23 @@ func (s *Service) StartAndWait(ctx context.Context, request domain.ExternalAgent
 		select {
 		case <-ctx.Done():
 			timer.Stop()
-			_, _ = s.Cancel(context.WithoutCancel(ctx), job.ID, request.Actor)
+			s.cancelForegroundAsync(ctx, job.ID, request.Actor)
 			return domain.AcpInvocationResult{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
+}
+
+// cancelForegroundAsync preserves the durable cancellation attempt after the
+// foreground context ends without allowing a blocked store transaction to hold
+// the synchronous caller. A queued job that is not cancelled remains guarded by
+// TimeoutAt before the worker can invoke the external runtime.
+func (s *Service) cancelForegroundAsync(ctx context.Context, jobID, actor string) {
+	go func() {
+		cancelCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), foregroundCancellationTimeout)
+		defer cancel()
+		_, _ = s.Cancel(cancelCtx, jobID, actor)
+	}()
 }
 
 func (s *Service) Cancel(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error) {
@@ -211,6 +232,16 @@ func (s *Service) verifiedForegroundResult(ctx context.Context, job *domain.Exte
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
+	if s.nativeResults != nil {
+		handle, err := s.nativeResultHandle(ctx, job)
+		if err != nil {
+			return domain.AcpInvocationResult{}, err
+		}
+		return domain.AcpInvocationResult{
+			NativeResultID: handle.ResultID, NativeJobID: job.ID, NativeResultHandle: handle,
+			ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes,
+		}, nil
+	}
 	return domain.AcpInvocationResult{
 		Text:         verified.Text,
 		Inline:       job.ResultArtifact == "",
@@ -218,6 +249,45 @@ func (s *Service) verifiedForegroundResult(ctx context.Context, job *domain.Exte
 		ResultSHA256: job.ResultSHA256,
 		ResultBytes:  job.ResultBytes,
 	}, nil
+}
+
+// NativeResultHandleForJob returns only bounded metadata for V2 jobs. A
+// service without a native store is an intentional legacy-only runtime.
+func (s *Service) NativeResultHandleForJob(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.ResultHandle, bool, error) {
+	job, err := s.Status(ctx, jobID, actor, conversationKey)
+	if err != nil {
+		return domain.ResultHandle{}, false, err
+	}
+	if s.nativeResults == nil {
+		return domain.ResultHandle{}, false, nil
+	}
+	handle, err := s.nativeResultHandle(ctx, job)
+	return handle, true, err
+}
+
+func (s *Service) nativeResultHandle(ctx context.Context, job *domain.ExternalAgentJob) (domain.ResultHandle, error) {
+	if job == nil || job.Status != domain.JobCompleted || s.nativeResults == nil {
+		return domain.ResultHandle{}, domain.ErrResultUnavailable
+	}
+	bindingStore, ok := s.store.(port.ExternalAgentJobNativeResultStore)
+	if !ok {
+		return domain.ResultHandle{}, domain.ErrResultUnavailable
+	}
+	resultID, err := bindingStore.NativeResultIDForJob(ctx, job.ID, job.StatusRevision)
+	if err != nil {
+		return domain.ResultHandle{}, err
+	}
+	identity, handle, err := s.nativeResults.Resolve(ctx, resultID, domain.ResultScope{
+		Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject,
+	})
+	if err != nil {
+		return domain.ResultHandle{}, err
+	}
+	if identity.Producer.Kind != domain.ResultProducerACPJob || identity.Producer.ID != job.ID || identity.Producer.Revision != job.StatusRevision ||
+		handle.SHA256 != job.ResultSHA256 || handle.Bytes != job.ResultBytes {
+		return domain.ResultHandle{}, domain.ErrResultUnavailable
+	}
+	return handle, nil
 }
 
 func (s *Service) Status(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error) {
@@ -797,7 +867,13 @@ func (s *Service) recoverExpired(ctx context.Context) {
 	for _, job := range jobs {
 		now := s.clock.Now().UTC()
 		next, code := domain.JobQueued, ""
-		if job.Status == domain.JobReconciling {
+		if job.Status == domain.JobCancelRequested {
+			if job.SideEffectsPossible || job.ACPSessionID != "" {
+				next, code = domain.JobCompletionUnknown, "completion_unknown"
+			} else {
+				next = domain.JobCancelled
+			}
+		} else if job.Status == domain.JobReconciling {
 			next, code = domain.JobCompletionUnknown, "completion_unknown"
 		} else if job.SideEffectsPossible || job.ACPSessionID != "" {
 			next, code = domain.JobCompletionUnknown, "completion_unknown"

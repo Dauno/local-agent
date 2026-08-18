@@ -84,6 +84,18 @@ func TestAdkSessionServicePersistsStateAndEventOrder(t *testing.T) {
 	if events := reloaded.Session.Events(); events.Len() != 2 || events.At(0).ID != "event-1" || events.At(1).ID != "event-2" {
 		t.Fatalf("reloaded event order = %#v", events)
 	}
+	recent, err := service.Get(ctx, &session.GetRequest{AppName: "app", UserID: "user", SessionID: "session", NumRecentEvents: 1})
+	if err != nil || recent.Session.Events().Len() != 1 || recent.Session.Events().At(0).ID != "event-2" {
+		t.Fatalf("bounded recent events = %#v, %v", recent, err)
+	}
+	rangeEvents, err := service.LoadEventRange(ctx, "app", "user", "session", -1, 1)
+	if err != nil || len(rangeEvents) != 1 || rangeEvents[0].ID != "event-1" {
+		t.Fatalf("first event range = %#v, %v", rangeEvents, err)
+	}
+	rangeEvents, err = service.LoadEventRange(ctx, "app", "user", "session", 0, 1)
+	if err != nil || len(rangeEvents) != 1 || rangeEvents[0].ID != "event-2" {
+		t.Fatalf("second event range = %#v, %v", rangeEvents, err)
+	}
 
 	listed, err := service.List(ctx, &session.ListRequest{AppName: "app", UserID: "user"})
 	if err != nil || len(listed.Sessions) != 1 || listed.Sessions[0].ID() != "session" {

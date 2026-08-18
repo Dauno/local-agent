@@ -362,6 +362,8 @@ type coverageProjector struct {
 	calls    int
 }
 
+func (p *coverageProjector) Recover(string) error { return nil }
+
 func (p *coverageProjector) Project(context.Context, port.ProjectionReader, string) error {
 	p.calls++
 	if p.failures < 0 {

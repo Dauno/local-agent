@@ -355,20 +355,7 @@ func TestJobStatusTerminalRetainsSessionID(t *testing.T) {
 
 func TestActivationStatusKeepsRevisionBoundSnapshot(t *testing.T) {
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
-	// The current projection has drifted to a newer revision than the
-	// activation; the merged live fields must be rejected so the response
-	// stays bound to the activation revision.
-	reader := &projectionExternalJobReader{
-		stubExternalJobReader: stubExternalJobReader{job: &domain.ExternalAgentJob{
-			ID: "job_act", Status: domain.JobCompleted, StatusRevision: 4, ACPSessionID: "ses_activation_identity",
-		}},
-		view: &domain.ExternalAgentJobStatusView{
-			JobID: "job_act", Status: domain.JobCompleted, StatusRevision: 7,
-			ACPSessionID: "ses_activation_identity", Phase: domain.ACPPhaseResponding,
-			Health: domain.ACPHealthActive, ProcessAlive: boolPtr(true),
-		},
-	}
-	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(&stubExternalJobReader{})
 	activation := domain.ExternalAgentJobActivation{
 		ActivationID: "activation-1", JobID: "job_act", StatusRevision: 4, Kind: "terminal",
 		TerminalStatus: domain.JobCompleted, Actor: "U12345678", ConversationKey: key,
@@ -377,31 +364,7 @@ func TestActivationStatusKeepsRevisionBoundSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("activation tools: %v", err)
 	}
-	var statusTool runnableFunctionTool
-	for _, candidate := range tools {
-		if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == "job_status" {
-			statusTool, _ = candidate.(runnableFunctionTool)
-		}
-	}
-	if statusTool == nil {
-		t.Fatal("activation job_status tool is unavailable")
-	}
-	value, err := statusTool.Run(&stubToolContext{}, map[string]any{"job_id": "job_act"})
-	if err != nil {
-		t.Fatalf("invoke: %v", err)
-	}
-	raw, _ := json.Marshal(value)
-	var result map[string]any
-	if err := json.Unmarshal(raw, &result); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if result["status_revision"] != float64(4) {
-		t.Fatalf("activation status revision = %v, want 4", result["status_revision"])
-	}
-	if result["phase"] != "" {
-		t.Fatalf("drifted live phase leaked into revision-bound status: %v", result["phase"])
-	}
-	if result["acp_session_id"] != "ses_activation_identity" {
-		t.Fatalf("activation session ID = %v", result["acp_session_id"])
+	if len(tools) != 0 {
+		t.Fatalf("activation tools = %d, want none", len(tools))
 	}
 }

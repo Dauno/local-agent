@@ -56,8 +56,10 @@ import (
 	contextsummary "github.com/Dauno/slack-local-agent/internal/usecase/contextsummary"
 	externalagentusecase "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
+	knowledgeusecase "github.com/Dauno/slack-local-agent/internal/usecase/knowledge"
 	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
 	opencodeusecase "github.com/Dauno/slack-local-agent/internal/usecase/opencode"
+	resultsusecase "github.com/Dauno/slack-local-agent/internal/usecase/results"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
@@ -72,29 +74,32 @@ type runtimeSetup struct {
 }
 
 type runtimeModels struct {
-	rootModel           model.LLM
-	rootFamily          string
-	rootIsAgentCLI      bool
-	preparedAgentTools  []preparedAgentTool
-	preparedWorkflows   []preparedWorkflowTool
-	curatorLLM          memorycurator.LLM
-	agentName           string
-	rootDef             *agentdef.AgentDef
-	curatorDef          *agentdef.AgentDef
-	attachmentDef       *agentdef.AgentDef
-	attachmentModel     model.LLM
-	transcriber         port.AudioTranscriber
-	apiKey              string
-	botToken            string
-	appToken            string
-	modelBaseURL        string
-	redactor            secure.Redactor
-	logger              *logging.Logger
-	openCodeCoordinator *opencodeusecase.Coordinator
-	artifactStore       port.ResultArtifactStore
-	requestTokenCounter port.RequestTokenCounter
-	contextWindowTokens int
-	metrics             port.MetricRecorder
+	rootModel             model.LLM
+	rootFamily            string
+	rootIsAgentCLI        bool
+	preparedAgentTools    []preparedAgentTool
+	preparedWorkflows     []preparedWorkflowTool
+	curatorLLM            memorycurator.LLM
+	agentName             string
+	rootDef               *agentdef.AgentDef
+	curatorDef            *agentdef.AgentDef
+	attachmentDef         *agentdef.AgentDef
+	attachmentModel       model.LLM
+	transcriber           port.AudioTranscriber
+	apiKey                string
+	botToken              string
+	appToken              string
+	embeddingAPIKey       string
+	modelBaseURL          string
+	redactor              secure.Redactor
+	logger                *logging.Logger
+	openCodeCoordinator   *opencodeusecase.Coordinator
+	artifactStore         port.ResultArtifactStore
+	resultPayloadStore    port.ResultPayloadStore
+	requestTokenCounter   port.RequestTokenCounter
+	contextWindowTokens   int
+	rootDirectInlineBytes int64
+	metrics               port.MetricRecorder
 }
 
 func newRuntimeModels() runtimeModels {
@@ -172,7 +177,7 @@ func (a *Application) loadRuntimeSetup() (runtimeSetup, error) {
 	}
 	legacy := defs == nil
 	if legacy {
-		defs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody)
+		defs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody, cfg.Model.ResultHandles.MaxDirectInlineBytes)
 	}
 	return runtimeSetup{cfg: cfg, paths: paths, defs: defs, legacy: legacy}, nil
 }
@@ -194,22 +199,36 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	}
 
 	providerEnvs := defs.RequiredAPIKeyEnvs()
-	allKeys := append(append(make([]string, 0, len(providerEnvs)+2), providerEnvs...), bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv)
+	// The embedding API key must resolve inside this same secret-resolution
+	// pass: the redactor is immutable once constructed and every resolved
+	// credential feeds it here, so a key resolved later would silently
+	// never be redacted from logs and errors. It is requested only when
+	// embeddings are actually enabled.
+	embeddingEnabled := cfg.Orchestration.Knowledge.Enabled && cfg.Orchestration.Knowledge.Retrieval.Enabled && cfg.Orchestration.Knowledge.Retrieval.Embedding.Enabled
+	embeddingKeyEnv := cfg.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv
+	allKeys := append(append(make([]string, 0, len(providerEnvs)+3), providerEnvs...), bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv)
+	if embeddingEnabled && strings.TrimSpace(embeddingKeyEnv) != "" {
+		allKeys = append(allKeys, embeddingKeyEnv)
+	}
 	values, err := envfile.NewResolver(paths.EnvFile).Resolve(allKeys...)
 	if err != nil {
 		return runtimeModels{}, fmt.Errorf("load runtime secrets: %w", err)
 	}
 	prepared.botToken = values[bootstrap.SlackBotTokenEnv]
 	prepared.appToken = values[bootstrap.SlackAppTokenEnv]
+	prepared.embeddingAPIKey = values[embeddingKeyEnv]
 	if setup.legacy && strings.TrimSpace(values[cfg.Model.APIKeyEnv]) == "" {
 		return runtimeModels{}, fmt.Errorf("%s is not configured. Run: local-agent init", cfg.Model.APIKeyEnv)
 	}
 	if err := requiredSlackTokens(prepared.botToken, prepared.appToken); err != nil {
 		return runtimeModels{}, err
 	}
-	secrets := make([]string, 0, len(providerEnvs)+2)
+	secrets := make([]string, 0, len(providerEnvs)+3)
 	for _, environment := range providerEnvs {
 		secrets = append(secrets, values[environment])
+	}
+	if embeddingEnabled {
+		secrets = append(secrets, prepared.embeddingAPIKey)
 	}
 	prepared.redactor = secure.NewRedactor(append(secrets, prepared.botToken, prepared.appToken)...)
 	prepared.logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, prepared.redactor)
@@ -221,6 +240,10 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize ACP result artifact store: %w", artifactErr))
 	}
 	prepared.artifactStore = artifactStore
+	prepared.resultPayloadStore, err = fsartifact.NewTypedStore(filepath.Join(paths.ArtifactDir, "v2-results"), int64(cfg.ACP.MaxResultArtifactBytes))
+	if err != nil {
+		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize typed result artifact store: %w", err))
+	}
 
 	resolved, err := defs.ResolveModel(prepared.rootDef.Model)
 	if err != nil {
@@ -230,6 +253,7 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	if err != nil {
 		return runtimeModels{}, err
 	}
+	prepared.rootDirectInlineBytes = int64(resolved.MaxDirectInlineBytes)
 	prepared.contextWindowTokens = resolved.ContextWindowTokens
 	if err := config.ValidateADKCompaction(cfg, resolved.Type() == agentdef.ProviderTypeOpenAICompatible, resolved.Type() == agentdef.ProviderTypeOpenAICompatible); err != nil {
 		return runtimeModels{}, err
@@ -518,6 +542,9 @@ type runtimeComposition struct {
 	externalJobService *externalagentusecase.Service
 	notificationWorker *externalagentusecase.NotificationWorker
 	activationWorker   *externalagentusecase.ActivationWorker
+	knowledgeRetriever port.KnowledgeRetriever
+	lexicalWorker      *knowledgeusecase.LexicalWorker
+	embeddingWorker    *knowledgeusecase.EmbeddingWorker
 	notificationDone   chan struct{}
 }
 
@@ -534,6 +561,24 @@ func (c *runtimeComposition) StopExternalAdmission() {
 	if c.activationWorker != nil {
 		c.activationWorker.StopAdmission()
 	}
+}
+
+// WaitKnowledge waits for the lexical worker to stop. A nil worker means
+// retrieval was disabled and nothing needs draining.
+func (c *runtimeComposition) WaitKnowledge(ctx context.Context) error {
+	if c == nil || c.lexicalWorker == nil {
+		return nil
+	}
+	return c.lexicalWorker.WaitStopped(ctx)
+}
+
+// WaitEmbedding waits for the embedding worker to stop. A nil worker means
+// embeddings were disabled and nothing needs draining.
+func (c *runtimeComposition) WaitEmbedding(ctx context.Context) error {
+	if c == nil || c.embeddingWorker == nil {
+		return nil
+	}
+	return c.embeddingWorker.WaitStopped(ctx)
 }
 
 func (c *runtimeComposition) WaitExternal(ctx context.Context) error {
@@ -606,8 +651,26 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var continuityStore port.ContinuityStore
 	var resultStore *recoverableresult.Store
 	var workstreamService *workstreamusecase.Service
+	var knowledgeBindings port.KnowledgeBindingResolver
+	var knowledgeRetriever port.KnowledgeRetriever
+	var knowledgeLexicalWorker *knowledgeusecase.LexicalWorker
+	var knowledgeEmbeddingWorker *knowledgeusecase.EmbeddingWorker
+	var knowledgeRetrievalLimits domain.KnowledgeRetrievalLimits
 	features := cfg.Context.ContextFeatures
 	var err error
+	// The TRD 02 V2 retention policy is composed and validated at startup
+	// even though no deletion worker consumes it yet (see TRD 02 §Retention,
+	// finding 6): failing closed here catches a misconfigured age before the
+	// offline doctor check ever runs against it.
+	resultRetentionPolicy := resultsusecase.RetentionPolicy{
+		Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
+		Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
+		Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
+		Exported:     time.Duration(cfg.Orchestration.ResultHandles.Retention.ExportedDays) * 24 * time.Hour,
+	}
+	if err := resultRetentionPolicy.Validate(); err != nil {
+		return nil, fmt.Errorf("initialize result retention policy: %w", err)
+	}
 	if models.rootIsAgentCLI && cfg.Orchestration.Workstreams.Enabled {
 		return nil, errors.New("orchestration.workstreams.enabled requires an openai_compatible root agent")
 	}
@@ -722,16 +785,24 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			if len(allowedProjects) == 0 {
 				return nil, errors.New("initialize workstream service: at least one registered sandbox project is required")
 			}
+			trustedResults, trustedResultsErr := adaptersqlite.NewResultStore(infra.store, models.resultPayloadStore)
+			if trustedResultsErr != nil {
+				return nil, models.redactor.Error(fmt.Errorf("initialize workstream result verifier: %w", trustedResultsErr))
+			}
+			workstreamStore := adaptersqlite.NewWorkstreamStore(infra.store)
+			if workstreamStore == nil {
+				return nil, errors.New("initialize workstream store")
+			}
 			var workstreamErr error
 			workstreamService, workstreamErr = workstreamusecase.New(workstreamusecase.Config{
-				Enabled:         true,
+				Enabled: true, ResultHandlesEnabled: cfg.Orchestration.ResultHandles.Enabled,
 				Limits:          domain.WorkstreamLimits{MaxNonTerminalTasks: cfg.Orchestration.Workstreams.MaxNonTerminalTasks, MaxDependenciesPerTask: cfg.Orchestration.Workstreams.MaxDependenciesPerTask},
 				AllowedProjects: allowedProjects,
-			}, workstreamusecase.Dependencies{Store: adaptersqlite.NewWorkstreamStore(infra.store), Clock: port.SystemClock{}})
+			}, workstreamusecase.Dependencies{Store: workstreamStore, Clock: port.SystemClock{}, ResultVerifier: trustedResults, LinkCommitter: workstreamStore, ResultReader: trustedResults})
 			if workstreamErr != nil {
 				return nil, models.redactor.Error(fmt.Errorf("initialize workstream service: %w", workstreamErr))
 			}
-			factory.WithWorkstreams(workstreamService)
+			factory.WithWorkstreams(workstreamService).WithResultLinksEnabled(cfg.Orchestration.ResultHandles.Enabled)
 		}
 		// Configurar Agent Builder (preview + install tools).
 		if agentBuilderSvc != nil && defs != nil {
@@ -780,6 +851,9 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		}
 		if compositeFactory != nil && externalJobService != nil {
 			compositeFactory.setJobStarter(externalJobService)
+			if workstreamService != nil {
+				compositeFactory.setCompletionBindingResolver(workstreamService)
+			}
 		}
 		if setup.defs != nil {
 			if provider, exists := setup.defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
@@ -837,7 +911,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		contextCompaction = domain.ContextCompactionSettings{
 			Enabled: compaction.Enabled, MaxHistoryChars: compaction.MaxHistoryChars,
 			RecentTurns: compaction.RecentTurns, SummaryEnabled: compaction.SummaryEnabled,
-			SummaryMaxChars: compaction.SummaryMaxChars,
+			SummaryMaxChars: compaction.SummaryMaxChars, SummaryBudgetTokens: compaction.SummaryBudgetTokens,
 		}
 		if compiler == nil {
 			projector, err = adkagent.NewProjector(adkagent.CompactionConfig{
@@ -854,18 +928,123 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			}
 		}
 	}
-	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContextCompaction: contextCompaction, ContinuityStore: continuityStore, SummaryStore: infra.store, Metrics: models.metrics, ProviderFamily: models.rootFamily})
+	resultProducingTools := make([]string, 0, len(models.preparedAgentTools))
+	if cfg.Orchestration.ResultHandles.Enabled {
+		for _, child := range models.preparedAgentTools {
+			if child.acpRuntime != nil {
+				resultProducingTools = append(resultProducingTools, child.definition.Name)
+			}
+		}
+	}
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContextCompaction: contextCompaction, ContinuityStore: continuityStore, SummaryStore: infra.store, EpochStore: adaptersqlite.NewContextEpochStore(infra.store), Metrics: models.metrics, ProviderFamily: models.rootFamily, ResultProducingToolNames: resultProducingTools, ResultProducingCallsPerStep: cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep, ResultProducingCallReserveTokens: cfg.Orchestration.ResultHandles.ProducingCallReserveTokens, KnowledgeBudgetTokens: cfg.Orchestration.Knowledge.MaxCardTokens, WorkstreamBudgetTokens: cfg.Orchestration.Workstreams.SnapshotBudgetTokens})
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}
 	confirmationStore := adaptersqlite.NewConfirmationStore(infra.store)
+	// One coordinator instance is shared by root turns, activations,
+	// confirmations, workstream commands, and knowledge commands so a busy
+	// conversation never mutates knowledge state while another operation
+	// holds the conversation. The knowledge service is always wired: while the
+	// gate is disabled its executor answers memory-human commands with a
+	// deterministic disabled response instead of mutating or reaching the
+	// model.
+	coordinator := botusecase.NewLimiter(cfg.Runtime.MaxConcurrentModelCalls)
+	// The OKF projector is a single shared, serialized instance used by the
+	// legacy memory runner (when memory.enabled) and the knowledge projection
+	// worker, so concurrent promotions never corrupt staging, backup, or the
+	// live bundle and each worker preserves the other's file ownership.
+	okfProjector := memoryprojector.New()
+	knowledgeStore := adaptersqlite.NewKnowledgeStore(infra.store)
+	knowledgeService, err := composeKnowledgeService(cfg.Orchestration.Knowledge.Enabled, knowledgeStore, coordinator)
+	if err != nil {
+		return nil, models.redactor.Error(fmt.Errorf("initialize knowledge service: %w", err))
+	}
+	// The legacy topic backfill is mandatory when the knowledge gate is on:
+	// a failure fails startup closed instead of leaving the catalog
+	// silently incomplete.
+	if err := runLegacyKnowledgeImport(ctx, cfg.Orchestration.Knowledge.Enabled, knowledgeStore, models.logger); err != nil {
+		return nil, models.redactor.Error(err)
+	}
+	// The knowledge projection worker is independent of memory.enabled and
+	// starts only when the knowledge gate is on. While disabled it never
+	// claims outbox rows or writes files; pending triggers survive and drain
+	// immediately when the gate is re-enabled.
+	if cfg.Orchestration.Knowledge.Enabled {
+		// Deterministic legacy topic import: exactly one knowledge document
+		// per existing legacy topic, idempotent and replay-safe, with the
+		// durable projection trigger enqueued in the same transaction. It
+		// runs before the worker so imported rows drain in the first tick.
+		// A failure fails startup closed: the catalog must never be
+		// silently incomplete.
+		projectionWorker, workerErr := knowledgeusecase.NewProjectionWorker(knowledgeusecase.ProjectionWorkerConfig{
+			Interval:      time.Duration(cfg.Orchestration.Knowledge.ProjectionIntervalSeconds) * time.Second,
+			MaxRetries:    cfg.Orchestration.Knowledge.ProjectionMaxRetries,
+			RetentionDays: cfg.Orchestration.Knowledge.ProjectionRetentionDays,
+			OutputDir:     paths.MemoryDir,
+		}, knowledgeusecase.ProjectionWorkerDependencies{
+			Store: knowledgeStore, Reader: infra.store, Projector: okfProjector,
+			Logger: models.logger, Sanitize: models.redactor.String, Enabled: knowledgeService.Enabled,
+		})
+		if workerErr != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize knowledge projection worker: %w", workerErr))
+		}
+		go projectionWorker.Run(ctx)
+		// The lexical index worker runs only when retrieval is enabled on
+		// a durable openai_compatible root with the model-budget safety
+		// gate (config validation enforces the gate statically; composition
+		// re-asserts both fail closed). While disabled the worker is never
+		// created, FTS is never touched, and queues never drain. The worker
+		// owns startup reconciliation and an awaitable shutdown path. When
+		// embeddings are enabled the embedding provider, vector index, and
+		// embedding worker are composed alongside it and awaited on
+		// shutdown the same way.
+		retrievalComposition, composeErr := composeLexicalRetrieval(cfg, models, infra.modelCalls, infra.store)
+		if composeErr != nil {
+			return nil, models.redactor.Error(composeErr)
+		}
+		if retrievalComposition != nil && retrievalComposition.lexicalWorker != nil {
+			go retrievalComposition.lexicalWorker.Run(ctx)
+			knowledgeRetriever = retrievalComposition.retriever
+			knowledgeLexicalWorker = retrievalComposition.lexicalWorker
+			knowledgeRetrievalLimits = retrievalComposition.limits
+			if retrievalComposition.embeddingWorker != nil {
+				go retrievalComposition.embeddingWorker.Run(ctx)
+				knowledgeEmbeddingWorker = retrievalComposition.embeddingWorker
+			}
+		}
+	}
+	// Binding resolution is read-only host state and must never depend on the
+	// workstream command feature gate: durable active workstreams keep their
+	// project scope for knowledge even when workstream commands are disabled.
+	registeredProjects := paths.SandboxProjectRoots
+	if len(registeredProjects) == 0 {
+		registeredProjects = cfg.Sandbox.Projects
+	}
+	knowledgeAllowedProjects := make(map[string]struct{}, len(registeredProjects))
+	for project := range registeredProjects {
+		knowledgeAllowedProjects[project] = struct{}{}
+	}
+	bindingsResolver := workstreamKnowledgeBindingResolver{
+		store:   adaptersqlite.NewWorkstreamStore(infra.store),
+		allowed: knowledgeAllowedProjects,
+	}
+	knowledgeBindings = bindingsResolver
+	// The consuming root profile must declare a positive
+	// result_handles.max_direct_inline_bytes to opt in to direct-inline
+	// completion frames. The resolved root profile (declarative or legacy)
+	// is authoritative; absence is zero and never transformed into a default.
 	service, err := botusecase.New(botusecase.Config{
 		AccessPolicy:   domain.AccessPolicy{AllowAllUsers: cfg.Slack.AllowAllUsers, AllowedUserIDs: cfg.Slack.AllowedUserIDs, AllowedTeamIDs: cfg.Slack.AllowedTeamIDs, AllowedChannelIDs: cfg.Slack.AllowedChannelIDs},
 		ContextLimits:  domain.ContextLimits{MaxMessages: cfg.Context.MaxMessages, MaxChars: cfg.Context.MaxChars},
 		RetainMessages: cfg.Context.RetainMessagesPerConversation, MaxConcurrentCalls: cfg.Runtime.MaxConcurrentModelCalls,
 		ModelTimeout: time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second, BusyMessage: cfg.Runtime.BusyMessage, ModelErrorMessage: cfg.Runtime.ModelErrorMessage, UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
 		ProgressEnabled: cfg.Slack.StandardAgent.ProgressEnabled, PromptsEnabled: cfg.Slack.StandardAgent.PromptsEnabled, SuggestedPrompts: cfg.Slack.StandardAgent.SuggestedPrompts, StreamingEnabled: cfg.Slack.StandardAgent.StreamingEnabled, UpdateInterval: time.Duration(cfg.Slack.StandardAgent.UpdateIntervalSeconds) * time.Second, StreamingCarryRunes: models.redactor.StreamingCarryRunes(),
-	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, ActivationStore: activationStore, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler, Workstreams: workstreamService})
+		ResultHandlesEnabled:     cfg.Orchestration.ResultHandles.Enabled,
+		MaxDirectInlineBytes:     models.rootDirectInlineBytes,
+		KnowledgeRetrievalLimits: knowledgeRetrievalLimits,
+		WorkstreamsEnabled:       cfg.Orchestration.Workstreams.Enabled,
+		KnowledgeGateEnabled:     cfg.Orchestration.Knowledge.Enabled,
+	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, ActivationStore: activationStore, CompletionReader: externalJobService, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler, Workstreams: workstreamService, Coordinator: coordinator, Knowledge: knowledgeService, KnowledgeBindings: knowledgeBindings, KnowledgeRetriever: knowledgeRetriever, KnowledgeRetrievalBindings: bindingsResolver})
 	if err != nil {
 		return nil, err
 	}
@@ -880,7 +1059,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	}
 	models.logger.Info("ADK durable runtime enabled", "session_service", "sqlite")
 	if cfg.Memory.Enabled {
-		if err := a.startMemoryCurator(ctx, setup, models, infra, service); err != nil {
+		if err := a.startMemoryCurator(ctx, setup, models, infra, service, okfProjector); err != nil {
 			return nil, err
 		}
 	}
@@ -906,10 +1085,10 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	if activationWorker != nil {
 		go activationWorker.Run(ctx)
 	}
-	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, notificationDone: notificationDone}, nil
+	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, knowledgeRetriever: knowledgeRetriever, lexicalWorker: knowledgeLexicalWorker, embeddingWorker: knowledgeEmbeddingWorker, notificationDone: notificationDone}, nil
 }
 
-func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service) error {
+func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service, projector port.OKFProjector) error {
 	cfg, paths := setup.cfg, setup.paths
 	memorySvc, memErr := memoryusecase.New(memoryusecase.Config{Recall: domain.MemoryRecallConfig{Enabled: true, MaxTopics: cfg.Memory.MaxTopicsRecall, MaxChars: cfg.Memory.MaxCharsRecall, Timeout: time.Duration(cfg.Memory.RecallTimeoutSeconds) * time.Second}, Limits: domain.MemoryLimits{MaxTopics: cfg.Memory.MaxTopics, MaxLinks: cfg.Memory.MaxLinks, MaxTopicChars: cfg.Memory.MaxTopicChars}, MaxPatchOps: cfg.Memory.MaxPatchOps}, memoryusecase.Dependencies{Store: infra.store, Logger: models.logger, SanitizeContent: models.redactor.String})
 	if memErr != nil {
@@ -937,7 +1116,7 @@ func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup
 		MemoryDir:     paths.MemoryDir,
 	}, memoryusecase.RunnerDependencies{
 		Store: infra.store, ExchangeFinder: infra.history, Curator: curator, Memory: memorySvc,
-		Projector: memoryprojector.New(), ProjectionReader: infra.store,
+		Projector: projector, ProjectionReader: infra.store,
 		Logger: models.logger, Sanitize: models.redactor.String,
 	})
 	if runnerErr != nil {

@@ -76,6 +76,40 @@ func TestNotificationClaimCASConflictReturnsTypedError(t *testing.T) {
 	}
 }
 
+func TestNotificationPublicationCASVerifiesPersistedStateWhenTriggerIgnoresUpdate(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	now := time.Now().UTC()
+	job := testExternalAgentJob(now)
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create = %v, err = %v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), now, "worker-1", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobFailed, nil, "acp_process_exit", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	notification, err := jobs.ClaimNextNotification(t.Context(), now.Add(2*time.Second), "publisher-1", time.Minute)
+	if err != nil || notification == nil {
+		t.Fatalf("claim notification = %#v, err = %v", notification, err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `CREATE TRIGGER ignore_notification_publication
+		BEFORE UPDATE OF publish_state ON external_agent_job_notifications
+		WHEN NEW.publish_state = 'published'
+		BEGIN SELECT RAISE(IGNORE); END`); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000001", now.Add(3*time.Second)); !errors.Is(err, ErrNotificationStateConflict) {
+		t.Fatalf("publication CAS error = %v", err)
+	}
+}
+
 func TestNotificationRestartAndAmbiguousPublishAreReconciledBeforeRetry(t *testing.T) {
 	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
@@ -559,7 +593,7 @@ func TestOpenReadOnlyDoesNotMigrateOrWrite(t *testing.T) {
 // assertTerminalNotificationRows checks the row-level activation disposition of
 // every terminal notification row of the job: one row per status revision in
 // order, matching terminal statuses, pending publication, and a
-// root_activation_required that follows the job mode.
+// root_activation_required that follows the completed detached route.
 func assertTerminalNotificationRows(t *testing.T, store *Store, jobs *ExternalAgentJobStore, jobID string, mode domain.ExternalAgentJobMode, wantStatuses ...domain.ExternalAgentJobStatus) {
 	t.Helper()
 	rows := terminalNotificationRowsForJob(t, store, jobID)
@@ -578,7 +612,7 @@ func assertTerminalNotificationRows(t *testing.T, store *Store, jobs *ExternalAg
 		if row.PublishState != domain.NotificationPending {
 			t.Fatalf("row %d publish state = %s, want %s", index, row.PublishState, domain.NotificationPending)
 		}
-		if row.RootActivationRequired != (mode == domain.JobDetached) {
+		if row.RootActivationRequired != (mode == domain.JobDetached && row.TerminalStatus == domain.JobCompleted) {
 			t.Fatalf("row %d root activation = %t, mode = %s", index, row.RootActivationRequired, mode)
 		}
 		if seen[row.StatusRevision] {
@@ -614,6 +648,7 @@ func TestTerminalPathNotificationRowDisposition(t *testing.T) {
 			store, jobs, now := newActivationTestStore(t)
 			job := activationTestJob("notification-cancellation-"+string(mode), now)
 			job.Mode = mode
+			seedActivationTestBinding(t, jobs, job, now)
 			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 				t.Fatalf("create = %v, err = %v", created, err)
 			}
@@ -636,6 +671,7 @@ func TestTerminalPathNotificationRowDisposition(t *testing.T) {
 				store, jobs, now := newActivationTestStore(t)
 				job := activationTestJob("notification-recovered-"+outcome.name+"-"+string(mode), now)
 				job.Mode = mode
+				seedActivationTestBinding(t, jobs, job, now)
 				if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 					t.Fatalf("create = %v, err = %v", created, err)
 				}

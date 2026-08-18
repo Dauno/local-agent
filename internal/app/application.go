@@ -103,14 +103,16 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		return doctor.Report{}, err
 	}
 	dependencies := doctor.Dependencies{
-		ConfigPath: configPath,
-		Secrets:    envfile.NewResolver(filepath.Join(a.root, config.DefaultEnvFile)),
-		Database:   databaseChecker{},
-		Artifacts:  artifactChecker{},
-		Jobs:       jobStoreChecker{},
-		CLI:        cliProviderChecker{},
-		ACP:        acpProviderChecker{},
-		Counter:    counterChecker{},
+		ConfigPath:      configPath,
+		Secrets:         envfile.NewResolver(filepath.Join(a.root, config.DefaultEnvFile)),
+		Database:        databaseChecker{},
+		Artifacts:       artifactChecker{},
+		Jobs:            jobStoreChecker{},
+		CLI:             cliProviderChecker{},
+		ACP:             acpProviderChecker{},
+		Counter:         counterChecker{},
+		Knowledge:       knowledgeChecker{},
+		ResultRetention: resultRetentionChecker{},
 	}
 	if includeLive {
 		dependencies.Live = liveChecker{}
@@ -332,6 +334,28 @@ func (jobStoreChecker) CheckExternalAgentResultIdentityHealth(ctx context.Contex
 	defer store.Close()
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	return jobs.IdentityHealth(ctx)
+}
+
+type knowledgeChecker struct{}
+
+func (knowledgeChecker) CheckKnowledgeRetrievalState(ctx context.Context, path string) (domain.KnowledgeRetrievalHealth, error) {
+	store, err := adaptersqlite.OpenExisting(ctx, path)
+	if err != nil {
+		return domain.KnowledgeRetrievalHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckKnowledgeRetrievalState(ctx)
+}
+
+type resultRetentionChecker struct{}
+
+func (resultRetentionChecker) CheckResultRetention(ctx context.Context, path string, ages domain.ResultRetentionAges, now time.Time) (domain.ResultRetentionHealth, error) {
+	store, err := adaptersqlite.OpenExisting(ctx, path)
+	if err != nil {
+		return domain.ResultRetentionHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckResultRetention(ctx, ages, now)
 }
 
 func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {

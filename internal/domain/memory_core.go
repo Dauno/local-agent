@@ -238,6 +238,18 @@ func SlackOwnerKey(key ConversationKey, userID string) string {
 	return "slack:" + parts[1] + ":user:" + userID
 }
 
+// ValidSlackOwnerKey reports whether ownerKey matches the canonical
+// "slack:<team>:user:<userID>" shape produced by SlackOwnerKey and the v9
+// ownership migration. It is the fail-closed owner check for legacy person
+// topics before they can bind a knowledge user scope.
+func ValidSlackOwnerKey(ownerKey string) bool {
+	parts := strings.Split(ownerKey, ":")
+	if len(parts) != 4 || parts[0] != "slack" || parts[2] != "user" {
+		return false
+	}
+	return strings.TrimSpace(parts[1]) != "" && strings.TrimSpace(parts[3]) != ""
+}
+
 func ScopedPersonTopicSlug(slug, ownerKey string) string {
 	suffix := memorySlug(ownerKey)
 	if suffix == "" || strings.HasSuffix(slug, "-"+suffix) {

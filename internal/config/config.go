@@ -128,11 +128,12 @@ type RecoverableResultsConfig struct {
 }
 
 type ADKCompactionConfig struct {
-	Enabled         bool `yaml:"enabled"`
-	MaxHistoryChars int  `yaml:"max_history_chars"`
-	RecentTurns     int  `yaml:"recent_turns"`
-	SummaryEnabled  bool `yaml:"summary_enabled"`
-	SummaryMaxChars int  `yaml:"summary_max_chars"`
+	Enabled             bool `yaml:"enabled"`
+	MaxHistoryChars     int  `yaml:"max_history_chars"`
+	RecentTurns         int  `yaml:"recent_turns"`
+	SummaryEnabled      bool `yaml:"summary_enabled"`
+	SummaryMaxChars     int  `yaml:"summary_max_chars"`
+	SummaryBudgetTokens int  `yaml:"summary_budget_tokens"`
 }
 
 type RuntimeConfig struct {
@@ -146,12 +147,21 @@ type RuntimeConfig struct {
 }
 
 type ModelConfig struct {
-	Name            string            `yaml:"name"`
-	BaseURL         string            `yaml:"base_url"`
-	APIKeyEnv       string            `yaml:"api_key_env"`
-	Headers         map[string]string `yaml:"headers,omitempty"`
-	ReasoningEffort string            `yaml:"reasoning_effort"`
-	ExtraBody       map[string]any    `yaml:"extra_body,omitempty"`
+	Name            string                   `yaml:"name"`
+	BaseURL         string                   `yaml:"base_url"`
+	APIKeyEnv       string                   `yaml:"api_key_env"`
+	Headers         map[string]string        `yaml:"headers,omitempty"`
+	ReasoningEffort string                   `yaml:"reasoning_effort"`
+	ExtraBody       map[string]any           `yaml:"extra_body,omitempty"`
+	ResultHandles   ModelResultHandlesConfig `yaml:"result_handles"`
+}
+
+// ModelResultHandlesConfig is the per-profile direct-inline admission of the
+// consuming (root) model profile. A profile must declare a positive
+// max_direct_inline_bytes to opt in; no declaration means zero V2
+// direct-inline bytes.
+type ModelResultHandlesConfig struct {
+	MaxDirectInlineBytes int `yaml:"max_direct_inline_bytes"`
 }
 
 type SlackConfig struct {
@@ -233,13 +243,132 @@ type ExportsConfig struct {
 }
 
 type OrchestrationConfig struct {
-	Workstreams WorkstreamConfig `yaml:"workstreams"`
+	Workstreams    WorkstreamConfig     `yaml:"workstreams"`
+	ResultHandles  ResultHandlesConfig  `yaml:"result_handles"`
+	Knowledge      KnowledgeConfig      `yaml:"knowledge"`
+	ResultAnalysis ResultAnalysisConfig `yaml:"result_analysis"`
 }
 
 type WorkstreamConfig struct {
 	Enabled                bool `yaml:"enabled"`
 	MaxNonTerminalTasks    int  `yaml:"max_non_terminal_tasks"`
 	MaxDependenciesPerTask int  `yaml:"max_dependencies_per_task"`
+	// SnapshotBudgetTokens is the provider-shaped per-turn source budget for
+	// the active workstream snapshot admitted into a normal human turn's
+	// frame. Zero disables snapshot admission.
+	SnapshotBudgetTokens int `yaml:"snapshot_budget_tokens"`
+}
+
+// KnowledgeConfig gates the TRD 05 scoped knowledge command surface. When
+// disabled, memory-human commands receive a deterministic disabled response
+// and never mutate state or reach the model, and the projection worker is
+// not started. Projection settings are projection-specific. MaxCardTokens
+// and Retrieval carry the TRD 06 contracts: card budgets, retrieval bounds,
+// and the optional embedding configuration. Defaults keep retrieval and
+// embeddings disabled.
+type KnowledgeConfig struct {
+	Enabled                   bool                     `yaml:"enabled"`
+	ProjectionIntervalSeconds int                      `yaml:"projection_interval_seconds"`
+	ProjectionMaxRetries      int                      `yaml:"projection_max_retries"`
+	ProjectionRetentionDays   int                      `yaml:"projection_retention_days"`
+	MaxCardTokens             int                      `yaml:"max_card_tokens"`
+	Retrieval                 KnowledgeRetrievalConfig `yaml:"retrieval"`
+}
+
+// KnowledgeRetrievalConfig carries the TRD 06 retrieval bounds. Embeddings
+// are opt-in: enabled requires retrieval enabled and a fully configured
+// embedding block; disabled leaves the embedding fields inert.
+type KnowledgeRetrievalConfig struct {
+	Enabled                 bool                     `yaml:"enabled"`
+	TimeoutSeconds          int                      `yaml:"timeout_seconds"`
+	MaxQueryRunes           int                      `yaml:"max_query_runes"`
+	MaxCandidatesPerChannel int                      `yaml:"max_candidates_per_channel"`
+	MaxCards                int                      `yaml:"max_cards"`
+	MaxDocumentBytes        int                      `yaml:"max_document_bytes"`
+	WorkerIntervalSeconds   int                      `yaml:"worker_interval_seconds"`
+	WorkerMaxRetries        int                      `yaml:"worker_max_retries"`
+	WorkerBatchSize         int                      `yaml:"worker_batch_size"`
+	Embedding               KnowledgeEmbeddingConfig `yaml:"embedding"`
+}
+
+// KnowledgeEmbeddingConfig names an opaque OpenAI-compatible embedding
+// endpoint. There is no default provider, endpoint, model, dimensions, or
+// threshold; the API key is resolved from the named environment variable at
+// composition time and is never stored or emitted.
+type KnowledgeEmbeddingConfig struct {
+	Enabled                  bool   `yaml:"enabled"`
+	ProviderID               string `yaml:"provider_id"`
+	BaseURL                  string `yaml:"base_url"`
+	APIKeyEnv                string `yaml:"api_key_env"`
+	Model                    string `yaml:"model"`
+	Dimensions               int    `yaml:"dimensions"`
+	MinSimilarityBasisPoints int    `yaml:"min_similarity_basis_points"`
+	TimeoutSeconds           int    `yaml:"timeout_seconds"`
+}
+
+// ResultHandlesConfig gates new V2 result materialization and workstream links.
+// Disabling it leaves existing V2 data readable for recovery and inspection.
+type ResultHandlesConfig struct {
+	Enabled                    bool                  `yaml:"enabled"`
+	MaxProducingCallsPerStep   int                   `yaml:"max_producing_calls_per_step"`
+	ProducingCallReserveTokens int                   `yaml:"producing_call_reserve_tokens"`
+	Retention                  ResultRetentionConfig `yaml:"retention"`
+}
+
+// ResultRetentionConfig carries the TRD 02 per-class retention ages in days.
+// A retention worker is not implemented yet (see TRD 02 §Retention); these
+// ages currently drive only the offline doctor observability check.
+type ResultRetentionConfig struct {
+	ContextDays      int `yaml:"context_days"`
+	ConversationDays int `yaml:"conversation_days"`
+	WorkstreamDays   int `yaml:"workstream_days"`
+	ExportedDays     int `yaml:"exported_days"`
+}
+
+// ResultAnalysisConfig carries the TRD 07 objective-bound result analysis
+// bounds. The gate defaults to disabled. Every bound is a static hard-capped
+// value validated in internal/config/validate.go; a non-positive value is
+// rejected, never silently defaulted.
+type ResultAnalysisConfig struct {
+	Enabled               bool                         `yaml:"enabled"`
+	MaxSegmentBytes       int                          `yaml:"max_segment_bytes"`
+	OverlapBasisPoints    int                          `yaml:"overlap_basis_points"`
+	OverlapMaxBytes       int                          `yaml:"overlap_max_bytes"`
+	MaxLeaves             int                          `yaml:"max_leaves"`
+	MaxReductionFanIn     int                          `yaml:"max_reduction_fan_in"`
+	MaxReductionDepth     int                          `yaml:"max_reduction_depth"`
+	MaxConcurrentLeaves   int                          `yaml:"max_concurrent_leaves"`
+	MaxAttemptsPerStep    int                          `yaml:"max_attempts_per_step"`
+	CallTimeoutSeconds    int                          `yaml:"call_timeout_seconds"`
+	WallTimeSeconds       int                          `yaml:"wall_time_seconds"`
+	WorkerIntervalSeconds int                          `yaml:"worker_interval_seconds"`
+	Evidence              ResultAnalysisEvidenceConfig `yaml:"evidence"`
+	Model                 ResultAnalysisModelConfig    `yaml:"model"`
+}
+
+// ResultAnalysisEvidenceConfig carries the four static bounds from TRD 07
+// §Evidence and Downstream Bundle.
+type ResultAnalysisEvidenceConfig struct {
+	ExcerptBytes        int `yaml:"excerpt_bytes"`
+	SelectorsPerLeaf    int `yaml:"selectors_per_leaf"`
+	ReferencesPerPacket int `yaml:"references_per_packet"`
+	BundleBytes         int `yaml:"bundle_bytes"`
+}
+
+// ResultAnalysisModelConfig optionally names a distinct model profile for
+// analysis leaf and reduction calls. When Enabled is false, analysis uses
+// the main model profile; the fingerprint recorded on the analysis row is
+// derived from whichever profile is effective, so the fallback is explicit
+// in the identity. There is no default provider, endpoint, or model; the API
+// key is resolved from the named environment variable at composition time
+// and is never stored or emitted.
+type ResultAnalysisModelConfig struct {
+	Enabled         bool   `yaml:"enabled"`
+	ProviderID      string `yaml:"provider_id"`
+	BaseURL         string `yaml:"base_url"`
+	APIKeyEnv       string `yaml:"api_key_env"`
+	Model           string `yaml:"model"`
+	ReasoningEffort string `yaml:"reasoning_effort"`
 }
 
 // Default returns a new Config populated with the PRD defaults.
@@ -265,7 +394,7 @@ func Default() Config {
 			},
 			ADKCompaction: &ADKCompactionConfig{
 				Enabled: true, MaxHistoryChars: 120_000, RecentTurns: 8,
-				SummaryEnabled: true, SummaryMaxChars: 8_000,
+				SummaryEnabled: true, SummaryMaxChars: 8_000, SummaryBudgetTokens: 2_048,
 			},
 			ContextFeatures: &ContextFeaturesConfig{},
 		},
@@ -351,6 +480,54 @@ func Default() Config {
 		Orchestration: OrchestrationConfig{Workstreams: WorkstreamConfig{
 			Enabled: false, MaxNonTerminalTasks: domain.DefaultMaxWorkstreamTasks,
 			MaxDependenciesPerTask: domain.DefaultMaxWorkstreamDependencies,
+			SnapshotBudgetTokens:   domain.DefaultWorkstreamSnapshotBudgetTokens,
+		}, ResultHandles: ResultHandlesConfig{
+			Enabled: false, MaxProducingCallsPerStep: 1, ProducingCallReserveTokens: 2_048,
+			Retention: ResultRetentionConfig{
+				ContextDays: domain.DefaultResultRetentionContextDays, ConversationDays: domain.DefaultResultRetentionConversationDays,
+				WorkstreamDays: domain.DefaultResultRetentionWorkstreamDays, ExportedDays: domain.DefaultResultRetentionExportedDays,
+			},
+		}, Knowledge: KnowledgeConfig{
+			Enabled:                   false,
+			ProjectionIntervalSeconds: 60,
+			ProjectionMaxRetries:      3,
+			ProjectionRetentionDays:   90,
+			MaxCardTokens:             domain.DefaultMaxKnowledgeCardBudget,
+			Retrieval: KnowledgeRetrievalConfig{
+				Enabled:                 false,
+				TimeoutSeconds:          domain.DefaultKnowledgeRetrievalTimeoutSeconds,
+				MaxQueryRunes:           domain.DefaultKnowledgeRetrievalMaxQueryRunes,
+				MaxCandidatesPerChannel: domain.DefaultKnowledgeRetrievalMaxCandidatesPerChannel,
+				MaxCards:                domain.DefaultKnowledgeRetrievalMaxCards,
+				MaxDocumentBytes:        domain.DefaultKnowledgeRetrievalMaxDocumentBytes,
+				WorkerIntervalSeconds:   domain.DefaultKnowledgeRetrievalWorkerIntervalSeconds,
+				WorkerMaxRetries:        domain.DefaultKnowledgeRetrievalWorkerMaxRetries,
+				WorkerBatchSize:         domain.DefaultKnowledgeRetrievalWorkerBatchSize,
+				Embedding: KnowledgeEmbeddingConfig{
+					Enabled:        false,
+					TimeoutSeconds: domain.DefaultKnowledgeEmbeddingTimeoutSeconds,
+				},
+			},
+		}, ResultAnalysis: ResultAnalysisConfig{
+			Enabled:               false,
+			MaxSegmentBytes:       24576,
+			OverlapBasisPoints:    1000,
+			OverlapMaxBytes:       4096,
+			MaxLeaves:             64,
+			MaxReductionFanIn:     8,
+			MaxReductionDepth:     4,
+			MaxConcurrentLeaves:   2,
+			MaxAttemptsPerStep:    2,
+			CallTimeoutSeconds:    120,
+			WallTimeSeconds:       900,
+			WorkerIntervalSeconds: 5,
+			Evidence: ResultAnalysisEvidenceConfig{
+				ExcerptBytes:        2048,
+				SelectorsPerLeaf:    8,
+				ReferencesPerPacket: 32,
+				BundleBytes:         32768,
+			},
+			Model: ResultAnalysisModelConfig{Enabled: false},
 		}},
 	}
 }

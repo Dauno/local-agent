@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -18,13 +19,66 @@ import (
 
 var _ port.OKFProjector = (*Projector)(nil)
 
-type Projector struct{}
+// Projector renders committed SQLite memory state into an OKF bundle. A
+// single shared instance is serialized across the legacy memory runner and
+// the knowledge projection worker so concurrent promotions never corrupt
+// staging, backup, or the live bundle. Every promotion renders one complete
+// snapshot: legacy topics and knowledge files, with each owner's file set
+// preserved across both workers.
+type Projector struct {
+	mu    sync.Mutex
+	clock port.Clock
+	// rename and removeAll are injectable promotion seams; tests fault them
+	// to exercise promotion, rollback, and cleanup failure paths.
+	renameFn    func(oldpath, newpath string) error
+	removeAllFn func(path string) error
+}
 
 func New() *Projector {
-	return &Projector{}
+	return NewWithFaults(os.Rename, os.RemoveAll)
+}
+
+// NewWithFaults returns a projector whose rename and removal operations are
+// injectable seams. It exists for fault-injection tests; production code
+// always uses New.
+func NewWithFaults(renameFn func(oldpath, newpath string) error, removeAllFn func(path string) error) *Projector {
+	return &Projector{clock: port.SystemClock{}, renameFn: renameFn, removeAllFn: removeAllFn}
+}
+
+func (p *Projector) now() time.Time {
+	if p.clock != nil {
+		return p.clock.Now().UTC()
+	}
+	return time.Now().UTC()
+}
+
+func (p *Projector) removeAll(path string) error {
+	if p.removeAllFn != nil {
+		return p.removeAllFn(path)
+	}
+	return os.RemoveAll(path)
+}
+
+func (p *Projector) rename(oldpath, newpath string) error {
+	if p.renameFn != nil {
+		return p.renameFn(oldpath, newpath)
+	}
+	return os.Rename(oldpath, newpath)
 }
 
 func (p *Projector) Project(ctx context.Context, reader port.ProjectionReader, outputDir string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	// Internal recovery runs before the live bundle is created: a backup
+	// left by a failed promotion and rollback (live bundle missing) is
+	// restored in place, while residue staging or backup directories next
+	// to an existing live bundle are removed, keeping the typed cleanup
+	// error for as long as the removal fails. A later read, render, or
+	// promotion failure can therefore never lose the previous bundle: it
+	// is either still live or was restored first.
+	if err := p.recoverLocked(outputDir); err != nil {
+		return err
+	}
 	if err := makeSafeDir(outputDir); err != nil {
 		return fmt.Errorf("create memory directory: %w", err)
 	}
@@ -35,41 +89,168 @@ func (p *Projector) Project(ctx context.Context, reader port.ProjectionReader, o
 	}
 
 	stagingDir := filepath.Join(filepath.Dir(outputDir), ".okf-staging-"+filepath.Base(outputDir))
-	if err := os.RemoveAll(stagingDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("clean staging directory: %w", err)
+	if err := rejectSymlinkPath(stagingDir); err != nil {
+		return err
+	}
+	if err := p.removeAll(stagingDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: clean staging directory: %v", port.ErrProjectionCleanup, err)
 	}
 	if err := makeSafeDir(stagingDir); err != nil {
 		return fmt.Errorf("create staging directory: %w", err)
 	}
 
-	if err := renderBundle(stagingDir, snapshot); err != nil {
-		_ = os.RemoveAll(stagingDir)
-		return err
+	if err := p.renderBundle(stagingDir, snapshot); err != nil {
+		return p.discardStaging(stagingDir, err)
 	}
 
-	backupDir := filepath.Join(filepath.Dir(outputDir), ".okf-backup-"+filepath.Base(outputDir))
-	if err := os.RemoveAll(backupDir); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("clean backup directory: %w", err)
+	// A symlink anywhere inside the current bundle (directory, subtree, or
+	// target) aborts the promotion before any rename, so the destination is
+	// never modified through an attacker-placed link.
+	if err := rejectBundleSymlinks(outputDir); err != nil {
+		return p.discardStaging(stagingDir, err)
 	}
-	if _, err := os.Stat(outputDir); err == nil {
-		if err := os.Rename(outputDir, backupDir); err != nil {
-			return fmt.Errorf("backup current bundle: %w", err)
+
+	return p.promote(stagingDir, outputDir)
+}
+
+// discardStaging removes the staging directory after another failure,
+// joining any cleanup failure with the original error. A staging residue
+// can retain content that the next projection forgets, so its removal
+// failure keeps the typed cleanup error and attempt-neutral callers stay
+// pending until the residue is actually removed.
+func (p *Projector) discardStaging(stagingDir string, cause error) error {
+	cleanupErr := p.removeAll(stagingDir)
+	if cleanupErr == nil || errors.Is(cleanupErr, os.ErrNotExist) {
+		return cause
+	}
+	return errors.Join(cause, fmt.Errorf("%w: remove staging after failure: %v", port.ErrProjectionCleanup, cleanupErr))
+}
+
+// promote swaps the staged bundle into place with strict error semantics:
+// an error is returned only when the live bundle is not the new complete
+// bundle. A promotion failure rolls the previous bundle back and reports a
+// rollback failure explicitly without losing the backup; backup cleanup
+// after a successful promotion is durable and surfaced as
+// ErrProjectionCleanup so callers keep the outbox row pending. Project runs
+// internal recovery first, so a backup present here is residue whose removal
+// failure keeps the same typed error.
+func (p *Projector) promote(stagingDir, outputDir string) error {
+	backupDir := filepath.Join(filepath.Dir(outputDir), ".okf-backup-"+filepath.Base(outputDir))
+	if err := rejectSymlinkPath(backupDir); err != nil {
+		return p.discardStaging(stagingDir, err)
+	}
+	if err := p.removeAll(backupDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return p.discardStaging(stagingDir, fmt.Errorf("%w: clean backup directory: %v", port.ErrProjectionCleanup, err))
+	}
+
+	existed := true
+	if _, err := os.Lstat(outputDir); errors.Is(err, os.ErrNotExist) {
+		existed = false
+	} else if err != nil {
+		return p.discardStaging(stagingDir, fmt.Errorf("inspect current bundle: %w", err))
+	}
+
+	if existed {
+		if err := p.rename(outputDir, backupDir); err != nil {
+			return p.discardStaging(stagingDir, fmt.Errorf("backup current bundle: %w", err))
 		}
 	}
 
-	if err := os.Rename(stagingDir, outputDir); err != nil {
-		_ = os.Rename(backupDir, outputDir)
-		return fmt.Errorf("promote staging to bundle: %w", err)
+	if err := p.rename(stagingDir, outputDir); err != nil {
+		if existed {
+			if rollbackErr := p.rename(backupDir, outputDir); rollbackErr != nil {
+				// The previous bundle is preserved at the backup path and
+				// recoverable; report both failures together with the
+				// staging cleanup state. The staging residue can retain
+				// content the next projection forgets, so its cleanup
+				// failure keeps the typed cleanup error.
+				return p.discardStaging(stagingDir, fmt.Errorf("promote staging to bundle: %v; rollback failed: %v (previous bundle preserved at %q)", err, rollbackErr, backupDir))
+			}
+		}
+		return p.discardStaging(stagingDir, fmt.Errorf("promote staging to bundle: %w", err))
 	}
 
-	if err := os.RemoveAll(backupDir); err != nil {
-		return fmt.Errorf("remove backup after promotion: %w", err)
+	// The promotion succeeded; the live bundle is complete. Cleanup must be
+	// durable: if the backup cannot be removed, forgotten content would
+	// remain indefinitely while the caller marks the batch complete. A
+	// cleanup failure therefore surfaces a typed error that keeps the
+	// outbox row pending; the next attempt starts by removing the backup
+	// again.
+	if err := p.removeAll(backupDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		if retryErr := p.removeAll(backupDir); retryErr != nil && !errors.Is(retryErr, os.ErrNotExist) {
+			return fmt.Errorf("%w: remove backup after promotion: %v", port.ErrProjectionCleanup, retryErr)
+		}
 	}
-
 	return nil
 }
 
-func renderBundle(dir string, snapshot port.ProjectionSnapshot) error {
+// Recover removes promotion residue for outputDir without rendering:
+// leftover staging and backup directories. When the live bundle is missing
+// the backup is the only copy and is restored instead of discarded, so a
+// crash between backup and promotion never loses the previous bundle.
+// Recovery holds the same mutex as promotions and is safe to run at worker
+// startup with no pending knowledge mutation.
+func (p *Projector) Recover(outputDir string) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.recoverLocked(outputDir)
+}
+
+// recoverLocked removes promotion residue for outputDir under the caller's
+// mutex: leftover staging directories and the residue backup. When the
+// live bundle is missing the backup holds the previous bundle and is
+// restored in place; when the live bundle exists the backup is residue
+// and is removed, keeping the typed cleanup error for as long as the
+// removal fails so attempt-neutral callers stay pending. Shared by Recover
+// and the start of every Project.
+func (p *Projector) recoverLocked(outputDir string) error {
+	stagingDir := filepath.Join(filepath.Dir(outputDir), ".okf-staging-"+filepath.Base(outputDir))
+	if err := rejectSymlinkPath(stagingDir); err != nil {
+		return err
+	}
+	if err := p.removeAll(stagingDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: clean staging directory: %v", port.ErrProjectionCleanup, err)
+	}
+	backupDir := filepath.Join(filepath.Dir(outputDir), ".okf-backup-"+filepath.Base(outputDir))
+	if err := rejectSymlinkPath(backupDir); err != nil {
+		return err
+	}
+	backupInfo, err := os.Lstat(backupDir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect backup directory: %w", err)
+	}
+	if !backupInfo.IsDir() {
+		// A non-directory at the reserved backup path can never be a
+		// bundle; fail preserving it instead of discarding content.
+		return fmt.Errorf("backup path %q exists and is not a directory", backupDir)
+	}
+	if _, err := os.Lstat(outputDir); errors.Is(err, os.ErrNotExist) {
+		// The live bundle is missing: the backup holds the previous bundle
+		// and must be restored rather than discarded.
+		if err := rejectBundleSymlinks(backupDir); err != nil {
+			return err
+		}
+		if err := p.rename(backupDir, outputDir); err != nil {
+			return fmt.Errorf("restore previous bundle from backup: %w", err)
+		}
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("inspect current bundle: %w", err)
+	}
+	// The live bundle exists and must be free of symlinks anywhere in the
+	// tree before the backup is discarded.
+	if err := rejectBundleSymlinks(outputDir); err != nil {
+		return err
+	}
+	if err := p.removeAll(backupDir); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("%w: remove backup residue: %v", port.ErrProjectionCleanup, err)
+	}
+	return nil
+}
+
+func (p *Projector) renderBundle(dir string, snapshot port.ProjectionSnapshot) error {
 	topicByID := make(map[domain.TopicID]domain.Topic, len(snapshot.Topics))
 	for _, topic := range snapshot.Topics {
 		topicByID[topic.ID] = topic
@@ -98,6 +279,10 @@ func renderBundle(dir string, snapshot port.ProjectionSnapshot) error {
 		}
 	}
 
+	if err := renderKnowledge(dir, snapshot.Knowledge, p.now()); err != nil {
+		return err
+	}
+
 	dirs, childrenByDir := collectOKFDirs(snapshot.Topics)
 	for _, d := range dirs {
 		if d == "" {
@@ -110,13 +295,13 @@ func renderBundle(dir string, snapshot port.ProjectionSnapshot) error {
 	}
 
 	allChildren := childrenByDir[""]
-	if err := writeRootIndex(dir, allChildren); err != nil {
+	if err := writeRootIndex(dir, allChildren, snapshot.Knowledge.Present()); err != nil {
 		return fmt.Errorf("write root index: %w", err)
 	}
 	if err := writeOKFLog(dir, snapshot); err != nil {
 		return fmt.Errorf("write log: %w", err)
 	}
-	return removeStaleOKFFiles(dir, snapshot.Topics)
+	return removeStaleOKFFiles(dir, snapshot.Topics, snapshot.Knowledge.Present())
 }
 
 type dirEntry struct {
@@ -152,7 +337,7 @@ func collectOKFDirs(topics []domain.Topic) ([]string, map[string][]dirEntry) {
 	return dirs, childrenByDir
 }
 
-func writeRootIndex(dir string, children []dirEntry) error {
+func writeRootIndex(dir string, children []dirEntry, hasKnowledge bool) error {
 	var b strings.Builder
 	b.WriteString("---\n")
 	b.WriteString("okf_version: \"0.1\"\n")
@@ -169,6 +354,9 @@ func writeRootIndex(dir string, children []dirEntry) error {
 		}
 		seen[dirPath] = struct{}{}
 		b.WriteString(fmt.Sprintf("- [%s](%s/index.md)\n", dirPath, dirPath))
+	}
+	if hasKnowledge {
+		b.WriteString("- [knowledge](knowledge/index.md)\n")
 	}
 	b.WriteString("\nSee [Change Log](log.md) for revision history.\n")
 	return atomicWrite(filepath.Join(dir, "index.md"), b.String())
@@ -435,7 +623,46 @@ func makeSafeDir(path string) error {
 	return nil
 }
 
-func removeStaleOKFFiles(rootDir string, topics []domain.Topic) error {
+// rejectSymlinkPath refuses a staging or backup path that is itself a
+// symlink, so promotion never removes or renames through an attacker-placed
+// link.
+func rejectSymlinkPath(path string) error {
+	info, err := os.Lstat(path)
+	if err == nil && info.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("projection path %q is a symlink", path)
+	}
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("inspect projection path %q: %w", path, err)
+	}
+	return nil
+}
+
+// rejectBundleSymlinks refuses any symlink inside the current bundle before
+// promotion. The bundle is replaced wholesale; a symlink planted in it must
+// fail the projection instead of being silently swapped or followed.
+func rejectBundleSymlinks(bundleDir string) error {
+	info, err := os.Lstat(bundleDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return nil
+		}
+		return fmt.Errorf("inspect current bundle: %w", err)
+	}
+	if !info.IsDir() {
+		return fmt.Errorf("current bundle %q exists and is not a directory", bundleDir)
+	}
+	return filepath.WalkDir(bundleDir, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.Type()&os.ModeSymlink != 0 {
+			return fmt.Errorf("current bundle %q contains a symlink", path)
+		}
+		return nil
+	})
+}
+
+func removeStaleOKFFiles(rootDir string, topics []domain.Topic, hasKnowledge bool) error {
 	wanted := map[string]struct{}{}
 	for _, topic := range topics {
 		bp := topic.BundlePath
@@ -453,6 +680,14 @@ func removeStaleOKFFiles(rootDir string, topics []domain.Topic) error {
 	// Always keep root index.md and log.md
 	wanted["index.md"] = struct{}{}
 	wanted["log.md"] = struct{}{}
+	// Knowledge files are fixed names owned by the knowledge projection.
+	// When knowledge rows exist they must survive legacy promotion; when no
+	// knowledge rows exist they are stale and removed like any other file.
+	if hasKnowledge {
+		for _, name := range knowledgeFileNames() {
+			wanted[filepath.Join("knowledge", name)] = struct{}{}
+		}
+	}
 
 	return filepath.WalkDir(rootDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil {

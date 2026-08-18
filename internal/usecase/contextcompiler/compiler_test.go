@@ -25,6 +25,8 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
+func init() { legacyProjectionWritesForTests = true }
+
 // ---------------------------------------------------------------------------
 // Test fakes
 // ---------------------------------------------------------------------------
@@ -250,6 +252,119 @@ type serializedByteCounter struct{}
 
 func (serializedByteCounter) CountRequest(_ context.Context, envelope port.ModelRequestEnvelope) (port.TokenCount, error) {
 	return port.TokenCount{Tokens: len(envelope.Serialized), Strategy: "byte_bound"}, nil
+}
+
+type recordingFrameCounter struct {
+	count    port.TokenCount
+	calls    int
+	contents []domain.Content
+}
+
+func (c *recordingFrameCounter) CountContextFrame(_ context.Context, contents []domain.Content) (port.TokenCount, error) {
+	c.calls++
+	c.contents = domain.CloneContents(contents)
+	return c.count, nil
+}
+
+type summaryBudgetFrameCounter struct {
+	summaryTokens int
+	fullTokens    int
+	calls         int
+}
+
+func (c *summaryBudgetFrameCounter) CountContextFrame(_ context.Context, contents []domain.Content) (port.TokenCount, error) {
+	c.calls++
+	for _, content := range contents {
+		for _, part := range content.Parts {
+			if strings.Contains(part.Text, "UNTRUSTED CONVERSATION SUMMARY REFERENCE") {
+				return port.TokenCount{Tokens: c.summaryTokens, Strategy: "provider", Exact: true}, nil
+			}
+		}
+	}
+	return port.TokenCount{Tokens: c.fullTokens, Strategy: "provider", Exact: true}, nil
+}
+
+func TestCompilerAppliesProviderAwareSummarySourceBudget(t *testing.T) {
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
+	}
+	for _, tc := range []struct {
+		name          string
+		summaryTokens int
+		budget        int
+		wantOmitted   bool
+		wantSummary   bool
+	}{
+		{name: "within source budget", summaryTokens: 5, budget: 5, wantSummary: true},
+		{name: "over source budget", summaryTokens: 6, budget: 5, wantOmitted: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			counter := &summaryBudgetFrameCounter{summaryTokens: tc.summaryTokens, fullTokens: 4}
+			result, err := New(newFakeResultStore(), serializedByteCounter{}).CompileFrame(t.Context(), domain.CompileRequest{
+				Contents: contents, ExistingSummary: "The user stated that bounded context is required.",
+				Compaction: domain.ContextCompactionSettings{
+					Enabled: true, MaxHistoryChars: 1000, RecentTurns: 1,
+					SummaryEnabled: true, SummaryMaxChars: 500, SummaryBudgetTokens: tc.budget,
+				},
+				ModelBudget: domain.RequestBudget{HardTokens: 100, TargetTokens: 100},
+			}, counter)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if result.Diagnostics.SummaryOmitted != tc.wantOmitted {
+				t.Fatalf("summary omission = %v, want %v; diagnostics = %#v", result.Diagnostics.SummaryOmitted, tc.wantOmitted, result.Diagnostics)
+			}
+			if result.Diagnostics.SummarySourceTokens != tc.summaryTokens {
+				t.Fatalf("summary source tokens = %d, want %d", result.Diagnostics.SummarySourceTokens, tc.summaryTokens)
+			}
+			foundSummary := false
+			for _, content := range result.Contents {
+				for _, part := range content.Parts {
+					if strings.Contains(part.Text, "UNTRUSTED CONVERSATION SUMMARY REFERENCE") {
+						foundSummary = true
+					}
+				}
+			}
+			if foundSummary != tc.wantSummary {
+				t.Fatalf("summary present = %v, want %v; contents = %#v", foundSummary, tc.wantSummary, result.Contents)
+			}
+			if counter.calls != 2 {
+				t.Fatalf("provider frame count calls = %d, want source plus final count", counter.calls)
+			}
+		})
+	}
+}
+
+func TestCompilerCompileFrameUsesProviderShapedCounterWithoutFixedEstimate(t *testing.T) {
+	frameCounter := &recordingFrameCounter{count: port.TokenCount{Tokens: 4, Strategy: "provider", Exact: true}}
+	contents := []domain.Content{
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "previous input"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "previous response"}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current input"}}},
+	}
+	result, err := New(nil, serializedByteCounter{}).CompileFrame(t.Context(), domain.CompileRequest{
+		Contents:           contents,
+		ModelBudget:        domain.RequestBudget{HardTokens: 100, TargetTokens: 100},
+		FixedRequestTokens: 100,
+		Compaction:         domain.ContextCompactionSettings{Enabled: true, RecentTurns: 1},
+	}, frameCounter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if frameCounter.calls != 1 {
+		t.Fatalf("provider frame counter calls = %d, want 1", frameCounter.calls)
+	}
+	if !reflect.DeepEqual(frameCounter.contents, contents) {
+		t.Fatalf("provider frame contents = %#v, want %#v", frameCounter.contents, contents)
+	}
+	if result.Diagnostics.RequestTokensAfter != 4 || result.Diagnostics.CounterStrategy != "provider" {
+		t.Fatalf("frame diagnostics = %#v", result.Diagnostics)
+	}
+	if !reflect.DeepEqual(result.Contents, contents) {
+		t.Fatalf("provider frame unexpectedly evicted optional contents: %#v", result.Contents)
+	}
 }
 
 type sequenceTokenCounter struct {
@@ -557,8 +672,8 @@ func TestCompilerRecountsContinuityAndExcerptsThenFailsClosed(t *testing.T) {
 func TestCompilerIrreducibleResultExposesRecountMetrics(t *testing.T) {
 	contents := []domain.Content{{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}}}
 	recorder := &compilerMetricCapture{}
-	result, err := New(newFakeResultStore(), &sequenceTokenCounter{counts: []int{101, 101, 101}}, recorder).Compile(t.Context(), domain.CompileRequest{
-		Contents: contents, ExistingSummary: "summary", ModelBudget: domain.RequestBudget{HardTokens: 100, TargetTokens: 100},
+	result, err := New(newFakeResultStore(), &sequenceTokenCounter{counts: []int{1001, 1001, 1001}}, recorder).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents, ExistingSummary: "summary", ModelBudget: domain.RequestBudget{HardTokens: 1000, TargetTokens: 1000},
 		Continuity: domain.ContinuityCapsule{Objective: &domain.ContinuityItem{ID: "objective", Kind: domain.ContinuityKindObjective, Text: "retain", Status: domain.ContinuityStatusCurrent}},
 	})
 	if err == nil {
@@ -609,7 +724,7 @@ func TestCompilerExternalizedTotalIsCounter(t *testing.T) {
 }
 
 func TestCompilerReducesOptionalContextTowardTargetBeforeHardLimit(t *testing.T) {
-	counter := &sequenceTokenCounter{counts: []int{81, 70}}
+	counter := &sequenceTokenCounter{counts: []int{181, 181, 170}}
 	contents := []domain.Content{
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
 		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
@@ -617,12 +732,12 @@ func TestCompilerReducesOptionalContextTowardTargetBeforeHardLimit(t *testing.T)
 	}
 	result, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
 		Contents: contents, ExistingSummary: "summary",
-		ModelBudget: domain.RequestBudget{HardTokens: 100, TriggerTokens: 80, TargetTokens: 70},
+		ModelBudget: domain.RequestBudget{HardTokens: 200, TriggerTokens: 180, TargetTokens: 170},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Diagnostics.RequestTokensAfter != 70 || result.Diagnostics.ReductionStage != "optional" {
+	if result.Diagnostics.RequestTokensAfter != 170 || result.Diagnostics.ReductionStage != "optional" {
 		t.Fatalf("diagnostics = %#v", result.Diagnostics)
 	}
 	if len(result.Contents) != 1 || result.Contents[0].Parts[0].Text != "current request" {
@@ -632,21 +747,22 @@ func TestCompilerReducesOptionalContextTowardTargetBeforeHardLimit(t *testing.T)
 
 func TestCompilerDoesNotExternalizeAfterOptionalContextReachesTarget(t *testing.T) {
 	store := newFakeResultStore()
-	counter := &sequenceTokenCounter{counts: []int{81, 65}}
+	counter := &sequenceTokenCounter{counts: []int{381, 381, 370}}
 	contents := []domain.Content{
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "old request"}}},
 		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "old answer"}}},
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "current request"}}},
 		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file"}}}},
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": readableText(500)}}}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": readableText(50)}}}}},
 	}
 	result, err := New(store, counter).Compile(t.Context(), domain.CompileRequest{
-		Contents: contents, ModelBudget: domain.RequestBudget{HardTokens: 100, TriggerTokens: 80, TargetTokens: 70},
+		Contents: contents, ExistingSummary: "summary",
+		ModelBudget: domain.RequestBudget{HardTokens: 400, TriggerTokens: 380, TargetTokens: 370},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Diagnostics.RequestTokensAfter != 65 || result.Diagnostics.ResponsesExternalized != 0 || store.putCalls != 0 {
+	if result.Diagnostics.RequestTokensAfter != 370 || result.Diagnostics.ResponsesExternalized != 0 || store.putCalls != 0 {
 		t.Fatalf("diagnostics=%#v writes=%d", result.Diagnostics, store.putCalls)
 	}
 }
@@ -1054,71 +1170,43 @@ func TestCompilerRequiresBindingsBeforeProjectionStorage(t *testing.T) {
 	}
 }
 
-func lateProjectionHardLimit(t *testing.T, contents []domain.Content, parts []reduciblePart) int {
-	t.Helper()
-	compiler := New(newFakeResultStore(), serializedByteCounter{})
-	minimum := dryRunActiveContents(contents, parts)
-	count, err := compiler.countProjection(t.Context(), minimum, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	return count.Tokens
-}
-
-func TestLateExternalizationUsesBatchValidation(t *testing.T) {
-	contents := largeProjectionContents(false, false)
-	before, err := domain.CanonicalJSON(contents)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, parts := classifyActiveParts(contents)
+func TestCompilerDoesNotExternalizeResultChunks(t *testing.T) {
 	store := newFakeResultStore()
-	store.emptyRef = true
-	compiler := New(store, serializedByteCounter{})
-	_, _, _, err = compiler.lateExternalize(t.Context(), domain.CompileRequest{
-		Actor: "U1", ConversationKey: "late-empty-ref", ModelBudget: domain.RequestBudget{HardTokens: 2_000},
-	}, contents, parts, nil, lateProjectionHardLimit(t, contents, parts))
-	if err == nil || !strings.Contains(err.Error(), "empty reference") {
-		t.Fatalf("lateExternalize() error = %v, want empty reference error", err)
+	_, err := New(store, serializedByteCounter{}).Compile(t.Context(), domain.CompileRequest{
+		Contents: []domain.Content{
+			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect result"}}},
+			{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "v2-chunk", Name: "workstream_read_result_chunk"}}}},
+			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "v2-chunk", Name: "workstream_read_result_chunk", Response: map[string]any{"content": strings.Repeat("x", 6_000)}}}}},
+		},
+		ModelBudget: domain.RequestBudget{HardTokens: 1_000, TargetTokens: 1_000}, Actor: "U1", ConversationKey: "no-recursive-projection",
+	})
+	var irreducible *domain.IrreducibleContextError
+	if !errors.As(err, &irreducible) {
+		t.Fatalf("Compile() error = %v, want irreducible context", err)
 	}
-	if store.putCalls != 1 {
-		t.Fatalf("late Put calls = %d, want one", store.putCalls)
-	}
-	after, err := domain.CanonicalJSON(contents)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) {
-		t.Fatal("late empty-reference failure mutated caller input")
+	if store.putCalls != 0 {
+		t.Fatalf("protected result chunk wrote %d projections", store.putCalls)
 	}
 }
 
-func TestLateExternalizationDoesNotPublishAfterSecondPutFailure(t *testing.T) {
-	contents := largeProjectionContents(false, false)
-	before, err := domain.CanonicalJSON(contents)
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, parts := classifyActiveParts(contents)
+func TestCompilerV2BoundaryDoesNotWriteAnyProjection(t *testing.T) {
 	store := newFakeResultStore()
-	store.failPutAt = 2
-	store.putFailure = errors.New("late second put failed")
 	compiler := New(store, serializedByteCounter{})
-	result, _, _, err := compiler.lateExternalize(t.Context(), domain.CompileRequest{
-		Actor: "U1", ConversationKey: "late-second-put", ModelBudget: domain.RequestBudget{HardTokens: 2_000},
-	}, contents, parts, nil, lateProjectionHardLimit(t, contents, parts))
-	if err == nil || !strings.Contains(err.Error(), "late second put failed") {
-		t.Fatalf("lateExternalize() error = %v, want second Put error", err)
+	compiler.projectionWritesDisabled = true
+	_, err := compiler.Compile(t.Context(), domain.CompileRequest{
+		Contents: []domain.Content{
+			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "run tool"}}},
+			{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "tool-large", Name: "arbitrary_tool"}}}},
+			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "tool-large", Name: "arbitrary_tool", Response: map[string]any{"content": strings.Repeat("x", 6_000)}}}}},
+		},
+		ModelBudget: domain.RequestBudget{HardTokens: 1_000, TargetTokens: 1_000}, Actor: "U1", ConversationKey: "v2-no-writes",
+	})
+	var irreducible *domain.IrreducibleContextError
+	if !errors.As(err, &irreducible) {
+		t.Fatalf("Compile() error = %v, want irreducible context", err)
 	}
-	if result != nil || store.putCalls != 2 {
-		t.Fatalf("late result=%#v writes=%d, want no result and two Put attempts", result, store.putCalls)
-	}
-	after, err := domain.CanonicalJSON(contents)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(before) != string(after) {
-		t.Fatal("late second-Put failure mutated caller input")
+	if store.putCalls != 0 {
+		t.Fatalf("V2 compiler wrote %d legacy projections", store.putCalls)
 	}
 }
 

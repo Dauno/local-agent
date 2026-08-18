@@ -368,14 +368,17 @@ func (s *Store) DiscardAssistantExchange(ctx context.Context, intentID string) e
 
 // ReconcileAssistantExchanges finalizes only published intents. Prepared
 // intents are finalized only after Slack exposes their durable correlation ID;
-// legacy rows without one intentionally remain unresolved.
+// legacy rows without one intentionally remain unresolved. Activation
+// fallback intents are excluded: their completion is owned exclusively by the
+// CompleteActivationFallback transaction, and generic finalization here would
+// consume them outside that transaction and duplicate their message.
 func (s *Store) ReconcileAssistantExchanges(ctx context.Context, finder port.AssistantExchangeFinder) error {
 	for {
 		var intentID string
 		err := s.db.QueryRowContext(ctx, `
 			SELECT id FROM memory_exchange_intents
-			WHERE publish_status = 'published'
-			ORDER BY created_at ASC LIMIT 1`).Scan(&intentID)
+			WHERE publish_status = 'published' AND id NOT LIKE ?
+			ORDER BY created_at ASC LIMIT 1`, activationFallbackIntentPrefix+"%").Scan(&intentID)
 		if errors.Is(err, sql.ErrNoRows) {
 			break
 		}
@@ -395,8 +398,8 @@ func (s *Store) ReconcileAssistantExchanges(ctx context.Context, finder port.Ass
 	}
 	rows, err := s.db.QueryContext(ctx, `
 		SELECT id FROM memory_exchange_intents
-		WHERE publish_status = 'prepared' AND length(correlation_id) > 0
-		ORDER BY created_at ASC`)
+		WHERE publish_status = 'prepared' AND length(correlation_id) > 0 AND id NOT LIKE ?
+		ORDER BY created_at ASC`, activationFallbackIntentPrefix+"%")
 	if err != nil {
 		return fmt.Errorf("select prepared assistant exchange intents: %w", err)
 	}

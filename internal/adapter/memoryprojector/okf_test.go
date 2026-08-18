@@ -63,7 +63,7 @@ func TestRemoveStaleOKFFiles(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(keepDir, "keep.md"), []byte("keep"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := removeStaleOKFFiles(dir, []domain.Topic{{Slug: "keep", BundlePath: "facts"}}); err != nil {
+	if err := removeStaleOKFFiles(dir, []domain.Topic{{Slug: "keep", BundlePath: "facts"}}, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(filepath.Join(topicsDir, "old.md")); !os.IsNotExist(err) {
@@ -104,7 +104,7 @@ func TestNestedIndexHasNoFrontmatter(t *testing.T) {
 	dir := t.TempDir()
 	topic := domain.Topic{ID: "mem_1", Slug: "test", Title: "Test", BundlePath: "facts", CurrentRev: 1, UpdatedAt: time.Now().UTC()}
 	snapshot := port.ProjectionSnapshot{Topics: []domain.Topic{topic}}
-	if err := renderBundle(dir, snapshot); err != nil {
+	if err := (&Projector{clock: port.SystemClock{}}).renderBundle(dir, snapshot); err != nil {
 		t.Fatal(err)
 	}
 	for _, indexPath := range []string{"facts/index.md", "index.md"} {
@@ -174,7 +174,7 @@ func TestWriteTopicFileRejectsInvalidUTF8(t *testing.T) {
 	dir := t.TempDir()
 	topic := domain.Topic{ID: "mem_1", Slug: "invalid", Title: "Valid", BundlePath: "facts", Content: "abc\xfe\xfe", CurrentRev: 1, UpdatedAt: time.Now().UTC()}
 	snapshot := port.ProjectionSnapshot{Topics: []domain.Topic{topic}}
-	err := renderBundle(dir, snapshot)
+	err := (&Projector{clock: port.SystemClock{}}).renderBundle(dir, snapshot)
 	if err == nil {
 		t.Fatal("renderBundle accepted invalid UTF-8 content")
 	}
@@ -219,4 +219,12 @@ type stubProjectionReader struct {
 
 func (r *stubProjectionReader) ReadProjectionSnapshot(_ context.Context) (port.ProjectionSnapshot, error) {
 	return r.snapshot, nil
+}
+
+type errorProjectionReader struct {
+	err error
+}
+
+func (r *errorProjectionReader) ReadProjectionSnapshot(_ context.Context) (port.ProjectionSnapshot, error) {
+	return port.ProjectionSnapshot{}, r.err
 }

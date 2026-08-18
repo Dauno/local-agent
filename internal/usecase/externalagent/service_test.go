@@ -210,6 +210,41 @@ func TestForegroundWaitReturnsWhenQueuedJobTotalTimeoutExpires(t *testing.T) {
 	}
 }
 
+func TestForegroundWaitDoesNotBlockOnExpiredJobCancellation(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := &blockingCancellationStore{
+		ExternalAgentJobStore: sqlite.NewExternalAgentJobStore(store),
+		started:               make(chan struct{}),
+		release:               make(chan struct{}),
+		finished:              make(chan struct{}),
+	}
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	started := time.Now()
+	_, err = service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, 20*time.Millisecond))
+	if err == nil || time.Since(started) > time.Second || !strings.Contains(err.Error(), "acp_job_timeout") {
+		t.Fatalf("error = %v, elapsed = %s", err, time.Since(started))
+	}
+	select {
+	case <-jobStore.started:
+	case <-time.After(time.Second):
+		t.Fatal("foreground timeout did not attempt durable cancellation")
+	}
+	close(jobStore.release)
+	select {
+	case <-jobStore.finished:
+	case <-time.After(time.Second):
+		t.Fatal("background cancellation did not finish")
+	}
+}
+
 func TestStartRejectsUnboundConversation(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
@@ -934,6 +969,62 @@ func TestStartAndWaitReturnsVerifiedForegroundResult(t *testing.T) {
 	}
 }
 
+func TestStartAndWaitReturnsNativeHandleWithoutForegroundPayload(t *testing.T) {
+	catalog, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "native-foreground.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catalog.Close() })
+	payloads, err := fsartifact.NewTypedStore(filepath.Join(t.TempDir(), "native-results"), 1<<20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	nativeResults, err := sqlite.NewResultStore(catalog, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobStore := sqlite.NewExternalAgentJobStore(catalog)
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{
+		Store: jobStore, Runtime: &fakeJobRuntime{}, NativeResults: nativeResults,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequestWithTimeout(domain.JobForeground, time.Second)
+	request.OriginalCallID = "native-foreground-call"
+	job, err := service.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "native-worker", time.Minute)
+	if err != nil || claimed == nil || claimed.ID != job.ID {
+		t.Fatalf("claim = %#v, %v", claimed, err)
+	}
+	content := "native foreground payload"
+	handle, err := nativeResults.Materialize(t.Context(), port.ResultMaterialization{
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Payload:  content, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
+		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &domain.AcpInvocationResult{
+		Text: content, Inline: true, NativeResultID: handle.ResultID,
+		ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes,
+	}
+	if err := jobStore.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	foreground, err := service.StartAndWait(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foreground.Text != "" || foreground.NativeResultID != handle.ResultID || foreground.NativeJobID != job.ID || foreground.NativeResultHandle.ResultID != handle.ResultID {
+		t.Fatalf("native foreground result = %+v", foreground)
+	}
+}
+
 func TestStartAndWaitRejectsIncompleteForegroundIdentity(t *testing.T) {
 	content := "done"
 	digest := sha256.Sum256([]byte(content))
@@ -1379,6 +1470,21 @@ type recordingJobStore struct {
 	once         sync.Once
 	mu           sync.Mutex
 	lastRenewErr error
+}
+
+type blockingCancellationStore struct {
+	*sqlite.ExternalAgentJobStore
+	started  chan struct{}
+	release  chan struct{}
+	finished chan struct{}
+}
+
+func (s *blockingCancellationStore) RequestCancellation(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error) {
+	close(s.started)
+	<-s.release
+	result, err := s.ExternalAgentJobStore.RequestCancellation(ctx, jobID, actor)
+	close(s.finished)
+	return result, err
 }
 
 func (s *recordingJobStore) RenewLease(ctx context.Context, jobID, owner string, attempt int, now time.Time, ttl time.Duration) error {

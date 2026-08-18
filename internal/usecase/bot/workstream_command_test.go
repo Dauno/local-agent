@@ -34,3 +34,34 @@ func TestParseHumanWorkstreamCommandRejectsUnknownFields(t *testing.T) {
 		t.Fatalf("handled=%v err=%v, want unknown field error", handled, err)
 	}
 }
+
+func TestParseHumanWorkstreamCommandStartTask(t *testing.T) {
+	command, handled, err := parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":2,"action":"start_task","task_id":"task-1"}`)
+	if err != nil || !handled {
+		t.Fatalf("parse start_task: handled=%v err=%v", handled, err)
+	}
+	if command.Transition.Action != domain.WorkstreamActionStartTask || command.Transition.TaskID != "task-1" {
+		t.Fatalf("start_task transition = %+v", command.Transition)
+	}
+
+	_, handled, err = parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":2,"action":"start_task"}`)
+	if !handled || err == nil {
+		t.Fatalf("start_task without task_id: handled=%v err=%v, want error", handled, err)
+	}
+}
+
+func TestParseHumanWorkstreamCommandBindsSourceResultIdentity(t *testing.T) {
+	const identity = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	command, handled, err := parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":3,"action":"propose_task","task_id":"task-2","task_description":"verify","source_result_identity":"` + identity + `"}`)
+	if err != nil || !handled {
+		t.Fatalf("parse propose with source identity: handled=%v err=%v", handled, err)
+	}
+	if command.Transition.Task == nil || len(command.Transition.Task.RequiredInputs) != 1 || command.Transition.Task.RequiredInputs[0] != identity {
+		t.Fatalf("source identity was not bound as required input: %+v", command.Transition.Task)
+	}
+
+	_, handled, err = parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":3,"action":"propose_task","task_id":"task-2","task_description":"verify","source_result_identity":"not-hex"}`)
+	if !handled || err == nil {
+		t.Fatalf("invalid source identity accepted: handled=%v err=%v", handled, err)
+	}
+}

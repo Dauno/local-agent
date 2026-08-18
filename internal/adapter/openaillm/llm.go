@@ -156,6 +156,19 @@ func (m *OpenAICompatibleLLM) ConfigureDefaultMaxOutputTokens(tokens int) error 
 	return nil
 }
 
+// CountLLMRequest counts the exact provider-shaped envelope used by the final
+// guard. It performs no provider call and emits no guard metrics.
+func (m *OpenAICompatibleLLM) CountLLMRequest(ctx context.Context, request *model.LLMRequest, stream bool) (port.TokenCount, error) {
+	if m == nil || m.requestCounter == nil {
+		return port.TokenCount{}, errors.New("OpenAI-compatible final request guard is not configured")
+	}
+	converted, err := m.convertRequest(request, stream)
+	if err != nil {
+		return port.TokenCount{}, err
+	}
+	return m.requestCounter.CountRequest(ctx, converted.envelope)
+}
+
 func (m *OpenAICompatibleLLM) guardRequest(ctx context.Context, converted convertedRequest) error {
 	if m != nil && m.recorder != nil {
 		m.recorder.SetGauge(domain.MetricModelRequestContextWindowTokens, int64(m.requestBudget.WindowTokens), port.MetricLabels{"profile_id": m.profileID})

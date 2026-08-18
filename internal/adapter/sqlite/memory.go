@@ -458,12 +458,18 @@ func (s *Store) ReadProjectionSnapshot(ctx context.Context) (port.ProjectionSnap
 		_ = evRows.Close()
 	}
 
+	knowledge, err := s.readKnowledgeProjectionSnapshot(ctx, tx)
+	if err != nil {
+		return port.ProjectionSnapshot{}, err
+	}
+
 	if err := tx.Commit(); err != nil {
 		return port.ProjectionSnapshot{}, err
 	}
 
 	return port.ProjectionSnapshot{
 		Topics: topics, Revisions: revisions, Links: links, Evidence: evidence,
+		Knowledge: knowledge,
 	}, nil
 }
 
