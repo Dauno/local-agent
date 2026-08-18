@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	defaultActivationRetryBase = time.Second
-	defaultActivationRetryMax  = time.Minute
+	defaultActivationRetryBase   = time.Second
+	defaultActivationRetryMax    = time.Minute
+	defaultActivationMaxAttempts = 8
 )
 
 // ActivationConfig controls durable activation polling and leases. Backoff is
@@ -25,6 +26,10 @@ type ActivationConfig struct {
 	RetryBase      time.Duration
 	RetryMax       time.Duration
 	StuckThreshold time.Duration
+	// MaxAttempts bounds pre-model retries. A retryable pre-model failure
+	// beyond this bound becomes a terminal activation failure instead of an
+	// unbounded backoff loop.
+	MaxAttempts int
 }
 
 type ActivationDependencies struct {
@@ -64,6 +69,12 @@ func NewActivationWorker(cfg ActivationConfig, deps ActivationDependencies) (*Ac
 	}
 	if cfg.RetryMax < cfg.RetryBase {
 		return nil, errors.New("activation retry maximum must not be below its base delay")
+	}
+	if cfg.MaxAttempts < 0 || cfg.MaxAttempts > 64 {
+		return nil, errors.New("activation maximum attempts must be between 0 and 64")
+	}
+	if cfg.MaxAttempts == 0 {
+		cfg.MaxAttempts = defaultActivationMaxAttempts
 	}
 	if cfg.StuckThreshold < 0 {
 		return nil, errors.New("activation stuck threshold must not be negative")
@@ -160,6 +171,9 @@ func (w *ActivationWorker) ProcessOne(ctx context.Context) error {
 		return err
 	}
 	if activation == nil {
+		activation = w.claimActivationFallback(ctx, now)
+	}
+	if activation == nil {
 		return nil
 	}
 	w.metrics.AddCounter(domain.MetricExternalAgentActivationClaimTotal, 1, port.MetricLabels{"activation_outcome": "claimed"})
@@ -172,8 +186,10 @@ func (w *ActivationWorker) ProcessOne(ctx context.Context) error {
 		processErr = w.processBeforeModel(ctx, activation)
 	case domain.ActivationModelStarted, domain.ActivationResponsePrepared:
 		processErr = w.reconcileAfterModel(ctx, activation)
-	case domain.ActivationCompleted, domain.ActivationCompletionUnknown, domain.ActivationFailed:
+	case domain.ActivationCompleted:
 		processErr = nil
+	case domain.ActivationFailed, domain.ActivationCompletionUnknown:
+		processErr = w.processFallback(ctx, activation)
 	default:
 		processErr = wrapActivationError(activation, errors.New("activation state is invalid"))
 	}
@@ -182,6 +198,42 @@ func (w *ActivationWorker) ProcessOne(ctx context.Context) error {
 	}
 	w.recordActivationOutcome(ctx, activation)
 	return processErr
+}
+
+// claimActivationFallback claims terminal fallback work only when both the
+// store and the handler support it. A handler without a fallback publisher
+// never claims these rows, and the rows keep their pending fallback state.
+func (w *ActivationWorker) claimActivationFallback(ctx context.Context, now time.Time) *domain.ExternalAgentJobActivation {
+	if _, ok := w.handler.(port.ActivationFallbackPublisher); !ok {
+		return nil
+	}
+	store, ok := w.store.(port.ExternalAgentJobActivationFallbackStore)
+	if !ok {
+		return nil
+	}
+	activation, err := store.ClaimNextActivationFallback(ctx, now, w.owner, w.cfg.LeaseTTL)
+	if err != nil {
+		w.recordCASConflict(err)
+		return nil
+	}
+	if activation != nil {
+		w.metrics.AddCounter(domain.MetricExternalAgentActivationClaimTotal, 1, port.MetricLabels{"activation_outcome": "fallback_claimed"})
+	}
+	return activation
+}
+
+func (w *ActivationWorker) processFallback(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
+	if activation == nil || !activation.FallbackRequired || activation.FallbackSlackTS != "" {
+		return nil
+	}
+	publisher, ok := w.handler.(port.ActivationFallbackPublisher)
+	if !ok {
+		return nil
+	}
+	// Fallback publication is one bounded Slack publish; the claim lease
+	// expires on failure so the row is reclaimed without renewal. Terminal
+	// states are never renewed by the lease store.
+	return publisher.PublishActivationFallback(ctx, *activation)
 }
 
 func (w *ActivationWorker) processBeforeModel(ctx context.Context, activation *domain.ExternalAgentJobActivation) error {
@@ -264,12 +316,19 @@ func (w *ActivationWorker) resolveBeforeModelFailure(ctx context.Context, activa
 	code, retryable := classifyActivationError(processErr)
 	now := w.clock.Now().UTC()
 	if retryable {
+		if activation.Attempt >= w.cfg.MaxAttempts {
+			return w.failBeforeModelTerminal(ctx, activation, "activation_retry_exhausted", now)
+		}
 		next := now.Add(w.retryDelay(activation.Attempt))
 		if err := w.store.RetryActivation(context.WithoutCancel(ctx), activation, code, next, now); err != nil {
 			return wrapActivationError(activation, err)
 		}
 		return nil
 	}
+	return w.failBeforeModelTerminal(ctx, activation, code, now)
+}
+
+func (w *ActivationWorker) failBeforeModelTerminal(ctx context.Context, activation *domain.ExternalAgentJobActivation, code string, now time.Time) error {
 	if err := w.store.FailActivation(context.WithoutCancel(ctx), activation, code, now); err != nil {
 		return wrapActivationError(activation, err)
 	}

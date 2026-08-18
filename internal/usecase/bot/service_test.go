@@ -116,6 +116,11 @@ type fakeRuntime struct {
 }
 
 func (r *fakeRuntime) Run(ctx context.Context, request port.AgentRequest) (port.AgentTurn, error) {
+	if request.BeforeModel != nil {
+		if err := request.BeforeModel(ctx); err != nil {
+			return port.AgentTurn{}, err
+		}
+	}
 	r.runCalls++
 	r.runRequest = request
 	if r.onRun != nil {
@@ -549,6 +554,23 @@ func TestHandleAuthorizedDM(t *testing.T) {
 	}
 	if len(publisher.calls) != 1 || publisher.calls[0].target.ThreadTS != "" || publisher.calls[0].text != "answer" {
 		t.Fatalf("unexpected publishes: %#v", publisher.calls)
+	}
+}
+
+func TestHumanWorkstreamCommandIsTheOnlyPathThatMutatesWorkstream(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "workstream-human {\"project\":\"workspace\",\"workstream_id\":\"ws-1\",\"expected_revision\":0,\"action\":\"pause_workstream\"}"}}
+	publisher := &fakePublisher{}
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
+	workstreams := &fakeActivationWorkstreamService{}
+	service.workstreams = workstreams
+
+	invocation := botInvocation()
+	if outcome, err := service.Handle(t.Context(), invocation); err != nil || outcome != OutcomeResponded {
+		t.Fatalf("proposal-shaped model response outcome=%q err=%v", outcome, err)
+	}
+	if len(workstreams.applyHumanCalls) != 0 || len(publisher.calls) != 1 || !strings.Contains(publisher.calls[0].text, "workstream-human") {
+		t.Fatalf("model proposal crossed human command boundary: applies=%d publishes=%#v", len(workstreams.applyHumanCalls), publisher.calls)
 	}
 }
 
@@ -1316,6 +1338,43 @@ func TestHandleEnforcesCombinedMessageAndRenderedMemoryBudget(t *testing.T) {
 	if got := len([]rune(runtime.runRequest.Messages[0].Content)) + len([]rune(domain.RenderMemoryReference(runtime.runRequest.Memory))); got > 500 {
 		t.Fatalf("combined model context has %d runes, exceeds 500", got)
 	}
+}
+
+// TestHandleRetiresLegacyRecallWhenKnowledgeGateEnabled pins hallazgo 10:
+// legacy scope-blind memory-topic recall is retired for the normal turn
+// once orchestration.knowledge.enabled is true, closing the cross-project
+// leak TRD 05 flagged as its central risk. With the gate disabled (the
+// default), legacy recall keeps running unchanged.
+func TestHandleRetiresLegacyRecallWhenKnowledgeGateEnabled(t *testing.T) {
+	snippet := domain.MemorySnippet{Title: "Topic", RevisionNumber: 1, Content: "legacy snippet"}
+
+	t.Run("knowledge gate enabled retires legacy recall", func(t *testing.T) {
+		store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+		runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
+		service := newTestService(t, store, runtime, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
+			cfg.KnowledgeGateEnabled = true
+		})
+		service.AddMemory(fakeRecall{snippets: []domain.MemorySnippet{snippet}}, nil)
+		if outcome, err := service.Handle(t.Context(), botInvocation()); err != nil || outcome != OutcomeResponded {
+			t.Fatalf("outcome=%q err=%v", outcome, err)
+		}
+		if len(runtime.runRequest.Memory) != 0 {
+			t.Fatalf("memory = %#v, want none with the knowledge gate enabled", runtime.runRequest.Memory)
+		}
+	})
+
+	t.Run("knowledge gate disabled keeps legacy recall", func(t *testing.T) {
+		store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+		runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
+		service := newTestService(t, store, runtime, &fakeHistory{}, &fakePublisher{}, nil)
+		service.AddMemory(fakeRecall{snippets: []domain.MemorySnippet{snippet}}, nil)
+		if outcome, err := service.Handle(t.Context(), botInvocation()); err != nil || outcome != OutcomeResponded {
+			t.Fatalf("outcome=%q err=%v", outcome, err)
+		}
+		if len(runtime.runRequest.Memory) != 1 {
+			t.Fatalf("memory = %#v, want the legacy snippet with the knowledge gate disabled", runtime.runRequest.Memory)
+		}
+	})
 }
 
 func TestHandleAuthorizedMentionRepliesInItsThread(t *testing.T) {

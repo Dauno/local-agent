@@ -35,6 +35,13 @@ type JobReconciliationBackend interface {
 	ReconcileJob(ctx context.Context, jobID string, expectedRevision int) (domain.ExternalAgentJobStatusView, error)
 }
 
+// KnowledgeIndexRebuildBackend is optional so existing embedders of the CLI
+// backend remain valid while the concrete application exposes the bounded
+// reconstructible-knowledge-index rebuild command.
+type KnowledgeIndexRebuildBackend interface {
+	RebuildKnowledgeIndexes(ctx context.Context) (domain.KnowledgeIndexRebuildResult, error)
+}
+
 type Streams struct {
 	In  io.Reader
 	Out io.Writer
@@ -85,6 +92,7 @@ func NewRoot(backend Backend, streams Streams) (*cobra.Command, error) {
 		newVersionCommand(backend, streams),
 		newJobsCommand(backend, streams),
 		newShimCommand(streams),
+		newKnowledgeCommand(backend, streams),
 	)
 	return root, nil
 }
@@ -215,6 +223,47 @@ func newVersionCommand(backend Backend, streams Streams) *cobra.Command {
 		Args:  cobra.NoArgs,
 		Run: func(*cobra.Command, []string) {
 			fmt.Fprintln(streams.Out, backend.Version())
+		},
+	}
+}
+
+func newKnowledgeCommand(backend Backend, streams Streams) *cobra.Command {
+	command := &cobra.Command{
+		Use:   "knowledge",
+		Short: "Operate the scoped knowledge catalog",
+		Args:  cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			return command.Help()
+		},
+	}
+	command.AddCommand(newKnowledgeRebuildIndexCommand(backend, streams))
+	return command
+}
+
+func newKnowledgeRebuildIndexCommand(backend Backend, streams Streams) *cobra.Command {
+	return &cobra.Command{
+		Use:   "rebuild-index",
+		Short: "Rebuild the reconstructible knowledge lexical index",
+		Long: "Clears the lexical FTS index and re-enqueues every truth identity for reindexing. " +
+			"It never touches knowledge_claims, knowledge_preferences, knowledge_documents, or any other truth table. " +
+			"Reindexing then drains through the running agent's normal lexical worker poll loop.",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			rebuilder, ok := backend.(KnowledgeIndexRebuildBackend)
+			if !ok {
+				return &ExitError{Code: 1, Cause: errors.New("knowledge rebuild-index is unavailable")}
+			}
+			result, err := rebuilder.RebuildKnowledgeIndexes(command.Context())
+			if err != nil {
+				return &ExitError{Code: 1, Cause: err}
+			}
+			if result.LexicalRebuilt {
+				fmt.Fprintln(streams.Out, "Lexical index cleared and re-enqueued. Reindexing will drain through the running agent's normal lexical worker poll loop.")
+			}
+			if result.EmbeddingSkippedReason != "" {
+				fmt.Fprintf(streams.Out, "Embedding index: %s\n", result.EmbeddingSkippedReason)
+			}
+			return nil
 		},
 	}
 }

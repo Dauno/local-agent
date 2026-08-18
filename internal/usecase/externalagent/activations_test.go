@@ -41,6 +41,55 @@ func TestActivationWorkerRetriesBusyBeforeModelWithBackoff(t *testing.T) {
 	}
 }
 
+func TestActivationWorkerExhaustsPreModelRetriesTerminal(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	store := newActivationWorkerStore(testWorkerActivation(now, domain.ActivationPending))
+	handler := &fakeActivationHandler{handleErr: port.NewActivationProcessError("activation_frame_retryable", true, errors.New("transient failure"))}
+	worker, err := NewActivationWorker(ActivationConfig{
+		PollInterval: time.Second, LeaseTTL: time.Minute, MaxAttempts: 1,
+	}, ActivationDependencies{Store: store, Handler: handler, Clock: fixedClock{now: now}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	activation := store.activation(t, "activation-job-1")
+	if activation.State != domain.ActivationFailed || activation.LastErrorCode != "activation_retry_exhausted" {
+		t.Fatalf("exhausted state = %#v", activation)
+	}
+	if store.retryCalls != 0 || store.failCalls != 1 {
+		t.Fatalf("exhausted calls = retry:%d fail:%d", store.retryCalls, store.failCalls)
+	}
+}
+
+func TestActivationWorkerRetriesWithinAttemptBound(t *testing.T) {
+	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
+	store := newActivationWorkerStore(testWorkerActivation(now, domain.ActivationPending))
+	handler := &fakeActivationHandler{handleErr: port.NewActivationProcessError("activation_frame_retryable", true, errors.New("transient failure"))}
+	worker, err := NewActivationWorker(ActivationConfig{
+		PollInterval: time.Second, LeaseTTL: time.Minute, MaxAttempts: 8,
+	}, ActivationDependencies{Store: store, Handler: handler, Clock: fixedClock{now: now}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := worker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	activation := store.activation(t, "activation-job-1")
+	if activation.State != domain.ActivationPending || store.retryCalls != 1 || store.failCalls != 0 {
+		t.Fatalf("bounded retry state = %#v retry:%d fail:%d", activation, store.retryCalls, store.failCalls)
+	}
+}
+
+func TestActivationWorkerRejectsExcessiveAttemptBound(t *testing.T) {
+	if _, err := NewActivationWorker(ActivationConfig{PollInterval: time.Second, LeaseTTL: time.Minute, MaxAttempts: 65}, ActivationDependencies{
+		Store: newActivationWorkerStore(), Handler: &fakeActivationHandler{},
+	}); err == nil {
+		t.Fatal("worker accepted a maximum attempt bound above the hard ceiling")
+	}
+}
+
 func TestActivationWorkerFailsPermanentBeforeModelWithoutBackoff(t *testing.T) {
 	now := time.Date(2026, time.January, 1, 0, 0, 0, 0, time.UTC)
 	store := newActivationWorkerStore(testWorkerActivation(now, domain.ActivationPending))

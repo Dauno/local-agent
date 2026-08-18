@@ -9,7 +9,7 @@ import (
 func TestNormalizeLegacyPreservesModelSettingsWithoutMutatingInput(t *testing.T) {
 	extraBody := map[string]any{"thinking": map[string]any{"type": "disabled"}}
 	headers := map[string]string{"X-Tenant": "tenant-a"}
-	defs := agentdef.NormalizeLegacy("Legacy Agent", "model-name", "https://model.example/v1", "MODEL_KEY", "high", headers, extraBody)
+	defs := agentdef.NormalizeLegacy("Legacy Agent", "model-name", "https://model.example/v1", "MODEL_KEY", "high", headers, extraBody, 8192)
 
 	provider := defs.Providers["legacy"]
 	profile := provider.Profiles["default"]

@@ -150,3 +150,69 @@ func TestIdentityCountersRejectAnyLabelAtTheBoundary(t *testing.T) {
 		}
 	}
 }
+
+// TestKnowledgeMetricsEnforceExactFrozenLabelContract pins checkpoint 4
+// metric wiring: valid closed label combinations are preserved exactly,
+// while unknown keys, invalid enum values, sensitive keys, missing
+// mandatory labels, and contradictory semantic combinations drop the sample
+// entirely instead of becoming an unlabeled sample.
+func TestKnowledgeMetricsEnforceExactFrozenLabelContract(t *testing.T) {
+	recorder := NewRecorder()
+	valid := []struct {
+		name   string
+		labels port.MetricLabels
+	}{
+		{domain.MetricKnowledgeRetrievalTotal, port.MetricLabels{domain.MetricLabelOutcome: string(domain.KnowledgeRetrievalOutcomeSuccess)}},
+		{domain.MetricKnowledgeRetrievalDuration, port.MetricLabels{domain.MetricLabelOutcome: string(domain.KnowledgeRetrievalOutcomeEmpty)}},
+		{domain.MetricKnowledgeRetrievalCandidates, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelLexical)}},
+		{domain.MetricKnowledgeRetrievalSelected, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelExact)}},
+		{domain.MetricKnowledgeRetrievalEmptyTotal, port.MetricLabels{domain.MetricLabelOutcome: string(domain.KnowledgeRetrievalOutcomeEmpty)}},
+		{domain.MetricKnowledgeRetrievalChannelFailure, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelRelation), domain.MetricLabelReason: string(domain.KnowledgeRetrievalRelationUnavailable)}},
+		{domain.MetricKnowledgeRetrievalStaleIndex, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelLexical), domain.MetricLabelReason: string(domain.KnowledgeRetrievalReasonLabelStaleIndex)}},
+		{domain.MetricKnowledgeRetrievalCardTokens, nil},
+		{domain.MetricKnowledgeLexicalQueueDepth, nil},
+		{domain.MetricKnowledgeEmbeddingQueueDepth, nil},
+	}
+	for _, sample := range valid {
+		recorder.AddCounter(sample.name, 1, sample.labels)
+	}
+	if got := len(recorder.Snapshot()); got != len(valid) {
+		t.Fatalf("valid knowledge samples = %d, want %d", got, len(valid))
+	}
+
+	invalid := []struct {
+		name   string
+		labels port.MetricLabels
+	}{
+		// Unknown label key.
+		{domain.MetricKnowledgeRetrievalTotal, port.MetricLabels{domain.MetricLabelOutcome: "success", "actor": "U12345678"}},
+		// Sensitive free-form labels.
+		{domain.MetricKnowledgeRetrievalTotal, port.MetricLabels{"query": "hello"}},
+		{domain.MetricKnowledgeRetrievalSelected, port.MetricLabels{"identity": "claim:kclaim_000000000000000000000001"}},
+		// Invalid enum values.
+		{domain.MetricKnowledgeRetrievalTotal, port.MetricLabels{domain.MetricLabelOutcome: "exploded"}},
+		{domain.MetricKnowledgeRetrievalCandidates, port.MetricLabels{domain.MetricLabelChannel: "vectorx"}},
+		// Missing mandatory labels.
+		{domain.MetricKnowledgeRetrievalTotal, nil},
+		{domain.MetricKnowledgeRetrievalCandidates, nil},
+		{domain.MetricKnowledgeRetrievalChannelFailure, port.MetricLabels{domain.MetricLabelChannel: "relation"}},
+		// Contradictory semantic combinations.
+		{domain.MetricKnowledgeRetrievalEmptyTotal, port.MetricLabels{domain.MetricLabelOutcome: "success"}},
+		{domain.MetricKnowledgeRetrievalChannelFailure, port.MetricLabels{domain.MetricLabelChannel: "lexical", domain.MetricLabelReason: string(domain.KnowledgeRetrievalRelationUnavailable)}},
+		{domain.MetricKnowledgeRetrievalChannelFailure, port.MetricLabels{domain.MetricLabelChannel: "relation", domain.MetricLabelReason: string(domain.KnowledgeRetrievalCounterUnavailable)}},
+		{domain.MetricKnowledgeRetrievalStaleIndex, port.MetricLabels{domain.MetricLabelChannel: "exact", domain.MetricLabelReason: string(domain.KnowledgeRetrievalReasonLabelStaleIndex)}},
+	}
+	for _, sample := range invalid {
+		recorder.AddCounter(sample.name, 1, sample.labels)
+	}
+	if got := len(recorder.Snapshot()); got != len(valid) {
+		t.Fatalf("snapshot length = %d after invalid samples, want %d: invalid knowledge samples must be dropped entirely", got, len(valid))
+	}
+	for _, sample := range recorder.Snapshot() {
+		for key := range sample.Labels {
+			if key != domain.MetricLabelChannel && key != domain.MetricLabelOutcome && key != domain.MetricLabelReason {
+				t.Fatalf("sample %s kept unadmitted label %q", sample.Name, key)
+			}
+		}
+	}
+}

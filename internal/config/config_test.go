@@ -35,7 +35,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			},
 			ADKCompaction: &config.ADKCompactionConfig{
 				Enabled: true, MaxHistoryChars: 120_000, RecentTurns: 8,
-				SummaryEnabled: true, SummaryMaxChars: 8_000,
+				SummaryEnabled: true, SummaryMaxChars: 8_000, SummaryBudgetTokens: 2_048,
 			},
 			ContextFeatures: &config.ContextFeaturesConfig{},
 		},
@@ -103,7 +103,56 @@ func TestDefaultMatchesPRD(t *testing.T) {
 		OpenCode:         config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
 		ACP:              config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, ProgressWarningSeconds: 900, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
 		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
-		Orchestration:    config.OrchestrationConfig{Workstreams: config.WorkstreamConfig{Enabled: false, MaxNonTerminalTasks: 32, MaxDependenciesPerTask: 8}},
+		Orchestration: config.OrchestrationConfig{
+			Workstreams: config.WorkstreamConfig{Enabled: false, MaxNonTerminalTasks: 32, MaxDependenciesPerTask: 8, SnapshotBudgetTokens: domain.DefaultWorkstreamSnapshotBudgetTokens},
+			ResultHandles: config.ResultHandlesConfig{Enabled: false, MaxProducingCallsPerStep: 1, ProducingCallReserveTokens: 2_048,
+				Retention: config.ResultRetentionConfig{
+					ContextDays: domain.DefaultResultRetentionContextDays, ConversationDays: domain.DefaultResultRetentionConversationDays,
+					WorkstreamDays: domain.DefaultResultRetentionWorkstreamDays, ExportedDays: domain.DefaultResultRetentionExportedDays,
+				}},
+			Knowledge: config.KnowledgeConfig{
+				Enabled:                   false,
+				ProjectionIntervalSeconds: 60,
+				ProjectionMaxRetries:      3,
+				ProjectionRetentionDays:   90,
+				MaxCardTokens:             domain.DefaultMaxKnowledgeCardBudget,
+				Retrieval: config.KnowledgeRetrievalConfig{
+					Enabled:                 false,
+					TimeoutSeconds:          domain.DefaultKnowledgeRetrievalTimeoutSeconds,
+					MaxQueryRunes:           domain.DefaultKnowledgeRetrievalMaxQueryRunes,
+					MaxCandidatesPerChannel: domain.DefaultKnowledgeRetrievalMaxCandidatesPerChannel,
+					MaxCards:                domain.DefaultKnowledgeRetrievalMaxCards,
+					MaxDocumentBytes:        domain.DefaultKnowledgeRetrievalMaxDocumentBytes,
+					WorkerIntervalSeconds:   domain.DefaultKnowledgeRetrievalWorkerIntervalSeconds,
+					WorkerMaxRetries:        domain.DefaultKnowledgeRetrievalWorkerMaxRetries,
+					WorkerBatchSize:         domain.DefaultKnowledgeRetrievalWorkerBatchSize,
+					Embedding: config.KnowledgeEmbeddingConfig{
+						Enabled:        false,
+						TimeoutSeconds: domain.DefaultKnowledgeEmbeddingTimeoutSeconds,
+					},
+				},
+			},
+			ResultAnalysis: config.ResultAnalysisConfig{
+				Enabled:               false,
+				MaxSegmentBytes:       24576,
+				OverlapBasisPoints:    1000,
+				OverlapMaxBytes:       4096,
+				MaxLeaves:             64,
+				MaxReductionFanIn:     8,
+				MaxReductionDepth:     4,
+				MaxConcurrentLeaves:   2,
+				MaxAttemptsPerStep:    2,
+				CallTimeoutSeconds:    120,
+				WallTimeSeconds:       900,
+				WorkerIntervalSeconds: 5,
+				Evidence: config.ResultAnalysisEvidenceConfig{
+					ExcerptBytes:        2048,
+					SelectorsPerLeaf:    8,
+					ReferencesPerPacket: 32,
+					BundleBytes:         32768,
+				},
+			},
+		},
 	}
 
 	got := config.Default()
@@ -131,7 +180,7 @@ func TestDefaultDoesNotShareExtraBody(t *testing.T) {
 func TestADKCompactionDefaultsAndProductionValidation(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default()
-	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.RecentTurns != 8 || !cfg.Context.ADKCompaction.SummaryEnabled || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 {
+	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.RecentTurns != 8 || !cfg.Context.ADKCompaction.SummaryEnabled || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 || cfg.Context.ADKCompaction.SummaryBudgetTokens != 2048 {
 		t.Fatalf("unexpected ADK compaction defaults: %#v", cfg.Context.ADKCompaction)
 	}
 	cfg.Context.ADKCompaction.Enabled = false
@@ -147,6 +196,18 @@ func TestADKCompactionDefaultsAndProductionValidation(t *testing.T) {
 	cfg.Context.ADKCompaction.SummaryMaxChars = 9000
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "SQLite summary limit") {
 		t.Fatalf("SQLite summary limit error = %v", err)
+	}
+	cfg = config.Default()
+	cfg.Context.ADKCompaction.SummaryBudgetTokens = 0
+	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "summary_budget_tokens") {
+		t.Fatalf("summary source budget error = %v", err)
+	}
+	parsed, err := config.Parse([]byte("context:\n  adk_compaction:\n    summary_budget_tokens: 1024\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if parsed.Context.ADKCompaction == nil || parsed.Context.ADKCompaction.SummaryBudgetTokens != 1024 {
+		t.Fatalf("parsed summary source budget = %#v", parsed.Context.ADKCompaction)
 	}
 }
 
@@ -199,9 +260,10 @@ context:
   adk_compaction:
     enabled: true
     max_history_chars: 120000
-    recent_turns: 8
-    summary_enabled: true
-    summary_max_chars: 8000
+     recent_turns: 8
+     summary_enabled: true
+     summary_max_chars: 8000
+     summary_budget_tokens: 2048
   model_budget:
     max_request_percent: 60
    recoverable_results:
@@ -229,6 +291,8 @@ model:
   extra_body:
     thinking:
       type: enabled
+  result_handles:
+    max_direct_inline_bytes: 0
 slack:
   app_name: Local Agent
   bot_display_name: Dev Agent
@@ -321,7 +385,67 @@ orchestration:
     enabled: false
     max_non_terminal_tasks: 32
     max_dependencies_per_task: 8
-          `
+    snapshot_budget_tokens: 2048
+  result_handles:
+    enabled: false
+    max_producing_calls_per_step: 1
+    producing_call_reserve_tokens: 2048
+    retention:
+      context_days: 7
+      conversation_days: 30
+      workstream_days: 180
+      exported_days: 30
+  knowledge:
+    enabled: false
+    projection_interval_seconds: 60
+    projection_max_retries: 3
+    projection_retention_days: 90
+    max_card_tokens: 1024
+    retrieval:
+      enabled: false
+      timeout_seconds: 2
+      max_query_runes: 2048
+      max_candidates_per_channel: 32
+      max_cards: 8
+      max_document_bytes: 65536
+      worker_interval_seconds: 10
+      worker_max_retries: 3
+      worker_batch_size: 32
+      embedding:
+        enabled: false
+        provider_id: ""
+        base_url: ""
+        api_key_env: ""
+        model: ""
+        dimensions: 0
+        min_similarity_basis_points: 0
+        timeout_seconds: 5
+  result_analysis:
+    enabled: false
+    max_segment_bytes: 24576
+    overlap_basis_points: 1000
+    overlap_max_bytes: 4096
+    max_leaves: 64
+    max_reduction_fan_in: 8
+    max_reduction_depth: 4
+    max_concurrent_leaves: 2
+    max_attempts_per_step: 2
+    call_timeout_seconds: 120
+    wall_time_seconds: 900
+    worker_interval_seconds: 5
+    evidence:
+      excerpt_bytes: 2048
+      selectors_per_leaf: 8
+      references_per_packet: 32
+      bundle_bytes: 32768
+    model:
+      enabled: false
+      provider_id: ""
+      base_url: ""
+      api_key_env: ""
+      model: ""
+      reasoning_effort: ""
+           `
 
 	if !reflect.DeepEqual(strings.Fields(string(got)), strings.Fields(want)) {
 		t.Fatalf("default YAML fields mismatch\n--- got ---\n%s--- want ---\n%s", got, want)
@@ -414,7 +538,7 @@ func TestParseLegacyYAMLReceivesADKCompactionDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 {
+	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 || cfg.Context.ADKCompaction.SummaryBudgetTokens != 2048 {
 		t.Fatalf("legacy compaction defaults = %#v", cfg.Context.ADKCompaction)
 	}
 }
@@ -726,12 +850,24 @@ func TestValidateWorkstreamLimitsAndParseGate(t *testing.T) {
     enabled: true
     max_non_terminal_tasks: 12
     max_dependencies_per_task: 4
+  result_handles:
+    enabled: true
 `))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !parsed.Orchestration.Workstreams.Enabled || parsed.Orchestration.Workstreams.MaxNonTerminalTasks != 12 || parsed.Orchestration.Workstreams.MaxDependenciesPerTask != 4 {
-		t.Fatalf("parsed workstream config = %+v", parsed.Orchestration.Workstreams)
+	if !parsed.Orchestration.Workstreams.Enabled || parsed.Orchestration.Workstreams.MaxNonTerminalTasks != 12 || parsed.Orchestration.Workstreams.MaxDependenciesPerTask != 4 || !parsed.Orchestration.ResultHandles.Enabled {
+		t.Fatalf("parsed orchestration config = %+v", parsed.Orchestration)
+	}
+	if parsed.Orchestration.ResultHandles.MaxProducingCallsPerStep != 1 || parsed.Orchestration.ResultHandles.ProducingCallReserveTokens != 2_048 {
+		t.Fatalf("parsed result-handle reservation = %+v", parsed.Orchestration.ResultHandles)
+	}
+	cfg = config.Default()
+	cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep = 2
+	cfg.Orchestration.ResultHandles.ProducingCallReserveTokens = 0
+	err = cfg.Validate()
+	if !errors.As(err, &validation) || !validation.Has("orchestration.result_handles.max_producing_calls_per_step") || !validation.Has("orchestration.result_handles.producing_call_reserve_tokens") {
+		t.Fatalf("result-handle reservation validation = %v", err)
 	}
 	emptyRegistry := config.Default()
 	emptyRegistry.Orchestration.Workstreams.Enabled = true
@@ -739,6 +875,414 @@ func TestValidateWorkstreamLimitsAndParseGate(t *testing.T) {
 	err = emptyRegistry.Validate()
 	if !errors.As(err, &validation) || !validation.Has("orchestration.workstreams") {
 		t.Fatalf("workstream project registry validation = %v", err)
+	}
+}
+
+// TestValidateResultRetentionDaysBounds pins hallazgo 6: each of the four
+// TRD 02 retention classes has an independently validated, configurable age
+// in days, bounded to [1, domain.HardMaxResultRetentionDays].
+func TestValidateResultRetentionDaysBounds(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Orchestration.ResultHandles.Retention = config.ResultRetentionConfig{
+		ContextDays: 0, ConversationDays: -1, WorkstreamDays: domain.HardMaxResultRetentionDays + 1, ExportedDays: domain.HardMaxResultRetentionDays,
+	}
+	err := cfg.Validate()
+	var validation *config.ValidationError
+	if !errors.As(err, &validation) ||
+		!validation.Has("orchestration.result_handles.retention.context_days") ||
+		!validation.Has("orchestration.result_handles.retention.conversation_days") ||
+		!validation.Has("orchestration.result_handles.retention.workstream_days") ||
+		validation.Has("orchestration.result_handles.retention.exported_days") {
+		t.Fatalf("retention days validation = %v", err)
+	}
+}
+
+func TestKnowledgeGateDefaultParseSchemaAndRoundTrip(t *testing.T) {
+	t.Parallel()
+	if config.Default().Orchestration.Knowledge.Enabled {
+		t.Fatal("knowledge gate must default to disabled")
+	}
+	parsed, err := config.Parse([]byte(`orchestration:
+  knowledge:
+    enabled: true
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !parsed.Orchestration.Knowledge.Enabled {
+		t.Fatalf("parsed knowledge gate = %+v", parsed.Orchestration.Knowledge)
+	}
+	if err := parsed.Validate(); err != nil {
+		t.Fatalf("enabled knowledge gate must validate: %v", err)
+	}
+	rendered, err := config.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripped, err := config.Parse(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !roundTripped.Orchestration.Knowledge.Enabled {
+		t.Fatalf("round-tripped knowledge gate = %+v", roundTripped.Orchestration.Knowledge)
+	}
+	withExtra, err := config.Parse([]byte(`orchestration:
+  knowledge:
+    enabled: true
+    future_extension: preserved
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !withExtra.Orchestration.Knowledge.Enabled {
+		t.Fatalf("knowledge gate with extension = %+v", withExtra.Orchestration.Knowledge)
+	}
+	preserved, err := config.Marshal(withExtra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(preserved), "future_extension: preserved") || !strings.Contains(string(preserved), "enabled: true") {
+		t.Fatalf("extension field was not preserved: %s", preserved)
+	}
+}
+
+func TestKnowledgeProjectionConfigDefaultsParseSchemaAndRoundTrip(t *testing.T) {
+	t.Parallel()
+	def := config.Default().Orchestration.Knowledge
+	if def.ProjectionIntervalSeconds != 60 || def.ProjectionMaxRetries != 3 || def.ProjectionRetentionDays != 90 {
+		t.Fatalf("projection defaults = %+v", def)
+	}
+	parsed, err := config.Parse([]byte(`orchestration:
+  knowledge:
+    enabled: true
+    projection_interval_seconds: 15
+    projection_max_retries: 7
+    projection_retention_days: 30
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parsed.Orchestration.Knowledge
+	if !got.Enabled || got.ProjectionIntervalSeconds != 15 || got.ProjectionMaxRetries != 7 || got.ProjectionRetentionDays != 30 {
+		t.Fatalf("parsed projection settings = %+v", got)
+	}
+	if err := parsed.Validate(); err != nil {
+		t.Fatalf("valid projection settings must validate: %v", err)
+	}
+	rendered, err := config.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripped, err := config.Parse(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTripped.Orchestration.Knowledge != got {
+		t.Fatalf("projection round trip = %+v, want %+v", roundTripped.Orchestration.Knowledge, got)
+	}
+	withExtra, err := config.Parse([]byte(`orchestration:
+  knowledge:
+    projection_interval_seconds: 45
+    projection_extra: preserved
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	renderedExtra, err := config.Marshal(withExtra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(renderedExtra), "projection_extra: preserved") || !strings.Contains(string(renderedExtra), "projection_interval_seconds: 45") {
+		t.Fatalf("projection extension was not preserved: %s", renderedExtra)
+	}
+}
+
+func TestKnowledgeProjectionConfigValidationRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+	for name, mutate := range map[string]func(*config.Config){
+		"interval": func(c *config.Config) { c.Orchestration.Knowledge.ProjectionIntervalSeconds = 0 },
+		"retries":  func(c *config.Config) { c.Orchestration.Knowledge.ProjectionMaxRetries = -1 },
+		"retention": func(c *config.Config) {
+			c.Orchestration.Knowledge.ProjectionRetentionDays = 0
+		},
+	} {
+		cfg := config.Default()
+		mutate(&cfg)
+		var validation *config.ValidationError
+		if err := cfg.Validate(); !errors.As(err, &validation) {
+			t.Fatalf("%s: invalid projection settings error = %v", name, err)
+		}
+	}
+}
+
+func TestKnowledgeRetrievalConfigDefaultsKeepEverythingDisabled(t *testing.T) {
+	t.Parallel()
+	def := config.Default().Orchestration.Knowledge
+	if def.MaxCardTokens != domain.DefaultMaxKnowledgeCardBudget {
+		t.Fatalf("max card tokens default = %d", def.MaxCardTokens)
+	}
+	if def.Retrieval.Enabled || def.Retrieval.Embedding.Enabled {
+		t.Fatalf("retrieval defaults must be disabled: %+v", def.Retrieval)
+	}
+	if def.Retrieval.TimeoutSeconds != 2 || def.Retrieval.MaxQueryRunes != 2048 ||
+		def.Retrieval.MaxCandidatesPerChannel != 32 || def.Retrieval.MaxCards != 8 ||
+		def.Retrieval.MaxDocumentBytes != 65536 || def.Retrieval.WorkerIntervalSeconds != 10 ||
+		def.Retrieval.WorkerMaxRetries != 3 || def.Retrieval.WorkerBatchSize != 32 {
+		t.Fatalf("retrieval defaults diverged: %+v", def.Retrieval)
+	}
+	if def.Retrieval.Embedding.TimeoutSeconds != 5 || def.Retrieval.Embedding.Dimensions != 0 || def.Retrieval.Embedding.MinSimilarityBasisPoints != 0 {
+		t.Fatalf("embedding defaults diverged: %+v", def.Retrieval.Embedding)
+	}
+	if err := config.Default().Validate(); err != nil {
+		t.Fatalf("default config with retrieval fields must validate: %v", err)
+	}
+}
+
+func TestKnowledgeRetrievalConfigParseSchemaAndRoundTrip(t *testing.T) {
+	t.Parallel()
+	parsed, err := config.Parse([]byte(`context:
+  context_features:
+    model_budget_enabled: true
+    recoverable_results_enabled: true
+orchestration:
+  knowledge:
+    enabled: true
+    max_card_tokens: 2048
+    retrieval:
+      enabled: true
+      timeout_seconds: 4
+      max_query_runes: 3000
+      max_candidates_per_channel: 48
+      max_cards: 12
+      max_document_bytes: 131072
+      worker_interval_seconds: 20
+      worker_max_retries: 5
+      worker_batch_size: 64
+      embedding:
+        enabled: true
+        provider_id: internal-embeddings
+        base_url: https://embeddings.internal.example
+        api_key_env: EMBEDDING_API_KEY
+        model: text-embedding-local
+        dimensions: 768
+        min_similarity_basis_points: 7000
+        timeout_seconds: 15
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parsed.Orchestration.Knowledge
+	if !got.Enabled || got.MaxCardTokens != 2048 {
+		t.Fatalf("parsed knowledge retrieval gate = %+v", got)
+	}
+	retrieval := got.Retrieval
+	if !retrieval.Enabled || retrieval.TimeoutSeconds != 4 || retrieval.MaxQueryRunes != 3000 ||
+		retrieval.MaxCandidatesPerChannel != 48 || retrieval.MaxCards != 12 ||
+		retrieval.MaxDocumentBytes != 131072 || retrieval.WorkerIntervalSeconds != 20 ||
+		retrieval.WorkerMaxRetries != 5 || retrieval.WorkerBatchSize != 64 {
+		t.Fatalf("parsed retrieval settings = %+v", retrieval)
+	}
+	embedding := retrieval.Embedding
+	if !embedding.Enabled || embedding.ProviderID != "internal-embeddings" ||
+		embedding.BaseURL != "https://embeddings.internal.example" ||
+		embedding.APIKeyEnv != "EMBEDDING_API_KEY" || embedding.Model != "text-embedding-local" ||
+		embedding.Dimensions != 768 || embedding.MinSimilarityBasisPoints != 7000 || embedding.TimeoutSeconds != 15 {
+		t.Fatalf("parsed embedding settings = %+v", embedding)
+	}
+	if err := parsed.Validate(); err != nil {
+		t.Fatalf("valid retrieval settings must validate: %v", err)
+	}
+	rendered, err := config.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripped, err := config.Parse(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTripped.Orchestration.Knowledge != got {
+		t.Fatalf("retrieval round trip = %+v, want %+v", roundTripped.Orchestration.Knowledge, got)
+	}
+}
+
+func TestKnowledgeRetrievalConfigPreservesExtensions(t *testing.T) {
+	t.Parallel()
+	withExtra, err := config.Parse([]byte(`context:
+  context_features:
+    model_budget_enabled: true
+    recoverable_results_enabled: true
+orchestration:
+  knowledge:
+    enabled: true
+    retrieval:
+      enabled: true
+      future_retrieval_extra: preserved
+      embedding:
+        future_embedding_extra: preserved
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := config.Marshal(withExtra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), "future_retrieval_extra: preserved") || !strings.Contains(string(rendered), "future_embedding_extra: preserved") {
+		t.Fatalf("retrieval extension fields were not preserved: %s", rendered)
+	}
+}
+
+func TestKnowledgeRetrievalConfigValidationRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+	for name, mutate := range map[string]func(*config.Config){
+		"card tokens zero": func(c *config.Config) { c.Orchestration.Knowledge.MaxCardTokens = 0 },
+		"card tokens over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.MaxCardTokens = domain.HardMaxKnowledgeCardBudget + 1
+		},
+		"timeout zero": func(c *config.Config) { c.Orchestration.Knowledge.Retrieval.TimeoutSeconds = 0 },
+		"timeout over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.TimeoutSeconds = domain.HardMaxKnowledgeRetrievalTimeoutSeconds + 1
+		},
+		"query runes over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.MaxQueryRunes = domain.HardMaxKnowledgeRetrievalMaxQueryRunes + 1
+		},
+		"candidates over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.MaxCandidatesPerChannel = domain.HardMaxKnowledgeRetrievalMaxCandidatesPerChannel + 1
+		},
+		"cards over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.MaxCards = domain.HardMaxKnowledgeRetrievalMaxCards + 1
+		},
+		"document bytes over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.MaxDocumentBytes = domain.HardMaxKnowledgeRetrievalMaxDocumentBytes + 1
+		},
+		"worker interval over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.WorkerIntervalSeconds = domain.HardMaxKnowledgeRetrievalWorkerIntervalSeconds + 1
+		},
+		"worker retries over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.WorkerMaxRetries = domain.HardMaxKnowledgeRetrievalWorkerMaxRetries + 1
+		},
+		"worker batch over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.WorkerBatchSize = domain.HardMaxKnowledgeRetrievalWorkerBatchSize + 1
+		},
+		"embedding timeout over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.TimeoutSeconds = domain.HardMaxKnowledgeEmbeddingTimeoutSeconds + 1
+		},
+		"embedding dimensions over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.Dimensions = domain.HardMaxKnowledgeEmbeddingDimensions + 1
+		},
+		"negative embedding dimensions": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.Dimensions = -1
+		},
+		"similarity over hard max": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.MinSimilarityBasisPoints = domain.HardMaxKnowledgeMinSimilarityBasisPoints + 1
+		},
+		"retrieval without knowledge": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Enabled = true
+		},
+		"retrieval without model budget": func(c *config.Config) {
+			c.Orchestration.Knowledge.Enabled = true
+			c.Orchestration.Knowledge.Retrieval.Enabled = true
+		},
+		"embedding without retrieval": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.Enabled = true
+		},
+		"bad api key env": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv = "not a name"
+		},
+		"unbounded api key env": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv = strings.Repeat("E", 129)
+		},
+		"multiline provider id": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.ProviderID = "two\nlines"
+		},
+	} {
+		cfg := config.Default()
+		mutate(&cfg)
+		var validation *config.ValidationError
+		if err := cfg.Validate(); !errors.As(err, &validation) {
+			t.Fatalf("%s: invalid retrieval settings error = %v", name, err)
+		}
+	}
+}
+
+func TestKnowledgeEmbeddingEnabledRequiresFullConfiguration(t *testing.T) {
+	t.Parallel()
+	enable := func() config.Config {
+		cfg := config.Default()
+		cfg.Context.ContextFeatures.ModelBudgetEnabled = true
+		cfg.Context.ContextFeatures.RecoverableResultsEnabled = true
+		cfg.Orchestration.Knowledge.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.ProviderID = "internal"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "https://embeddings.internal.example"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv = "EMBEDDING_API_KEY"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Model = "text-embedding-local"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Dimensions = 768
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.MinSimilarityBasisPoints = 7000
+		return cfg
+	}
+	if err := enable().Validate(); err != nil {
+		t.Fatalf("fully configured embedding must validate: %v", err)
+	}
+	for name, mutate := range map[string]func(*config.Config){
+		"empty provider":  func(c *config.Config) { c.Orchestration.Knowledge.Retrieval.Embedding.ProviderID = "" },
+		"empty model":     func(c *config.Config) { c.Orchestration.Knowledge.Retrieval.Embedding.Model = "" },
+		"empty key env":   func(c *config.Config) { c.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv = "" },
+		"zero dimensions": func(c *config.Config) { c.Orchestration.Knowledge.Retrieval.Embedding.Dimensions = 0 },
+		"zero threshold":  func(c *config.Config) { c.Orchestration.Knowledge.Retrieval.Embedding.MinSimilarityBasisPoints = 0 },
+		"empty base url":  func(c *config.Config) { c.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "" },
+		"insecure non-loopback": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "http://embeddings.internal.example"
+		},
+		"base url userinfo": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "https://user:pass@embeddings.internal.example"
+		},
+		"base url query": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "https://embeddings.internal.example?token=x"
+		},
+		"base url fragment": func(c *config.Config) {
+			c.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "https://embeddings.internal.example#frag"
+		},
+	} {
+		cfg := enable()
+		mutate(&cfg)
+		var validation *config.ValidationError
+		if err := cfg.Validate(); !errors.As(err, &validation) {
+			t.Fatalf("%s: enabled embedding error = %v", name, err)
+		}
+	}
+	loopback := enable()
+	loopback.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "http://localhost:8080"
+	if err := loopback.Validate(); err != nil {
+		t.Fatalf("loopback http embedding base url rejected: %v", err)
+	}
+}
+
+func TestKnowledgeRetrievalEnabledRequiresModelBudgetInParsedConfig(t *testing.T) {
+	t.Parallel()
+	if _, err := config.Parse([]byte(`orchestration:
+  knowledge:
+    enabled: true
+    retrieval:
+      enabled: true
+`)); err == nil || !strings.Contains(err.Error(), "model_budget_enabled") {
+		t.Fatalf("parsed retrieval without model budget error = %v", err)
+	}
+	// A fully enabled positive fixture passes: knowledge plus model budget
+	// with the recovery dependency satisfied.
+	if _, err := config.Parse([]byte(`context:
+  context_features:
+    model_budget_enabled: true
+    recoverable_results_enabled: true
+orchestration:
+  knowledge:
+    enabled: true
+    retrieval:
+      enabled: true
+`)); err != nil {
+		t.Fatalf("fully enabled retrieval fixture rejected: %v", err)
 	}
 }
 
@@ -1205,5 +1749,198 @@ func TestCodeIntelligenceRequiresSandboxAndRecoverableResults(t *testing.T) {
 	cfg.Context.ContextFeatures.RecoverableResultsEnabled = true
 	if err := cfg.Validate(); err != nil {
 		t.Fatalf("Validate() with dependencies = %v", err)
+	}
+}
+
+func TestResultAnalysisDefaultsDisabledAndValid(t *testing.T) {
+	t.Parallel()
+	def := config.Default().Orchestration.ResultAnalysis
+	if def.Enabled || def.Model.Enabled {
+		t.Fatalf("result analysis defaults must be disabled: %+v", def)
+	}
+	if err := config.Default().Validate(); err != nil {
+		t.Fatalf("default config with result analysis fields must validate: %v", err)
+	}
+}
+
+// TestResultAnalysisConfigParseSchemaAndRoundTrip proves every field of
+// orchestration.result_analysis set in config.yaml actually reaches the
+// parsed struct, field by field, and survives a Marshal/Parse round trip.
+// This is the regression test the schema-registration trap requires: a
+// field present in the Go struct and in Validate but missing from
+// configSchema is silently ignored by Parse instead of erroring.
+func TestResultAnalysisConfigParseSchemaAndRoundTrip(t *testing.T) {
+	t.Parallel()
+	parsed, err := config.Parse([]byte(`orchestration:
+  result_analysis:
+    enabled: true
+    max_segment_bytes: 32768
+    overlap_basis_points: 1500
+    overlap_max_bytes: 2048
+    max_leaves: 128
+    max_reduction_fan_in: 4
+    max_reduction_depth: 4
+    max_concurrent_leaves: 4
+    max_attempts_per_step: 3
+    call_timeout_seconds: 180
+    wall_time_seconds: 1200
+    worker_interval_seconds: 15
+    evidence:
+      excerpt_bytes: 1024
+      selectors_per_leaf: 6
+      references_per_packet: 20
+      bundle_bytes: 16384
+    model:
+      enabled: true
+      provider_id: internal-analysis
+      base_url: https://analysis.internal.example
+      api_key_env: ANALYSIS_API_KEY
+      model: analysis-model-v1
+      reasoning_effort: high
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := parsed.Orchestration.ResultAnalysis
+	if !got.Enabled ||
+		got.MaxSegmentBytes != 32768 ||
+		got.OverlapBasisPoints != 1500 ||
+		got.OverlapMaxBytes != 2048 ||
+		got.MaxLeaves != 128 ||
+		got.MaxReductionFanIn != 4 ||
+		got.MaxReductionDepth != 4 ||
+		got.MaxConcurrentLeaves != 4 ||
+		got.MaxAttemptsPerStep != 3 ||
+		got.CallTimeoutSeconds != 180 ||
+		got.WallTimeSeconds != 1200 ||
+		got.WorkerIntervalSeconds != 15 {
+		t.Fatalf("parsed result analysis top-level fields = %+v", got)
+	}
+	if got.Evidence.ExcerptBytes != 1024 ||
+		got.Evidence.SelectorsPerLeaf != 6 ||
+		got.Evidence.ReferencesPerPacket != 20 ||
+		got.Evidence.BundleBytes != 16384 {
+		t.Fatalf("parsed result analysis evidence fields = %+v", got.Evidence)
+	}
+	if !got.Model.Enabled ||
+		got.Model.ProviderID != "internal-analysis" ||
+		got.Model.BaseURL != "https://analysis.internal.example" ||
+		got.Model.APIKeyEnv != "ANALYSIS_API_KEY" ||
+		got.Model.Model != "analysis-model-v1" ||
+		got.Model.ReasoningEffort != "high" {
+		t.Fatalf("parsed result analysis model fields = %+v", got.Model)
+	}
+	if err := parsed.Validate(); err != nil {
+		t.Fatalf("valid result analysis settings must validate: %v", err)
+	}
+	rendered, err := config.Marshal(parsed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roundTripped, err := config.Parse(rendered)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roundTripped.Orchestration.ResultAnalysis != got {
+		t.Fatalf("result analysis round trip = %+v, want %+v", roundTripped.Orchestration.ResultAnalysis, got)
+	}
+}
+
+func TestResultAnalysisConfigPreservesExtensions(t *testing.T) {
+	t.Parallel()
+	withExtra, err := config.Parse([]byte(`orchestration:
+  result_analysis:
+    enabled: true
+    future_analysis_extra: preserved
+    model:
+      future_model_extra: preserved
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rendered, err := config.Marshal(withExtra)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(rendered), "future_analysis_extra: preserved") || !strings.Contains(string(rendered), "future_model_extra: preserved") {
+		t.Fatalf("result analysis extension fields were not preserved: %s", rendered)
+	}
+}
+
+func TestResultAnalysisConfigValidationRejectsInvalidValues(t *testing.T) {
+	t.Parallel()
+	for name, mutate := range map[string]func(*config.Config){
+		"max segment bytes zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.MaxSegmentBytes = 0
+		},
+		"max segment bytes over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.MaxSegmentBytes = domain.HardMaxAnalysisSegmentBytes + 1
+		},
+		"overlap basis points over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.OverlapBasisPoints = domain.HardMaxAnalysisOverlapBasisPoints + 1
+		},
+		"overlap max bytes zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.OverlapMaxBytes = 0
+		},
+		"max leaves over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.MaxLeaves = domain.HardMaxAnalysisLeaves + 1
+		},
+		"max reduction fan-in zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.MaxReductionFanIn = 0
+		},
+		"max reduction depth over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.MaxReductionDepth = domain.HardMaxAnalysisReductionDepth + 1
+		},
+		"max concurrent leaves zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.MaxConcurrentLeaves = 0
+		},
+		"max attempts per step over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.MaxAttemptsPerStep = domain.HardMaxAnalysisAttemptsPerStep + 1
+		},
+		"call timeout zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.CallTimeoutSeconds = 0
+		},
+		"wall time over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.WallTimeSeconds = domain.HardMaxAnalysisWallTimeSeconds + 1
+		},
+		"worker interval seconds zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.WorkerIntervalSeconds = 0
+		},
+		"evidence excerpt bytes zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.Evidence.ExcerptBytes = 0
+		},
+		"evidence selectors per leaf over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.Evidence.SelectorsPerLeaf = domain.HardMaxAnalysisEvidencePerLeaf + 1
+		},
+		"evidence references per packet over hard max": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.Evidence.ReferencesPerPacket = domain.HardMaxAnalysisEvidencePerPacket + 1
+		},
+		"evidence bundle bytes zero": func(c *config.Config) {
+			c.Orchestration.ResultAnalysis.Evidence.BundleBytes = 0
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			cfg := config.Default()
+			mutate(&cfg)
+			if err := cfg.Validate(); err == nil {
+				t.Fatalf("expected validation error for %s", name)
+			}
+		})
+	}
+}
+
+func TestResultAnalysisModelEnabledRequiresFullConfiguration(t *testing.T) {
+	t.Parallel()
+	cfg := config.Default()
+	cfg.Orchestration.ResultAnalysis.Model.Enabled = true
+	if err := cfg.Validate(); err == nil {
+		t.Fatal("expected validation error for an enabled analysis model profile with no provider_id, model, or api_key_env")
+	}
+	cfg.Orchestration.ResultAnalysis.Model.ProviderID = "internal-analysis"
+	cfg.Orchestration.ResultAnalysis.Model.Model = "analysis-model-v1"
+	cfg.Orchestration.ResultAnalysis.Model.APIKeyEnv = "ANALYSIS_API_KEY"
+	cfg.Orchestration.ResultAnalysis.Model.BaseURL = "https://analysis.internal.example"
+	if err := cfg.Validate(); err != nil {
+		t.Fatalf("expected a fully configured enabled analysis model profile to validate, got %v", err)
 	}
 }

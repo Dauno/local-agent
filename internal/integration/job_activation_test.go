@@ -29,6 +29,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 	botusecase "github.com/Dauno/slack-local-agent/internal/usecase/bot"
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
+	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
 // TestJobCompletionActivationEndToEnd proves the detached root awareness
@@ -52,12 +53,58 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	job := integrationDetachedJob("job_activation_e2e", now)
 	job.ConversationKey = key
 	job.OriginalCallID = "original-call-e2e"
+	job.WorkstreamID = "ws-activation-e2e"
+	job.TaskID = "task-activation-e2e"
+	job.AdmissionRevision = 0
+	jobs := adaptersqlite.NewExternalAgentJobStore(store)
+	workstreams, err := workstreamusecase.New(workstreamusecase.Config{
+		Enabled: true, AllowedProjects: map[string]struct{}{job.PrimaryProject: {}},
+	}, workstreamusecase.Dependencies{Store: adaptersqlite.NewWorkstreamStore(store)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The binding must be reachable through public routes: a human creates and
+	// activates the workstream, proposes the task, and starts it for execution.
+	// The host generates the execution identity.
+	binding := port.WorkstreamBinding{Actor: job.Actor, ConversationKey: job.ConversationKey, Project: job.PrimaryProject}
+	if _, err := workstreams.CreateHuman(t.Context(), binding, job.WorkstreamID, "activation objective", "slack-human:ws-activation-create"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionActivateWorkstream, SourceID: "slack-human:ws-activation-activate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionProposeTask, SourceID: "slack-human:ws-activation-propose",
+		Task: &domain.WorkstreamTask{ID: job.TaskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, started, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 2, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionStartTask, TaskID: job.TaskID, SourceID: "slack-human:ws-activation-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range started.Tasks {
+		if task.ID == job.TaskID {
+			job.ExecutionIdentity = task.ExecutionIdentity
+		}
+	}
+	if job.ExecutionIdentity == "" {
+		t.Fatal("started task has no host execution identity")
+	}
+	job.AdmissionRevision = 3
 	job.RequestSHA256 = domain.ExternalAgentJobRequestDigest(domain.ExternalAgentJobRequest{
 		Provider: job.Provider, Profile: job.Profile, PrimaryProject: job.PrimaryProject,
 		RegistryRevision: job.RegistryRevision, Task: job.Task, Mode: job.Mode,
 		Actor: job.Actor, TeamID: job.TeamID, ConversationKey: job.ConversationKey,
+		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
 	})
-	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	created, _, err := jobs.CreateIfAbsent(t.Context(), job)
 	if err != nil || !created {
 		t.Fatalf("create job = %v, err=%v", created, err)
@@ -125,6 +172,9 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if notificationPublisher.calls != 1 {
 		t.Fatalf("notification publishes = %d, want 1", notificationPublisher.calls)
 	}
+	if notificationPublisher.notification.CanonicalMarkdown != "OpenCode job `job_activation_e2e` completed. Root integration is pending." {
+		t.Fatalf("terminal notification repeated result prose: %q", notificationPublisher.notification.CanonicalMarkdown)
+	}
 
 	var statusRevision int
 	if err := store.DB().QueryRowContext(t.Context(), `SELECT status_revision FROM external_agent_job_notifications WHERE job_id = ?`, job.ID).Scan(&statusRevision); err != nil {
@@ -156,9 +206,9 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 		RetainMessages: 50, MaxConcurrentCalls: 1, ModelTimeout: time.Minute,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
 	}, botusecase.Dependencies{
-		Store: store, Runtime: runtime, ActivationStore: jobs, Publisher: responsePublisher,
+		Store: store, Runtime: runtime, ActivationStore: jobs, CompletionReader: jobService, Publisher: responsePublisher,
 		Logger: integrationLogger{}, Exchange: store, ModelCalls: modelcalllimiter.New(1),
-		SanitizeContent: func(value string) string { return value },
+		SanitizeContent: func(value string) string { return value }, Workstreams: workstreams,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -172,6 +222,10 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := activationWorker.ProcessOne(t.Context()); err != nil {
+		var classified *port.ActivationProcessError
+		if errors.As(err, &classified) {
+			t.Fatalf("activation processing: %s: %v", classified.Code, classified.Err)
+		}
 		t.Fatal(err)
 	}
 
@@ -201,7 +255,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(messages) != 2 || messages[0].Source != domain.MessageSourceJobCompletion || messages[0].ExternalTS != activationID || messages[1].Role != domain.RoleAssistant || messages[1].Source != domain.MessageSourceAssistant {
+	if len(messages) != 1 || messages[0].Role != domain.RoleAssistant || messages[0].Source != domain.MessageSourceAssistant {
 		t.Fatalf("activation transcript = %#v", messages)
 	}
 	var memoryOutbox int
@@ -213,7 +267,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	}
 
 	loaded, err := sessionService.Get(t.Context(), &session.GetRequest{
-		AppName: "local-agent", UserID: "local_user", SessionID: "adk:" + string(key),
+		AppName: "local-agent", UserID: "local_user", SessionID: "adk:activation:" + activationID,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -223,15 +277,11 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if !verified {
 		t.Fatalf("root model chunk verification failed: %#v", failures)
 	}
-	if chunkCalls < 2 {
-		t.Fatalf("root model chunk calls = %d, want more than one chunk", chunkCalls)
+	if chunkCalls != 0 || reconstructed != "" {
+		t.Fatalf("root model used result readers: calls=%d reconstructed=%q", chunkCalls, reconstructed)
 	}
-	if reconstructed != expectedText || len([]byte(reconstructed)) != len([]byte(expectedText)) {
-		t.Fatalf("root model reconstructed %d chunks into %q, want %q", chunkCalls, reconstructed, expectedText)
-	}
-	// One user envelope, one status call/response, one call/response per
-	// chunk and one final root response.
-	expectedEvents := 4 + 2*chunkCalls
+	// One transient frame input and one final root response.
+	expectedEvents := 2
 	if loaded == nil || loaded.Session == nil || loaded.Session.Events().Len() != expectedEvents {
 		t.Fatalf("durable ADK session = %#v, want %d events", loaded, expectedEvents)
 	}
@@ -246,20 +296,11 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 		}
 	}
 	modelRequest, modelContext, contextOK, _ := rootModel.snapshot()
-	if !contextOK || modelContext.Origin.Kind != port.AgentTurnOriginJobCompletion || modelContext.Origin.Actor != job.Actor || modelContext.Origin.ActivationID != activationID || calls != 2+chunkCalls {
-		t.Fatalf("root model context = %#v, present=%t, calls=%d (want 2+%d)", modelContext, contextOK, calls, chunkCalls)
+	if !contextOK || modelContext.Origin.Kind != port.AgentTurnOriginJobCompletion || modelContext.Origin.Actor != job.Actor || modelContext.Origin.ActivationID != activationID || calls != 1 {
+		t.Fatalf("root model context = %#v, present=%t, calls=%d (want 1)", modelContext, contextOK, calls)
 	}
-	if got := rootModel.statusRevisionSnapshot(); got != statusRevision {
-		t.Fatalf("root model status revision = %d, want notification revision %d", got, statusRevision)
-	}
-	if modelRequest == nil || len(modelRequest.Tools) != 2 {
-		t.Fatalf("activation model tools = %#v, want job_status and read_job_result_chunk", modelRequest)
-	}
-	if _, ok := modelRequest.Tools["job_status"]; !ok {
-		t.Fatalf("job_status tool missing: %#v", modelRequest.Tools)
-	}
-	if _, ok := modelRequest.Tools["read_job_result_chunk"]; !ok {
-		t.Fatalf("read_job_result_chunk tool missing: %#v", modelRequest.Tools)
+	if modelRequest == nil || len(modelRequest.Tools) != 0 {
+		t.Fatalf("activation model tools = %#v, want none", modelRequest)
 	}
 
 	health, err := activationWorker.SnapshotHealth(t.Context(), time.Now().UTC())
@@ -271,6 +312,442 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	}
 	assertMetricAtLeast(t, metrics.Snapshot(), domain.MetricExternalAgentActivationClaimTotal, 1)
 	assertMetricAtLeast(t, metrics.Snapshot(), domain.MetricExternalAgentActivationTotal, 1)
+}
+
+// TestJobCompletionProposalPathEndToEnd proves the text-only proposal
+// contract (FR-09): a detached completion publishes the terminal marker and
+// root's integrated response carries exactly one informational proposal.
+// The proposal never mutates the durable workstream and never creates a
+// confirmation; only a later explicit human `workstream-human` command goes
+// through the trusted host path and commits the transition.
+func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
+	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "proposal.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Add(-time.Minute)
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1710000000.000001")
+	job := integrationDetachedJob("job_proposal_e2e", now)
+	job.ConversationKey = key
+	job.OriginalCallID = "original-call-proposal-e2e"
+	job.WorkstreamID = "ws-proposal-e2e"
+	job.TaskID = "task-proposal-e2e"
+	job.AdmissionRevision = 0
+	jobs := adaptersqlite.NewExternalAgentJobStore(store)
+	workstreams, err := workstreamusecase.New(workstreamusecase.Config{
+		Enabled: true, AllowedProjects: map[string]struct{}{job.PrimaryProject: {}},
+	}, workstreamusecase.Dependencies{Store: adaptersqlite.NewWorkstreamStore(store)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := port.WorkstreamBinding{Actor: job.Actor, ConversationKey: job.ConversationKey, Project: job.PrimaryProject}
+	if _, err := workstreams.CreateHuman(t.Context(), binding, job.WorkstreamID, "proposal objective", "slack-human:ws-proposal-create"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionActivateWorkstream, SourceID: "slack-human:ws-proposal-activate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionProposeTask, SourceID: "slack-human:ws-proposal-propose",
+		Task: &domain.WorkstreamTask{ID: job.TaskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, started, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 2, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionStartTask, TaskID: job.TaskID, SourceID: "slack-human:ws-proposal-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range started.Tasks {
+		if task.ID == job.TaskID {
+			job.ExecutionIdentity = task.ExecutionIdentity
+		}
+	}
+	if job.ExecutionIdentity == "" {
+		t.Fatal("started task has no host execution identity")
+	}
+	job.AdmissionRevision = 3
+	job.RequestSHA256 = domain.ExternalAgentJobRequestDigest(domain.ExternalAgentJobRequest{
+		Provider: job.Provider, Profile: job.Profile, PrimaryProject: job.PrimaryProject,
+		RegistryRevision: job.RegistryRevision, Task: job.Task, Mode: job.Mode,
+		Actor: job.Actor, TeamID: job.TeamID, ConversationKey: job.ConversationKey,
+		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
+	})
+	created, _, err := jobs.CreateIfAbsent(t.Context(), job)
+	if err != nil || !created {
+		t.Fatalf("create job = %v, err=%v", created, err)
+	}
+
+	const rawResult = "proposal-path verified result"
+	expectedText, err := domain.SanitizeResultText(rawResult)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expectedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(expectedText)))
+
+	acp := &detachedFakeACP{raw: rawResult}
+	jobService, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+	}, externalagent.Dependencies{
+		Store: jobs, Runtime: &detachedDispatcherRuntime{acp: acp},
+		MaxResultBytes: 1 << 20, MaxResultChunkBytes: 7, Logger: integrationLogger{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	t.Cleanup(stopWorker)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		jobService.Run(workerCtx)
+	}()
+	t.Cleanup(func() {
+		stopWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("durable job worker did not stop")
+		}
+	})
+	waitForJobStatus(t, jobs, job.ID, domain.JobCompleted)
+
+	metrics := metricsadapter.NewRecorder()
+	notificationPublisher := &jobActivationNotificationPublisher{}
+	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{
+		PollInterval: time.Millisecond, LeaseTTL: time.Minute,
+	}, externalagent.NotificationDependencies{
+		Store: jobs, Publisher: notificationPublisher, HostCompleter: jobService,
+		Logger: integrationLogger{}, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := notificationWorker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if notificationPublisher.calls != 1 {
+		t.Fatalf("notification publishes = %d, want 1", notificationPublisher.calls)
+	}
+	if notificationPublisher.notification.CanonicalMarkdown != "OpenCode job `job_proposal_e2e` completed. Root integration is pending." {
+		t.Fatalf("terminal notification repeated result prose: %q", notificationPublisher.notification.CanonicalMarkdown)
+	}
+	var statusRevision int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT status_revision FROM external_agent_job_notifications WHERE job_id = ?`, job.ID).Scan(&statusRevision); err != nil {
+		t.Fatal(err)
+	}
+	activationID := domain.ExternalAgentJobActivationID(job.ID, statusRevision, domain.JobNotificationTerminal)
+	activation, err := jobs.GetActivation(t.Context(), activationID)
+	if err != nil || activation == nil || activation.State != domain.ActivationPending {
+		t.Fatalf("activation after publication = %#v, err=%v", activation, err)
+	}
+
+	const proposal = "The inspection completed cleanly.\nProposal: add a verification task before closing the objective."
+	rootModel := newActivationRootModel(job.ID, expectedText, expectedDigest, int64(len([]byte(expectedText))), 7)
+	rootModel.response = proposal
+	toolFactory := toolfactory.New(store, nil, nil, nil).WithExternalAgentJobs(jobService)
+	sessionService := adaptersqlite.NewAdkSessionService(store)
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
+		AgentName: "root_agent", Model: rootModel, SessionService: sessionService,
+		ToolFactory: toolFactory, ProviderFamily: domain.ProviderFamilyOpenAICompatible,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePublisher := &jobActivationResponsePublisher{}
+	bot, err := botusecase.New(botusecase.Config{
+		AccessPolicy:   domain.AccessPolicy{AllowedUserIDs: []string{job.Actor}},
+		ContextLimits:  domain.ContextLimits{MaxMessages: 20, MaxChars: 20_000},
+		RetainMessages: 50, MaxConcurrentCalls: 1, ModelTimeout: time.Minute,
+		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+	}, botusecase.Dependencies{
+		Store: store, Runtime: runtime, ActivationStore: jobs, CompletionReader: jobService, Publisher: responsePublisher,
+		Logger: integrationLogger{}, Exchange: store, ModelCalls: modelcalllimiter.New(1),
+		SanitizeContent: func(value string) string { return value }, Workstreams: workstreams,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationWorker, err := externalagent.NewActivationWorker(externalagent.ActivationConfig{
+		PollInterval: time.Millisecond, LeaseTTL: time.Minute, StuckThreshold: time.Minute,
+	}, externalagent.ActivationDependencies{
+		Store: jobs, Handler: bot, Logger: integrationLogger{}, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := activationWorker.ProcessOne(t.Context()); err != nil {
+		var classified *port.ActivationProcessError
+		if errors.As(err, &classified) {
+			t.Fatalf("activation processing: %s: %v", classified.Code, classified.Err)
+		}
+		t.Fatal(err)
+	}
+
+	completed, err := jobs.GetActivation(t.Context(), activationID)
+	if err != nil || completed == nil || completed.State != domain.ActivationCompleted {
+		t.Fatalf("completed activation = %#v, err=%v", completed, err)
+	}
+	if len(responsePublisher.calls) != 1 || responsePublisher.calls[0].text != proposal {
+		t.Fatalf("proposal delivery = %#v", responsePublisher.calls)
+	}
+
+	// The informational proposal never mutated the durable workstream or
+	// created a confirmation.
+	var revision, taskCount, confirmationCount int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT revision FROM workstreams WHERE workstream_id = ?`, job.WorkstreamID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_tasks WHERE workstream_id = ?`, job.WorkstreamID).Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM tool_confirmation_deliveries`).Scan(&confirmationCount); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 3 || taskCount != 1 || confirmationCount != 0 {
+		t.Fatalf("proposal mutated durable state: revision=%d tasks=%d confirmations=%d", revision, taskCount, confirmationCount)
+	}
+
+	// The later explicit human command owns validation and mutation. It carries
+	// the source result identity of the completed execution so the dependent
+	// task keeps its provenance bound as a required input.
+	const sourceResultID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	humanCommand := `workstream-human {"project":"workspace","workstream_id":"ws-proposal-e2e","expected_revision":3,"action":"propose_task","task_id":"task-proposal-e2e-2","task_description":"verify the proposal integration","source_result_identity":"` + sourceResultID + `"}`
+	humanInvocation := foregroundThreadedDMInvocation("Ev-proposal-human-01", humanCommand, key)
+	if outcome, err := bot.Handle(t.Context(), humanInvocation); err != nil || outcome != botusecase.OutcomeResponded {
+		t.Fatalf("human command outcome=%q err=%v", outcome, err)
+	}
+	if calls := responsePublisher.snapshot(); len(calls) != 2 || !strings.Contains(calls[1].text, "applied human action `propose_task` at revision `4`") {
+		t.Fatalf("human command publication = %#v", calls)
+	}
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT revision FROM workstreams WHERE workstream_id = ?`, job.WorkstreamID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_tasks WHERE workstream_id = ?`, job.WorkstreamID).Scan(&taskCount); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 4 || taskCount != 2 {
+		t.Fatalf("human command did not commit through the trusted path: revision=%d tasks=%d", revision, taskCount)
+	}
+	var sourceInputs int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_task_inputs WHERE workstream_id = ? AND task_id = ? AND input_identity = ?`, job.WorkstreamID, "task-proposal-e2e-2", sourceResultID).Scan(&sourceInputs); err != nil {
+		t.Fatal(err)
+	}
+	if sourceInputs != 1 {
+		t.Fatalf("source result identity was not bound as a required input: %d", sourceInputs)
+	}
+	if _, _, _, calls := rootModel.snapshot(); calls != 1 {
+		t.Fatalf("human command crossed the root model: calls=%d", calls)
+	}
+}
+
+// TestJobCompletionUnavailableResultPublishesTerminalFallback proves the
+// fail-closed completion UX: the terminal marker is followed by an activation
+// whose oversized markdown result cannot be represented, so the host publishes
+// one deterministic fallback update through the activation worker's fallback
+// claim instead of leaving the conversation visibly open. Root is never
+// invoked and the producing ACP job is never replayed.
+func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
+	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "fallback.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	now := time.Now().UTC().Add(-time.Minute)
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1710000000.000001")
+	job := integrationDetachedJob("job_fallback_e2e", now)
+	job.ConversationKey = key
+	job.OriginalCallID = "original-call-fallback-e2e"
+	job.WorkstreamID = "ws-fallback-e2e"
+	job.TaskID = "task-fallback-e2e"
+	job.AdmissionRevision = 0
+	jobs := adaptersqlite.NewExternalAgentJobStore(store)
+	workstreams, err := workstreamusecase.New(workstreamusecase.Config{
+		Enabled: true, AllowedProjects: map[string]struct{}{job.PrimaryProject: {}},
+	}, workstreamusecase.Dependencies{Store: adaptersqlite.NewWorkstreamStore(store)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := port.WorkstreamBinding{Actor: job.Actor, ConversationKey: job.ConversationKey, Project: job.PrimaryProject}
+	if _, err := workstreams.CreateHuman(t.Context(), binding, job.WorkstreamID, "fallback objective", "slack-human:ws-fallback-create"); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionActivateWorkstream, SourceID: "slack-human:ws-fallback-activate",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionProposeTask, SourceID: "slack-human:ws-fallback-propose",
+		Task: &domain.WorkstreamTask{ID: job.TaskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, started, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
+		WorkstreamID: job.WorkstreamID, ExpectedRevision: 2, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionStartTask, TaskID: job.TaskID, SourceID: "slack-human:ws-fallback-start",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range started.Tasks {
+		if task.ID == job.TaskID {
+			job.ExecutionIdentity = task.ExecutionIdentity
+		}
+	}
+	job.AdmissionRevision = 3
+	job.RequestSHA256 = domain.ExternalAgentJobRequestDigest(domain.ExternalAgentJobRequest{
+		Provider: job.Provider, Profile: job.Profile, PrimaryProject: job.PrimaryProject,
+		RegistryRevision: job.RegistryRevision, Task: job.Task, Mode: job.Mode,
+		Actor: job.Actor, TeamID: job.TeamID, ConversationKey: job.ConversationKey,
+		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
+	})
+	created, _, err := jobs.CreateIfAbsent(t.Context(), job)
+	if err != nil || !created {
+		t.Fatalf("create job = %v, err=%v", created, err)
+	}
+
+	rawResult := strings.Repeat("x", domain.MaxActivationFrameRunes+1)
+	acp := &detachedFakeACP{raw: rawResult}
+	jobService, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
+		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
+	}, externalagent.Dependencies{
+		Store: jobs, Runtime: &detachedDispatcherRuntime{acp: acp},
+		MaxResultBytes: 1 << 20, MaxResultChunkBytes: 7, Logger: integrationLogger{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	workerCtx, stopWorker := context.WithCancel(context.Background())
+	t.Cleanup(stopWorker)
+	workerDone := make(chan struct{})
+	go func() {
+		defer close(workerDone)
+		jobService.Run(workerCtx)
+	}()
+	t.Cleanup(func() {
+		stopWorker()
+		select {
+		case <-workerDone:
+		case <-time.After(5 * time.Second):
+			t.Error("durable job worker did not stop")
+		}
+	})
+	waitForJobStatus(t, jobs, job.ID, domain.JobCompleted)
+	if calls, _ := acp.callStats(); calls != 1 {
+		t.Fatalf("ACP executions = %d, want exactly 1", calls)
+	}
+
+	metrics := metricsadapter.NewRecorder()
+	notificationPublisher := &jobActivationNotificationPublisher{}
+	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{
+		PollInterval: time.Millisecond, LeaseTTL: time.Minute,
+	}, externalagent.NotificationDependencies{
+		Store: jobs, Publisher: notificationPublisher, HostCompleter: jobService,
+		Logger: integrationLogger{}, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := notificationWorker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	var statusRevision int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT status_revision FROM external_agent_job_notifications WHERE job_id = ?`, job.ID).Scan(&statusRevision); err != nil {
+		t.Fatal(err)
+	}
+	activationID := domain.ExternalAgentJobActivationID(job.ID, statusRevision, domain.JobNotificationTerminal)
+
+	rootModel := newActivationRootModel(job.ID, "", "", 0, 7)
+	toolFactory := toolfactory.New(store, nil, nil, nil).WithExternalAgentJobs(jobService)
+	sessionService := adaptersqlite.NewAdkSessionService(store)
+	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
+		AgentName: "root_agent", Model: rootModel, SessionService: sessionService,
+		ToolFactory: toolFactory, ProviderFamily: domain.ProviderFamilyOpenAICompatible,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	responsePublisher := &jobActivationResponsePublisher{}
+	bot, err := botusecase.New(botusecase.Config{
+		AccessPolicy:   domain.AccessPolicy{AllowedUserIDs: []string{job.Actor}},
+		ContextLimits:  domain.ContextLimits{MaxMessages: 20, MaxChars: 20_000},
+		RetainMessages: 50, MaxConcurrentCalls: 1, ModelTimeout: time.Minute,
+		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+	}, botusecase.Dependencies{
+		Store: store, Runtime: runtime, ActivationStore: jobs, CompletionReader: jobService, Publisher: responsePublisher,
+		Logger: integrationLogger{}, Exchange: store, ModelCalls: modelcalllimiter.New(1),
+		SanitizeContent: func(value string) string { return value }, Workstreams: workstreams,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activationWorker, err := externalagent.NewActivationWorker(externalagent.ActivationConfig{
+		PollInterval: time.Millisecond, LeaseTTL: time.Minute, StuckThreshold: time.Minute,
+	}, externalagent.ActivationDependencies{
+		Store: jobs, Handler: bot, Logger: integrationLogger{}, Metrics: metrics,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// The unavailable representation fails the activation terminally before
+	// model contact.
+	if err := activationWorker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := jobs.GetActivation(t.Context(), activationID)
+	if err != nil || failed == nil {
+		t.Fatalf("failed activation = %#v, err=%v", failed, err)
+	}
+	if failed.State != domain.ActivationFailed || failed.LastErrorCode != "activation_result_unavailable" || !failed.FallbackRequired {
+		t.Fatalf("unavailable activation state = %#v", failed)
+	}
+	if _, _, _, calls := rootModel.snapshot(); calls != 0 {
+		t.Fatalf("unavailable activation crossed the root model: calls=%d", calls)
+	}
+
+	// The next poll claims the terminal fallback and publishes the host-owned
+	// closing update.
+	if err := activationWorker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	fallbackPublished, err := jobs.GetActivation(t.Context(), activationID)
+	if err != nil || fallbackPublished == nil {
+		t.Fatalf("fallback activation = %#v, err=%v", fallbackPublished, err)
+	}
+	if fallbackPublished.State != domain.ActivationFailed || fallbackPublished.FallbackSlackTS == "" {
+		t.Fatalf("fallback publication state = %#v", fallbackPublished)
+	}
+	calls := responsePublisher.snapshot()
+	if len(calls) != 1 || !strings.Contains(calls[0].text, "integrated root response is unavailable") || !strings.Contains(calls[0].text, "job_fallback_e2e") {
+		t.Fatalf("fallback publication = %#v", calls)
+	}
+
+	// The fallback is reconciled at most once: a third poll publishes nothing
+	// and never replays the producing job.
+	if err := activationWorker.ProcessOne(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if len(responsePublisher.snapshot()) != 1 {
+		t.Fatalf("fallback was republished: %#v", responsePublisher.snapshot())
+	}
+	if calls, _ := acp.callStats(); calls != 1 {
+		t.Fatalf("producing ACP job was replayed: %d calls", calls)
+	}
 }
 
 // TestForegroundJobSingleRootResponseEndToEnd reproduces the user-observed
@@ -546,15 +1023,8 @@ func TestActivationWorkerShutdownDrainsCurrentActivation(t *testing.T) {
 	}
 }
 
-// activationRootModel scripts the root activation turn with real result
-// consumption (FR-02, FR-12): call 1 emits job_status to bind the terminal
-// revision and capture the persisted result identity; then it emits
-// read_job_result_chunk calls at server-provided UTF-8 continuation offsets
-// until EOF, verifying each reported per-chunk SHA-256 against the status
-// identity, the offset progression and the total digest recomputed over the
-// reconstructed text; only then does it return the root synthesis. Every
-// verification failure fails the turn loudly, so the E2E test fails when the
-// chunk reader is broken even though the tool is registered.
+// activationRootModel verifies that the host supplies the complete direct
+// result in the transient frame and that no activation readers are registered.
 type activationRootModel struct {
 	mu             sync.Mutex
 	jobID          string
@@ -572,12 +1042,15 @@ type activationRootModel struct {
 	revision      int
 	verified      bool
 	failures      []string
+	directInline  bool
+	response      string
 }
 
 func newActivationRootModel(jobID, expectedText, expectedDigest string, expectedBytes, chunkMaxBytes int64) *activationRootModel {
 	return &activationRootModel{
 		jobID: jobID, expectedText: expectedText, expectedDigest: expectedDigest,
-		expectedBytes: expectedBytes, chunkMaxBytes: chunkMaxBytes,
+		expectedBytes: expectedBytes, chunkMaxBytes: chunkMaxBytes, directInline: true,
+		response: "root synthesis",
 	}
 }
 
@@ -593,6 +1066,42 @@ func (m *activationRootModel) GenerateContent(ctx context.Context, request *mode
 		m.calls++
 		call := m.calls
 		m.mu.Unlock()
+		if m.directInline {
+			if call != 1 {
+				m.failLoud(yield, "activation made %d model calls", call)
+				return
+			}
+			if request == nil || len(request.Tools) != 0 {
+				toolCount := 0
+				if request != nil {
+					toolCount = len(request.Tools)
+				}
+				m.failLoud(yield, "activation tools = %d, want none", toolCount)
+				return
+			}
+			foundResult := false
+			if request != nil {
+				for _, content := range request.Contents {
+					if content == nil {
+						continue
+					}
+					for _, part := range content.Parts {
+						if part != nil && strings.Contains(part.Text, m.expectedText) {
+							foundResult = true
+						}
+					}
+				}
+			}
+			if !foundResult {
+				m.failLoud(yield, "direct result was not present in activation frame")
+				return
+			}
+			m.mu.Lock()
+			m.verified = true
+			m.mu.Unlock()
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(m.response, genai.RoleModel), TurnComplete: true}, nil)
+			return
+		}
 		if call == 1 {
 			yield(functionCallResponse("call_job_status_001", "job_status", map[string]any{"job_id": m.jobID}), nil)
 			return
@@ -662,7 +1171,7 @@ func (m *activationRootModel) GenerateContent(ctx context.Context, request *mode
 			m.mu.Lock()
 			m.verified = true
 			m.mu.Unlock()
-			yield(&model.LLMResponse{Content: genai.NewContentFromText("root synthesis", genai.RoleModel), TurnComplete: true}, nil)
+			yield(&model.LLMResponse{Content: genai.NewContentFromText(m.response, genai.RoleModel), TurnComplete: true}, nil)
 			return
 		}
 		yield(functionCallResponse(fmt.Sprintf("call_chunk_%03d", chunkNumber+1), "read_job_result_chunk", map[string]any{"job_id": m.jobID, "offset_bytes": nextOffset, "max_bytes": m.chunkMaxBytes}), nil)
@@ -884,11 +1393,13 @@ func waitForJobStatus(t *testing.T, jobs *adaptersqlite.ExternalAgentJobStore, j
 }
 
 type jobActivationNotificationPublisher struct {
-	calls int
+	calls        int
+	notification domain.ExternalAgentJobNotification
 }
 
-func (p *jobActivationNotificationPublisher) Publish(context.Context, domain.ExternalAgentJobNotification) (port.PublishedResponse, error) {
+func (p *jobActivationNotificationPublisher) Publish(_ context.Context, notification domain.ExternalAgentJobNotification) (port.PublishedResponse, error) {
 	p.calls++
+	p.notification = notification
 	return port.PublishedResponse{LastMessageTS: "1710000000.000002"}, nil
 }
 

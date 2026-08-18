@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -137,8 +138,14 @@ func TestRunnerDiscardsInvalidOptionalPatchWithoutRetry(t *testing.T) {
 }
 
 func prepareRunnerExchange(t *testing.T, userContent, assistantContent string) (*adaptersqlite.Store, domain.ConversationKey, domain.ConversationMetadata) {
+	store, key, metadata, _ := prepareRunnerExchangeWithPath(t, userContent, assistantContent)
+	return store, key, metadata
+}
+
+func prepareRunnerExchangeWithPath(t *testing.T, userContent, assistantContent string) (*adaptersqlite.Store, domain.ConversationKey, domain.ConversationMetadata, string) {
 	t.Helper()
-	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	dbPath := filepath.Join(t.TempDir(), "memory.db")
+	store, err := adaptersqlite.Initialize(t.Context(), dbPath)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,7 +166,7 @@ func prepareRunnerExchange(t *testing.T, userContent, assistantContent string) (
 	if err := store.FinalizeAssistantExchange(t.Context(), prepared.ID); err != nil {
 		t.Fatal(err)
 	}
-	return store, key, metadata
+	return store, key, metadata, dbPath
 }
 
 func newRunnerMemoryService(t *testing.T, store *adaptersqlite.Store, maxOps int) *Service {
@@ -377,9 +384,259 @@ func (runnerNoopCurator) ProposePatch(context.Context, domain.ConversationKey, s
 	return domain.MemoryPatch{}, nil
 }
 
+type cleanupFailingProjector struct {
+	inner        port.OKFProjector
+	mu           sync.Mutex
+	failures     int
+	projectCalls int
+	recoverCalls int
+}
+
+func (p *cleanupFailingProjector) Project(ctx context.Context, reader port.ProjectionReader, dir string) error {
+	p.mu.Lock()
+	p.projectCalls++
+	fail := p.failures > 0
+	if fail {
+		p.failures--
+	}
+	p.mu.Unlock()
+	if fail {
+		return port.ErrProjectionCleanup
+	}
+	return p.inner.Project(ctx, reader, dir)
+}
+
+func (p *cleanupFailingProjector) Recover(dir string) error {
+	p.mu.Lock()
+	p.recoverCalls++
+	p.mu.Unlock()
+	return p.inner.Recover(dir)
+}
+
+func (p *cleanupFailingProjector) counts() (projectCalls, recoverCalls int) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.projectCalls, p.recoverCalls
+}
+
+func runnerOutboxState(t *testing.T, dbPath string) (status string, attempts int) {
+	t.Helper()
+	db, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if err := db.QueryRowContext(t.Context(), `SELECT status, attempts FROM memory_outbox LIMIT 1`).Scan(&status, &attempts); err != nil {
+		t.Fatalf("outbox state query: %v", err)
+	}
+	return status, attempts
+}
+
+func TestRunnerCleanupFailureReschedulesWithoutConsumingRetries(t *testing.T) {
+	store, _, _, dbPath := prepareRunnerExchangeWithPath(t, "record a durable fact", "the fact is durable")
+	service := newRunnerMemoryService(t, store, 2)
+	// Fault-inject the real projector: backup removal fails five times, so
+	// the first promotion publishes the live bundle but leaves a residue
+	// backup, and every retry re-encounters that residue through the
+	// projector's internal recovery instead of a pre-return fake error.
+	backupRemovals := 0
+	projector := memoryprojector.NewWithFaults(os.Rename, func(path string) error {
+		if strings.Contains(path, ".okf-backup-") {
+			if _, err := os.Lstat(path); err == nil {
+				backupRemovals++
+				if backupRemovals <= 5 {
+					return errors.New("injected backup removal failure")
+				}
+			}
+		}
+		return os.RemoveAll(path)
+	})
+	runner, err := NewRunner(RunnerConfig{Interval: time.Hour, MaxRetries: 1, MemoryDir: t.TempDir()}, RunnerDependencies{
+		Store: store, ExchangeFinder: runnerFinder{}, Curator: runnerNoopCurator{}, Memory: service,
+		Projector: projector, ProjectionReader: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MaxRetries=1 would fail the item terminal on the very first failure
+	// under the normal path. Four cleanup failures must neither fail the
+	// item nor consume the retry budget: it stays pending, attempt-neutral.
+	for i := 0; i < 4; i++ {
+		runner.processOutbox(t.Context())
+		if status, attempts := runnerOutboxState(t, dbPath); status != "pending" || attempts != 0 {
+			t.Fatalf("cleanup failure %d: outbox = status %q attempts %d; want pending with budget restored", i, status, attempts)
+		}
+	}
+	if backupRemovals == 0 {
+		t.Fatal("fault injection never exercised backup removal")
+	}
+	// Once the backup can be removed, the same item completes.
+	runner.processOutbox(t.Context())
+	if status, attempts := runnerOutboxState(t, dbPath); status != "done" || attempts != 1 {
+		t.Fatalf("recovered item: outbox = status %q attempts %d; want done at attempts 1", status, attempts)
+	}
+}
+
+func TestRunnerStagingCleanupFailureReschedulesWithoutConsumingRetries(t *testing.T) {
+	store, _, _, dbPath := prepareRunnerExchangeWithPath(t, "record a durable fact", "the fact is durable")
+	service := newRunnerMemoryService(t, store, 2)
+	// Fault-inject the real projector: the first promotion fails (rollback
+	// succeeds), leaving a staging residue whose removal fails five times.
+	// Each retry re-encounters the residue through the projector's
+	// internal recovery, and the joined error stays typed.
+	promoteFailures := 1
+	stagingRemovals := 0
+	projector := memoryprojector.NewWithFaults(
+		func(oldpath, newpath string) error {
+			if promoteFailures > 0 && strings.Contains(oldpath, ".okf-staging-") {
+				promoteFailures--
+				return errors.New("injected promotion failure")
+			}
+			return os.Rename(oldpath, newpath)
+		},
+		func(path string) error {
+			if strings.Contains(path, ".okf-staging-") {
+				if _, err := os.Lstat(path); err == nil {
+					stagingRemovals++
+					if stagingRemovals <= 5 {
+						return errors.New("injected staging removal failure")
+					}
+				}
+			}
+			return os.RemoveAll(path)
+		},
+	)
+	runner, err := NewRunner(RunnerConfig{Interval: time.Hour, MaxRetries: 1, MemoryDir: t.TempDir()}, RunnerDependencies{
+		Store: store, ExchangeFinder: runnerFinder{}, Curator: runnerNoopCurator{}, Memory: service,
+		Projector: projector, ProjectionReader: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MaxRetries=1 would fail the item terminal on the very first failure
+	// under the normal path. Five staging cleanup failures must neither
+	// fail the item nor consume the retry budget.
+	for i := 0; i < 5; i++ {
+		runner.processOutbox(t.Context())
+		if status, attempts := runnerOutboxState(t, dbPath); status != "pending" || attempts != 0 {
+			t.Fatalf("staging cleanup failure %d: outbox = status %q attempts %d; want pending with budget restored", i, status, attempts)
+		}
+	}
+	if stagingRemovals == 0 {
+		t.Fatal("fault injection never exercised staging removal")
+	}
+	// Once the staging residue can be removed, the same item completes.
+	runner.processOutbox(t.Context())
+	if status, attempts := runnerOutboxState(t, dbPath); status != "done" || attempts != 1 {
+		t.Fatalf("recovered item: outbox = status %q attempts %d; want done at attempts 1", status, attempts)
+	}
+}
+
+func TestRunnerRollbackStagingFailureReschedulesWithoutConsumingRetries(t *testing.T) {
+	store, _, _, dbPath := prepareRunnerExchangeWithPath(t, "record a durable fact", "the fact is durable")
+	service := newRunnerMemoryService(t, store, 2)
+	// Fault-inject the real projector: the first promotion fails and its
+	// rollback fails too, leaving the previous bundle only at the backup
+	// path and a staging residue whose removal fails five times. Each
+	// retry re-encounters the residue through internal recovery and the
+	// combined error stays typed.
+	renameFailures := 2 // one promotion failure, then one rollback failure
+	stagingRemovals := 0
+	projector := memoryprojector.NewWithFaults(
+		func(oldpath, newpath string) error {
+			if renameFailures > 0 && strings.Contains(oldpath, ".okf-") {
+				renameFailures--
+				if strings.Contains(oldpath, ".okf-staging-") {
+					return errors.New("injected promotion failure")
+				}
+				return errors.New("injected rollback failure")
+			}
+			return os.Rename(oldpath, newpath)
+		},
+		func(path string) error {
+			if strings.Contains(path, ".okf-staging-") {
+				if _, err := os.Lstat(path); err == nil {
+					stagingRemovals++
+					if stagingRemovals <= 5 {
+						return errors.New("injected staging removal failure")
+					}
+				}
+			}
+			return os.RemoveAll(path)
+		},
+	)
+	runner, err := NewRunner(RunnerConfig{Interval: time.Hour, MaxRetries: 1, MemoryDir: t.TempDir()}, RunnerDependencies{
+		Store: store, ExchangeFinder: runnerFinder{}, Curator: runnerNoopCurator{}, Memory: service,
+		Projector: projector, ProjectionReader: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// MaxRetries=1 would fail the item terminal on the very first failure
+	// under the normal path. Five residue cleanup failures after the
+	// promotion+rollback failure must neither fail the item nor consume
+	// the retry budget.
+	for i := 0; i < 5; i++ {
+		runner.processOutbox(t.Context())
+		if status, attempts := runnerOutboxState(t, dbPath); status != "pending" || attempts != 0 {
+			t.Fatalf("rollback+staging cleanup failure %d: outbox = status %q attempts %d; want pending with budget restored", i, status, attempts)
+		}
+	}
+	if stagingRemovals == 0 {
+		t.Fatal("fault injection never exercised staging removal")
+	}
+	// Once the staging residue can be removed, the previous bundle is
+	// restored and the same item completes.
+	runner.processOutbox(t.Context())
+	if status, attempts := runnerOutboxState(t, dbPath); status != "done" || attempts != 1 {
+		t.Fatalf("recovered item: outbox = status %q attempts %d; want done at attempts 1", status, attempts)
+	}
+}
+
+func TestRunnerRecoversResidueAtStartupWithoutPendingOutbox(t *testing.T) {
+	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "memory.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	projector := &cleanupFailingProjector{inner: memoryprojector.New()}
+	runner, err := NewRunner(RunnerConfig{Interval: time.Hour, MaxRetries: 1, MemoryDir: t.TempDir()}, RunnerDependencies{
+		Store: store, ExchangeFinder: runnerFinder{}, Curator: runnerNoopCurator{}, Memory: &Service{},
+		Projector: projector, ProjectionReader: store, Logger: slog.New(slog.NewTextHandler(io.Discard, nil)),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		runner.Run(ctx)
+		close(done)
+	}()
+	deadline := time.Now().Add(2 * time.Second)
+	for {
+		if _, recoverCalls := projector.counts(); recoverCalls >= 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			<-done
+			t.Fatal("startup recovery never ran with an empty outbox")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("runner did not stop after cancellation")
+	}
+}
+
 type runnerProjector struct{}
 
 func (runnerProjector) Project(context.Context, port.ProjectionReader, string) error { return nil }
+func (runnerProjector) Recover(string) error                                         { return nil }
 
 type runnerSnapshotReader struct{}
 

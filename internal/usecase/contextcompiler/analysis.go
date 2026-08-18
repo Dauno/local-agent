@@ -43,16 +43,35 @@ type compilationState struct {
 	turns     []domain.ConversationTurn
 	reducible []reduciblePart
 
-	summary []domain.Content
-	recent  []domain.Content
-	capsule []domain.Content
-	active  []domain.Content
+	summary    []domain.Content
+	recent     []domain.Content
+	knowledge  []domain.Content
+	workstream []domain.Content
+	capsule    []domain.Content
+	active     []domain.Content
+
+	// knowledgeCards is the final selected whole-card subset. knowledgeApplied
+	// records that selection ran with a positive budget, and
+	// knowledgeSourceTokens is the provider-shaped source token delta of the
+	// selected block (zero after total-pressure eviction or a counter
+	// failure).
+	knowledgeCards        []domain.KnowledgeFrameCard
+	knowledgeApplied      bool
+	knowledgeSourceTokens int
+
+	// workstreamApplied records that selection ran; workstreamSourceTokens is
+	// the provider-shaped source token delta of the admitted block (zero when
+	// omitted); workstreamOmissionReason is the bounded closed-set reason.
+	workstreamApplied        bool
+	workstreamSourceTokens   int
+	workstreamOmissionReason string
 
 	protectedCost    int
 	totalMinimumCost int
 
-	result domain.CompileResult
-	count  port.TokenCount
+	result       domain.CompileResult
+	count        port.TokenCount
+	frameCounter port.ContextFrameCounter
 
 	optionalEvicted bool
 
@@ -249,7 +268,7 @@ func classifyActivePartsWithSerializations(contents []domain.Content, sourceOffs
 		hasProtected := false
 		hasReducible := false
 		for partIndex, part := range content.Parts {
-			if part.FunctionResponse != nil && part.FunctionResponse.Name != domain.ConfirmationFunctionName {
+			if part.FunctionResponse != nil && part.FunctionResponse.Name != domain.ConfirmationFunctionName && !readOnlyResultResponse(part.FunctionResponse) {
 				serializedResponse := serialized[projectionIndex{contentIndex: sourceOffset + contentIndex, partIndex: partIndex}]
 				plan := reduciblePart{
 					contentIndex:  contentIndex,
@@ -280,6 +299,20 @@ func classifyActivePartsWithSerializations(contents []domain.Content, sourceOffs
 		}
 	}
 	return protected, reducible
+}
+
+// readOnlyResultResponse must never become another recoverable projection.
+// V2 range reads are already bounded handles.
+func readOnlyResultResponse(response *domain.FunctionResponse) bool {
+	if response == nil {
+		return false
+	}
+	switch response.Name {
+	case "read_result_chunk", "read_job_result_chunk", "workstream_read_result_chunk":
+		return true
+	default:
+		return false
+	}
 }
 
 func contentCostWithPlans(contents []domain.Content, parts []reduciblePart) (int, error) {

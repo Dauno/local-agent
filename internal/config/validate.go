@@ -148,9 +148,7 @@ func Validate(cfg Config) error {
 	if !environmentNamePattern.MatchString(cfg.Model.APIKeyEnv) {
 		add("model.api_key_env", "must be a valid environment variable name such as DEEPSEEK_API_KEY")
 	}
-	switch cfg.Model.ReasoningEffort {
-	case "none", "minimal", "low", "medium", "high", "xhigh":
-	default:
+	if !validReasoningEffort(cfg.Model.ReasoningEffort) {
 		add("model.reasoning_effort", "must be one of none, minimal, low, medium, high, or xhigh")
 	}
 	validateHeaders(&problems, cfg.Model.Headers)
@@ -285,6 +283,41 @@ func Validate(cfg Config) error {
 	if cfg.Orchestration.Workstreams.Enabled && len(cfg.Sandbox.Projects) == 0 {
 		add("orchestration.workstreams", "requires at least one registered sandbox project when enabled")
 	}
+	if cfg.Orchestration.Workstreams.SnapshotBudgetTokens < 1 || cfg.Orchestration.Workstreams.SnapshotBudgetTokens > domain.HardWorkstreamSnapshotBudgetTokens {
+		add("orchestration.workstreams.snapshot_budget_tokens", fmt.Sprintf("must be between 1 and %d", domain.HardWorkstreamSnapshotBudgetTokens))
+	}
+	if cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep != 1 {
+		add("orchestration.result_handles.max_producing_calls_per_step", "must equal 1")
+	}
+	if cfg.Orchestration.ResultHandles.ProducingCallReserveTokens <= 0 {
+		add("orchestration.result_handles.producing_call_reserve_tokens", "must be greater than zero")
+	}
+	if cfg.Orchestration.ResultHandles.Retention.ContextDays < 1 || cfg.Orchestration.ResultHandles.Retention.ContextDays > domain.HardMaxResultRetentionDays {
+		add("orchestration.result_handles.retention.context_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+	}
+	if cfg.Orchestration.ResultHandles.Retention.ConversationDays < 1 || cfg.Orchestration.ResultHandles.Retention.ConversationDays > domain.HardMaxResultRetentionDays {
+		add("orchestration.result_handles.retention.conversation_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+	}
+	if cfg.Orchestration.ResultHandles.Retention.WorkstreamDays < 1 || cfg.Orchestration.ResultHandles.Retention.WorkstreamDays > domain.HardMaxResultRetentionDays {
+		add("orchestration.result_handles.retention.workstream_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+	}
+	if cfg.Orchestration.ResultHandles.Retention.ExportedDays < 1 || cfg.Orchestration.ResultHandles.Retention.ExportedDays > domain.HardMaxResultRetentionDays {
+		add("orchestration.result_handles.retention.exported_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+	}
+	if cfg.Orchestration.Knowledge.ProjectionIntervalSeconds <= 0 {
+		add("orchestration.knowledge.projection_interval_seconds", "must be greater than zero")
+	}
+	if cfg.Orchestration.Knowledge.ProjectionMaxRetries <= 0 {
+		add("orchestration.knowledge.projection_max_retries", "must be greater than zero")
+	}
+	if cfg.Orchestration.Knowledge.ProjectionRetentionDays <= 0 {
+		add("orchestration.knowledge.projection_retention_days", "must be greater than zero")
+	}
+	validateKnowledgeRetrieval(&problems, cfg)
+	validateResultAnalysis(&problems, cfg)
+	if cfg.Model.ResultHandles.MaxDirectInlineBytes < 0 || cfg.Model.ResultHandles.MaxDirectInlineBytes > domain.HardMaxDirectInlineResultBytes {
+		add("model.result_handles.max_direct_inline_bytes", fmt.Sprintf("must be between 0 and %d", domain.HardMaxDirectInlineResultBytes))
+	}
 	if cfg.Sandbox.Enabled {
 		if len(cfg.Sandbox.Projects) == 0 {
 			add("sandbox.projects", "must contain at least one registered project when enabled")
@@ -344,6 +377,242 @@ func validProviderProfileReference(value string) bool {
 	}
 	parts := strings.SplitN(value, "/", 2)
 	return parts[0] != "" && parts[1] != ""
+}
+
+// validateKnowledgeRetrieval enforces the TRD 06 static bounds and the
+// static enablement gates that do not depend on the selected root type.
+// Root-type gates and credential resolution belong to composition.
+func validateKnowledgeRetrieval(problems *[]FieldError, cfg Config) {
+	knowledge := cfg.Orchestration.Knowledge
+	retrieval := knowledge.Retrieval
+	embedding := retrieval.Embedding
+
+	if knowledge.MaxCardTokens < 1 || knowledge.MaxCardTokens > domain.HardMaxKnowledgeCardBudget {
+		addConfigProblem(problems, "orchestration.knowledge.max_card_tokens",
+			fmt.Sprintf("must be between 1 and %d", domain.HardMaxKnowledgeCardBudget))
+	}
+	rangeChecks := []struct {
+		field string
+		value int
+		min   int
+		max   int
+	}{
+		{"orchestration.knowledge.retrieval.timeout_seconds", retrieval.TimeoutSeconds, 1, domain.HardMaxKnowledgeRetrievalTimeoutSeconds},
+		{"orchestration.knowledge.retrieval.max_query_runes", retrieval.MaxQueryRunes, 1, domain.HardMaxKnowledgeRetrievalMaxQueryRunes},
+		{"orchestration.knowledge.retrieval.max_candidates_per_channel", retrieval.MaxCandidatesPerChannel, 1, domain.HardMaxKnowledgeRetrievalMaxCandidatesPerChannel},
+		{"orchestration.knowledge.retrieval.max_cards", retrieval.MaxCards, 1, domain.HardMaxKnowledgeRetrievalMaxCards},
+		{"orchestration.knowledge.retrieval.max_document_bytes", retrieval.MaxDocumentBytes, 1, domain.HardMaxKnowledgeRetrievalMaxDocumentBytes},
+		{"orchestration.knowledge.retrieval.worker_interval_seconds", retrieval.WorkerIntervalSeconds, 1, domain.HardMaxKnowledgeRetrievalWorkerIntervalSeconds},
+		{"orchestration.knowledge.retrieval.worker_max_retries", retrieval.WorkerMaxRetries, 1, domain.HardMaxKnowledgeRetrievalWorkerMaxRetries},
+		{"orchestration.knowledge.retrieval.worker_batch_size", retrieval.WorkerBatchSize, 1, domain.HardMaxKnowledgeRetrievalWorkerBatchSize},
+		{"orchestration.knowledge.retrieval.embedding.timeout_seconds", embedding.TimeoutSeconds, 1, domain.HardMaxKnowledgeEmbeddingTimeoutSeconds},
+		{"orchestration.knowledge.retrieval.embedding.dimensions", embedding.Dimensions, 0, domain.HardMaxKnowledgeEmbeddingDimensions},
+		{"orchestration.knowledge.retrieval.embedding.min_similarity_basis_points", embedding.MinSimilarityBasisPoints, 0, domain.HardMaxKnowledgeMinSimilarityBasisPoints},
+	}
+	for _, check := range rangeChecks {
+		if check.value < check.min || check.value > check.max {
+			addConfigProblem(problems, check.field, fmt.Sprintf("must be between %d and %d", check.min, check.max))
+		}
+	}
+
+	if retrieval.Enabled && !knowledge.Enabled {
+		addConfigProblem(problems, "orchestration.knowledge.retrieval.enabled", "requires orchestration.knowledge.enabled")
+	}
+	if retrieval.Enabled && (cfg.Context.ContextFeatures == nil || !cfg.Context.ContextFeatures.ModelBudgetEnabled) {
+		addConfigProblem(problems, "orchestration.knowledge.retrieval.enabled", "requires context.context_features.model_budget_enabled")
+	}
+	if embedding.Enabled && !retrieval.Enabled {
+		addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.enabled", "requires orchestration.knowledge.retrieval.enabled")
+	}
+	if embedding.Enabled {
+		if strings.TrimSpace(embedding.ProviderID) == "" {
+			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.provider_id", "must not be empty when embedding is enabled")
+		}
+		if strings.TrimSpace(embedding.Model) == "" {
+			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.model", "must not be empty when embedding is enabled")
+		}
+		if !validBoundedEnvironmentName(embedding.APIKeyEnv) {
+			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.api_key_env", "must be a bounded valid environment variable name when embedding is enabled")
+		}
+		if embedding.Dimensions < 1 {
+			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.dimensions", fmt.Sprintf("must be between 1 and %d when embedding is enabled", domain.HardMaxKnowledgeEmbeddingDimensions))
+		}
+		if embedding.MinSimilarityBasisPoints < 1 {
+			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.min_similarity_basis_points", fmt.Sprintf("must be between 1 and %d when embedding is enabled", domain.HardMaxKnowledgeMinSimilarityBasisPoints))
+		}
+		validateEmbeddingBaseURL(problems, "orchestration.knowledge.retrieval.embedding.base_url", embedding.BaseURL)
+	} else if strings.TrimSpace(embedding.BaseURL) != "" {
+		validateEmbeddingBaseURL(problems, "orchestration.knowledge.retrieval.embedding.base_url", embedding.BaseURL)
+	}
+	if embedding.APIKeyEnv != "" && !validBoundedEnvironmentName(embedding.APIKeyEnv) {
+		addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.api_key_env", "must be a bounded valid environment variable name")
+	}
+	for field, value := range map[string]string{
+		"provider_id": embedding.ProviderID,
+		"model":       embedding.Model,
+	} {
+		validateBoundedSingleLine(problems, "orchestration.knowledge.retrieval.embedding."+field, value)
+	}
+}
+
+// validateEmbeddingBaseURL enforces the embedding endpoint contract: an
+// absolute URL with no userinfo, query, or fragment; HTTPS everywhere except
+// loopback HTTP; redirects are rejected later by the adapter.
+func validateEmbeddingBaseURL(problems *[]FieldError, field, value string) {
+	if strings.TrimSpace(value) == "" {
+		addConfigProblem(problems, field, "must not be empty")
+		return
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
+		addConfigProblem(problems, field, "must be an absolute http or https URL")
+		return
+	}
+	if parsed.User != nil {
+		addConfigProblem(problems, field, "must not contain userinfo")
+	}
+	if parsed.RawQuery != "" {
+		addConfigProblem(problems, field, "must not contain a query")
+	}
+	if parsed.Fragment != "" {
+		addConfigProblem(problems, field, "must not contain a fragment")
+	}
+	if parsed.Scheme == "http" {
+		switch strings.ToLower(parsed.Hostname()) {
+		case "localhost", "127.0.0.1", "::1":
+		default:
+			addConfigProblem(problems, field, "must use https except for loopback endpoints")
+		}
+	}
+}
+
+// validateResultAnalysis enforces the TRD 07 static hard bounds for
+// orchestration.result_analysis. Every field must be positive and within its
+// domain hard maximum; non-positive values are rejected, never silently
+// defaulted. The optional model block is validated only when enabled, the
+// same opt-in pattern as orchestration.knowledge.retrieval.embedding.
+func validateResultAnalysis(problems *[]FieldError, cfg Config) {
+	analysis := cfg.Orchestration.ResultAnalysis
+	evidence := analysis.Evidence
+	model := analysis.Model
+
+	rangeChecks := []struct {
+		field string
+		value int
+		max   int
+	}{
+		{"orchestration.result_analysis.max_segment_bytes", analysis.MaxSegmentBytes, domain.HardMaxAnalysisSegmentBytes},
+		{"orchestration.result_analysis.overlap_basis_points", analysis.OverlapBasisPoints, domain.HardMaxAnalysisOverlapBasisPoints},
+		{"orchestration.result_analysis.overlap_max_bytes", analysis.OverlapMaxBytes, domain.HardMaxAnalysisOverlapBytes},
+		{"orchestration.result_analysis.max_leaves", analysis.MaxLeaves, domain.HardMaxAnalysisLeaves},
+		{"orchestration.result_analysis.max_reduction_fan_in", analysis.MaxReductionFanIn, domain.HardMaxAnalysisReductionFanIn},
+		{"orchestration.result_analysis.max_reduction_depth", analysis.MaxReductionDepth, domain.HardMaxAnalysisReductionDepth},
+		{"orchestration.result_analysis.max_concurrent_leaves", analysis.MaxConcurrentLeaves, domain.HardMaxAnalysisConcurrentLeaves},
+		{"orchestration.result_analysis.max_attempts_per_step", analysis.MaxAttemptsPerStep, domain.HardMaxAnalysisAttemptsPerStep},
+		{"orchestration.result_analysis.call_timeout_seconds", analysis.CallTimeoutSeconds, domain.HardMaxAnalysisCallTimeoutSeconds},
+		{"orchestration.result_analysis.wall_time_seconds", analysis.WallTimeSeconds, domain.HardMaxAnalysisWallTimeSeconds},
+		{"orchestration.result_analysis.evidence.excerpt_bytes", evidence.ExcerptBytes, domain.HardMaxAnalysisEvidenceExcerptBytes},
+		{"orchestration.result_analysis.evidence.selectors_per_leaf", evidence.SelectorsPerLeaf, domain.HardMaxAnalysisEvidencePerLeaf},
+		{"orchestration.result_analysis.evidence.references_per_packet", evidence.ReferencesPerPacket, domain.HardMaxAnalysisEvidencePerPacket},
+		{"orchestration.result_analysis.evidence.bundle_bytes", evidence.BundleBytes, domain.HardMaxAnalysisBundleBytes},
+	}
+	for _, check := range rangeChecks {
+		if check.value < 1 || check.value > check.max {
+			addConfigProblem(problems, check.field, fmt.Sprintf("must be between 1 and %d", check.max))
+		}
+	}
+	if analysis.WorkerIntervalSeconds < 1 {
+		addConfigProblem(problems, "orchestration.result_analysis.worker_interval_seconds", "must be greater than zero")
+	}
+
+	// FIND-097: TRD 07 requires the reduction tree to be satisfiable at
+	// configuration load, not deferred to when an analysis actually runs.
+	// This calls the exact rule domain.AnalysisLimits.Validate uses
+	// (domain.AnalysisReductionTreeSatisfiable) instead of reimplementing
+	// the fan-in/depth/leaves arithmetic here, so the rule has one
+	// definition even though it is enforced at two boundaries.
+	if !domain.AnalysisReductionTreeSatisfiable(analysis.MaxReductionFanIn, analysis.MaxReductionDepth, analysis.MaxLeaves) {
+		addConfigProblem(problems, "orchestration.result_analysis",
+			fmt.Sprintf("max_reduction_fan_in %d raised to max_reduction_depth %d cannot cover max_leaves %d",
+				analysis.MaxReductionFanIn, analysis.MaxReductionDepth, analysis.MaxLeaves))
+	}
+
+	if model.Enabled {
+		if strings.TrimSpace(model.ProviderID) == "" {
+			addConfigProblem(problems, "orchestration.result_analysis.model.provider_id", "must not be empty when the analysis model profile is enabled")
+		}
+		if strings.TrimSpace(model.Model) == "" {
+			addConfigProblem(problems, "orchestration.result_analysis.model.model", "must not be empty when the analysis model profile is enabled")
+		}
+		if !validBoundedEnvironmentName(model.APIKeyEnv) {
+			addConfigProblem(problems, "orchestration.result_analysis.model.api_key_env", "must be a bounded valid environment variable name when the analysis model profile is enabled")
+		}
+		validateEmbeddingBaseURL(problems, "orchestration.result_analysis.model.base_url", model.BaseURL)
+	} else if strings.TrimSpace(model.BaseURL) != "" {
+		validateEmbeddingBaseURL(problems, "orchestration.result_analysis.model.base_url", model.BaseURL)
+	}
+	if model.APIKeyEnv != "" && !validBoundedEnvironmentName(model.APIKeyEnv) {
+		addConfigProblem(problems, "orchestration.result_analysis.model.api_key_env", "must be a bounded valid environment variable name")
+	}
+	// FIND-099: the analysis profile's reasoning_effort must validate
+	// against the same closed set as the main model profile
+	// (model.reasoning_effort, checked below in Validate). validReasoningEffort
+	// is the one shared definition of that set. Unlike the main profile,
+	// which always has an effective reasoning_effort, an empty value is
+	// valid here: it means "unspecified", and the effective analysis
+	// profile then falls back to the main model's reasoning_effort, the
+	// same way an empty provider_id or model falls back when the whole
+	// analysis model block is not enabled. A non-empty value must still be
+	// one of the closed set.
+	if model.ReasoningEffort != "" && !validReasoningEffort(model.ReasoningEffort) {
+		addConfigProblem(problems, "orchestration.result_analysis.model.reasoning_effort", "must be empty or one of none, minimal, low, medium, high, or xhigh")
+	}
+	for field, value := range map[string]string{
+		"provider_id":      model.ProviderID,
+		"model":            model.Model,
+		"reasoning_effort": model.ReasoningEffort,
+	} {
+		validateBoundedSingleLine(problems, "orchestration.result_analysis.model."+field, value)
+	}
+}
+
+// validReasoningEffort reports whether value is one of the closed reasoning
+// effort levels. FIND-099: this is the one shared definition of that set,
+// used both by the main model.reasoning_effort field and by
+// orchestration.result_analysis.model.reasoning_effort, so the two can never
+// diverge again. The empty string is deliberately not accepted here: the
+// analysis profile's caller treats "" as its own separate "unspecified,
+// fall back to the main profile" case before ever calling this function.
+func validReasoningEffort(value string) bool {
+	switch value {
+	case "none", "minimal", "low", "medium", "high", "xhigh":
+		return true
+	default:
+		return false
+	}
+}
+
+func validateBoundedSingleLine(problems *[]FieldError, field, value string) {
+	if strings.TrimSpace(value) == "" {
+		return
+	}
+	if strings.ContainsAny(value, "\r\n\x00") {
+		addConfigProblem(problems, field, "must be a single line without NUL bytes")
+		return
+	}
+	if utf8.RuneCountInString(value) > 128 {
+		addConfigProblem(problems, field, "must not exceed 128 Unicode code points")
+	}
+}
+
+// validBoundedEnvironmentName reports whether the value matches the safe
+// environment identifier syntax and stays within the frozen bounded-value
+// contract shared with the other embedding identifiers.
+func validBoundedEnvironmentName(value string) bool {
+	if value == "" || utf8.RuneCountInString(value) > 128 {
+		return false
+	}
+	return environmentNamePattern.MatchString(value)
 }
 
 // validateProgressLabels restricts slack.standard_agent.progress_labels to the
@@ -416,6 +685,7 @@ func validateADKCompaction(problems *[]FieldError, cfg ADKCompactionConfig) {
 		{"context.adk_compaction.max_history_chars", cfg.MaxHistoryChars},
 		{"context.adk_compaction.recent_turns", cfg.RecentTurns},
 		{"context.adk_compaction.summary_max_chars", cfg.SummaryMaxChars},
+		{"context.adk_compaction.summary_budget_tokens", cfg.SummaryBudgetTokens},
 	}
 	for _, item := range positive {
 		if item.value <= 0 {

@@ -158,19 +158,26 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 		error_code, error_message, partial, turn_complete, interrupted
 		FROM adk_events
 		WHERE app_name = ? AND user_id = ? AND session_id = ?
-		ORDER BY ordinal DESC`
+		`
+	args := []any{req.AppName, req.UserID, req.SessionID}
+	if !req.After.IsZero() {
+		query += ` AND timestamp >= ?`
+		args = append(args, req.After.UnixMicro())
+	}
+	query += ` ORDER BY ordinal DESC`
 
 	if req.NumRecentEvents > 0 {
-		query += fmt.Sprintf(" LIMIT %d", req.NumRecentEvents)
+		query += ` LIMIT ?`
+		args = append(args, req.NumRecentEvents)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, req.AppName, req.UserID, req.SessionID)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch events: %w", err)
 	}
 	defer rows.Close()
 
-	loadedEvents, err := scanEvents(rows, req.After)
+	loadedEvents, err := scanEvents(rows, time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +191,57 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 	sess.events = loadedEvents
 
 	return &adksession.GetResponse{Session: sess}, nil
+}
+
+// LoadEventRange loads a bounded ascending ordinal range without loading the
+// rest of the session. Epoch callers use the exclusive afterOrdinal cursor to
+// walk selected ADK history in finite batches.
+func (s *AdkSessionService) LoadEventRange(ctx context.Context, appName, userID, sessionID string, afterOrdinal int64, limit int64) ([]*adksession.Event, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("session service is not configured")
+	}
+	if appName == "" || userID == "" || sessionID == "" {
+		return nil, errors.New("app_name, user_id, session_id are required")
+	}
+	if afterOrdinal < -1 || limit <= 0 || limit > domain.MaxContextEpochRange {
+		return nil, errors.New("session event range is outside bounded limits")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, invocation_id, author, actions, long_running_tool_ids, routes, output,
+		node_info, requested_input, branch, isolation_scope, timestamp, content,
+		grounding_metadata, custom_metadata, usage_metadata, citation_metadata,
+		error_code, error_message, partial, turn_complete, interrupted
+		FROM adk_events
+		WHERE app_name = ? AND user_id = ? AND session_id = ? AND ordinal > ?
+		ORDER BY ordinal ASC LIMIT ?`, appName, userID, sessionID, afterOrdinal, limit)
+	if err != nil {
+		return nil, fmt.Errorf("fetch event range: %w", err)
+	}
+	defer rows.Close()
+	loadedEvents, err := scanEventsOrdered(rows, time.Time{}, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate event range: %w", err)
+	}
+	return loadedEvents, nil
+}
+
+// LatestEventOrdinal returns the session-local event head without loading event
+// content. A session with no persisted events has head -1.
+func (s *AdkSessionService) LatestEventOrdinal(ctx context.Context, appName, userID, sessionID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("session service is not configured")
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`, appName, userID, sessionID).Scan(&exists); err != nil {
+		return 0, err
+	}
+	var head int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordinal), -1) FROM adk_events WHERE app_name = ? AND user_id = ? AND session_id = ?`, appName, userID, sessionID).Scan(&head); err != nil {
+		return 0, err
+	}
+	return head, nil
 }
 
 func (s *AdkSessionService) List(ctx context.Context, req *adksession.ListRequest) (*adksession.ListResponse, error) {
@@ -741,6 +799,10 @@ func trimTempDeltaState(event *adksession.Event) *adksession.Event {
 }
 
 func scanEvents(rows *sql.Rows, after time.Time) ([]*adksession.Event, error) {
+	return scanEventsOrdered(rows, after, false)
+}
+
+func scanEventsOrdered(rows *sql.Rows, after time.Time, reverse bool) ([]*adksession.Event, error) {
 	var loaded []*adksession.Event
 	for rows.Next() {
 		var (
@@ -868,6 +930,9 @@ func scanEvents(rows *sql.Rows, after time.Time) ([]*adksession.Event, error) {
 		}
 
 		loaded = append(loaded, event)
+	}
+	if reverse {
+		reverseEvents(loaded)
 	}
 	return loaded, nil
 }

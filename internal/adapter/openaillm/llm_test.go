@@ -23,6 +23,7 @@ import (
 
 	"github.com/openai/openai-go/v3"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -979,6 +980,114 @@ type fixedRequestCounter int
 
 func (c fixedRequestCounter) CountRequest(context.Context, port.ModelRequestEnvelope) (port.TokenCount, error) {
 	return port.TokenCount{Tokens: int(c), Strategy: "fixed", Exact: true}, nil
+}
+
+type capturingRequestCounter struct {
+	envelope port.ModelRequestEnvelope
+}
+
+func (c *capturingRequestCounter) CountRequest(_ context.Context, envelope port.ModelRequestEnvelope) (port.TokenCount, error) {
+	c.envelope = envelope
+	return port.TokenCount{Tokens: len(envelope.Serialized), Strategy: "captured", Exact: true}, nil
+}
+
+func TestCountLLMRequestUsesFinalGuardEnvelope(t *testing.T) {
+	counter := &capturingRequestCounter{}
+	llm := &OpenAICompatibleLLM{model: "test-model", profileID: "test/profile", requestCounter: counter}
+	request := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)},
+		Config: &genai.GenerateContentConfig{
+			Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "lookup"}}}},
+		},
+	}
+	want, err := llm.convertRequest(request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := llm.CountLLMRequest(t.Context(), request, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(counter.envelope, want.envelope) {
+		t.Fatalf("counted envelope = %#v, want %#v", counter.envelope, want.envelope)
+	}
+	if got.Tokens != len(want.envelope.Serialized) || got.Strategy != "captured" || !got.Exact {
+		t.Fatalf("count = %#v", got)
+	}
+}
+
+type frameCountingCompiler struct{}
+
+func (frameCountingCompiler) Compile(_ context.Context, req domain.CompileRequest) (domain.CompileResult, error) {
+	return domain.CompileResult{Contents: req.Contents}, nil
+}
+
+func (frameCountingCompiler) CompileFrame(ctx context.Context, req domain.CompileRequest, counter port.ContextFrameCounter) (domain.CompileResult, error) {
+	if _, err := counter.CountContextFrame(ctx, req.Contents); err != nil {
+		return domain.CompileResult{}, err
+	}
+	return domain.CompileResult{Contents: req.Contents}, nil
+}
+
+type envelopeSequenceCounter struct {
+	envelopes []port.ModelRequestEnvelope
+}
+
+func (c *envelopeSequenceCounter) CountRequest(_ context.Context, envelope port.ModelRequestEnvelope) (port.TokenCount, error) {
+	c.envelopes = append(c.envelopes, envelope)
+	return port.TokenCount{Tokens: 2, Strategy: "captured", Exact: true}, nil
+}
+
+func TestProviderFrameCountMatchesFinalGuardEnvelope(t *testing.T) {
+	for _, stream := range []bool{false, true} {
+		t.Run(fmt.Sprintf("stream=%t", stream), func(t *testing.T) {
+			counter := &envelopeSequenceCounter{}
+			llm := &OpenAICompatibleLLM{
+				model:                  "test-model",
+				reasoningEffort:        "high",
+				extraBody:              map[string]any{"provider_option": true},
+				requestCounter:         counter,
+				requestBudget:          domain.RequestBudget{HardTokens: 1},
+				profileID:              "test/profile",
+				defaultMaxOutputTokens: 256,
+			}
+			request := &model.LLMRequest{
+				Model:    "adk-model-field",
+				Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)},
+				Config: &genai.GenerateContentConfig{
+					SystemInstruction: genai.NewContentFromText("system policy", genai.RoleUser),
+					Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{
+						Name:        "lookup",
+						Description: "look up one item",
+					}}}},
+				},
+				Tools: map[string]any{"host_metadata": "retained"},
+			}
+			callback := adkagent.CompilerBeforeModelCallback(adkagent.CompilerCallbackConfig{
+				Compiler: frameCountingCompiler{}, RequestModel: llm, Stream: stream,
+				Budget: domain.RequestBudget{HardTokens: 100}, Actor: "U12345678",
+			})
+			if _, err := callback(nil, request); err != nil {
+				t.Fatal(err)
+			}
+
+			var guardErr error
+			for _, err := range llm.GenerateContent(t.Context(), request, stream) {
+				guardErr = err
+				break
+			}
+			var irreducible *domain.IrreducibleContextError
+			if !errors.As(guardErr, &irreducible) {
+				t.Fatalf("GenerateContent() error = %v, want final guard rejection", guardErr)
+			}
+			if len(counter.envelopes) != 2 {
+				t.Fatalf("counted envelopes = %d, want frame and final guard", len(counter.envelopes))
+			}
+			if !reflect.DeepEqual(counter.envelopes[0], counter.envelopes[1]) {
+				t.Fatalf("frame envelope = %#v\nfinal guard envelope = %#v", counter.envelopes[0], counter.envelopes[1])
+			}
+		})
+	}
 }
 
 type failingRequestCounter struct{}

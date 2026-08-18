@@ -37,9 +37,11 @@ type failingDatabase struct{ err error }
 func (d failingDatabase) CheckDatabase(context.Context, string) error { return d.err }
 
 type fakeLive struct {
-	bot, app, context, canvas, exports, model, attachment, audio int
-	modelAPIKey                                                  string
-	audioAPIKey                                                  string
+	bot, app, context, canvas, exports, model, attachment, audio, embedding int
+	modelAPIKey                                                             string
+	audioAPIKey                                                             string
+	embeddingAPIKey                                                         string
+	embeddingErr                                                            error
 }
 
 type fakeCLI struct {
@@ -101,6 +103,12 @@ func (f *fakeLive) CheckAudioTranscription(_ context.Context, _ *agentdef.Resolv
 	return nil
 }
 
+func (f *fakeLive) CheckKnowledgeEmbedding(_ context.Context, _ config.KnowledgeEmbeddingConfig, apiKey string) error {
+	f.embedding++
+	f.embeddingAPIKey = apiKey
+	return f.embeddingErr
+}
+
 // fakeCounter implements CounterChecker with a configurable availability set.
 type fakeCounter struct {
 	implemented map[string]string
@@ -130,6 +138,91 @@ func validDependencies() (Dependencies, *fakeDatabase, *fakeLive) {
 		Database: database,
 		Live:     live,
 	}, database, live
+}
+
+func TestDoctorLiveEmbeddingCheckRunsOnlyWhenEnabledAndKeyResolves(t *testing.T) {
+	deps, _, live := validDependencies()
+	live.embeddingErr = errors.New("embedding endpoint exploded")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Orchestration.Knowledge.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.ProviderID = "acme"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "https://embeddings.example.test"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv = "EMBEDDING_API_KEY"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Model = "embed-3"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Dimensions = 4
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.MinSimilarityBasisPoints = 5000
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.TimeoutSeconds = 5
+		return cfg, nil
+	}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The embedding key is resolved before the live check: a missing key
+	// fails the secret check and the live call never runs.
+	report := service.Run(t.Context(), true)
+	if live.embedding != 0 {
+		t.Fatalf("embedding live check ran without a resolved key: %#v", live)
+	}
+	secretMissing := false
+	for _, result := range report.Results {
+		if result.Name == "knowledge embedding API key" && result.Status == StatusFail {
+			secretMissing = true
+		}
+	}
+	if !secretMissing {
+		t.Fatalf("missing embedding API key was not reported: %#v", report.Results)
+	}
+
+	deps.Secrets = fakeSecrets{values: map[string]string{
+		"DEEPSEEK_API_KEY":  "secret-model-key",
+		"EMBEDDING_API_KEY": "secret-embedding-key",
+		SlackBotTokenKey:    "xoxb-secret-token",
+		SlackAppTokenKey:    "xapp-secret-token",
+	}}
+	service, err = New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = service.Run(t.Context(), true)
+	if live.embedding != 1 || live.embeddingAPIKey != "secret-embedding-key" {
+		t.Fatalf("embedding live check calls = %d key %q, want one call with the resolved key", live.embedding, live.embeddingAPIKey)
+	}
+	failed := false
+	for _, result := range report.Results {
+		if result.Name == "knowledge embedding endpoint" {
+			if result.Status != StatusFail || !strings.Contains(result.Detail, "embedding endpoint exploded") {
+				t.Fatalf("embedding endpoint result = %#v, want a failure with the checked error", result)
+			}
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("embedding endpoint failure missing: %#v", report.Results)
+	}
+
+	// With embeddings disabled the key is neither resolved nor checked.
+	disabled, _, _ := validDependencies()
+	disabledSecrets := fakeSecrets{values: map[string]string{
+		"DEEPSEEK_API_KEY": "secret-model-key",
+		SlackBotTokenKey:   "xoxb-secret-token",
+		SlackAppTokenKey:   "xapp-secret-token",
+	}}
+	disabled.Secrets = disabledSecrets
+	disabled.Live = &fakeLive{}
+	service, err = New(disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = service.Run(t.Context(), true)
+	for _, result := range report.Results {
+		if strings.Contains(result.Name, "embedding") {
+			t.Fatalf("embedding-disabled doctor reported an embedding check: %#v", report.Results)
+		}
+	}
 }
 
 func TestOfflineDoctorCannotCallLiveChecks(t *testing.T) {

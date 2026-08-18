@@ -79,11 +79,42 @@ type MemoryWorkerStore interface {
 
 // ProjectionSnapshot holds a consistent point-in-time view of all memory state
 // required to render an OKF bundle. It is read under a single transaction.
+// Knowledge rows are included so legacy and knowledge promotions each
+// represent one complete snapshot; tombstones are never part of a snapshot.
 type ProjectionSnapshot struct {
 	Topics    []domain.Topic
 	Revisions map[domain.TopicID][]domain.TopicRevision
 	Links     map[domain.TopicID][]domain.TopicLink
 	Evidence  map[domain.TopicID][]domain.Evidence
+	Knowledge KnowledgeSnapshot
+}
+
+// KnowledgeSnapshot carries all content-bearing knowledge rows, including
+// archived, disputed, and superseded records. Expiry is computed from
+// validity at render time and never written back to SQLite.
+type KnowledgeSnapshot struct {
+	Claims      []domain.KnowledgeClaim
+	Preferences []domain.KnowledgePreference
+	Documents   []domain.KnowledgeDocument
+	Evidence    []KnowledgeEvidenceRef
+}
+
+// Present reports whether the snapshot carries any knowledge rows. When it
+// does not, projection output for legacy state stays byte-identical to the
+// pre-knowledge renderer.
+func (k KnowledgeSnapshot) Present() bool {
+	return len(k.Claims)+len(k.Preferences)+len(k.Documents)+len(k.Evidence) > 0
+}
+
+// KnowledgeEvidenceRef is the projection-safe episodic reference: claim
+// linkage, evidence kind, and the safe temporal reference only. Conversation
+// keys and author identities are never carried into projections, and no
+// ledger content is ever copied.
+type KnowledgeEvidenceRef struct {
+	ClaimID        domain.KnowledgeClaimID
+	RevisionNumber int
+	Kind           domain.KnowledgeEvidenceKind
+	ExchangeTS     string
 }
 
 // ProjectionReader returns a consistent snapshot of the memory store suitable
@@ -92,9 +123,22 @@ type ProjectionReader interface {
 	ReadProjectionSnapshot(ctx context.Context) (ProjectionSnapshot, error)
 }
 
+// ErrProjectionCleanup marks a projection whose live bundle state is
+// correct but whose promotion residue (backup or staging) could not be
+// removed. Residue can retain content that has since been forgotten, so
+// callers must not treat it as a complete projection: the outbox row must
+// stay pending until the residue is actually removed.
+var ErrProjectionCleanup = errors.New("projection residue cleanup incomplete")
+
 // OKFProjector materializes committed SQLite memory state into an Open
 // Knowledge Format bundle on the filesystem. It is never a writable source of
 // truth.
 type OKFProjector interface {
 	Project(ctx context.Context, reader ProjectionReader, outputDir string) error
+	// Recover removes promotion residue for outputDir without rendering:
+	// leftover staging and backup directories. When the live bundle is
+	// missing, a recovered backup is restored in its place instead of being
+	// discarded. Recovery must be safe to run at startup with no pending
+	// knowledge mutation.
+	Recover(outputDir string) error
 }

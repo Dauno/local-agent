@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,6 +57,52 @@ func TestWorkstreamStoreFreshSchemaAndSQLConstraints(t *testing.T) {
 	}
 	if err := workstreams.Create(ctx, testSQLiteWorkstream("ws-2", "slack:T12345678:dm:D12345678"), domain.WorkstreamSourceHuman, "create-2"); !errors.Is(err, ErrWorkstreamConversationConflict) {
 		t.Fatalf("second active conversation error = %v, want %v", err, ErrWorkstreamConversationConflict)
+	}
+}
+
+func TestWorkstreamStoreStartTaskPersistsRunningBindingAndJournal(t *testing.T) {
+	ctx := context.Background()
+	store, err := Initialize(ctx, filepath.Join(t.TempDir(), "workstream.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	workstreams := NewWorkstreamStore(store)
+	workstream := testSQLiteWorkstream("ws-1", "slack:T12345678:dm:D12345678")
+	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-1"); err != nil {
+		t.Fatal(err)
+	}
+	activate := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionActivateWorkstream, 0)
+	activate.SourceID = "activate-1"
+	if _, err := workstreams.Apply(ctx, activate, domain.DefaultWorkstreamLimits(), time.Unix(10, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	propose := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionProposeTask, 1)
+	propose.SourceID = "propose-1"
+	propose.Task = &domain.WorkstreamTask{ID: "task-1", Project: workstream.Project, Description: "admitted task", Status: domain.TaskProposed}
+	if _, err := workstreams.Apply(ctx, propose, domain.DefaultWorkstreamLimits(), time.Unix(11, 0).UTC()); err != nil {
+		t.Fatal(err)
+	}
+	start := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionStartTask, 2)
+	start.SourceID = "start-1"
+	start.TaskID = "task-1"
+	start.ExecutionIdentity = "exec-host-1"
+	if _, err := workstreams.Apply(ctx, start, domain.DefaultWorkstreamLimits(), time.Unix(12, 0).UTC()); err != nil {
+		t.Fatalf("start task: %v", err)
+	}
+	got, err := workstreams.Get(ctx, workstream.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Tasks) != 1 || got.Tasks[0].Status != domain.TaskRunning || got.Tasks[0].ExecutionIdentity != "exec-host-1" {
+		t.Fatalf("started workstream = %+v", got)
+	}
+	var journalAction string
+	if err := store.DB().QueryRowContext(ctx, `SELECT action FROM workstream_transitions WHERE workstream_id = ? AND to_revision = 3`, workstream.ID).Scan(&journalAction); err != nil {
+		t.Fatal(err)
+	}
+	if journalAction != string(domain.WorkstreamActionStartTask) {
+		t.Fatalf("start task journal action = %q", journalAction)
 	}
 }
 
@@ -154,6 +201,137 @@ func TestWorkstreamStoreRejectsInvalidTaskConstraint(t *testing.T) {
 	}
 	if taskCount != 0 {
 		t.Fatalf("invalid task was persisted: %d rows", taskCount)
+	}
+}
+
+func TestWorkstreamResultLinkCommitIsAtomicAndBindsVerifiedIdentity(t *testing.T) {
+	ctx := context.Background()
+	store, err := Initialize(ctx, filepath.Join(t.TempDir(), "workstream-result-link.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
+	results, err := NewResultStore(store, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialization := testResultMaterialization("tool-workstream-link", 1, "verified link payload")
+	materialization.Producer.Kind = domain.ResultProducerToolOperation
+	handle, err := results.Materialize(ctx, materialization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _, err := results.Resolve(ctx, handle.ResultID, materialization.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workstreams := NewWorkstreamStore(store)
+	workstream := testSQLiteWorkstream("ws-result-link", domain.ConversationKey(materialization.Scope.ConversationKey))
+	workstream.OwnerActor = materialization.Scope.Actor
+	workstream.Project = materialization.Scope.Project
+	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-result-link"); err != nil {
+		t.Fatal(err)
+	}
+	verification := port.WorkstreamResultVerification{ResultID: handle.ResultID, WorkstreamID: workstream.ID,
+		Actor: materialization.Scope.Actor, TeamID: materialization.Scope.TeamID, Conversation: materialization.Scope.ConversationKey, Project: materialization.Scope.Project}
+	transition := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionLinkCompletedResult, 0)
+	transition.SourceID = "link-result-1"
+	transition.ResultLink = &domain.WorkstreamResultLink{ID: "result-link-1", ResultIdentity: handle.ResultID, Description: "verified output"}
+	if _, err := workstreams.Apply(ctx, transition, domain.DefaultWorkstreamLimits(), time.Unix(9, 0).UTC()); !errors.Is(err, domain.ErrResultInvalid) {
+		t.Fatalf("generic result-link error = %v, want %v", err, domain.ErrResultInvalid)
+	}
+
+	forged := identity
+	forged.SHA256 = strings.Repeat("a", 64)
+	if _, err := workstreams.CommitVerifiedResultLink(ctx, port.WorkstreamResultLinkCommit{Verification: verification, VerifiedIdentity: forged, Transition: transition, Limits: domain.DefaultWorkstreamLimits(), Now: time.Unix(10, 0).UTC()}); !errors.Is(err, domain.ErrResultUnavailable) {
+		t.Fatalf("forged commit error = %v", err)
+	}
+	var revision, links, bindings, references int
+	if err := store.DB().QueryRowContext(ctx, `SELECT revision FROM workstreams WHERE workstream_id = ?`, workstream.ID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workstream_result_links WHERE workstream_id = ?`, workstream.ID).Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workstream_result_link_results WHERE workstream_id = ?`, workstream.ID).Scan(&bindings); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM result_references WHERE result_id = ? AND owner_kind = 'workstream_result_link'`, handle.ResultID).Scan(&references); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 0 || links != 0 || bindings != 0 || references != 0 {
+		t.Fatalf("forged commit persisted revision/links/bindings/references = %d/%d/%d/%d", revision, links, bindings, references)
+	}
+
+	record, err := workstreams.CommitVerifiedResultLink(ctx, port.WorkstreamResultLinkCommit{Verification: verification, VerifiedIdentity: identity, Transition: transition, Limits: domain.DefaultWorkstreamLimits(), Now: time.Unix(11, 0).UTC()})
+	if err != nil {
+		t.Fatalf("verified commit: %v", err)
+	}
+	if record.ToRevision != 1 {
+		t.Fatalf("verified record = %+v", record)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workstream_result_link_results WHERE workstream_id = ? AND result_id = ?`, workstream.ID, handle.ResultID).Scan(&bindings); err != nil || bindings != 1 {
+		t.Fatalf("verified result binding = %d, %v", bindings, err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM result_references WHERE result_id = ? AND owner_kind = 'workstream_result_link' AND state = 'live'`, handle.ResultID).Scan(&references); err != nil || references != 1 {
+		t.Fatalf("verified result reference = %d, %v", references, err)
+	}
+}
+
+func TestWorkstreamResultLinkCommitRejectsCrossScopeRequest(t *testing.T) {
+	ctx := context.Background()
+	store, err := Initialize(ctx, filepath.Join(t.TempDir(), "workstream-cross-scope-link.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
+	results, err := NewResultStore(store, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	materialization := testResultMaterialization("tool-cross-scope-link", 1, "scope A payload")
+	materialization.Producer.Kind = domain.ResultProducerToolOperation
+	handle, err := results.Materialize(ctx, materialization)
+	if err != nil {
+		t.Fatal(err)
+	}
+	identity, _, err := results.Resolve(ctx, handle.ResultID, materialization.Scope)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	workstreams := NewWorkstreamStore(store)
+	workstream := testSQLiteWorkstream("ws-scope-b", "slack:T2:dm:D2")
+	workstream.OwnerActor = "U2"
+	workstream.Project = "project-b"
+	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-scope-b"); err != nil {
+		t.Fatal(err)
+	}
+	transition := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionLinkCompletedResult, 0)
+	transition.SourceID = "cross-scope-link"
+	transition.ResultLink = &domain.WorkstreamResultLink{ID: "link-scope-b", ResultIdentity: handle.ResultID}
+	verification := port.WorkstreamResultVerification{
+		ResultID: handle.ResultID, WorkstreamID: workstream.ID, Actor: materialization.Scope.Actor,
+		TeamID: materialization.Scope.TeamID, Conversation: materialization.Scope.ConversationKey, Project: materialization.Scope.Project,
+	}
+	_, err = workstreams.CommitVerifiedResultLink(ctx, port.WorkstreamResultLinkCommit{
+		Verification: verification, VerifiedIdentity: identity, Transition: transition,
+		Limits: domain.DefaultWorkstreamLimits(), Now: time.Unix(10, 0).UTC(),
+	})
+	if !errors.Is(err, domain.ErrResultInvalid) {
+		t.Fatalf("cross-scope commit error = %v, want %v", err, domain.ErrResultInvalid)
+	}
+	var revision, links int
+	if err := store.DB().QueryRowContext(ctx, `SELECT revision FROM workstreams WHERE workstream_id = ?`, workstream.ID).Scan(&revision); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workstream_result_links WHERE workstream_id = ?`, workstream.ID).Scan(&links); err != nil {
+		t.Fatal(err)
+	}
+	if revision != 0 || links != 0 {
+		t.Fatalf("cross-scope commit persisted revision/links = %d/%d", revision, links)
 	}
 }
 

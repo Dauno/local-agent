@@ -35,6 +35,15 @@ type stubExternalJobReader struct {
 	chunk  domain.ResultChunk
 }
 
+type nativeExternalJobReader struct {
+	stubExternalJobReader
+	handle domain.ResultHandle
+}
+
+func (r nativeExternalJobReader) NativeResultHandleForJob(context.Context, string, string, domain.ConversationKey) (domain.ResultHandle, bool, error) {
+	return r.handle, true, nil
+}
+
 type recordingBuilderLauncher struct {
 	requests []port.BuilderLauncherRequest
 }
@@ -296,13 +305,12 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 		Status: domain.WorkstreamProposed, Revision: 0, Objective: "bounded objective",
 	}}
 	service, err := workstreamusecase.New(workstreamusecase.Config{
-		Enabled:         true,
-		AllowedProjects: map[string]struct{}{"workspace": {}},
+		Enabled: true, ResultHandlesEnabled: true, AllowedProjects: map[string]struct{}{"workspace": {}},
 	}, workstreamusecase.Dependencies{Store: store})
 	if err != nil {
 		t.Fatal(err)
 	}
-	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithWorkstreams(service)
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithWorkstreams(service).WithResultLinksEnabled(true)
 	tools, err := factory.ToolsForInvocation("U12345678", key)
 	if err != nil {
 		t.Fatal(err)
@@ -313,7 +321,7 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 			byName[candidate.Name()] = candidate
 		}
 	}
-	for _, name := range []string{"workstream_get", "workstream_active", "workstream_create", "workstream_transition"} {
+	for _, name := range []string{"workstream_get", "workstream_active", "workstream_create", "workstream_transition", "workstream_link_completed_result", "workstream_result_handle", "workstream_read_result_chunk"} {
 		if byName[name] == nil {
 			t.Fatalf("%s tool was not registered", name)
 		}
@@ -350,6 +358,16 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 	}
 	if store.workstream.Revision != 1 {
 		t.Fatalf("authority transition executed before confirmation: revision %d", store.workstream.Revision)
+	}
+	linkConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "link-result-1"}}
+	if _, err := byName["workstream_link_completed_result"].Run(linkConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"result_id": strings.Repeat("a", 64), "result_link_id": "link-1",
+	}); err != nil || !linkConfirmation.requested {
+		t.Fatalf("result-link confirmation = requested:%t err:%v", linkConfirmation.requested, err)
+	}
+	if store.workstream.Revision != 1 {
+		t.Fatalf("result-link transition executed before confirmation: revision %d", store.workstream.Revision)
 	}
 	rejectTaskConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "reject-task-1"}}
 	if _, err := byName["workstream_transition"].Run(rejectTaskConfirmation, map[string]any{
@@ -393,6 +411,27 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 	}
 	if store.workstream.Status != domain.WorkstreamActive || store.workstream.Revision != 2 {
 		t.Fatalf("confirmed transition state = %+v", store.workstream)
+	}
+}
+
+func TestWorkstreamResultLinkToolStaysHiddenUntilFeatureGateEnabled(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	service, err := workstreamusecase.New(workstreamusecase.Config{
+		Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}},
+	}, workstreamusecase.Dependencies{Store: &stubWorkstreamStore{workstream: domain.Workstream{
+		ID: "ws-1", ConversationKey: key, OwnerActor: "U12345678", Project: "workspace", Status: domain.WorkstreamProposed, Objective: "bounded objective",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithWorkstreams(service).ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range tools {
+		if named, ok := raw.(interface{ Name() string }); ok && named.Name() == "workstream_link_completed_result" {
+			t.Fatal("result-link tool is exposed while result handles are disabled")
+		}
 	}
 }
 
@@ -519,8 +558,7 @@ func TestFactoryExposesBoundedJobResultChunkTool(t *testing.T) {
 func TestFactoryActivationScopeBindsRevisionAndContainsOnlyHostTools(t *testing.T) {
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
 	reader := &stubExternalJobReader{
-		job:   &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete"},
-		chunk: domain.ResultChunk{Content: "part", OffsetBytes: 0, NextOffsetBytes: 4, EOF: true, SHA256: "digest"},
+		job: &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete"},
 	}
 	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
 	activation := domain.ExternalAgentJobActivation{
@@ -531,28 +569,28 @@ func TestFactoryActivationScopeBindsRevisionAndContainsOnlyHostTools(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 2 || tools[0].(interface{ Name() string }).Name() != "job_status" || tools[1].(interface{ Name() string }).Name() != "read_job_result_chunk" {
+	if len(tools) != 0 {
 		t.Fatalf("activation tools = %v", tools)
 	}
-	var status, chunk runnableFunctionTool
-	for _, candidate := range tools {
-		named := candidate.(interface{ Name() string })
-		switch named.Name() {
-		case "job_status":
-			status = candidate.(runnableFunctionTool)
-		case "read_job_result_chunk":
-			chunk = candidate.(runnableFunctionTool)
-		}
+}
+
+func TestFactoryActivationScopeDoesNotExposeResultReaders(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	reader := &stubExternalJobReader{
+		job: &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete"},
 	}
-	if _, err := status.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"}); err != nil {
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	activation := domain.ExternalAgentJobActivation{
+		ActivationID: "activation_1", JobID: "job_1", StatusRevision: 4, Kind: "terminal",
+		TerminalStatus: domain.JobCompleted, Actor: "U12345678", ConversationKey: key,
+	}
+
+	tools, err := factory.ToolsForActivation(activation.Actor, key, activation)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := chunk.Run(&stubToolContext{}, map[string]any{"job_id": "job_1", "offset_bytes": 0, "max_bytes": 4}); err != nil {
-		t.Fatal(err)
-	}
-	reader.job.StatusRevision = 6
-	if _, err := chunk.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"}); err == nil {
-		t.Fatal("activation tool read a reconciled later revision")
+	if len(tools) != 0 {
+		t.Fatalf("activation result-reader tools = %d, want none", len(tools))
 	}
 }
 
@@ -586,6 +624,39 @@ func TestFactoryDoesNotPlaceFileModeResultInToolResponse(t *testing.T) {
 	}
 	if value["result"] != "" || value["host_delivery"] != true || value["result_available"] != true {
 		t.Fatalf("file-mode tool response leaked content: %#v", value)
+	}
+}
+
+func TestFactoryReturnsNativeJobHandleWithoutCompleteResult(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	handle := domain.ResultHandle{
+		ResultID: strings.Repeat("a", 64), SHA256: strings.Repeat("b", 64), Bytes: 4096,
+		MediaType: "text/plain; charset=utf-8", Availability: []domain.ResultAvailability{domain.ResultAvailabilityRangeRead},
+	}
+	reader := nativeExternalJobReader{
+		stubExternalJobReader: stubExternalJobReader{
+			job:    &domain.ExternalAgentJob{ID: "job_native", Status: domain.JobCompleted, StatusRevision: 4},
+			result: domain.ExternalAgentJobResult{Text: "must not enter ADK"},
+		},
+		handle: handle,
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read runnableFunctionTool
+	for _, candidate := range tools {
+		if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == "read_job_result" {
+			read, _ = candidate.(runnableFunctionTool)
+		}
+	}
+	value, err := read.Run(&stubToolContext{}, map[string]any{"job_id": "job_native"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value["result"] != "" || value["result_id"] != handle.ResultID || value["content_bytes"] != float64(handle.Bytes) {
+		t.Fatalf("native job result = %#v", value)
 	}
 }
 

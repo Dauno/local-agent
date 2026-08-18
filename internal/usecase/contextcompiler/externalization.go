@@ -62,57 +62,11 @@ func projectionResponse(response *domain.FunctionResponse, marker domain.Context
 func dryRunActiveContents(active []domain.Content, parts []reduciblePart) []domain.Content {
 	result := domain.CloneContents(active)
 	for _, part := range parts {
-		marker := dryRunProjectionMarker("late_externalization", len(part.canonicalJSON))
+		marker := dryRunProjectionMarker("request_budget", len(part.canonicalJSON))
 		response := part.part.FunctionResponse
 		result[part.contentIndex].Parts[part.partIndex] = domain.ContentPart{FunctionResponse: projectionResponse(response, marker, "", false)}
 	}
 	return result
-}
-
-// lateExternalize is the single coarse fallback after optional context and
-// existing excerpts are removed. It reuses the initial response analysis.
-func (c *Compiler) lateExternalize(ctx context.Context, req domain.CompileRequest, active []domain.Content, analyzed []reduciblePart, planned []projectionMutation, hard int) ([]domain.Content, int, int, error) {
-	plannedIndexes := make(map[projectionIndex]struct{}, len(planned))
-	for _, projection := range planned {
-		plannedIndexes[projectionIndex{contentIndex: projection.contentIndex, partIndex: projection.partIndex}] = struct{}{}
-	}
-	parts := make([]reduciblePart, 0, len(analyzed))
-	for _, part := range analyzed {
-		if _, alreadyProjected := plannedIndexes[projectionIndex{contentIndex: part.contentIndex, partIndex: part.partIndex}]; alreadyProjected {
-			continue
-		}
-		parts = append(parts, part)
-	}
-	if len(parts) == 0 {
-		return nil, 0, 0, nil
-	}
-
-	minimum := domain.CloneContents(active)
-	for _, part := range parts {
-		marker := dryRunProjectionMarker("late_externalization", len(part.canonicalJSON))
-		response := part.part.FunctionResponse
-		minimum[part.contentIndex].Parts[part.partIndex] = domain.ContentPart{FunctionResponse: projectionResponse(response, marker, "", false)}
-	}
-	if err := validateProjectedContents(assembleContents(nil, nil, nil, minimum), req.OpenInvocationIDs); err != nil {
-		return nil, 0, 0, fmt.Errorf("context compiler: validate late projection: %w", err)
-	}
-	minimumCount, err := c.countProjection(ctx, minimum, req.FixedRequestTokens)
-	if err != nil {
-		return nil, 0, 0, err
-	}
-	if minimumCount.Tokens > hard {
-		return nil, minimumCount.Tokens, 0, &domain.IrreducibleContextError{MinimumTokens: minimumCount.Tokens, HardTokens: hard}
-	}
-
-	projections := make([]projectionMutation, 0, len(parts))
-	for _, part := range parts {
-		projection, planErr := newProjectionMutation(part, 0, "late_externalization")
-		if planErr != nil {
-			return nil, 0, 0, planErr
-		}
-		projections = append(projections, projection)
-	}
-	return c.materializeProjections(ctx, req, active, projections)
 }
 
 func newProjectionMutation(part reduciblePart, budget int, reason string) (projectionMutation, error) {

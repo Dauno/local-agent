@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
@@ -194,6 +195,32 @@ func (liveChecker) CheckAudioTranscription(ctx context.Context, resolved *agentd
 		Data:     diagnosticWAV(),
 	}); err != nil {
 		return fmt.Errorf("audio transcription endpoint check failed: %w", err)
+	}
+	return nil
+}
+
+func (liveChecker) CheckKnowledgeEmbedding(ctx context.Context, cfg config.KnowledgeEmbeddingConfig, apiKey string) error {
+	provider, err := openaillm.NewEmbeddingProvider(openaillm.EmbeddingProviderConfig{
+		APIKey:     apiKey,
+		BaseURL:    cfg.BaseURL,
+		Model:      cfg.Model,
+		Dimensions: cfg.Dimensions,
+		Timeout:    time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatch:   1,
+		Limiter:    modelcalllimiter.New(1),
+	})
+	if err != nil {
+		return err
+	}
+	vectors, err := provider.Embed(ctx, []string{"OK"})
+	if err != nil {
+		return fmt.Errorf("embedding endpoint check failed: %w", err)
+	}
+	if len(vectors) != 1 {
+		return fmt.Errorf("embedding endpoint returned %d vectors for one input", len(vectors))
+	}
+	if err := domain.ValidateEmbeddingOutput(vectors[0], cfg.Dimensions); err != nil {
+		return fmt.Errorf("embedding endpoint output is invalid: %w", err)
 	}
 	return nil
 }

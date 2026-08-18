@@ -90,6 +90,24 @@ type AgentRequest struct {
 	// Activation is host-owned durable identity used only to build the
 	// activation tool scope. It is not rendered into the model prompt.
 	Activation *domain.ExternalAgentJobActivation
+	// BeforeModel runs after host context admission and immediately before the
+	// runtime makes its first model call. It is used to durably cross the
+	// no-replay boundary for host-originated activation turns.
+	BeforeModel func(context.Context) error
+	// Knowledge carries the ordered complete retrieval frame cards for one
+	// authorized human turn. It is ephemeral optional context owned by the
+	// before-model path: it is never appended to durable session events and
+	// only the compiler may select it into the model-facing request.
+	Knowledge []domain.KnowledgeFrameCard
+	// WorkstreamRevision is the host-trusted active workstream revision for
+	// the turn. Zero means no active actor-bound workstream exists.
+	WorkstreamRevision int64
+	// WorkstreamSnapshot is the bounded snapshot of the active actor-bound
+	// workstream, when one exists. It is ephemeral turn data owned by the
+	// before-model path, never appended to durable session events, and
+	// untrusted, non-authoritative model input: it grants no tool scope and
+	// authorizes no mutation.
+	WorkstreamSnapshot *domain.WorkstreamSnapshot
 }
 
 // AgentTurn is the structured result of one agent invocation. It carries

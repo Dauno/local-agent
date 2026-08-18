@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
@@ -133,6 +134,167 @@ func TestDurableACPDispatcherMaterializesSanitizedCompleteResult(t *testing.T) {
 	}
 }
 
+func TestDurableACPDispatcherNativeResultMatchesInlineAndFileDelivery(t *testing.T) {
+	catalog, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "results.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catalog.Close() })
+	payloads, err := fsartifact.NewTypedStore(filepath.Join(t.TempDir(), "v2-results"), 1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := adaptersqlite.NewResultStore(catalog, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	policy := domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
+	}
+	for _, tc := range []struct {
+		name       string
+		jobID      string
+		payload    string
+		fileOutput bool
+		reconcile  bool
+	}{
+		{name: "inline", jobID: "job_v2_inline", payload: "inline <verified> result"},
+		{name: "file", jobID: "job_v2_file", payload: strings.Repeat("x", domain.SlackMarkdownChunkRunes+1), fileOutput: true},
+		{name: "recovered inline", jobID: "job_v2_recovered", payload: "recovered result", reconcile: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			artifacts := &recordingResultArtifacts{}
+			child := preparedAgentTool{
+				definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+				acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: tc.payload}},
+				acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+				projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
+			}
+			job := domain.ExternalAgentJob{
+				ID: tc.jobID, Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+				RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
+				ConversationKey: "slack:T12345678:dm:D12345678", StatusRevision: 4, TimeoutAt: time.Now().Add(time.Minute),
+			}
+			if tc.reconcile {
+				job.ACPSessionID = "session-1"
+			}
+			dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, results: results, policy: policy}
+			var delivery domain.AcpInvocationResult
+			if tc.reconcile {
+				delivery, err = dispatcher.Reconcile(t.Context(), job)
+			} else {
+				delivery, err = dispatcher.Run(t.Context(), job)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var resultID string
+			if err := catalog.DB().QueryRowContext(t.Context(), `SELECT result_id FROM result_records WHERE producer_kind = ? AND producer_id = ? AND producer_revision = ?`, domain.ResultProducerACPJob, job.ID, job.StatusRevision+1).Scan(&resultID); err != nil {
+				t.Fatalf("read native ACP result: %v", err)
+			}
+			_, handle, err := results.Resolve(t.Context(), resultID, domain.ResultScope{
+				Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject,
+			})
+			if err != nil {
+				t.Fatalf("resolve native ACP result: %v", err)
+			}
+			if handle.SHA256 != delivery.ResultSHA256 || handle.Bytes != delivery.ResultBytes {
+				t.Fatalf("native/delivery identity differs: handle=%+v delivery=%+v", handle, delivery)
+			}
+			if tc.fileOutput {
+				if delivery.DeliveryMode != domain.JobResultDeliveryFile || delivery.Text != "" || artifacts.contents[job.ID+"-delivery"] == "" {
+					t.Fatalf("file delivery = %+v, artifacts=%#v", delivery, artifacts.contents)
+				}
+			} else if delivery.DeliveryMode != domain.JobResultDeliveryMarkdown || delivery.Text == "" || len(artifacts.contents) != 0 {
+				t.Fatalf("inline delivery = %+v, artifacts=%#v", delivery, artifacts.contents)
+			}
+		})
+	}
+}
+
+func TestDurableACPDispatcherBlocksDeliveryWhenNativeMaterializationFails(t *testing.T) {
+	workspace := t.TempDir()
+	artifacts := &recordingResultArtifacts{}
+	results := &failingTrustedResultStore{}
+	child := preparedAgentTool{
+		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "complete result"}},
+		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
+	}
+	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, results: results, policy: domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
+	}}
+	_, err := dispatcher.Run(t.Context(), domain.ExternalAgentJob{
+		ID: "job_v2_failure", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+		RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
+		ConversationKey: "slack:T12345678:dm:D12345678", TimeoutAt: time.Now().Add(time.Minute),
+	})
+	var acpErr *domain.ACPError
+	if !errors.As(err, &acpErr) || acpErr.Code != domain.ACPErrorResultArtifactInvalid {
+		t.Fatalf("materialization error = %v", err)
+	}
+	if results.calls != 1 || len(artifacts.contents) != 0 {
+		t.Fatalf("native calls/delivery artifacts = %d/%#v", results.calls, artifacts.contents)
+	}
+}
+
+func TestDurableACPDispatcherPreservesNativeResultWhenDeliveryArtifactFails(t *testing.T) {
+	catalog, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "delivery-failure.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = catalog.Close() })
+	payloads, err := fsartifact.NewTypedStore(filepath.Join(t.TempDir(), "v2-results"), 1024*1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	results, err := adaptersqlite.NewResultStore(catalog, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	child := preparedAgentTool{
+		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: strings.Repeat("x", domain.SlackMarkdownChunkRunes+1)}},
+		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
+	}
+	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: failingDeliveryArtifacts{}, results: results, policy: domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
+	}}
+	delivery, err := dispatcher.Run(t.Context(), domain.ExternalAgentJob{
+		ID: "job_v2_delivery_failure", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+		RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
+		ConversationKey: "slack:T12345678:dm:D12345678", StatusRevision: 4, TimeoutAt: time.Now().Add(time.Minute),
+	})
+	if err == nil || delivery.NativeResultID == "" || delivery.ResultSHA256 == "" || delivery.ResultBytes <= 0 {
+		t.Fatalf("delivery failure lost native identity: result=%+v err=%v", delivery, err)
+	}
+}
+
+func TestDurableACPDispatcherPreservesMaterializationCancellation(t *testing.T) {
+	workspace := t.TempDir()
+	child := preparedAgentTool{
+		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "complete result"}},
+		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
+	}
+	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: &recordingResultArtifacts{}, results: cancelingTrustedResultStore{}, policy: domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
+	}}
+	_, err := dispatcher.Run(t.Context(), domain.ExternalAgentJob{
+		ID: "job_v2_cancel", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+		RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
+		ConversationKey: "slack:T12345678:dm:D12345678", TimeoutAt: time.Now().Add(time.Minute),
+	})
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("materialization cancellation = %v", err)
+	}
+}
+
 func TestDurableACPDispatcherFallsBackForUnicodeTwentyThousandCharacters(t *testing.T) {
 	artifacts := &recordingResultArtifacts{}
 	workspace := t.TempDir()
@@ -149,7 +311,7 @@ func TestDurableACPDispatcherFallsBackForUnicodeTwentyThousandCharacters(t *test
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.DeliveryMode != domain.JobResultDeliveryFile || result.Text != "" || len(artifacts.contents) != 1 || len([]rune(artifacts.contents["job_unicode-delivery"])) != 20000 {
+	if result.NativeResultID != "" || result.DeliveryMode != domain.JobResultDeliveryFile || result.Text != "" || len(artifacts.contents) != 1 || len([]rune(artifacts.contents["job_unicode-delivery"])) != 20000 {
 		t.Fatalf("Unicode fallback result=%+v artifacts=%#v", result, artifacts.contents)
 	}
 }
@@ -433,3 +595,47 @@ func (*recordingResultArtifacts) Get(context.Context, string, string, string, in
 }
 
 var _ port.ResultArtifactStore = (*recordingResultArtifacts)(nil)
+
+type failingTrustedResultStore struct{ calls int }
+
+func (s *failingTrustedResultStore) Materialize(context.Context, port.ResultMaterialization) (domain.ResultHandle, error) {
+	s.calls++
+	return domain.ResultHandle{}, domain.ErrResultUnavailable
+}
+
+func (*failingTrustedResultStore) Resolve(context.Context, string, domain.ResultScope) (domain.ResultIdentity, domain.ResultHandle, error) {
+	return domain.ResultIdentity{}, domain.ResultHandle{}, domain.ErrResultUnavailable
+}
+
+func (*failingTrustedResultStore) ReadRange(context.Context, string, domain.ResultScope, int64, int64) (domain.ResultChunk, error) {
+	return domain.ResultChunk{}, domain.ErrResultUnavailable
+}
+
+var _ port.TrustedResultStore = (*failingTrustedResultStore)(nil)
+
+type cancelingTrustedResultStore struct{}
+
+func (cancelingTrustedResultStore) Materialize(context.Context, port.ResultMaterialization) (domain.ResultHandle, error) {
+	return domain.ResultHandle{}, context.DeadlineExceeded
+}
+
+func (cancelingTrustedResultStore) Resolve(context.Context, string, domain.ResultScope) (domain.ResultIdentity, domain.ResultHandle, error) {
+	return domain.ResultIdentity{}, domain.ResultHandle{}, domain.ErrResultUnavailable
+}
+
+func (cancelingTrustedResultStore) ReadRange(context.Context, string, domain.ResultScope, int64, int64) (domain.ResultChunk, error) {
+	return domain.ResultChunk{}, domain.ErrResultUnavailable
+}
+
+type failingDeliveryArtifacts struct{}
+
+func (failingDeliveryArtifacts) Put(context.Context, string, string) (domain.ResultArtifact, error) {
+	return domain.ResultArtifact{}, errors.New("injected delivery artifact failure")
+}
+
+func (failingDeliveryArtifacts) Get(context.Context, string, string, string, int64) ([]byte, error) {
+	return nil, errors.New("injected delivery artifact unavailable")
+}
+
+var _ port.TrustedResultStore = cancelingTrustedResultStore{}
+var _ port.ResultArtifactStore = failingDeliveryArtifacts{}

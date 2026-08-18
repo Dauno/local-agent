@@ -34,10 +34,26 @@ type WorkstreamMutator interface {
 	ApplyHuman(ctx context.Context, binding WorkstreamBinding, transition domain.WorkstreamTransition) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error)
 }
 
+// WorkstreamSnapshotReader exposes the trusted current snapshot needed to
+// build an isolated host activation frame. It derives project binding from the
+// durable workstream rather than accepting it from the activation payload.
+type WorkstreamSnapshotReader interface {
+	SnapshotForActivation(ctx context.Context, workstreamID, actor string, conversationKey domain.ConversationKey) (domain.WorkstreamSnapshot, error)
+}
+
+// ExternalAgentJobCompletionBindingResolver derives an immutable detached-job
+// binding from the active, actor-bound workstream. Model-provided task text is
+// used only for exact matching; it cannot select IDs or revisions.
+type ExternalAgentJobCompletionBindingResolver interface {
+	CompletionBindingForTask(ctx context.Context, actor string, conversationKey domain.ConversationKey, project, task string) (domain.ExternalAgentJobCompletionBinding, bool, error)
+}
+
 // WorkstreamService is the actor-bound surface used by Slack commands. Creation
 // remains explicit and has a trusted event identity distinct from model calls.
 type WorkstreamService interface {
 	WorkstreamMutator
+	WorkstreamSnapshotReader
+	ExternalAgentJobCompletionBindingResolver
 	CreateHuman(ctx context.Context, binding WorkstreamBinding, id, objective, sourceID string) (domain.WorkstreamSnapshot, error)
 }
 

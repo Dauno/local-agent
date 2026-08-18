@@ -23,6 +23,7 @@ type acpJobDispatcher struct {
 	store                 port.ExternalAgentJobStore
 	sanitize              func(string) string
 	artifacts             port.ResultArtifactStore
+	results               port.TrustedResultStore
 	policy                domain.ResultDeliveryPolicy
 	partLabels            bool
 	reconciliationTimeout time.Duration
@@ -94,10 +95,12 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 			},
 			OnProgress: onProgress,
 		})
-		if runErr == nil && d.artifacts != nil && job.Mode == domain.JobDetached {
+		if runErr == nil && job.Mode == domain.JobDetached && d.artifacts != nil {
 			result, runErr = d.materialize(ctx, job, result)
+		} else if runErr == nil && job.Mode == domain.JobDetached && d.results != nil {
+			runErr = &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("native ACP result delivery store is unavailable")}
 		} else if runErr == nil && job.Mode == domain.JobForeground {
-			result, runErr = d.normalizeForegroundResult(result)
+			result, runErr = d.normalizeForegroundResult(ctx, job, result)
 		} else if runErr == nil && d.sanitize != nil {
 			result.Text = d.sanitize(result.Text)
 		}
@@ -114,15 +117,59 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 // final post-transformation text, its exact UTF-8 byte count and lowercase
 // hex SHA-256 digest are set; Delivery* fields, artifact refs and policy
 // fields stay empty for the synchronous path.
-func (d *acpJobDispatcher) normalizeForegroundResult(result domain.AcpInvocationResult) (domain.AcpInvocationResult, error) {
+func (d *acpJobDispatcher) normalizeForegroundResult(ctx context.Context, job domain.ExternalAgentJob, result domain.AcpInvocationResult) (domain.AcpInvocationResult, error) {
 	text, size, digest, err := d.normalizeResultText(result.Text, d.policy.MaxInlineResultBytes)
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
 	}
 	result.Text = text
+	result.ArtifactRef = ""
+	result.DeliveryArtifactRef = ""
 	result.ResultBytes = size
 	result.ResultSHA256 = digest
+	result.NativeResultID, err = d.materializeNativeResult(ctx, job, text, size, digest)
+	if err != nil {
+		return result, err
+	}
 	return result, nil
+}
+
+// materializeNativeResult commits the complete sanitized ACP payload before
+// the caller can transition its job to a terminal status or create delivery
+// metadata. The terminal status revision is exactly one past the leased job
+// snapshot supplied to this runtime invocation.
+func (d *acpJobDispatcher) materializeNativeResult(ctx context.Context, job domain.ExternalAgentJob, text string, size int64, digest string) (string, error) {
+	if d.results == nil {
+		return "", nil
+	}
+	if job.StatusRevision < 0 {
+		return "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("ACP result producer revision is invalid")}
+	}
+	retention := domain.ResultRetentionContext
+	if job.Mode == domain.JobDetached {
+		retention = domain.ResultRetentionConversation
+	}
+	handle, err := d.results.Materialize(ctx, port.ResultMaterialization{
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: job.StatusRevision + 1},
+		Payload:  text, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
+		Retention: retention, MediaType: "text/plain; charset=utf-8",
+	})
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", err
+	}
+	if err != nil || handle.Validate() != nil || handle.SHA256 != digest || handle.Bytes != size || !hasArtifactAvailability(handle.Availability) {
+		return "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("native ACP result materialization failed")}
+	}
+	return handle.ResultID, nil
+}
+
+func hasArtifactAvailability(values []domain.ResultAvailability) bool {
+	for _, value := range values {
+		if value == domain.ResultAvailabilityPrivateArtifact {
+			return true
+		}
+	}
+	return false
 }
 
 // normalizeResultText applies the host redactor and domain control
@@ -176,11 +223,22 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 		content = []byte(result.Text)
 	}
 	text := string(content)
+	// Provider/source artifacts never become delivery bindings. From this point
+	// onward only host-created native and delivery identities may survive.
+	result.ArtifactRef = ""
+	result.DeliveryArtifactRef = ""
 	var size int64
 	var contentSHA string
 	text, size, contentSHA, err = d.normalizeResultText(text, d.policy.MaxFileBytes)
 	if err != nil {
 		return domain.AcpInvocationResult{}, err
+	}
+	result.Text = text
+	result.ResultSHA256 = contentSHA
+	result.ResultBytes = size
+	result.NativeResultID, err = d.materializeNativeResult(ctx, job, text, size, contentSHA)
+	if err != nil {
+		return result, err
 	}
 	canonical := fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text)
 	parts := slackadapter.RenderMarkdownParts(canonical, d.partLabels)
@@ -192,20 +250,17 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 		artifact, putErr := d.artifacts.Put(ctx, ownerID, text)
 		if putErr != nil {
 			if _, readErr := d.artifacts.Get(ctx, ownerID, ownerID+".result", contentSHA, d.policy.MaxFileBytes); readErr != nil {
-				return domain.AcpInvocationResult{}, fmt.Errorf("store sanitized result artifact: %w", putErr)
+				return result, fmt.Errorf("store sanitized result artifact: %w", putErr)
 			}
 			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: size}
 		}
 		if artifact.Reference == "" || !strings.EqualFold(artifact.SHA256, contentSHA) || artifact.Bytes != size {
-			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultDeliveryFailed, Err: errors.New("sanitized ACP result artifact identity is invalid")}
+			return result, &domain.ACPError{Code: domain.ACPErrorResultDeliveryFailed, Err: errors.New("sanitized ACP result artifact identity is invalid")}
 		}
 		artifactRef = artifact.Reference
 	}
-	result.Text = text
 	result.Inline = mode == domain.JobResultDeliveryMarkdown
 	result.ArtifactRef = artifactRef
-	result.ResultSHA256 = contentSHA
-	result.ResultBytes = size
 	result.DeliveryMode = mode
 	result.DeliveryCanonicalMarkdown = canonical
 	result.DeliveryPolicyVersion = domain.JobDeliveryPolicyV1
@@ -252,10 +307,12 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 			GlobalInstruction: d.global, AgentInstruction: child.definition.Instruction,
 			PermissionOptionKind: child.acpResolved.PermissionOptionKind, Timeout: recoveryTimeout,
 		}, job.ACPSessionID)
-		if runErr == nil && d.artifacts != nil && job.Mode == domain.JobDetached {
+		if runErr == nil && job.Mode == domain.JobDetached && d.artifacts != nil {
 			result, runErr = d.materialize(ctx, job, result)
+		} else if runErr == nil && job.Mode == domain.JobDetached && d.results != nil {
+			runErr = &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("native ACP result delivery store is unavailable")}
 		} else if runErr == nil && job.Mode == domain.JobForeground {
-			result, runErr = d.normalizeForegroundResult(result)
+			result, runErr = d.normalizeForegroundResult(ctx, job, result)
 		} else if runErr == nil && d.sanitize != nil {
 			result.Text = d.sanitize(result.Text)
 		}
@@ -294,6 +351,17 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	if store == nil {
 		return nil, nil, errors.New("initialize external-agent job store")
 	}
+	var nativeResults port.TrustedResultStore
+	var err error
+	if cfg.Orchestration.ResultHandles.Enabled {
+		if models.resultPayloadStore == nil {
+			return nil, nil, errors.New("initialize native ACP result payload store")
+		}
+		nativeResults, err = adaptersqlite.NewResultStore(infra.store, models.resultPayloadStore)
+		if err != nil {
+			return nil, nil, fmt.Errorf("initialize native ACP result store: %w", err)
+		}
+	}
 	global := ""
 	if models.rootDef != nil {
 		global = models.rootDef.EffectiveDelegatedGlobalInstruction()
@@ -307,14 +375,14 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		MaxAttempts:            2,
 		ProgressWarningSeconds: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
 	}, externalagent.Dependencies{
-		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String,
+		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
 			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
 			reconciliationTimeout: time.Duration(cfg.ACP.ReconciliationTimeoutSeconds) * time.Second,
 			progressStore:         store, processRegistry: infra.processRegistry,
 			progressWarnAfter: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
 			logger:            models.logger, metrics: models.metrics,
 			progressGauge: externalagent.NewActiveProgressGauge(models.metrics)},
-		Publisher: nil, Artifacts: models.artifactStore,
+		Publisher: nil, Artifacts: models.artifactStore, NativeResults: nativeResults,
 		ProgressStore: store, ProcessRegistry: infra.processRegistry,
 		MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
 		Logger: models.logger, Metrics: models.metrics,

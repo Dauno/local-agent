@@ -169,6 +169,62 @@ tools:
 	}
 }
 
+func TestProfileResultHandlesAdmissionLoadsAndValidates(t *testing.T) {
+	t.Parallel()
+
+	agentsDir := filepath.Join(t.TempDir(), "agents")
+	providersDir := filepath.Join(t.TempDir(), "providers")
+	os.MkdirAll(agentsDir, 0o755)
+	os.MkdirAll(providersDir, 0o755)
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  flash-reasoning:
+    model: deepseek-v4-flash
+    result_handles:
+      max_direct_inline_bytes: 8192
+`)
+	writeFile(t, agentsDir, "agent.yaml", `
+agent_class: LlmAgent
+name: test
+description: "test agent"
+model: deepseek/flash-reasoning
+instruction: "test"
+tool_scope: invocation_scoped
+`)
+
+	defs, err := agentdef.LoadFromDirs(agentsDir, providersDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resolved, err := defs.ResolveModel("deepseek/flash-reasoning")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resolved.MaxDirectInlineBytes != 8192 {
+		t.Fatalf("resolved direct-inline admission = %d, want 8192", resolved.MaxDirectInlineBytes)
+	}
+
+	writeFile(t, providersDir, "deepseek.yaml", `
+name: deepseek
+type: openai_compatible
+base_url: https://api.deepseek.com
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  flash-reasoning:
+    model: deepseek-v4-flash
+    result_handles:
+      max_direct_inline_bytes: 131072
+`)
+	if _, err := agentdef.LoadFromDirs(agentsDir, providersDir); err == nil {
+		t.Fatal("expected error for direct-inline admission above the hard maximum")
+	}
+}
+
 func TestRejectUnknownProviderField(t *testing.T) {
 	t.Parallel()
 

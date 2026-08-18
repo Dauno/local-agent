@@ -19,11 +19,12 @@ import (
 const activationTerminalStates = `('completed', 'failed', 'completion_unknown')`
 
 const activationColumns = `a.job_id, a.status_revision, a.kind, a.activation_id, a.terminal_status,
-	a.notification_sha256, a.actor, a.team_id, a.conversation_key, a.original_call_id,
+	a.notification_sha256, a.result_sha256, a.actor, a.team_id, a.conversation_key, a.workstream_id, a.task_id,
+	a.execution_identity, a.admission_revision, a.original_call_id,
 	a.delivery_mode, a.content_bytes, a.slack_message_ts, a.published_at, a.state,
 	a.attempt, a.lease_owner, a.lease_expiry, a.next_attempt_at, a.last_error_code,
 	a.response_body, a.response_sha256, a.exchange_intent_id, a.correlation_id,
-	a.response_slack_ts, a.created_at, a.updated_at`
+	a.response_slack_ts, a.fallback_required, a.fallback_slack_ts, a.created_at, a.updated_at`
 
 func (s *ExternalAgentJobStore) GetActivation(ctx context.Context, activationID string) (*domain.ExternalAgentJobActivation, error) {
 	if s == nil || s.db == nil || strings.TrimSpace(activationID) == "" {
@@ -303,7 +304,7 @@ func (s *ExternalAgentJobStore) PrepareActivationResponseWithExchange(
 	}
 
 	source, err := sourceExchangeTx(ctx, tx, metadata.Key)
-	if err != nil {
+	if err != nil && !strings.Contains(err.Error(), "assistant exchange has no persisted user source") {
 		return port.PreparedAssistantExchange{}, err
 	}
 	source = append(source, message)
@@ -364,8 +365,9 @@ func sameActivationIdentity(left, right *domain.ExternalAgentJobActivation) bool
 	}
 	return left.ActivationID == right.ActivationID && left.JobID == right.JobID &&
 		left.StatusRevision == right.StatusRevision && left.Kind == right.Kind &&
-		left.TerminalStatus == right.TerminalStatus && left.NotificationSHA256 == right.NotificationSHA256 &&
+		left.TerminalStatus == right.TerminalStatus && left.NotificationSHA256 == right.NotificationSHA256 && left.ResultSHA256 == right.ResultSHA256 &&
 		left.Actor == right.Actor && left.TeamID == right.TeamID && left.ConversationKey == right.ConversationKey &&
+		left.WorkstreamID == right.WorkstreamID && left.TaskID == right.TaskID && left.ExecutionIdentity == right.ExecutionIdentity && left.AdmissionRevision == right.AdmissionRevision &&
 		left.OriginalCallID == right.OriginalCallID && left.DeliveryMode == right.DeliveryMode &&
 		left.ContentBytes == right.ContentBytes && left.SlackMessageTS == right.SlackMessageTS &&
 		left.PublishedAt.Equal(right.PublishedAt)
@@ -430,10 +432,10 @@ func (s *ExternalAgentJobStore) FailActivation(ctx context.Context, activation *
 	}
 	code := safeActivationError(errorCode)
 	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_job_activations SET
-		state = ?, last_error_code = ?, lease_owner = '', lease_expiry = 0, updated_at = ?
+		state = ?, last_error_code = ?, fallback_required = ?, lease_owner = '', lease_expiry = 0, updated_at = ?
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND state IN (?, ?)
 		AND lease_owner = ? AND attempt = ? AND lease_expiry > ?`,
-		domain.ActivationFailed, code, now.UTC().UnixNano(), activation.JobID, activation.StatusRevision,
+		domain.ActivationFailed, code, boolInt(domain.ActivationFallbackRequired(code)), now.UTC().UnixNano(), activation.JobID, activation.StatusRevision,
 		activation.Kind, domain.ActivationProcessing, domain.ActivationResponsePrepared, activation.LeaseOwner,
 		activation.Attempt, now.UTC().UnixNano())
 	if err != nil {
@@ -451,10 +453,10 @@ func (s *ExternalAgentJobStore) MarkActivationCompletionUnknown(ctx context.Cont
 	}
 	code := safeActivationError(errorCode)
 	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_job_activations SET
-		state = ?, last_error_code = ?, lease_owner = '', lease_expiry = 0, updated_at = ?
+		state = ?, last_error_code = ?, fallback_required = ?, lease_owner = '', lease_expiry = 0, updated_at = ?
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND state = ?
 		AND lease_owner = ? AND attempt = ? AND lease_expiry > ?`,
-		domain.ActivationCompletionUnknown, code, now.UTC().UnixNano(), activation.JobID, activation.StatusRevision,
+		domain.ActivationCompletionUnknown, code, boolInt(domain.ActivationFallbackRequired(code)), now.UTC().UnixNano(), activation.JobID, activation.StatusRevision,
 		activation.Kind, domain.ActivationModelStarted, activation.LeaseOwner, activation.Attempt, now.UTC().UnixNano())
 	if err != nil {
 		return fmt.Errorf("mark external-agent activation completion unknown: %w", err)
@@ -463,6 +465,254 @@ func (s *ExternalAgentJobStore) MarkActivationCompletionUnknown(ctx context.Cont
 		return port.ErrActivationStateConflict
 	}
 	return nil
+}
+
+// ClaimNextActivationFallback claims one terminal activation whose host-owned
+// fallback publication is still pending. Terminal states never carry a lease
+// after their CAS, so this path is only reachable for fallback-required rows.
+func (s *ExternalAgentJobStore) ClaimNextActivationFallback(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("external-agent activation store is not configured")
+	}
+	if strings.TrimSpace(owner) == "" || leaseTTL <= 0 {
+		return nil, errors.New("activation fallback lease owner and positive TTL are required")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	now = now.UTC()
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return nil, fmt.Errorf("begin external-agent activation fallback claim: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	where := `(a.state IN (?, ?) AND a.fallback_required = 1 AND a.fallback_slack_ts = ''
+		AND (a.lease_expiry = 0 OR a.lease_expiry <= ?))`
+	query := `SELECT a.job_id, a.status_revision, a.kind
+		FROM external_agent_job_activations a
+		WHERE ` + where + `
+		ORDER BY a.published_at ASC, a.status_revision ASC, a.job_id ASC, a.kind ASC LIMIT 1`
+	var jobID, kind string
+	var revision int
+	if err := tx.QueryRowContext(ctx, query, domain.ActivationFailed, domain.ActivationCompletionUnknown, now.UnixNano()).Scan(&jobID, &revision, &kind); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, fmt.Errorf("select claimable external-agent activation fallback: %w", err)
+	}
+	leaseExpiry := now.Add(leaseTTL)
+	changed, err := tx.ExecContext(ctx, `UPDATE external_agent_job_activations AS a SET
+		lease_owner = ?, lease_expiry = ?, attempt = attempt + 1, updated_at = ?
+		WHERE a.job_id = ? AND a.status_revision = ? AND a.kind = ? AND `+where,
+		append([]any{owner, leaseExpiry.UnixNano(), now.UnixNano(), jobID, revision, kind},
+			domain.ActivationFailed, domain.ActivationCompletionUnknown, now.UnixNano())...)
+	if err != nil {
+		return nil, fmt.Errorf("claim external-agent activation fallback: %w", err)
+	}
+	if affected, _ := changed.RowsAffected(); affected != 1 {
+		return nil, port.ErrActivationClaimConflict
+	}
+	activation, err := loadActivation(ctx, tx, `WHERE a.job_id = ? AND a.status_revision = ? AND a.kind = ?`, jobID, revision, kind)
+	if err != nil {
+		return nil, fmt.Errorf("load claimed external-agent activation fallback: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, fmt.Errorf("commit external-agent activation fallback claim: %w", err)
+	}
+	return &activation, nil
+}
+
+// CompleteActivationFallback closes one terminal fallback in a single
+// transaction: the assistant message is persisted, the durable published
+// intent is consumed, and fallback_slack_ts commits by CAS. A retry after any
+// crash either observes the committed fallback and returns without side
+// effects, or re-runs the whole transaction exactly once.
+func (s *ExternalAgentJobStore) CompleteActivationFallback(ctx context.Context, activation *domain.ExternalAgentJobActivation, exchangeIntentID, slackTS string, now time.Time) error {
+	if s == nil || s.db == nil {
+		return errors.New("external-agent activation store is not configured")
+	}
+	if activation == nil || activation.JobID == "" || activation.Kind == "" || activation.LeaseOwner == "" || activation.Attempt <= 0 {
+		return errors.New("external-agent activation fallback identity is required")
+	}
+	if strings.TrimSpace(exchangeIntentID) == "" || !validSlackTimestamp(slackTS) {
+		return errors.New("external-agent activation fallback exchange identity is invalid")
+	}
+	if now.IsZero() {
+		now = time.Now().UTC()
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return fmt.Errorf("begin complete external-agent activation fallback: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, err := loadActivation(ctx, tx, `WHERE a.job_id = ? AND a.status_revision = ? AND a.kind = ?`, activation.JobID, activation.StatusRevision, activation.Kind)
+	if err != nil {
+		return fmt.Errorf("load external-agent activation fallback state: %w", err)
+	}
+	if !sameActivationIdentity(&current, activation) {
+		return port.ErrActivationStateConflict
+	}
+	if current.FallbackSlackTS != "" {
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit completed external-agent activation fallback: %w", err)
+		}
+		return nil // A prior completion committed before its caller observed success.
+	}
+	if !current.FallbackRequired || !domain.ActivationFallbackRequired(current.LastErrorCode) {
+		return errors.New("external-agent activation fallback is not required")
+	}
+	if current.State != domain.ActivationFailed && current.State != domain.ActivationCompletionUnknown {
+		return port.ErrActivationStateConflict
+	}
+	if current.LeaseOwner != activation.LeaseOwner || current.Attempt != activation.Attempt || current.LeaseExpiry.IsZero() || !current.LeaseExpiry.After(now.UTC()) {
+		return port.ErrActivationStateConflict
+	}
+
+	intent, err := loadAssistantExchangeIntent(ctx, tx, exchangeIntentID)
+	if err != nil {
+		return fmt.Errorf("load external-agent activation fallback intent: %w", err)
+	}
+	if intent.PublishStatus != "published" || intent.AssistantExternalTS != slackTS {
+		return errors.New("cannot complete an unpublished external-agent activation fallback")
+	}
+	if intent.ConversationKey != current.ConversationKey {
+		return errors.New("external-agent activation fallback intent conversation conflicts")
+	}
+
+	if err := appendMessageTx(ctx, tx, intent.metadata(), intent.assistantMessage(), intent.Retain); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM memory_exchange_intents WHERE id = ?`, exchangeIntentID); err != nil {
+		return fmt.Errorf("delete completed external-agent activation fallback intent: %w", err)
+	}
+	result, err := tx.ExecContext(ctx, `UPDATE external_agent_job_activations SET
+		fallback_slack_ts = ?, lease_owner = '', lease_expiry = 0, updated_at = ?
+		WHERE job_id = ? AND status_revision = ? AND kind = ? AND state IN (?, ?)
+		AND fallback_required = 1 AND fallback_slack_ts = ''
+		AND lease_owner = ? AND attempt = ?`,
+		slackTS, now.UTC().UnixNano(), activation.JobID, activation.StatusRevision, activation.Kind,
+		domain.ActivationFailed, domain.ActivationCompletionUnknown, activation.LeaseOwner, activation.Attempt)
+	if err != nil {
+		return fmt.Errorf("complete external-agent activation fallback: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		committed, err := loadActivation(ctx, tx, `WHERE a.job_id = ? AND a.status_revision = ? AND a.kind = ?`, activation.JobID, activation.StatusRevision, activation.Kind)
+		if err == nil && committed.FallbackSlackTS != "" {
+			if err := tx.Commit(); err != nil {
+				return fmt.Errorf("commit completed external-agent activation fallback: %w", err)
+			}
+			return nil
+		}
+		return port.ErrActivationStateConflict
+	}
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("commit complete external-agent activation fallback: %w", err)
+	}
+	return nil
+}
+
+// activationFallbackIntentPrefix is the deterministic ID prefix of staged
+// activation fallback exchanges. The generic assistant-exchange reconciler
+// must never consume these intents: their completion is owned exclusively by
+// the CompleteActivationFallback transaction.
+const activationFallbackIntentPrefix = "activation_fallback_exchange_"
+
+func fallbackExchangeIDs(activationID string) (string, string) {
+	digest := sha256.Sum256([]byte(activationID))
+	encoded := hex.EncodeToString(digest[:])
+	return activationFallbackIntentPrefix + encoded[:32], "activation_fallback_response_" + encoded[:32]
+}
+
+// PrepareActivationFallbackExchange stages the host-owned fallback assistant
+// exchange durably before Slack is contacted. The intent and correlation IDs
+// are deterministic per activation, so a retry returns the same durable
+// exchange instead of creating or publishing another fallback. The activation
+// stays in its terminal state; only the fallback intent is staged.
+func (s *ExternalAgentJobStore) PrepareActivationFallbackExchange(
+	ctx context.Context,
+	activation *domain.ExternalAgentJobActivation,
+	metadata domain.ConversationMetadata,
+	message domain.Message,
+	retain int,
+	now time.Time,
+) (port.PreparedAssistantExchange, error) {
+	if s == nil || s.db == nil {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation store is not configured")
+	}
+	if activation == nil || activation.JobID == "" || activation.Kind == "" || activation.LeaseOwner == "" || activation.Attempt <= 0 {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation fallback identity is required")
+	}
+	if now.IsZero() {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation fallback time is required")
+	}
+	if retain <= 0 {
+		return port.PreparedAssistantExchange{}, errors.New("message retention must be positive")
+	}
+	message = message.WithInferredSource()
+	if message.Role != domain.RoleAssistant || message.Source != domain.MessageSourceAssistant || !utf8.ValidString(message.Content) || strings.TrimSpace(message.Content) == "" {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent assistant fallback is invalid")
+	}
+	intentID, correlationID := fallbackExchangeIDs(activation.ActivationID)
+
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("begin prepare external-agent assistant fallback: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	current, err := loadActivation(ctx, tx, `WHERE a.job_id = ? AND a.status_revision = ? AND a.kind = ?`, activation.JobID, activation.StatusRevision, activation.Kind)
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("load external-agent activation fallback state: %w", err)
+	}
+	if !sameActivationIdentity(&current, activation) {
+		return port.PreparedAssistantExchange{}, port.ErrActivationStateConflict
+	}
+	if !current.FallbackRequired || current.FallbackSlackTS != "" || !domain.ActivationFallbackRequired(current.LastErrorCode) {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation fallback is not required")
+	}
+	if current.State != domain.ActivationFailed && current.State != domain.ActivationCompletionUnknown {
+		return port.PreparedAssistantExchange{}, port.ErrActivationStateConflict
+	}
+	if current.LeaseOwner != activation.LeaseOwner || current.Attempt != activation.Attempt || current.LeaseExpiry.IsZero() || !current.LeaseExpiry.After(now.UTC()) {
+		return port.PreparedAssistantExchange{}, port.ErrActivationStateConflict
+	}
+	if current.ConversationKey != metadata.Key || current.TeamID != metadata.TeamID || current.ConversationKey == "" {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent activation fallback conversation metadata conflicts")
+	}
+
+	source, err := sourceExchangeTx(ctx, tx, metadata.Key)
+	if err != nil && !strings.Contains(err.Error(), "assistant exchange has no persisted user source") {
+		return port.PreparedAssistantExchange{}, err
+	}
+	source = append(source, message)
+	payload, err := json.Marshal(sourceMessagesWrapper{MemoryEligible: false, Messages: marshalMessages(source)})
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("encode external-agent assistant fallback source: %w", err)
+	}
+	nowNanos := now.UTC().UnixNano()
+	if _, err := tx.ExecContext(ctx, `
+		INSERT INTO memory_exchange_intents (
+			id, conversation_key, team_id, channel_id, channel_kind, root_ts, last_ts,
+			assistant_content, assistant_external_ts, assistant_created_at, retain, source_messages, created_at, publish_status, correlation_id, presentation_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?, 'prepared', ?, '')
+		ON CONFLICT (id) DO NOTHING`,
+		intentID, string(metadata.Key), metadata.TeamID, metadata.ChannelID, string(metadata.ChannelKind), metadata.RootTS, metadata.LastTS,
+		message.Content, message.CreatedAt.UnixNano(), retain, string(payload), nowNanos, correlationID,
+	); err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("prepare external-agent assistant fallback: %w", err)
+	}
+	intent, err := loadAssistantExchangeIntent(ctx, tx, intentID)
+	if err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("load external-agent assistant fallback: %w", err)
+	}
+	if intent.ConversationKey != metadata.Key || intent.AssistantContent != message.Content || intent.CorrelationID != correlationID || !activationExchangeMemoryIneligible(intent.SourceMessages) {
+		return port.PreparedAssistantExchange{}, errors.New("external-agent assistant fallback identity conflicts")
+	}
+	if err := tx.Commit(); err != nil {
+		return port.PreparedAssistantExchange{}, fmt.Errorf("commit external-agent assistant fallback: %w", err)
+	}
+	return port.PreparedAssistantExchange{ID: intentID, CorrelationID: correlationID}, nil
 }
 
 func (s *ExternalAgentJobStore) RenewActivationLease(ctx context.Context, activation *domain.ExternalAgentJobActivation, now time.Time, leaseTTL time.Duration) error {
@@ -533,13 +783,16 @@ func loadActivation(ctx context.Context, queryer queryRower, where string, args 
 	var activation domain.ExternalAgentJobActivation
 	var terminalStatus, deliveryMode, state, conversation string
 	var publishedAt, leaseExpiry, nextAttemptAt, createdAt, updatedAt int64
+	var fallbackRequired int
 	row := queryer.QueryRowContext(ctx, `SELECT `+activationColumns+` FROM external_agent_job_activations a `+where, args...)
 	err := row.Scan(
 		&activation.JobID, &activation.StatusRevision, &activation.Kind, &activation.ActivationID, &terminalStatus,
-		&activation.NotificationSHA256, &activation.Actor, &activation.TeamID, &conversation, &activation.OriginalCallID,
+		&activation.NotificationSHA256, &activation.ResultSHA256, &activation.Actor, &activation.TeamID, &conversation, &activation.WorkstreamID, &activation.TaskID,
+		&activation.ExecutionIdentity, &activation.AdmissionRevision, &activation.OriginalCallID,
 		&deliveryMode, &activation.ContentBytes, &activation.SlackMessageTS, &publishedAt, &state, &activation.Attempt,
 		&activation.LeaseOwner, &leaseExpiry, &nextAttemptAt, &activation.LastErrorCode, &activation.ResponseBody,
 		&activation.ResponseSHA256, &activation.ExchangeIntentID, &activation.CorrelationID, &activation.ResponseSlackTS,
+		&fallbackRequired, &activation.FallbackSlackTS,
 		&createdAt, &updatedAt,
 	)
 	if err != nil {
@@ -552,5 +805,6 @@ func loadActivation(ctx context.Context, queryer queryRower, where string, args 
 	activation.NextAttemptAt, activation.CreatedAt = fromUnix(nextAttemptAt), fromUnix(createdAt)
 	activation.UpdatedAt = fromUnix(updatedAt)
 	activation.State = domain.ExternalAgentJobActivationState(state)
+	activation.FallbackRequired = fallbackRequired == 1
 	return activation, nil
 }

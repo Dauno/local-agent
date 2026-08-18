@@ -26,6 +26,9 @@ func (s *Service) handleStreamingTurn(
 	metadata domain.ConversationMetadata,
 	modelRelease func(),
 	progress *domain.ProgressOperation,
+	knowledge []domain.KnowledgeFrameCard,
+	workstreamRevision int64,
+	workstreamSnapshot *domain.WorkstreamSnapshot,
 ) (Outcome, error) {
 	now := s.clock.Now().UTC()
 	operation := domain.IncrementalOperation{
@@ -52,6 +55,9 @@ func (s *Service) handleStreamingTurn(
 		defer modelRelease()
 		s.streamingRuntime.Stream(modelCtx, port.AgentRequest{
 			ConversationKey: key, Messages: modelContext, Memory: memory, Context: agentContext,
+			Knowledge:          append([]domain.KnowledgeFrameCard(nil), knowledge...),
+			WorkstreamRevision: workstreamRevision,
+			WorkstreamSnapshot: workstreamSnapshot,
 		}, func(event port.AgentStreamEvent) bool {
 			switch event.Kind {
 			case port.AgentStreamTextDelta:

@@ -3,12 +3,53 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"mime"
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
-const HardMaxResultRepresentationIDs = 8
+const (
+	HardMaxResultRepresentationIDs = 8
+	HardMaxResultMediaTypeBytes    = 256
+	HardMaxDirectInlineResultBytes = 64 * 1024
+)
+
+// Default and hard-maximum retention ages in days for the four TRD 02
+// retention classes (orchestration.result_handles.retention.*).
+const (
+	DefaultResultRetentionContextDays      = 7
+	DefaultResultRetentionConversationDays = 30
+	DefaultResultRetentionWorkstreamDays   = 180
+	DefaultResultRetentionExportedDays     = 30
+	HardMaxResultRetentionDays             = 3650
+)
+
+// ResultRetentionAges carries the validated per-class retention ages used by
+// the offline retention observability check. ResultRetentionClassCounts
+// reports bounded counts only: no result ID, content, path, or digest.
+type ResultRetentionAges struct {
+	Context      time.Duration
+	Conversation time.Duration
+	Workstream   time.Duration
+}
+
+type ResultRetentionClassCounts struct {
+	Class                  ResultRetentionClass
+	Candidates             int
+	ReferenceProtected     int
+	MaterializationPending int
+}
+
+// ResultRetentionHealth is the bounded result of one offline retention scan.
+// ExportedNotImplemented records that the "exported" class is never scanned:
+// its age anchor is a verified publication event that does not exist yet
+// (see TRD 02 §Retention).
+type ResultRetentionHealth struct {
+	Classes                []ResultRetentionClassCounts
+	ExportedNotImplemented bool
+}
 
 var (
 	ErrResultInvalid             = errors.New("result identity is invalid")
@@ -17,6 +58,7 @@ var (
 	ErrResultScopeMismatch       = errors.New("result scope does not match")
 	ErrResultLegacyNotLinkable   = errors.New("legacy result cannot be linked to a workstream")
 	ErrResultRepresentationLimit = errors.New("result representation limit exceeded")
+	ErrResultInlineAdmission     = errors.New("result inline admission is required")
 )
 
 type ResultProducerKind string
@@ -154,10 +196,10 @@ type ResultIdentity struct {
 }
 
 func (i ResultIdentity) Validate() error {
-	if !validResultID(i.ResultID) || strings.TrimSpace(i.MediaType) == "" || i.Bytes <= 0 || i.CreatedAt.IsZero() {
+	if !validResultID(i.ResultID) || !validResultMediaType(i.MediaType) || i.Bytes <= 0 || i.CreatedAt.IsZero() {
 		return ErrResultInvalid
 	}
-	if digest, bytes := ValidResultIdentity(i.SHA256, i.Bytes); digest == "" || bytes != i.Bytes {
+	if !validCanonicalResultIdentity(i.SHA256, i.Bytes) {
 		return ErrResultInvalid
 	}
 	if err := i.Producer.Validate(); err != nil {
@@ -183,6 +225,10 @@ func (i ResultIdentity) Validate() error {
 }
 
 func (i ResultIdentity) Handle(availability []ResultAvailability, representationIDs []string) (ResultHandle, error) {
+	return i.handle(availability, representationIDs, false)
+}
+
+func (i ResultIdentity) handle(availability []ResultAvailability, representationIDs []string, inlineAdmitted bool) (ResultHandle, error) {
 	if err := i.Validate(); err != nil {
 		return ResultHandle{}, err
 	}
@@ -190,8 +236,9 @@ func (i ResultIdentity) Handle(availability []ResultAvailability, representation
 		return ResultHandle{}, ErrResultQuarantined
 	}
 	handle := ResultHandle{
-		ResultID: i.ResultID, SHA256: strings.ToLower(i.SHA256), Bytes: i.Bytes, MediaType: i.MediaType,
+		ResultID: i.ResultID, SHA256: i.SHA256, Bytes: i.Bytes, MediaType: i.MediaType,
 		Availability: slices.Clone(availability), RepresentationIDs: slices.Clone(representationIDs),
+		inlineAdmitted: inlineAdmitted,
 	}
 	if err := handle.Validate(); err != nil {
 		return ResultHandle{}, err
@@ -221,13 +268,14 @@ type ResultHandle struct {
 	MediaType         string
 	Availability      []ResultAvailability
 	RepresentationIDs []string
+	inlineAdmitted    bool
 }
 
 func (h ResultHandle) Validate() error {
-	if !validResultID(h.ResultID) || strings.TrimSpace(h.MediaType) == "" {
+	if !validResultID(h.ResultID) || !validResultMediaType(h.MediaType) {
 		return ErrResultInvalid
 	}
-	if digest, bytes := ValidResultIdentity(h.SHA256, h.Bytes); digest == "" || bytes != h.Bytes {
+	if !validCanonicalResultIdentity(h.SHA256, h.Bytes) {
 		return ErrResultInvalid
 	}
 	if len(h.Availability) == 0 || len(h.RepresentationIDs) > HardMaxResultRepresentationIDs {
@@ -246,11 +294,14 @@ func (h ResultHandle) Validate() error {
 		if _, exists := seenAvailability[availability]; exists {
 			return ErrResultInvalid
 		}
+		if availability == ResultAvailabilityInline && !h.inlineAdmitted {
+			return ErrResultInlineAdmission
+		}
 		seenAvailability[availability] = struct{}{}
 	}
 	seenRepresentations := make(map[string]struct{}, len(h.RepresentationIDs))
 	for _, id := range h.RepresentationIDs {
-		if strings.TrimSpace(id) == "" {
+		if !validResultID(id) {
 			return ErrResultInvalid
 		}
 		if _, exists := seenRepresentations[id]; exists {
@@ -274,13 +325,13 @@ type ResultRepresentation struct {
 }
 
 func (r ResultRepresentation) Validate() error {
-	if strings.TrimSpace(r.RepresentationID) == "" || !validResultID(r.ResultID) || strings.TrimSpace(r.AlgorithmOrPromptVersion) == "" {
+	if !validResultID(r.RepresentationID) || !validResultID(r.ResultID) || strings.TrimSpace(r.AlgorithmOrPromptVersion) == "" {
 		return ErrResultInvalid
 	}
-	if digest, bytes := ValidResultIdentity(r.SourceSHA256, r.SourceBytes); digest == "" || bytes != r.SourceBytes {
+	if !validCanonicalResultIdentity(r.SourceSHA256, r.SourceBytes) {
 		return ErrResultInvalid
 	}
-	if digest, bytes := ValidResultIdentity(r.PayloadSHA256, r.PayloadBytes); digest == "" || bytes != r.PayloadBytes {
+	if !validCanonicalResultIdentity(r.PayloadSHA256, r.PayloadBytes) {
 		return ErrResultInvalid
 	}
 	switch r.Kind {
@@ -296,6 +347,15 @@ func (r ResultRepresentation) Validate() error {
 	}
 }
 
+// ValidResultID reports whether value is a well-formed opaque V2 result
+// identity (64 lowercase hex characters). It is exported so consumers that
+// scan model-facing content for admitted result identities, such as the
+// context-epoch recorder, can validate candidates without duplicating the
+// format.
+func ValidResultID(value string) bool {
+	return validResultID(value)
+}
+
 func validResultID(value string) bool {
 	if len(value) != 64 {
 		return false
@@ -306,6 +366,19 @@ func validResultID(value string) bool {
 		}
 	}
 	return true
+}
+
+func validCanonicalResultIdentity(sha256Hex string, bytes int64) bool {
+	digest, validBytes := ValidResultIdentity(sha256Hex, bytes)
+	return digest != "" && digest == sha256Hex && validBytes == bytes
+}
+
+func validResultMediaType(value string) bool {
+	if value == "" || value != strings.TrimSpace(value) || len(value) > HardMaxResultMediaTypeBytes || !utf8.ValidString(value) {
+		return false
+	}
+	_, _, err := mime.ParseMediaType(value)
+	return err == nil
 }
 
 func (i ResultIdentity) String() string {

@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"google.golang.org/adk/v2/agent"
@@ -36,33 +38,54 @@ type RuntimeConfig struct {
 	ContextCompaction domain.ContextCompactionSettings
 	ContinuityStore   port.ContinuityStore
 	SummaryStore      port.SummaryStore
+	EpochStore        port.ContextEpochStore
 	Metrics           port.MetricRecorder
+	// Result-producing ACP tools are limited per model step. The input frame
+	// reserves their bounded result capacity before each provider call.
+	ResultProducingToolNames         []string
+	ResultProducingCallsPerStep      int
+	ResultProducingCallReserveTokens int
 	// StaticTools are reusable ADK tools composed at startup, such as AgentTool
 	// wrappers. Invocation-scoped tools continue to come from ToolFactory.
 	StaticTools []tool.Tool
 	// ProviderFamily is stamped onto new durable sessions and compared
 	// defensively before each turn. Empty defaults to openai_compatible.
 	ProviderFamily string
+	// KnowledgeBudgetTokens is the validated per-turn source budget for
+	// knowledge frame cards from orchestration.knowledge.max_card_tokens.
+	// The turn payload never controls this budget; zero disables selection.
+	KnowledgeBudgetTokens int
+	// WorkstreamBudgetTokens is the validated per-turn source budget for the
+	// active workstream snapshot from
+	// orchestration.workstreams.snapshot_budget_tokens. The turn payload
+	// never controls this budget; zero disables selection.
+	WorkstreamBudgetTokens int
 }
 
 // Runtime adapts ADK's llmagent + durable session service into the
 // application's port.AgentRuntime boundary.
 type Runtime struct {
-	agentName         string
-	instruction       string
-	globalInstruction string
-	sessionService    session.Service
-	model             model.LLM
-	toolFactory       port.AgentToolFactory
-	contextProjector  port.ContextProjector
-	contextCompiler   port.ContextCompiler
-	contextBudget     domain.RequestBudget
-	contextCompaction domain.ContextCompactionSettings
-	continuityStore   port.ContinuityStore
-	summaryStore      port.SummaryStore
-	staticTools       []tool.Tool
-	providerFamily    string
-	metrics           port.MetricRecorder
+	agentName                        string
+	instruction                      string
+	globalInstruction                string
+	sessionService                   session.Service
+	model                            model.LLM
+	toolFactory                      port.AgentToolFactory
+	contextProjector                 port.ContextProjector
+	contextCompiler                  port.ContextCompiler
+	contextBudget                    domain.RequestBudget
+	contextCompaction                domain.ContextCompactionSettings
+	continuityStore                  port.ContinuityStore
+	summaryStore                     port.SummaryStore
+	epochStore                       port.ContextEpochStore
+	staticTools                      []tool.Tool
+	providerFamily                   string
+	metrics                          port.MetricRecorder
+	resultProducingToolNames         map[string]struct{}
+	resultProducingCallsPerStep      int
+	resultProducingCallReserveTokens int
+	knowledgeBudgetTokens            int
+	workstreamBudgetTokens           int
 }
 
 var _ port.AgentRuntime = (*Runtime)(nil)
@@ -83,26 +106,49 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 	if cfg.SessionService == nil {
 		return nil, errors.New("session service is required")
 	}
+	resultProducingTools := make(map[string]struct{}, len(cfg.ResultProducingToolNames))
+	for _, name := range cfg.ResultProducingToolNames {
+		if name = strings.TrimSpace(name); name != "" {
+			resultProducingTools[name] = struct{}{}
+		}
+	}
+	if len(resultProducingTools) > 0 {
+		if cfg.ResultProducingCallsPerStep != 1 || cfg.ResultProducingCallReserveTokens <= 0 {
+			return nil, errors.New("result-producing tool reservation requires one call and a positive token reserve")
+		}
+		if cfg.ContextCompiler == nil {
+			return nil, errors.New("result-producing tool reservation requires an admissible context compiler budget")
+		}
+		if _, err := reserveResultCallTokens(cfg.ContextBudget, cfg.ResultProducingCallReserveTokens); err != nil {
+			return nil, fmt.Errorf("result-producing tool reservation requires an admissible context compiler budget: %w", err)
+		}
+	}
 	providerFamily := cfg.ProviderFamily
 	if providerFamily == "" {
 		providerFamily = domain.ProviderFamilyOpenAICompatible
 	}
 	return &Runtime{
-		agentName:         cfg.AgentName,
-		instruction:       cfg.Instruction,
-		globalInstruction: cfg.GlobalInstruction,
-		sessionService:    cfg.SessionService,
-		model:             cfg.Model,
-		toolFactory:       cfg.ToolFactory,
-		contextProjector:  cfg.ContextProjector,
-		contextCompiler:   cfg.ContextCompiler,
-		contextBudget:     cfg.ContextBudget,
-		contextCompaction: cfg.ContextCompaction,
-		continuityStore:   cfg.ContinuityStore,
-		summaryStore:      cfg.SummaryStore,
-		metrics:           cfg.Metrics,
-		staticTools:       append([]tool.Tool(nil), cfg.StaticTools...),
-		providerFamily:    providerFamily,
+		agentName:                        cfg.AgentName,
+		instruction:                      cfg.Instruction,
+		globalInstruction:                cfg.GlobalInstruction,
+		sessionService:                   cfg.SessionService,
+		model:                            cfg.Model,
+		toolFactory:                      cfg.ToolFactory,
+		contextProjector:                 cfg.ContextProjector,
+		contextCompiler:                  cfg.ContextCompiler,
+		contextBudget:                    cfg.ContextBudget,
+		contextCompaction:                cfg.ContextCompaction,
+		continuityStore:                  cfg.ContinuityStore,
+		summaryStore:                     cfg.SummaryStore,
+		epochStore:                       cfg.EpochStore,
+		metrics:                          cfg.Metrics,
+		staticTools:                      append([]tool.Tool(nil), cfg.StaticTools...),
+		providerFamily:                   providerFamily,
+		resultProducingToolNames:         resultProducingTools,
+		resultProducingCallsPerStep:      cfg.ResultProducingCallsPerStep,
+		resultProducingCallReserveTokens: cfg.ResultProducingCallReserveTokens,
+		knowledgeBudgetTokens:            cfg.KnowledgeBudgetTokens,
+		workstreamBudgetTokens:           cfg.WorkstreamBudgetTokens,
 	}, nil
 }
 
@@ -111,8 +157,19 @@ func adkSessionID(key domain.ConversationKey) string {
 	return "adk:" + string(key)
 }
 
+func adkActivationSessionID(activationID string) string {
+	return "adk:activation:" + activationID
+}
+
+func sessionIDForOrigin(key domain.ConversationKey, origin port.AgentTurnOrigin) string {
+	if origin.Kind == port.AgentTurnOriginJobCompletion {
+		return adkActivationSessionID(origin.ActivationID)
+	}
+	return adkSessionID(key)
+}
+
 // buildAgent constructs a per-turn llmagent with tools and before-model callback.
-func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agent.Agent, error) {
+func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData, stream bool) (agent.Agent, error) {
 	instruction := r.instruction
 	if instruction == "" {
 		instruction = BaseInstruction(r.agentName)
@@ -127,11 +184,26 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 		Description:       "Slack conversational assistant with tools",
 		Model:             r.model,
 		Mode:              llmagent.ModeChat,
-		IncludeContents:   llmagent.IncludeContentsDefault,
+		IncludeContents:   includeContentsForOrigin(ephemeral.origin),
 		GlobalInstruction: r.globalInstruction,
 		InstructionProvider: func(agent.ReadonlyContext) (string, error) {
 			return instruction, nil
 		},
+	}
+	reservation := newResultCallReservation(tools, r.resultProducingToolNames, r.resultProducingCallsPerStep)
+	budget := r.contextBudget
+	if reservation != nil {
+		var err error
+		budget, err = reserveResultCallTokens(budget, r.resultProducingCallReserveTokens)
+		if err != nil {
+			return nil, err
+		}
+		agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, func(agent.Context, *model.LLMRequest) (*model.LLMResponse, error) {
+			reservation.Reset()
+			return nil, nil
+		})
+		agentCfg.AfterModelCallbacks = append(agentCfg.AfterModelCallbacks, reservation.AfterModel)
+		agentCfg.BeforeToolCallbacks = append(agentCfg.BeforeToolCallbacks, reservation.BeforeTool)
 	}
 
 	if len(tools) > 0 {
@@ -145,11 +217,241 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData) (agen
 			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, injectEphemeralReference(reference))
 		}
 		if r.contextCompiler != nil {
-			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, CompilerBeforeModelCallback(r.contextCompiler, r.contextBudget, r.continuityStore, r.summaryStore, r.contextCompaction, ephemeral.actor))
+			recorder := &epochRecorder{}
+			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, CompilerBeforeModelCallback(CompilerCallbackConfig{
+				Compiler: r.contextCompiler, RequestModel: r.model, Stream: stream, Budget: budget,
+				Continuity: r.continuityStore, Summaries: r.summaryStore, Compaction: r.contextCompaction, Actor: ephemeral.actor,
+				Knowledge:              ephemeral.knowledge,
+				KnowledgeBudgetTokens:  r.knowledgeBudgetTokens,
+				Workstream:             ephemeral.workstreamSnapshot,
+				WorkstreamBudgetTokens: r.workstreamBudgetTokens,
+				WorkstreamRevision:     ephemeral.workstreamRevision,
+				EpochSink:              recorder,
+			}))
+			if r.epochStore != nil {
+				agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, recorder.capture)
+				agentCfg.AfterModelCallbacks = append(agentCfg.AfterModelCallbacks, r.recordEpoch(recorder))
+			}
 		}
+	}
+	if ephemeral.beforeModel != nil {
+		var once sync.Once
+		var callbackErr error
+		agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, func(ctx agent.Context, _ *model.LLMRequest) (*model.LLMResponse, error) {
+			once.Do(func() { callbackErr = ephemeral.beforeModel(ctx) })
+			return nil, callbackErr
+		})
 	}
 
 	return llmagent.New(agentCfg)
+}
+
+type epochEventHeadReader interface {
+	LatestEventOrdinal(context.Context, string, string, string) (int64, error)
+}
+
+type epochRecorder struct {
+	mu                  sync.Mutex
+	sourceDigest        string
+	codePoints          int
+	knowledgeIdentities []string
+	selectedCount       int
+	omittedCount        int
+	workstreamRevision  int64
+	summaryIdentity     string
+	resultIdentities    []string
+	frameTokens         int
+	compiled            bool
+}
+
+// setCompileFacts receives the final CompileResult of the same model step
+// from the compiler callback. Only content-free facts are retained: sorted
+// identities, bounded counts, the host-trusted workstream revision, and the
+// final provider count. Cards, queries, and rendered knowledge never reach
+// the recorder. summaryIdentity is already the durable source-digest/ordinal
+// form (never text), and resultIdentities are already sorted, deduplicated,
+// and bounded.
+func (r *epochRecorder) setCompileFacts(result domain.CompileResult, workstreamRevision int64, summaryIdentity string, resultIdentities []string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.knowledgeIdentities = append([]string(nil), result.KnowledgeIdentities...)
+	r.selectedCount = result.KnowledgeSelectedCount
+	r.omittedCount = result.KnowledgeOmittedCount
+	r.workstreamRevision = workstreamRevision
+	r.summaryIdentity = summaryIdentity
+	r.resultIdentities = append([]string(nil), resultIdentities...)
+	r.frameTokens = result.Diagnostics.RequestTokensAfter
+	r.compiled = true
+}
+
+func (r *epochRecorder) capture(_ agent.Context, request *model.LLMRequest) (*model.LLMResponse, error) {
+	if request == nil {
+		return nil, errors.New("epoch frame request is required")
+	}
+	contents, err := toDomainContents(request.Contents)
+	if err != nil {
+		return nil, err
+	}
+	encoded, err := domain.CanonicalJSON(contents)
+	if err != nil {
+		return nil, err
+	}
+	codePoints, err := domain.ContentCost(contents)
+	if err != nil {
+		return nil, err
+	}
+	digest := sha256.Sum256(encoded)
+	r.mu.Lock()
+	r.sourceDigest = fmt.Sprintf("%x", digest)
+	r.codePoints = codePoints
+	r.mu.Unlock()
+	return nil, nil
+}
+
+func (r *Runtime) recordEpoch(recorder *epochRecorder) llmagent.AfterModelCallback {
+	return func(ctx agent.Context, response *model.LLMResponse, responseErr error) (*model.LLMResponse, error) {
+		if responseErr != nil || response == nil || response.Partial || ctx == nil {
+			return nil, nil
+		}
+		headReader, ok := r.sessionService.(epochEventHeadReader)
+		if !ok {
+			return nil, nil
+		}
+		recorder.mu.Lock()
+		digest, codePoints := recorder.sourceDigest, recorder.codePoints
+		identities := append([]string(nil), recorder.knowledgeIdentities...)
+		selected, omitted := recorder.selectedCount, recorder.omittedCount
+		workstreamRevision, frameTokens, compiled := recorder.workstreamRevision, recorder.frameTokens, recorder.compiled
+		summaryIdentity := recorder.summaryIdentity
+		resultIdentities := append([]string(nil), recorder.resultIdentities...)
+		recorder.mu.Unlock()
+		if digest == "" {
+			return nil, errors.New("epoch frame was not captured")
+		}
+		head, err := headReader.LatestEventOrdinal(ctx, applicationName, ephemeralUserID, ctx.SessionID())
+		if err != nil {
+			return nil, fmt.Errorf("read epoch event head: %w", err)
+		}
+		latest, err := r.epochStore.Latest(ctx, applicationName, ephemeralUserID, ctx.SessionID())
+		expected, number := int64(0), int64(1)
+		if err == nil {
+			expected, number = latest.EpochNumber, latest.EpochNumber+1
+		} else if !errors.Is(err, port.ErrContextEpochNotFound) {
+			return nil, fmt.Errorf("read epoch head: %w", err)
+		}
+		idDigest := sha256.Sum256([]byte(ctx.SessionID() + "\x00" + strconv.FormatInt(number, 10) + "\x00" + digest))
+		epoch := domain.ContextEpoch{EpochID: "epoch-" + fmt.Sprintf("%x", idDigest[:16]), AppName: applicationName, UserID: ephemeralUserID, SessionID: ctx.SessionID(), EpochNumber: number, CoveredThroughOrdinal: head, CompilerVersion: "context-compiler-v1", CounterVersion: "provider-shaped-v1", SourceDigest: digest, FrameCodePoints: codePoints, Reason: "model_step", CreatedAt: time.Now().UTC()}
+		if compiled {
+			epoch.WorkstreamRevision = workstreamRevision
+			epoch.KnowledgeIdentities = identities
+			epoch.SummaryIdentity = summaryIdentity
+			epoch.ResultIdentities = resultIdentities
+			epoch.SelectedSourceCount = selected
+			epoch.OmittedSourceCount = omitted
+			epoch.FrameTokens = frameTokens
+		}
+		if err := r.epochStore.Append(ctx, epoch, expected); err != nil {
+			return nil, fmt.Errorf("append context epoch: %w", err)
+		}
+		return nil, nil
+	}
+}
+
+type resultCallReservation struct {
+	producerNames map[string]struct{}
+	limit         int
+	mu            sync.Mutex
+	calls         int
+	allowedCallID string
+}
+
+func newResultCallReservation(tools []tool.Tool, producerNames map[string]struct{}, limit int) *resultCallReservation {
+	if len(producerNames) == 0 || limit <= 0 {
+		return nil
+	}
+	for _, candidate := range tools {
+		if candidate != nil {
+			if _, ok := producerNames[candidate.Name()]; ok {
+				return &resultCallReservation{producerNames: producerNames, limit: limit}
+			}
+		}
+	}
+	return nil
+}
+
+func (r *resultCallReservation) Reset() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.calls = 0
+	r.allowedCallID = ""
+	r.mu.Unlock()
+}
+
+func (r *resultCallReservation) AfterModel(_ agent.Context, response *model.LLMResponse, responseErr error) (*model.LLMResponse, error) {
+	if r == nil || responseErr != nil || response == nil || response.Content == nil {
+		return nil, nil
+	}
+	allowedCallID := ""
+	for _, part := range response.Content.Parts {
+		if part == nil || part.FunctionCall == nil {
+			continue
+		}
+		if _, producer := r.producerNames[part.FunctionCall.Name]; producer {
+			allowedCallID = part.FunctionCall.ID
+			break
+		}
+	}
+	r.mu.Lock()
+	r.allowedCallID = allowedCallID
+	r.mu.Unlock()
+	return nil, nil
+}
+
+func (r *resultCallReservation) BeforeTool(ctx agent.Context, candidate tool.Tool, _ map[string]any) (map[string]any, error) {
+	if r == nil || candidate == nil {
+		return nil, nil
+	}
+	if _, ok := r.producerNames[candidate.Name()]; !ok {
+		return nil, nil
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.allowedCallID != "" && (ctx == nil || ctx.FunctionCallID() != r.allowedCallID) {
+		return nil, errors.New("result-producing call limit reached for model step")
+	}
+	if r.calls >= r.limit {
+		return nil, errors.New("result-producing call limit reached for model step")
+	}
+	r.calls++
+	return nil, nil
+}
+
+func reserveResultCallTokens(budget domain.RequestBudget, reserve int) (domain.RequestBudget, error) {
+	if reserve <= 0 || budget.HardTokens <= reserve {
+		return domain.RequestBudget{}, errors.New("result-producing call reserve exceeds the context budget")
+	}
+	budget.HardTokens -= reserve
+	if budget.TriggerTokens > 0 {
+		if budget.TriggerTokens <= reserve {
+			return domain.RequestBudget{}, errors.New("result-producing call reserve exhausts the context trigger")
+		}
+		budget.TriggerTokens -= reserve
+	}
+	if budget.TargetTokens > 0 {
+		if budget.TargetTokens <= reserve {
+			return domain.RequestBudget{}, errors.New("result-producing call reserve exhausts the context target")
+		}
+		budget.TargetTokens -= reserve
+	}
+	if err := domain.ValidateRequestBudget(budget); err != nil {
+		return domain.RequestBudget{}, fmt.Errorf("validate result-producing call budget: %w", err)
+	}
+	return budget, nil
 }
 
 func (r *Runtime) toolsForInvocation(origin port.AgentTurnOrigin, key domain.ConversationKey, activation *domain.ExternalAgentJobActivation) ([]tool.Tool, error) {
@@ -216,7 +518,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	}
 	turnCtx := port.WithAgentTurnContext(ctx, port.AgentTurnContext{ConversationKey: req.ConversationKey, Origin: origin})
 
-	sessionID := adkSessionID(req.ConversationKey)
+	sessionID := sessionIDForOrigin(req.ConversationKey, origin)
 
 	// Ensure session exists (idempotent).
 	_, err = r.ensureSession(turnCtx, sessionID)
@@ -237,7 +539,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 		return port.AgentTurn{}, fmt.Errorf("build invocation tools: %w", toolErr)
 	}
 
-	agent, err := r.buildAgent(tools, ephemeralCtx)
+	agent, err := r.buildAgent(tools, ephemeralCtx, false)
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("build agent: %w", err)
 	}
@@ -245,7 +547,7 @@ func (r *Runtime) Run(ctx context.Context, req port.AgentRequest) (port.AgentTur
 	adkRunner, err := runner.New(runner.Config{
 		AppName:        applicationName,
 		Agent:          agent,
-		SessionService: newTurnSessionService(r.sessionService, origin),
+		SessionService: newTurnSessionService(boundedSessions(r.sessionService), origin),
 	})
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("create runner: %w", err)
@@ -295,7 +597,7 @@ func (r *Runtime) Stream(ctx context.Context, req port.AgentRequest, yield func(
 		return
 	}
 	turnCtx := port.WithAgentTurnContext(ctx, port.AgentTurnContext{ConversationKey: req.ConversationKey, Origin: origin})
-	sessionID := adkSessionID(req.ConversationKey)
+	sessionID := sessionIDForOrigin(req.ConversationKey, origin)
 	if _, err := r.ensureSession(turnCtx, sessionID); err != nil {
 		terminalError(fmt.Errorf("ensure ADK session: %w", err))
 		return
@@ -308,12 +610,12 @@ func (r *Runtime) Stream(ctx context.Context, req port.AgentRequest, yield func(
 		terminalError(fmt.Errorf("build invocation tools: %w", toolErr))
 		return
 	}
-	agent, err := r.buildAgent(tools, ephemeralCtx)
+	agent, err := r.buildAgent(tools, ephemeralCtx, true)
 	if err != nil {
 		terminalError(fmt.Errorf("build agent: %w", err))
 		return
 	}
-	adkRunner, err := runner.New(runner.Config{AppName: applicationName, Agent: agent, SessionService: newTurnSessionService(r.sessionService, origin)})
+	adkRunner, err := runner.New(runner.Config{AppName: applicationName, Agent: agent, SessionService: newTurnSessionService(boundedSessions(r.sessionService), origin)})
 	if err != nil {
 		terminalError(fmt.Errorf("create runner: %w", err))
 		return
@@ -487,7 +789,7 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 			}
 		}
 	}
-	agent, err := r.buildAgent(tools, beforeModelData{actor: decision.Actor})
+	agent, err := r.buildAgent(tools, beforeModelData{actor: decision.Actor}, false)
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("build agent for resume: %w", err)
 	}
@@ -495,7 +797,7 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 	adkRunner, err := runner.New(runner.Config{
 		AppName:        applicationName,
 		Agent:          agent,
-		SessionService: r.sessionService,
+		SessionService: boundedSessions(r.sessionService),
 	})
 	if err != nil {
 		return port.AgentTurn{}, fmt.Errorf("create runner for resume: %w", err)
@@ -540,7 +842,7 @@ func (r *Runtime) RecoverActivation(ctx context.Context, conversationKey domain.
 		return port.AgentTurn{}, false, errors.New("activation recovery identity is required")
 	}
 	loaded, err := r.sessionService.Get(ctx, &session.GetRequest{
-		AppName: applicationName, UserID: ephemeralUserID, SessionID: adkSessionID(conversationKey),
+		AppName: applicationName, UserID: ephemeralUserID, SessionID: adkActivationSessionID(activationID),
 	})
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "not found") {
@@ -792,12 +1094,25 @@ func extractConfirmation(fc *genai.FunctionCall) *domain.PendingConfirmation {
 	}
 }
 
+// confirmationPayload renders the host-issued confirmation payload for any
+// tool call that requested confirmation with a custom, non-generic hint —
+// the signal that the tool explicitly called RequestConfirmation with a
+// real payload, rather than relying on the bare RequireConfirmation flag
+// (whose ADK-synthesized hint always mentions "FunctionResponse" and is
+// discarded by usableConfirmationHint). This covers workstream_ tools and
+// the durable ACP delegation tool without hardcoding either tool's name; a
+// missing payload on a call that did present a custom hint is a defect,
+// not a normal path, and fails closed rather than silently proceeding with
+// an unidentified request.
 func confirmationPayload(wrapper, call *genai.FunctionCall) (string, bool) {
-	if call == nil || !strings.HasPrefix(call.Name, "workstream_") {
+	if call == nil {
 		return "", true
 	}
 	confirmation, ok := requestedToolConfirmation(wrapper)
-	if !ok || confirmation.Payload == nil {
+	if !ok || usableConfirmationHint(confirmation.Hint) == "" {
+		return "", true
+	}
+	if confirmation.Payload == nil {
 		return "", false
 	}
 	encoded, err := json.Marshal(confirmation.Payload)
@@ -849,18 +1164,39 @@ func usableConfirmationHint(hint string) string {
 // --- ephemeral context (before-model callback) ---
 
 type beforeModelData struct {
-	memory  []domain.MemorySnippet
-	context domain.AgentContext
-	actor   string
-	origin  port.AgentTurnOrigin
+	memory             []domain.MemorySnippet
+	context            domain.AgentContext
+	actor              string
+	origin             port.AgentTurnOrigin
+	beforeModel        func(context.Context) error
+	knowledge          []domain.KnowledgeFrameCard
+	workstreamRevision int64
+	workstreamSnapshot *domain.WorkstreamSnapshot
 }
 
 func buildBeforeModelContext(req port.AgentRequest) beforeModelData {
 	return beforeModelData{
-		memory:  req.Memory,
-		context: req.Context,
-		actor:   latestActor(req),
+		memory:      req.Memory,
+		context:     req.Context,
+		actor:       latestActor(req),
+		beforeModel: req.BeforeModel,
+		// Knowledge and the workstream snapshot live only in the before-model
+		// path: they are cloned here and never appended to durable session
+		// events.
+		knowledge:          append([]domain.KnowledgeFrameCard(nil), req.Knowledge...),
+		workstreamRevision: req.WorkstreamRevision,
+		workstreamSnapshot: cloneWorkstreamSnapshot(req.WorkstreamSnapshot),
 	}
+}
+
+// cloneWorkstreamSnapshot defensively copies the ephemeral snapshot so
+// callers can never mutate it through the shared AgentRequest pointer.
+func cloneWorkstreamSnapshot(snapshot *domain.WorkstreamSnapshot) *domain.WorkstreamSnapshot {
+	if snapshot == nil {
+		return nil
+	}
+	cloned := *snapshot
+	return &cloned
 }
 
 func latestActor(req port.AgentRequest) string {

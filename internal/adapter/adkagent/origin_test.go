@@ -2,6 +2,7 @@ package adkagent
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"strings"
 	"testing"
@@ -109,7 +110,7 @@ func TestRuntimeUsesTypedJobOriginAndHostMetadata(t *testing.T) {
 	}
 
 	loaded, err := runtime.sessionService.Get(t.Context(), &session.GetRequest{
-		AppName: applicationName, UserID: ephemeralUserID, SessionID: adkSessionID(key),
+		AppName: applicationName, UserID: ephemeralUserID, SessionID: adkActivationSessionID(activationID),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -232,7 +233,7 @@ func TestRuntimeNormalTurnKeepsUserOriginAndNoActivationID(t *testing.T) {
 	}
 }
 
-func TestRuntimeRejectsOversizedHostCompletionEnvelope(t *testing.T) {
+func TestRuntimeAcceptsBoundedActivationFrameLargerThanLegacyEnvelopeLimit(t *testing.T) {
 	llm := &originContextLLM{}
 	runtime, err := NewRuntime(RuntimeConfig{
 		AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService(),
@@ -245,10 +246,60 @@ func TestRuntimeRejectsOversizedHostCompletionEnvelope(t *testing.T) {
 		Origin:          port.AgentTurnOrigin{Kind: port.AgentTurnOriginJobCompletion, Actor: "U12345678", ActivationID: "activation_123"},
 		Messages: []domain.Message{{
 			Role: domain.RoleUser, Source: domain.MessageSourceJobCompletion,
-			Content: strings.Repeat("x", maxHostCompletionEnvelopeRunes+1),
+			Content: strings.Repeat("x", 13_636),
 		}},
 	})
-	if err == nil || !strings.Contains(err.Error(), "compact host limit") {
-		t.Fatalf("oversized envelope error = %v", err)
+	if err != nil {
+		t.Fatalf("bounded activation frame error = %v", err)
+	}
+	if llm.calls != 1 {
+		t.Fatalf("model calls = %d, want 1", llm.calls)
+	}
+}
+
+func TestJobCompletionInstructionBoundsTextOnlyProposals(t *testing.T) {
+	instruction := instructionForOrigin("Root instruction.", port.AgentTurnOrigin{Kind: port.AgentTurnOriginJobCompletion, Actor: "U12345678", ActivationID: "activation_123"})
+	for _, required := range []string{
+		"At most one text-only proposal is allowed",
+		"Do not issue a workstream command",
+		"A human must send a later explicit workstream-human command",
+	} {
+		if !strings.Contains(instruction, required) {
+			t.Fatalf("completion instruction %q missing %q", instruction, required)
+		}
+	}
+}
+
+func TestActivationRetryExcludesRejectedFrameHistory(t *testing.T) {
+	llm := &originContextLLM{}
+	runtime, err := NewRuntime(RuntimeConfig{
+		AgentName: "Dev Agent", Model: llm, SessionService: session.InMemoryService(),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	activationID := "activation_retry_123"
+	request := func(content string, fail bool) port.AgentRequest {
+		return port.AgentRequest{
+			ConversationKey: key,
+			Origin:          port.AgentTurnOrigin{Kind: port.AgentTurnOriginJobCompletion, Actor: "U12345678", ActivationID: activationID},
+			Messages:        []domain.Message{{Role: domain.RoleUser, Source: domain.MessageSourceJobCompletion, Content: content, UserID: "U12345678"}},
+			BeforeModel: func(context.Context) error {
+				if fail {
+					return errors.New("reject first frame")
+				}
+				return nil
+			},
+		}
+	}
+	if _, err := runtime.Run(t.Context(), request("rejected frame", true)); err == nil {
+		t.Fatal("first frame unexpectedly reached the model")
+	}
+	if _, err := runtime.Run(t.Context(), request("accepted frame", false)); err != nil {
+		t.Fatal(err)
+	}
+	if llm.calls != 1 || len(llm.request.Contents) != 1 || llm.request.Contents[0].Parts[0].Text != "accepted frame" {
+		t.Fatalf("activation retry contents = %#v, calls=%d", llm.request.Contents, llm.calls)
 	}
 }

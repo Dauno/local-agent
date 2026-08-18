@@ -74,6 +74,25 @@ type fakeExternalRuntime struct {
 	runs    int
 }
 
+type recordingJobStarter struct {
+	request domain.ExternalAgentJobRequest
+}
+
+func (s *recordingJobStarter) Start(_ context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error) {
+	s.request = request
+	return &domain.ExternalAgentJob{ID: "job_1", RequestSHA256: "request"}, nil
+}
+
+type fixedCompletionBindingResolver struct {
+	binding domain.ExternalAgentJobCompletionBinding
+	found   bool
+	err     error
+}
+
+func (r fixedCompletionBindingResolver) CompletionBindingForTask(context.Context, string, domain.ConversationKey, string, string) (domain.ExternalAgentJobCompletionBinding, bool, error) {
+	return r.binding, r.found, r.err
+}
+
 func (f *fakeExternalRuntime) Run(_ context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error) {
 	f.runs++
 	f.request = request
@@ -541,7 +560,7 @@ func TestExploreChildRunsScopedReadOnlyToolLoop(t *testing.T) {
 	}
 }
 
-func TestExploreChildContextCompilerBoundsRepeatedToolResponses(t *testing.T) {
+func TestExploreChildContextCompilerRejectsRepeatedOversizedToolResponsesWithoutWrites(t *testing.T) {
 	const maxRequestBytes = 30_000
 	run := func(t *testing.T, compiler port.ContextCompiler) *largeExploringChildModel {
 		t.Helper()
@@ -583,11 +602,11 @@ func TestExploreChildContextCompilerBoundsRepeatedToolResponses(t *testing.T) {
 	if withCompiler.oversized {
 		t.Fatalf("managed child request exceeded %d bytes at sizes %v", maxRequestBytes, withCompiler.requestSizes)
 	}
-	if withCompiler.calls != 7 {
-		t.Fatalf("managed child model calls = %d, want 7", withCompiler.calls)
+	if withCompiler.calls >= 7 {
+		t.Fatalf("managed child continued after irreducible context: calls=%d", withCompiler.calls)
 	}
-	if store.puts == 0 {
-		t.Fatal("context compiler did not externalize any repeated tool response")
+	if store.puts != 0 {
+		t.Fatalf("context compiler wrote %d late projections", store.puts)
 	}
 }
 
@@ -724,11 +743,100 @@ func TestACPAgentToolResolvesRegisteredProjectsAndInvokesRuntime(t *testing.T) {
 	}
 }
 
+func TestACPAgentToolReturnsNativeHandleWithoutPayload(t *testing.T) {
+	handle := domain.ResultHandle{
+		ResultID: strings.Repeat("a", 64), SHA256: strings.Repeat("b", 64), Bytes: 4096,
+		MediaType: "text/plain; charset=utf-8", Availability: []domain.ResultAvailability{domain.ResultAvailabilityRangeRead},
+	}
+	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{
+		Text: "must not enter ADK", NativeResultID: handle.ResultID, NativeJobID: "job_native", NativeResultHandle: handle,
+	}}
+	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}}
+	result, err := invokeACPAgent(t.Context(), agentdef.AgentDef{Name: "opencode_worker"}, "Global.", runtime, resolved,
+		map[string]string{"workspace": t.TempDir()}, time.Minute, acpAgentArgs{Project: "workspace", Task: "inspect"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Result != "" || result.ResultHandle == nil || result.ResultHandle.ResultID != handle.ResultID || result.ResultHandle.JobID != "job_native" {
+		t.Fatalf("native ACP result = %+v", result)
+	}
+}
+
+func TestDurableACPAgentCopiesTrustedCompletionBinding(t *testing.T) {
+	starter := &recordingJobStarter{}
+	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}}
+	result, err := invokeACPAgentForInvocation(t.Context(),
+		agentdef.AgentDef{Name: "opencode_worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		"Global.", &fakeExternalRuntime{}, resolved, map[string]string{"workspace": t.TempDir()}, time.Minute, "registry-1", starter,
+		fixedCompletionBindingResolver{binding: domain.ExternalAgentJobCompletionBinding{WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1", AdmissionRevision: 4}, found: true},
+		"U12345678", "slack:T12345678:dm:D12345678", acpAgentArgs{Project: "workspace", Task: "inspect"},
+	)
+	if err != nil || result.Result == "" {
+		t.Fatalf("result = %#v, err = %v", result, err)
+	}
+	if starter.request.WorkstreamID != "ws-1" || starter.request.TaskID != "task-1" || starter.request.ExecutionIdentity != "exec-1" || starter.request.AdmissionRevision != 4 {
+		t.Fatalf("durable request binding = %+v", starter.request)
+	}
+}
+
 func TestResolveACPProjectRejectsUnknownName(t *testing.T) {
 	root := t.TempDir()
 	projects := map[string]string{"workspace": root}
 	if _, err := resolveACPProject(projects, "missing"); err == nil {
 		t.Fatal("expected unknown project rejection")
+	}
+}
+
+// TestAcpDelegationConfirmationPinsDurableDelegationContent pins hallazgo 9:
+// the durable ACP delegation confirmation must show workstream, expected
+// revision, project, bounded task, and source result identities, and must
+// never carry a path, URL, or credential.
+func TestAcpDelegationConfirmationPinsDurableDelegationContent(t *testing.T) {
+	resolver := fixedCompletionBindingResolver{found: true, binding: domain.ExternalAgentJobCompletionBinding{
+		WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1", AdmissionRevision: 4,
+		RequiredInputs: []string{strings.Repeat("a", 64), strings.Repeat("b", 64)},
+	}}
+	hint, payload := acpDelegationConfirmation(t.Context(), resolver, "U12345678", "slack:T12345678:dm:D12345678", acpAgentArgs{
+		Project: "workspace", Task: "review the failing integration test",
+	})
+	wantHint := `Approve delegating workstream "ws-1" task "review the failing integration test" (project "workspace") to an external agent at revision 4.`
+	if hint != wantHint {
+		t.Fatalf("hint = %q, want %q", hint, wantHint)
+	}
+	if payload["workstream_id"] != "ws-1" || payload["task_id"] != "task-1" || payload["expected_revision"] != 4 || payload["project"] != "workspace" || payload["task"] != "review the failing integration test" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	sourceResults, ok := payload["source_result_identities"].([]string)
+	if !ok || len(sourceResults) != 2 || sourceResults[0] != strings.Repeat("a", 64) || sourceResults[1] != strings.Repeat("b", 64) {
+		t.Fatalf("payload source result identities = %#v", payload["source_result_identities"])
+	}
+	encoded, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatal(err)
+	}
+	combined := hint + " " + string(encoded)
+	for _, forbidden := range []string{"/", "://", "primary", "additional", t.TempDir()} {
+		if strings.Contains(combined, forbidden) {
+			t.Fatalf("confirmation leaked a path-shaped value %q: %q", forbidden, combined)
+		}
+	}
+}
+
+// TestAcpDelegationConfirmationWithoutWorkstreamBindingShowsProjectAndTask
+// pins the degraded case: a foreground or unbound durable delegation still
+// gets a real confirmation showing project and task, without fabricating
+// workstream fields.
+func TestAcpDelegationConfirmationWithoutWorkstreamBindingShowsProjectAndTask(t *testing.T) {
+	hint, payload := acpDelegationConfirmation(t.Context(), nil, "", "", acpAgentArgs{Project: "workspace", Task: "run the linter"})
+	wantHint := `Approve delegating task "run the linter" in project "workspace" to an external agent.`
+	if hint != wantHint {
+		t.Fatalf("hint = %q, want %q", hint, wantHint)
+	}
+	if payload["project"] != "workspace" || payload["task"] != "run the linter" {
+		t.Fatalf("payload = %#v", payload)
+	}
+	if _, ok := payload["workstream_id"]; ok {
+		t.Fatalf("payload carries workstream_id with no bound task: %#v", payload)
 	}
 }
 
