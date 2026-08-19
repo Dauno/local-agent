@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 func insertResultAnalysis(t *testing.T, db interface {
@@ -102,6 +104,15 @@ func TestMigrationV40FreshObjectsAndConstraints(t *testing.T) {
 		actor, team_id, conversation_key, project, workstream_id, state, failure_code, created_at, updated_at)
 		VALUES (?, ?, ?, 100, 'bounded_question_v1', ?, 'text', 'text_v1', 'p1', 'm1', ?, '{}', 'U1', 'T1', 'c1', 'p', 'ws', 'failed', 'invented', ?, ?)`,
 		hex64, hex64, hex64, hex64, hex64, now, now)
+	// Asserts one past domain.HardMaxAnalysisObjectiveRunes so this test
+	// fails, rather than silently drifting, if the migration's objective_text
+	// ceiling and the domain rune ceiling ever diverge.
+	insertFails("result_analyses objective text over hard max", `INSERT INTO result_analyses (
+		analysis_id, source_result_id, source_sha256, source_bytes, objective_class, objective_digest,
+		objective_text, segmentation_version, prompt_version, model_fingerprint, limits_digest, limits_json,
+		actor, team_id, conversation_key, project, workstream_id, state, created_at, updated_at)
+		VALUES (?, ?, ?, 100, 'bounded_question_v1', ?, ?, 'text_v1', 'p1', 'm1', ?, '{}', 'U1', 'T1', 'c1', 'p', 'ws', 'preparing', ?, ?)`,
+		hex64, hex64, hex64, hex64, strings.Repeat("a", domain.HardMaxAnalysisObjectiveRunes+1), hex64, now, now)
 	insertFails("result_analyses empty workstream id", `INSERT INTO result_analyses (
 		analysis_id, source_result_id, source_sha256, source_bytes, objective_class, objective_digest,
 		objective_text, segmentation_version, prompt_version, model_fingerprint, limits_digest, limits_json,
@@ -117,9 +128,18 @@ func TestMigrationV40FreshObjectsAndConstraints(t *testing.T) {
 	insertFails("analysis_segments zero length", `INSERT INTO analysis_segments
 		(analysis_id, ordinal, offset_bytes, length_bytes, sha256, segmenter_version, overlap_prev_bytes)
 		VALUES (?, 0, 0, 0, ?, 'text_v1', 0)`, hex64, hex64)
+	// This asserts one past domain.HardMaxAnalysisOverlapBytes, not a bare
+	// literal, so the test fails (rather than silently drifting) if the
+	// domain constant and the migration's own hardcoded 4096 ceiling ever
+	// diverge.
 	insertFails("analysis_segments overlap over hard max", `INSERT INTO analysis_segments
 		(analysis_id, ordinal, offset_bytes, length_bytes, sha256, segmenter_version, overlap_prev_bytes)
-		VALUES (?, 0, 0, 10, ?, 'text_v1', 4097)`, hex64, hex64)
+		VALUES (?, 0, 0, 10, ?, 'text_v1', ?)`, hex64, hex64, domain.HardMaxAnalysisOverlapBytes+1)
+	if _, err := db.ExecContext(t.Context(), `INSERT INTO analysis_segments
+		(analysis_id, ordinal, offset_bytes, length_bytes, sha256, segmenter_version, overlap_prev_bytes)
+		VALUES (?, 1, 100, 10, ?, 'text_v1', ?)`, hex64, hex64, domain.HardMaxAnalysisOverlapBytes); err != nil {
+		t.Fatalf("overlap at domain.HardMaxAnalysisOverlapBytes must be accepted: %v", err)
+	}
 	if _, err := db.ExecContext(t.Context(), `INSERT INTO analysis_segments
 		(analysis_id, ordinal, offset_bytes, length_bytes, sha256, segmenter_version, overlap_prev_bytes)
 		VALUES (?, 0, 0, 100, ?, 'text_v1', 0)`, hex64, hex64); err != nil {
@@ -226,7 +246,10 @@ func TestMigrationV40TriggersAbortProtectedUpdates(t *testing.T) {
 
 	assertAborts("result_analyses_identity_immutable",
 		`UPDATE result_analyses SET source_result_id = ? WHERE analysis_id = ?`, strings.Repeat("f", 64), hex64)
-	assertAborts("result_analyses_state_monotonic",
+	if _, err := db.ExecContext(t.Context(), `UPDATE result_analyses SET state = 'running' WHERE analysis_id = ?`, hex64); err != nil {
+		t.Fatalf("legal state transition rejected: %v", err)
+	}
+	assertAborts("result_analyses_state_monotonic (running back to preparing)",
 		`UPDATE result_analyses SET state = 'preparing' WHERE analysis_id = ?`, hex64)
 	if _, err := db.ExecContext(t.Context(), `UPDATE result_analyses SET state = 'completed' WHERE analysis_id = ?`, hex64); err != nil {
 		t.Fatalf("legal state transition rejected: %v", err)
@@ -261,8 +284,9 @@ func TestMigrationV40UpgradePreservesV39State(t *testing.T) {
 	}
 	insert(`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, valid_from, valid_until, current_rev, created_at, updated_at)
 		VALUES ('claim-a', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', 0, 0, 1, ?, ?)`, now, now)
-	insert(`INSERT INTO knowledge_lexical_queue (item_kind, item_id, generation, status, attempts, next_attempt, lease_until, last_error, created_at, updated_at)
-		VALUES ('claim', 'claim-a', 1, 'pending', 0, 0, 0, '', ?, ?)`, now/1e9, now/1e9)
+	// knowledge_claims_enqueue_after_insert already inserts the matching
+	// knowledge_lexical_queue row; seeding it here a second time collides
+	// with its UNIQUE(item_kind, item_id) index.
 	insert(`INSERT INTO result_records (result_id, producer_kind, producer_id, producer_revision, storage_kind, storage_key,
 		sha256, bytes, media_type, actor, team_id, conversation_key, project, retention_class, created_at, state)
 		VALUES (?, 'tool_operation', 'op-1', 0, 'artifact', 'key-1', ?, 10, 'text/plain', 'U1', 'T1', 'c1', 'p', 'context', 1, 'available')`,
@@ -309,15 +333,27 @@ func TestMigrationV40UpgradePreservesV39State(t *testing.T) {
 // TestMigrationV40RejectedAsFutureSchema proves the same current > SchemaVersion
 // mechanism TestOpenExistingRejectsFutureSchema pins generically: a binary
 // whose SchemaVersion is lower than a database's PRAGMA user_version refuses
-// to open it. Here the concrete case is a v40 database opened by a binary
-// that only understands v39; since SchemaVersion is a compile-time constant,
-// this is simulated as a v40 database is opened by mutating user_version to
-// one past this binary's own SchemaVersion (v40+1), which exercises the
-// identical comparison a real v39 binary (SchemaVersion 39) would run
-// against a real v40 database (user_version 40).
+// to open it. createSchemaAtVersion always leaves PRAGMA user_version at its
+// target version, so it can never itself produce a database claiming a
+// version above this binary's own SchemaVersion (40). To exercise the
+// concrete v40 case, a fully migrated v40 database is opened once to reach
+// SchemaVersion, then its user_version is bumped one past that (41) to
+// simulate a database written by a future binary.
 func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
-	path, raw := createSchemaAtVersion(t, 39)
-	if _, err := raw.ExecContext(t.Context(), `PRAGMA user_version = 40`); err != nil {
+	path := t.TempDir() + "/future-v40.db"
+	fresh, err := Initialize(t.Context(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := fresh.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	raw, err := sql.Open("sqlite", mustDataSourceName(t, path))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := raw.ExecContext(t.Context(), `PRAGMA user_version = 41`); err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}
@@ -328,11 +364,11 @@ func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
 		store.Close()
-		t.Fatal("OpenExisting succeeded for a v39-schema binary opening a database claiming v40")
+		t.Fatal("OpenExisting succeeded for a v40-schema binary opening a database claiming v41")
 	}
 	var versionError *FutureSchemaError
-	if !errors.As(err, &versionError) || versionError.Found != 40 {
-		t.Fatalf("OpenExisting error = %v, want FutureSchemaError{Found: 40}", err)
+	if !errors.As(err, &versionError) || versionError.Found != 41 {
+		t.Fatalf("OpenExisting error = %v, want FutureSchemaError{Found: 41}", err)
 	}
 }
 

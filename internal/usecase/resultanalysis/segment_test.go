@@ -188,27 +188,51 @@ func TestSegmentMarkdownDoesNotSplitFittingFence(t *testing.T) {
 // 3 spaces, the CommonMark allowance) that fits inside a segment must not
 // be split, one subtest per indentation level.
 func TestSegmentMarkdownIndentedFenceNotSplit(t *testing.T) {
+	limits := testLimits()
+	nominal := int(limits.MaxSegmentBytes)
 	for indent := 1; indent <= 3; indent++ {
 		prefix := strings.Repeat(" ", indent)
 		t.Run(fmt.Sprintf("indent_%d", indent), func(t *testing.T) {
 			fence := prefix + "```go\n" + prefix + "func main() {}\n" + prefix + "```\n"
-			source := []byte(strings.Repeat("intro text. ", 8) + "\n\n" + fence + strings.Repeat("outro text. ", 8))
-			manifest, err := resultanalysis.Segment(resultanalysis.SegmenterMarkdownV1, source, testLimits())
+			// The fence must start a few bytes before the first chunk's
+			// nominal boundary (nominal-10, on its own line so the fence
+			// scanner can recognize its opening line at all): its own
+			// first internal newline (the opening fence line's own "\n")
+			// then falls just inside that boundary, but its closing
+			// newline does not. A cutter that never recognized the fence
+			// at all would fall through straight to a bare line-break cut
+			// and pick that first internal newline, strictly inside the
+			// fence. Fence-aware logic instead defers the whole fence,
+			// unsplit, to a fresh chunk starting exactly at its opening.
+			intro := strings.Repeat("x", nominal-11) + "\n"
+			source := []byte(intro + fence + strings.Repeat("outro text. ", 8))
+			manifest, err := resultanalysis.Segment(resultanalysis.SegmenterMarkdownV1, source, limits)
 			if err != nil {
 				t.Fatalf("segmentation failed: %v", err)
 			}
 			fenceStart := strings.Index(string(source), fence)
 			fenceEnd := fenceStart + len(fence)
-			found := false
+			// The real property a "not split" fence guarantees is that no
+			// *cut point* the segmenter chose falls strictly inside it.
+			// Asserting instead that some segment fully contains the fence
+			// is satisfied by accident whenever a segment (of any origin,
+			// recognized fence or not) happens to be wide enough to span
+			// it: with nominal 120 and overlap 24, this fence is only
+			// about 40 bytes, so that weaker assertion passes whether or
+			// not the fence was actually detected.
+			//
+			// A segment's own cut point is OffsetBytes + OverlapPrevBytes,
+			// not OffsetBytes directly: overlap intentionally makes a
+			// segment's final start reach backward into the immediately
+			// preceding block's own content (here, the fence's own tail,
+			// when the fence ends exactly at a base cut boundary), and
+			// that reach-back is correct segmenter behavior, not a split.
 			for _, segment := range manifest.Segments {
-				start, end := int(segment.OffsetBytes), int(segment.OffsetBytes+segment.LengthBytes)
-				if start <= fenceStart && end >= fenceEnd {
-					found = true
-					break
+				cutPoint := int(segment.OffsetBytes + segment.OverlapPrevBytes)
+				if cutPoint > fenceStart && cutPoint < fenceEnd {
+					t.Fatalf("expected no cut point to fall inside the %d-space indented fence [%d,%d), but segment %d's own cut point is %d",
+						indent, fenceStart, fenceEnd, segment.Ordinal, cutPoint)
 				}
-			}
-			if !found {
-				t.Fatalf("expected the %d-space indented fitting fenced block to remain inside one segment", indent)
 			}
 		})
 	}
@@ -330,22 +354,41 @@ func TestSegmentRejectsUnknownVersion(t *testing.T) {
 // several extreme limit combinations (overlap at the hard ceiling, overlap
 // as a large basis-point fraction, tiny nominal segments) with a multibyte
 // rune placed at every byte offset near a would-be cut point.
+// effectiveOverlapBytes mirrors resultanalysis.overlapBytesFor (unexported,
+// so recomputed here): the basis-point fraction of nominal, capped by
+// OverlapMaxBytes. It is used to prove each limitCases entry below actually
+// drives the segmenter to its overlap ceiling, not merely close to it.
+func effectiveOverlapBytes(nominal int64, limits domain.AnalysisLimits) int64 {
+	overlap := nominal * int64(limits.OverlapBasisPoints) / 10000
+	if overlap > limits.OverlapMaxBytes {
+		overlap = limits.OverlapMaxBytes
+	}
+	return overlap
+}
+
 func TestSegmentNeverProducesASelfRejectingManifest(t *testing.T) {
 	limitCases := map[string]domain.AnalysisLimits{
+		// 65536*1000/10000 = 6553, clamped down to the 4096 hard ceiling:
+		// the basis-point fraction alone would overshoot, so the cap is
+		// the binding constraint.
 		"overlap at hard byte ceiling": {
-			MaxSegmentBytes: 512, OverlapBasisPoints: 2000, OverlapMaxBytes: domain.HardMaxAnalysisOverlapBytes,
+			MaxSegmentBytes: 65536, OverlapBasisPoints: 1000, OverlapMaxBytes: domain.HardMaxAnalysisOverlapBytes,
 			MaxLeaves: 64, MaxReductionFanIn: 8, MaxReductionDepth: 4, MaxConcurrentLeaves: 2,
 			MaxAttemptsPerStep: 2, CallTimeoutSeconds: 120, WallTimeSeconds: 900,
 			EvidenceExcerptBytes: 2048, EvidenceSelectorsPerLeaf: 8, EvidenceReferencesPerPacket: 32, BundleBytes: 32768,
 		},
+		// 300*2000/10000 = 60, clamped down to a configured cap of 50: a
+		// smaller, non-hard-max cap still binds the same way.
 		"overlap basis points at hard max": {
-			MaxSegmentBytes: 300, OverlapBasisPoints: domain.HardMaxAnalysisOverlapBasisPoints, OverlapMaxBytes: 4096,
+			MaxSegmentBytes: 300, OverlapBasisPoints: domain.HardMaxAnalysisOverlapBasisPoints, OverlapMaxBytes: 50,
 			MaxLeaves: 64, MaxReductionFanIn: 8, MaxReductionDepth: 4, MaxConcurrentLeaves: 2,
 			MaxAttemptsPerStep: 2, CallTimeoutSeconds: 120, WallTimeSeconds: 900,
 			EvidenceExcerptBytes: 2048, EvidenceSelectorsPerLeaf: 8, EvidenceReferencesPerPacket: 32, BundleBytes: 32768,
 		},
+		// 32*2000/10000 = 6, exactly the configured cap: overlap is a large
+		// fraction of the nominal segment size itself.
 		"tiny nominal segment with overlap near its size": {
-			MaxSegmentBytes: 32, OverlapBasisPoints: domain.HardMaxAnalysisOverlapBasisPoints, OverlapMaxBytes: 30,
+			MaxSegmentBytes: 32, OverlapBasisPoints: domain.HardMaxAnalysisOverlapBasisPoints, OverlapMaxBytes: 6,
 			MaxLeaves: 256, MaxReductionFanIn: 8, MaxReductionDepth: 4, MaxConcurrentLeaves: 2,
 			MaxAttemptsPerStep: 2, CallTimeoutSeconds: 120, WallTimeSeconds: 900,
 			EvidenceExcerptBytes: 2048, EvidenceSelectorsPerLeaf: 8, EvidenceReferencesPerPacket: 32, BundleBytes: 32768,
@@ -354,11 +397,18 @@ func TestSegmentNeverProducesASelfRejectingManifest(t *testing.T) {
 	for name, limits := range limitCases {
 		t.Run(name, func(t *testing.T) {
 			nominal := int(limits.MaxSegmentBytes)
+			overlap := int(effectiveOverlapBytes(limits.MaxSegmentBytes, limits))
+			if int64(overlap) != limits.OverlapMaxBytes {
+				t.Fatalf("%s: fixture does not actually reach the overlap ceiling: effective overlap %d, ceiling %d", name, overlap, limits.OverlapMaxBytes)
+			}
 			// Place a 3-byte multibyte rune at every offset in a window
-			// around each nominal boundary, for the first few boundaries.
+			// around corte - solape (each boundary's cut position minus the
+			// overlap the segmenter will request going backward from it):
+			// FIND-096 lived exactly at that start-of-overlap point, not at
+			// the cut itself.
 			for boundary := 1; boundary <= 3; boundary++ {
 				for delta := -4; delta <= 4; delta++ {
-					pos := boundary*nominal + delta
+					pos := boundary*nominal - overlap + delta
 					if pos < 1 {
 						continue
 					}

@@ -59,6 +59,7 @@ import (
 	knowledgeusecase "github.com/Dauno/slack-local-agent/internal/usecase/knowledge"
 	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
 	opencodeusecase "github.com/Dauno/slack-local-agent/internal/usecase/opencode"
+	resultanalysisusecase "github.com/Dauno/slack-local-agent/internal/usecase/resultanalysis"
 	resultsusecase "github.com/Dauno/slack-local-agent/internal/usecase/results"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
@@ -90,6 +91,7 @@ type runtimeModels struct {
 	botToken              string
 	appToken              string
 	embeddingAPIKey       string
+	resultAnalysisAPIKey  string
 	modelBaseURL          string
 	redactor              secure.Redactor
 	logger                *logging.Logger
@@ -206,9 +208,19 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	// embeddings are actually enabled.
 	embeddingEnabled := cfg.Orchestration.Knowledge.Enabled && cfg.Orchestration.Knowledge.Retrieval.Enabled && cfg.Orchestration.Knowledge.Retrieval.Embedding.Enabled
 	embeddingKeyEnv := cfg.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv
+	// The result analysis model's API key must resolve in this same pass
+	// for the same reason as the embedding key above: the redactor is
+	// immutable once constructed below, so a key resolved later would
+	// never be redacted from logs and errors. It is requested only when
+	// the gate and the dedicated model profile are both enabled.
+	resultAnalysisModelEnabled := cfg.Orchestration.ResultAnalysis.Enabled && cfg.Orchestration.ResultAnalysis.Model.Enabled
+	resultAnalysisKeyEnv := cfg.Orchestration.ResultAnalysis.Model.APIKeyEnv
 	allKeys := append(append(make([]string, 0, len(providerEnvs)+3), providerEnvs...), bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv)
 	if embeddingEnabled && strings.TrimSpace(embeddingKeyEnv) != "" {
 		allKeys = append(allKeys, embeddingKeyEnv)
+	}
+	if resultAnalysisModelEnabled && strings.TrimSpace(resultAnalysisKeyEnv) != "" {
+		allKeys = append(allKeys, resultAnalysisKeyEnv)
 	}
 	values, err := envfile.NewResolver(paths.EnvFile).Resolve(allKeys...)
 	if err != nil {
@@ -217,6 +229,7 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	prepared.botToken = values[bootstrap.SlackBotTokenEnv]
 	prepared.appToken = values[bootstrap.SlackAppTokenEnv]
 	prepared.embeddingAPIKey = values[embeddingKeyEnv]
+	prepared.resultAnalysisAPIKey = values[resultAnalysisKeyEnv]
 	if setup.legacy && strings.TrimSpace(values[cfg.Model.APIKeyEnv]) == "" {
 		return runtimeModels{}, fmt.Errorf("%s is not configured. Run: local-agent init", cfg.Model.APIKeyEnv)
 	}
@@ -229,6 +242,9 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	}
 	if embeddingEnabled {
 		secrets = append(secrets, prepared.embeddingAPIKey)
+	}
+	if resultAnalysisModelEnabled {
+		secrets = append(secrets, prepared.resultAnalysisAPIKey)
 	}
 	prepared.redactor = secure.NewRedactor(append(secrets, prepared.botToken, prepared.appToken)...)
 	prepared.logger = logging.New(a.logOutput, cfg.Runtime.LogLevel, prepared.redactor)
@@ -537,15 +553,16 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 }
 
 type runtimeComposition struct {
-	service            *botusecase.Service
-	agentBuilderSvc    port.AgentBuilderService
-	externalJobService *externalagentusecase.Service
-	notificationWorker *externalagentusecase.NotificationWorker
-	activationWorker   *externalagentusecase.ActivationWorker
-	knowledgeRetriever port.KnowledgeRetriever
-	lexicalWorker      *knowledgeusecase.LexicalWorker
-	embeddingWorker    *knowledgeusecase.EmbeddingWorker
-	notificationDone   chan struct{}
+	service              *botusecase.Service
+	agentBuilderSvc      port.AgentBuilderService
+	externalJobService   *externalagentusecase.Service
+	notificationWorker   *externalagentusecase.NotificationWorker
+	activationWorker     *externalagentusecase.ActivationWorker
+	knowledgeRetriever   port.KnowledgeRetriever
+	lexicalWorker        *knowledgeusecase.LexicalWorker
+	embeddingWorker      *knowledgeusecase.EmbeddingWorker
+	resultAnalysisWorker *resultanalysisusecase.Worker
+	notificationDone     chan struct{}
 }
 
 func (c *runtimeComposition) StopExternalAdmission() {
@@ -579,6 +596,15 @@ func (c *runtimeComposition) WaitEmbedding(ctx context.Context) error {
 		return nil
 	}
 	return c.embeddingWorker.WaitStopped(ctx)
+}
+
+// WaitResultAnalysis waits for the TRD 07 result analysis worker to stop.
+// A nil worker means the gate was disabled and nothing needs draining.
+func (c *runtimeComposition) WaitResultAnalysis(ctx context.Context) error {
+	if c == nil || c.resultAnalysisWorker == nil {
+		return nil
+	}
+	return c.resultAnalysisWorker.WaitStopped(ctx)
 }
 
 func (c *runtimeComposition) WaitExternal(ctx context.Context) error {
@@ -655,6 +681,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var knowledgeRetriever port.KnowledgeRetriever
 	var knowledgeLexicalWorker *knowledgeusecase.LexicalWorker
 	var knowledgeEmbeddingWorker *knowledgeusecase.EmbeddingWorker
+	var resultAnalysisWorker *resultanalysisusecase.Worker
 	var knowledgeRetrievalLimits domain.KnowledgeRetrievalLimits
 	features := cfg.Context.ContextFeatures
 	var err error
@@ -776,31 +803,34 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 				return nil, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
 			}
 		}
+		// The TRD 07 result analysis gate is positive: with the feature
+		// disabled, composeResultAnalysis returns (nil, nil) and never
+		// constructs a v40 adapter, so no v40 table is opened or written
+		// and the worker is never created. This must compose before the
+		// workstream service below, because an enabled analysis feature
+		// injects resultAnalysisComp.gate into the workstream service's
+		// dependent-dispatch check.
+		resultAnalysisComp, resultAnalysisErr := composeResultAnalysis(cfg, models, infra.modelCalls, infra.store)
+		if resultAnalysisErr != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize result analysis: %w", resultAnalysisErr))
+		}
+		if resultAnalysisComp != nil {
+			resultAnalysisWorker = resultAnalysisComp.worker
+			go resultAnalysisWorker.Run(ctx)
+		}
 		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence).WithMetrics(models.metrics)
+		if resultAnalysisComp != nil {
+			factory = factory.WithResultAnalysis(resultAnalysisComp.service)
+		}
 		if cfg.Orchestration.Workstreams.Enabled {
-			allowedProjects := make(map[string]struct{}, len(paths.SandboxProjectRoots))
-			for project := range paths.SandboxProjectRoots {
-				allowedProjects[project] = struct{}{}
-			}
-			if len(allowedProjects) == 0 {
-				return nil, errors.New("initialize workstream service: at least one registered sandbox project is required")
-			}
-			trustedResults, trustedResultsErr := adaptersqlite.NewResultStore(infra.store, models.resultPayloadStore)
-			if trustedResultsErr != nil {
-				return nil, models.redactor.Error(fmt.Errorf("initialize workstream result verifier: %w", trustedResultsErr))
-			}
-			workstreamStore := adaptersqlite.NewWorkstreamStore(infra.store)
-			if workstreamStore == nil {
-				return nil, errors.New("initialize workstream store")
+			var analysisGate port.AnalysesByWorkstream
+			if resultAnalysisComp != nil {
+				analysisGate = resultAnalysisComp.gate
 			}
 			var workstreamErr error
-			workstreamService, workstreamErr = workstreamusecase.New(workstreamusecase.Config{
-				Enabled: true, ResultHandlesEnabled: cfg.Orchestration.ResultHandles.Enabled,
-				Limits:          domain.WorkstreamLimits{MaxNonTerminalTasks: cfg.Orchestration.Workstreams.MaxNonTerminalTasks, MaxDependenciesPerTask: cfg.Orchestration.Workstreams.MaxDependenciesPerTask},
-				AllowedProjects: allowedProjects,
-			}, workstreamusecase.Dependencies{Store: workstreamStore, Clock: port.SystemClock{}, ResultVerifier: trustedResults, LinkCommitter: workstreamStore, ResultReader: trustedResults})
+			workstreamService, workstreamErr = composeWorkstream(cfg, paths, infra.store, models.resultPayloadStore, analysisGate)
 			if workstreamErr != nil {
-				return nil, models.redactor.Error(fmt.Errorf("initialize workstream service: %w", workstreamErr))
+				return nil, models.redactor.Error(workstreamErr)
 			}
 			factory.WithWorkstreams(workstreamService).WithResultLinksEnabled(cfg.Orchestration.ResultHandles.Enabled)
 		}
@@ -1085,7 +1115,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	if activationWorker != nil {
 		go activationWorker.Run(ctx)
 	}
-	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, knowledgeRetriever: knowledgeRetriever, lexicalWorker: knowledgeLexicalWorker, embeddingWorker: knowledgeEmbeddingWorker, notificationDone: notificationDone}, nil
+	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, knowledgeRetriever: knowledgeRetriever, lexicalWorker: knowledgeLexicalWorker, embeddingWorker: knowledgeEmbeddingWorker, resultAnalysisWorker: resultAnalysisWorker, notificationDone: notificationDone}, nil
 }
 
 func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service, projector port.OKFProjector) error {

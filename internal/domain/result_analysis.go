@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"strconv"
@@ -537,6 +538,21 @@ func (m AnalysisSegmentManifest) Coverage() AnalysisCoverage {
 	}
 }
 
+// StatusText renders the one user-facing sentence that reports this
+// coverage. It always names verified byte ranges and never claims review,
+// comprehension, or approval: coverage proves which source bytes were read
+// and digest-verified, never that their content was judged, understood, or
+// approved. Every caller that surfaces analysis coverage to a human (tool
+// output, status text, dependent-dispatch messaging) must render coverage
+// through this one function, so the distinction cannot drift between call
+// sites.
+func (c AnalysisCoverage) StatusText() string {
+	if c.Complete {
+		return fmt.Sprintf("Source coverage: %d verified bytes, complete. This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved.", c.CoveredBytes)
+	}
+	return fmt.Sprintf("Source coverage: %d verified bytes, incomplete (%d gap range(s) remain). This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved.", c.CoveredBytes, len(c.Gaps))
+}
+
 // AnalysisStatement is one bounded typed statement: a finding, a
 // constraint, or an unresolved question.
 type AnalysisStatement struct {
@@ -859,4 +875,42 @@ func (c AnalysisStepClaim) Validate() error {
 		return fmt.Errorf("%w: step claim generation must not be negative", ErrAnalysisValidation)
 	}
 	return nil
+}
+
+// AnalysisModelFingerprint returns the frozen SHA-256 fingerprint over the
+// NUL-joined sequence `provider_id NUL model NUL analysis-v1`. It follows
+// the same shape as ModelFingerprint (TRD 06's embedding fingerprint) but
+// carries its own version tag, so an analysis fingerprint and an embedding
+// fingerprint can never collide even over the same provider and model
+// string. The empty result_analysis.model block falls back to the main
+// model profile; the caller passes that profile's own provider id and
+// model name here so the fallback is still explicit in the fingerprint,
+// per TRD 07's Concurrency and Model Profile section.
+func AnalysisModelFingerprint(providerID, model string) string {
+	sum := sha256.Sum256([]byte(providerID + "\x00" + model + "\x00" + "analysis-v1"))
+	return hex.EncodeToString(sum[:])
+}
+
+// ResultAnalysisHealth is the offline, content-free doctor view of v40
+// result analysis state (checkpoint 6): bounded counts and categories only.
+// It never carries an analysis id, an objective, a finding, an evidence
+// excerpt, or a digest, matching the same discipline
+// KnowledgeRetrievalHealth already established for the v39 retrieval state.
+type ResultAnalysisHealth struct {
+	// SchemaVersion is the database's PRAGMA user_version. A doctor caller
+	// compares it against the binary's own current schema version.
+	SchemaVersion int
+	// StepQueueDepth counts analysis_steps rows in 'prepared' or 'claimed'
+	// state: pending or in-flight work, excluding terminal rows.
+	StepQueueDepth int
+	// ExpiredLeases counts 'claimed' steps whose lease has already elapsed:
+	// work a restarted or recovered worker will reclaim on its next tick.
+	ExpiredLeases int
+	// NonTerminalAnalyses counts result_analyses rows in 'preparing' or
+	// 'running' state.
+	NonTerminalAnalyses int
+	// IncompleteCoverageAnalyses counts 'running' analyses whose root
+	// reduction step has not yet completed, so their terminal packet's
+	// coverage cannot yet be proven complete.
+	IncompleteCoverageAnalyses int
 }

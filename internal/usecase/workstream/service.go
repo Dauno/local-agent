@@ -33,6 +33,12 @@ type Dependencies struct {
 	ResultVerifier port.ResultIdentityVerifier
 	LinkCommitter  port.WorkstreamResultLinkCommitter
 	ResultReader   port.TrustedResultStore
+	// AnalysisGate is optional (checkpoint 6 wires it in composition). When
+	// nil, dependent dispatch blocking is a no-op, exactly like every other
+	// optional TRD 07 dependency in this codebase: a v40 gate that is off,
+	// or not yet composed, behaves like the feature does not exist rather
+	// than failing closed on every transition.
+	AnalysisGate port.AnalysesByWorkstream
 }
 
 type Binding = port.WorkstreamBinding
@@ -44,6 +50,7 @@ type Service struct {
 	verifier      port.ResultIdentityVerifier
 	linkCommitter port.WorkstreamResultLinkCommitter
 	resultReader  port.TrustedResultStore
+	analysisGate  port.AnalysesByWorkstream
 }
 
 var _ port.WorkstreamMutator = (*Service)(nil)
@@ -72,7 +79,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		allowedProjects[project] = struct{}{}
 	}
 	cfg.AllowedProjects = allowedProjects
-	return &Service{cfg: cfg, store: deps.Store, clock: deps.Clock, verifier: deps.ResultVerifier, linkCommitter: deps.LinkCommitter, resultReader: deps.ResultReader}, nil
+	return &Service{cfg: cfg, store: deps.Store, clock: deps.Clock, verifier: deps.ResultVerifier, linkCommitter: deps.LinkCommitter, resultReader: deps.ResultReader, analysisGate: deps.AnalysisGate}, nil
 }
 
 func (s *Service) Create(ctx context.Context, binding Binding, id, objective string) (domain.WorkstreamSnapshot, error) {
@@ -441,6 +448,19 @@ func (s *Service) apply(ctx context.Context, binding Binding, source domain.Work
 	transition.Actor = binding.Actor
 	transition.ConversationKey = binding.ConversationKey
 	transition.Project = binding.Project
+	// TRD 07 Completion and Dependent Dispatch: an incomplete, failed, or
+	// stale analysis bound to this workstream blocks every root confirmation
+	// transition and the start_task execution transition, across all four
+	// public entry points (Apply, ApplyConfirmed, ApplyHostConfirmed,
+	// ApplyHuman), because they all reach this one apply method. A generic
+	// handoff (a result link, a proposed task) never satisfies this: the
+	// check only looks at analysis state, never at whether the workstream
+	// already has other context bound to it.
+	if transition.RequiresConfirmation() || transition.Action == domain.WorkstreamActionStartTask {
+		if err := s.checkAnalysisDispatchGate(ctx, binding, transition.WorkstreamID); err != nil {
+			return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
+		}
+	}
 	if transition.Action == domain.WorkstreamActionStartTask {
 		// The execution identity is always host-owned and derived from the
 		// trusted binding plus the caller's provenance identity. A caller-
@@ -484,6 +504,38 @@ func (s *Service) apply(ctx context.Context, binding Binding, source domain.Work
 		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, fmt.Errorf("read applied workstream: %w", err)
 	}
 	return record, snapshot, nil
+}
+
+// checkAnalysisDispatchGate blocks a confirmation or execution transition
+// while any TRD 07 analysis bound to this workstream is incomplete, failed,
+// or stale. A completed analysis is stale when its recorded source
+// ResultIdentity no longer matches what the trusted source reader resolves
+// today for the same result and scope; the gate never trusts a stored digest
+// without re-verifying it, mirroring the rest of this file's rule that a
+// content digest is evidence, never an authorization by itself. No source
+// content, prompt, or credential ever appears in the returned error: only
+// the closed domain.AnalysisState or domain.AnalysisFailureCode value.
+func (s *Service) checkAnalysisDispatchGate(ctx context.Context, binding Binding, workstreamID string) error {
+	if s == nil || s.analysisGate == nil {
+		return nil
+	}
+	records, err := s.analysisGate.ListByWorkstream(ctx, workstreamID, binding.Actor, binding.ConversationKey, binding.Project)
+	if err != nil {
+		return fmt.Errorf("check dependent analysis: %w", err)
+	}
+	for _, record := range records {
+		if record.State != domain.AnalysisCompleted {
+			return fmt.Errorf("%w: analysis %s is %s", domain.ErrWorkstreamAnalysisBlocking, record.AnalysisID, record.State)
+		}
+		if s.resultReader == nil {
+			continue
+		}
+		identity, _, err := s.resultReader.Resolve(ctx, record.Identity.SourceResultID, record.Scope)
+		if err != nil || identity.SHA256 != record.Identity.SourceSHA256 {
+			return fmt.Errorf("%w: analysis %s source is stale", domain.ErrWorkstreamAnalysisBlocking, record.AnalysisID)
+		}
+	}
+	return nil
 }
 
 func (s *Service) requireEnabled() error {

@@ -483,6 +483,33 @@ func TestAnalysisObjectiveClassValidation(t *testing.T) {
 	}
 }
 
+// TestAnalysisCoverageStatusTextDistinguishesCoverageFromComprehension is
+// criterion 9: user-facing coverage text always reports verified byte
+// ranges and never claims review, comprehension, or approval. This fixes
+// the exact wording for both the complete and incomplete cases.
+func TestAnalysisCoverageStatusTextDistinguishesCoverageFromComprehension(t *testing.T) {
+	complete := AnalysisCoverage{CoveredBytes: 4096, Complete: true}
+	wantComplete := "Source coverage: 4096 verified bytes, complete. This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved."
+	if got := complete.StatusText(); got != wantComplete {
+		t.Fatalf("complete coverage status text = %q, want %q", got, wantComplete)
+	}
+
+	incomplete := AnalysisCoverage{CoveredBytes: 2048, Complete: false, Gaps: []AnalysisByteRange{{OffsetBytes: 2048, LengthBytes: 1024}}}
+	wantIncomplete := "Source coverage: 2048 verified bytes, incomplete (1 gap range(s) remain). This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved."
+	if got := incomplete.StatusText(); got != wantIncomplete {
+		t.Fatalf("incomplete coverage status text = %q, want %q", got, wantIncomplete)
+	}
+
+	for _, text := range []string{complete.StatusText(), incomplete.StatusText()} {
+		if !strings.Contains(text, "verified byte") && !strings.Contains(text, "byte ranges") {
+			t.Fatalf("coverage status text does not report verified byte ranges: %q", text)
+		}
+		if !strings.Contains(text, "not that the content was reviewed, understood, or approved") {
+			t.Fatalf("coverage status text does not disclaim review, comprehension, and approval: %q", text)
+		}
+	}
+}
+
 func TestAnalysisSentinelErrorsWrapExactlyOne(t *testing.T) {
 	err := (AnalysisLimits{}).Validate()
 	if !errors.Is(err, ErrAnalysisValidation) {

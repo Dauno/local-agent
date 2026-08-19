@@ -51,6 +51,15 @@ var (
 	ErrWorkstreamTaskNotReady         = errors.New("workstream task is not ready")
 	ErrWorkstreamExecutionIdentity    = errors.New("workstream execution identity is invalid")
 	ErrWorkstreamSourceConflict       = errors.New("workstream source identity conflict")
+	// ErrWorkstreamAnalysisBlocking applies when TRD 07 objective-bound
+	// result analysis bound to this workstream is incomplete, failed, or
+	// stale (its recorded source identity no longer matches the source
+	// result's current identity). It blocks a root confirmation transition
+	// and a start_task execution transition alike, per TRD 07's Completion
+	// and Dependent Dispatch section. Analysis output is untrusted evidence;
+	// it never authorizes a downstream task on its own, and a generic
+	// handoff alone can never satisfy a required analysis.
+	ErrWorkstreamAnalysisBlocking = errors.New("workstream dependent analysis is not complete")
 )
 
 type WorkstreamStatus string
