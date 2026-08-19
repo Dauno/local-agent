@@ -2,6 +2,7 @@ package sqlite
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -113,5 +114,72 @@ func TestAdkSessionServicePersistsStateAndEventOrder(t *testing.T) {
 	}
 	if err := service.AppendEvent(ctx, stale.Session, session.NewEvent(ctx, "invocation")); err == nil || !strings.Contains(err.Error(), "stale session error") {
 		t.Fatalf("stale AppendEvent() error = %v", err)
+	}
+}
+
+// TestAppendEventRevisionEqualsEventCountEqualsMaxOrdinalPlusOne fixes DEC-08-3
+// (docs/root-orchestrator-v2/08-sqlite-runtime-scaling-and-indexing-trd.md):
+// for every ADK session, revision equals the persisted event count equals
+// max(ordinal)+1. This invariant is what lets a caller read the session head
+// through LatestEventOrdinal instead of loading the whole session, and it is
+// not enforced by the schema. If a future change bumps revision without
+// inserting an event, or inserts without bumping revision, this test must
+// fail.
+func TestAppendEventRevisionEqualsEventCountEqualsMaxOrdinalPlusOne(t *testing.T) {
+	ctx := context.Background()
+	store, _ := newTestStore(t)
+	service := NewAdkSessionService(store)
+
+	created, err := service.Create(ctx, &session.CreateRequest{AppName: "app", UserID: "user", SessionID: "session"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const eventCount = 7
+	current := created.Session
+	for i := 0; i < eventCount; i++ {
+		event := session.NewEvent(ctx, "invocation")
+		event.ID = fmt.Sprintf("evt-%d", i)
+		event.Timestamp = time.Now()
+		if err := service.AppendEvent(ctx, current, event); err != nil {
+			t.Fatalf("append event %d: %v", i, err)
+		}
+
+		var revision int64
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT revision FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+			"app", "user", "session",
+		).Scan(&revision); err != nil {
+			t.Fatalf("read revision: %v", err)
+		}
+
+		var eventRows int64
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT COUNT(*) FROM adk_events WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+			"app", "user", "session",
+		).Scan(&eventRows); err != nil {
+			t.Fatalf("count events: %v", err)
+		}
+
+		var maxOrdinal int64
+		if err := store.DB().QueryRowContext(ctx,
+			`SELECT MAX(ordinal) FROM adk_events WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+			"app", "user", "session",
+		).Scan(&maxOrdinal); err != nil {
+			t.Fatalf("max ordinal: %v", err)
+		}
+
+		if revision != eventRows || revision != maxOrdinal+1 {
+			t.Fatalf("DEC-08-3 violated after event %d: revision=%d, event_count=%d, max(ordinal)+1=%d",
+				i, revision, eventRows, maxOrdinal+1)
+		}
+
+		head, err := service.LatestEventOrdinal(ctx, "app", "user", "session")
+		if err != nil {
+			t.Fatalf("LatestEventOrdinal: %v", err)
+		}
+		if head != maxOrdinal {
+			t.Fatalf("LatestEventOrdinal() = %d, want %d", head, maxOrdinal)
+		}
 	}
 }

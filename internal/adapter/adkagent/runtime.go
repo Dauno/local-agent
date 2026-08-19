@@ -633,15 +633,10 @@ func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, 
 	if r.continuityStore == nil {
 		return
 	}
-	loaded, err := r.sessionService.Get(ctx, &session.GetRequest{AppName: applicationName, UserID: ephemeralUserID, SessionID: sessionID})
-	if err != nil || loaded == nil || loaded.Session == nil || loaded.Session.Events() == nil || loaded.Session.Events().Len() == 0 {
+	ordinal, sourceRevision, ok := r.continuityHead(ctx, sessionID)
+	if !ok {
 		r.recordContinuityFallback()
 		return
-	}
-	ordinal := int64(loaded.Session.Events().Len() - 1)
-	sourceRevision := int64(loaded.Session.Events().Len())
-	if revisioned, ok := loaded.Session.(interface{ Revision() int64 }); ok {
-		sourceRevision = revisioned.Revision()
 	}
 	prior, err := r.continuityStore.Latest(ctx, sessionID)
 	if err != nil {
@@ -693,6 +688,32 @@ func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, 
 	default:
 		r.recordContinuityFallback()
 	}
+}
+
+// continuityHead resolves the event ordinal and session revision that
+// updateContinuity needs, without loading the session when the backing
+// service exposes LatestEventOrdinal. Under DEC-08-3, revision equals the
+// event count equals max(ordinal)+1, so sourceRevision follows directly from
+// the head with no extra query. ok is false for an empty session (head -1)
+// or a read failure, matching the prior unbounded-Get fallback behavior.
+func (r *Runtime) continuityHead(ctx context.Context, sessionID string) (ordinal, sourceRevision int64, ok bool) {
+	if headReader, isHeadReader := r.sessionService.(epochEventHeadReader); isHeadReader {
+		head, err := headReader.LatestEventOrdinal(ctx, applicationName, ephemeralUserID, sessionID)
+		if err != nil || head < 0 {
+			return 0, 0, false
+		}
+		return head, head + 1, true
+	}
+	loaded, err := r.sessionService.Get(ctx, &session.GetRequest{AppName: applicationName, UserID: ephemeralUserID, SessionID: sessionID})
+	if err != nil || loaded == nil || loaded.Session == nil || loaded.Session.Events() == nil || loaded.Session.Events().Len() == 0 {
+		return 0, 0, false
+	}
+	ordinal = int64(loaded.Session.Events().Len() - 1)
+	sourceRevision = int64(loaded.Session.Events().Len())
+	if revisioned, isRevisioned := loaded.Session.(interface{ Revision() int64 }); isRevisioned {
+		sourceRevision = revisioned.Revision()
+	}
+	return ordinal, sourceRevision, true
 }
 
 func (r *Runtime) recordContinuityFallback() {
@@ -841,7 +862,10 @@ func (r *Runtime) RecoverActivation(ctx context.Context, conversationKey domain.
 	if r == nil || r.sessionService == nil || strings.TrimSpace(string(conversationKey)) == "" || strings.TrimSpace(activationID) == "" {
 		return port.AgentTurn{}, false, errors.New("activation recovery identity is required")
 	}
-	loaded, err := r.sessionService.Get(ctx, &session.GetRequest{
+	// The activation session is scoped to one activation, not the whole
+	// conversation, so its row count is small; bounding the read still keeps
+	// this off the unbounded-Get path that risk 2 and risk 4 share.
+	loaded, err := boundedSessions(r.sessionService).Get(ctx, &session.GetRequest{
 		AppName: applicationName, UserID: ephemeralUserID, SessionID: adkActivationSessionID(activationID),
 	})
 	if err != nil {
@@ -891,7 +915,22 @@ func (r *Runtime) RecoverActivation(ctx context.Context, conversationKey domain.
 
 func boolPointer(value bool) *bool { return &value }
 
+// sessionExistenceChecker is a lightweight get-or-create primitive: it
+// reports whether a session row exists, and returns its state, without
+// loading any events. ensureSession only needs the state (provider family
+// validation), never the event history, so callers that support this
+// interface skip the unbounded Get that the create-then-get idiom used to
+// require on every turn after the first.
+type sessionExistenceChecker interface {
+	SessionExists(ctx context.Context, appName, userID, sessionID string) (session.Session, bool, error)
+}
+
 func (r *Runtime) ensureSession(ctx context.Context, sessionID string) (session.Session, error) {
+	if checker, ok := r.sessionService.(sessionExistenceChecker); ok {
+		return r.ensureSessionIdempotent(ctx, checker, sessionID)
+	}
+	// Fallback for session services without the lightweight existence check
+	// (for example ADK's in-memory service): keep the create-then-get idiom.
 	created, err := r.sessionService.Create(ctx, &session.CreateRequest{
 		AppName:   applicationName,
 		UserID:    ephemeralUserID,
@@ -914,6 +953,43 @@ func (r *Runtime) ensureSession(ctx context.Context, sessionID string) (session.
 			return nil, familyErr
 		}
 		return resp.Session, nil
+	}
+	return created.Session, nil
+}
+
+// ensureSessionIdempotent is the normal, non-failure path: check existence
+// first, and create only when the session is genuinely new. A Create error
+// here means a concurrent turn won the race, which is the true exceptional
+// case, not the everyday one.
+func (r *Runtime) ensureSessionIdempotent(ctx context.Context, checker sessionExistenceChecker, sessionID string) (session.Session, error) {
+	existing, found, err := checker.SessionExists(ctx, applicationName, ephemeralUserID, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("check session existence: %w", err)
+	}
+	if found {
+		if familyErr := r.checkProviderFamily(existing); familyErr != nil {
+			return nil, familyErr
+		}
+		return existing, nil
+	}
+	created, err := r.sessionService.Create(ctx, &session.CreateRequest{
+		AppName:   applicationName,
+		UserID:    ephemeralUserID,
+		SessionID: sessionID,
+		State: map[string]any{
+			domain.ProviderFamilyStateKey: r.providerFamily,
+		},
+	})
+	if err != nil {
+		// Lost a create race against a concurrent turn for the same session.
+		existing, found, existErr := checker.SessionExists(ctx, applicationName, ephemeralUserID, sessionID)
+		if existErr != nil || !found {
+			return nil, fmt.Errorf("create session: %w (existence check also failed: %v)", err, existErr)
+		}
+		if familyErr := r.checkProviderFamily(existing); familyErr != nil {
+			return nil, familyErr
+		}
+		return existing, nil
 	}
 	return created.Session, nil
 }
