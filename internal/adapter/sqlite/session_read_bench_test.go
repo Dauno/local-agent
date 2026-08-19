@@ -152,7 +152,6 @@ func BenchmarkSessionGetUnbounded(b *testing.B) {
 		sessionID := corpus.sessionID[n]
 		b.Run(fmt.Sprintf("events=%d", n), func(b *testing.B) {
 			ctx := context.Background()
-			b.ReportMetric(float64(n), "events")
 			for b.Loop() {
 				resp, err := corpus.service.Get(ctx, &adksession.GetRequest{
 					AppName: sessionReadBenchApp, UserID: sessionReadBenchUser, SessionID: sessionID,
@@ -164,6 +163,9 @@ func BenchmarkSessionGetUnbounded(b *testing.B) {
 					b.Fatalf("loaded %d events, corpus has %d: benchmark measured an empty or truncated read", got, n)
 				}
 			}
+			// b.Loop's first call runs ResetTimer, which clears any metric
+			// reported before it (FIND-113): report after the loop instead.
+			b.ReportMetric(float64(n), "events")
 		})
 	}
 }
@@ -180,7 +182,6 @@ func BenchmarkSessionGetBounded(b *testing.B) {
 		}
 		b.Run(fmt.Sprintf("events=%d", n), func(b *testing.B) {
 			ctx := context.Background()
-			b.ReportMetric(float64(n), "events")
 			for b.Loop() {
 				resp, err := corpus.service.Get(ctx, &adksession.GetRequest{
 					AppName: sessionReadBenchApp, UserID: sessionReadBenchUser, SessionID: sessionID,
@@ -193,6 +194,7 @@ func BenchmarkSessionGetBounded(b *testing.B) {
 					b.Fatalf("loaded %d events, want %d: benchmark measured an empty or truncated read", got, want)
 				}
 			}
+			b.ReportMetric(float64(n), "events")
 		})
 	}
 }
@@ -206,7 +208,6 @@ func BenchmarkSessionLatestEventOrdinal(b *testing.B) {
 		sessionID := corpus.sessionID[n]
 		b.Run(fmt.Sprintf("events=%d", n), func(b *testing.B) {
 			ctx := context.Background()
-			b.ReportMetric(float64(n), "events")
 			for b.Loop() {
 				head, err := corpus.service.LatestEventOrdinal(ctx, sessionReadBenchApp, sessionReadBenchUser, sessionID)
 				if err != nil {
@@ -216,6 +217,7 @@ func BenchmarkSessionLatestEventOrdinal(b *testing.B) {
 					b.Fatalf("head ordinal = %d, want %d: benchmark measured the wrong session", head, n-1)
 				}
 			}
+			b.ReportMetric(float64(n), "events")
 		})
 	}
 }
@@ -371,8 +373,6 @@ func BenchmarkRetentionSweep(b *testing.B) {
 			refs := corpus.refs[candidates]
 			b.Run(fmt.Sprintf("events=%d/candidates=%d", events, candidates), func(b *testing.B) {
 				ctx := context.Background()
-				b.ReportMetric(float64(events), "events")
-				b.ReportMetric(float64(candidates), "candidates")
 				for b.Loop() {
 					for _, ref := range refs {
 						referenced, err := corpus.store.IsRecoverableResultReferenced(ctx, ref)
@@ -384,6 +384,8 @@ func BenchmarkRetentionSweep(b *testing.B) {
 						}
 					}
 				}
+				b.ReportMetric(float64(events), "events")
+				b.ReportMetric(float64(candidates), "candidates")
 			})
 		}
 	}
