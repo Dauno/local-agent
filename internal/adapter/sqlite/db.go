@@ -142,10 +142,11 @@ func open(ctx context.Context, path, mode string, migrateDatabase bool) (*Store,
 	if err != nil {
 		return nil, fmt.Errorf("open SQLite database %q: %w", path, err)
 	}
-	// A single connection keeps connection-scoped pragmas deterministic and is
-	// sufficient for this single-process, write-light local application.
-	db.SetMaxOpenConns(1)
-	db.SetMaxIdleConns(1)
+	// Four connections, matched to this hardware's four physical cores
+	// (DEC-08-2). Every connection reapplies the DSN pragmas, so the pool size
+	// does not make journal_mode or synchronous non-deterministic.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(4)
 
 	if err := db.PingContext(ctx); err != nil {
 		_ = db.Close()
@@ -173,6 +174,22 @@ func dataSourceName(path, mode string) (string, error) {
 	query.Set("mode", mode)
 	query.Add("_pragma", "busy_timeout(5000)")
 	query.Add("_pragma", "foreign_keys(1)")
+	if mode != "ro" {
+		// journal_mode is a database-level property change. A read-only
+		// connection cannot write it, and setting it there fails Ping before
+		// any query runs. Read-only opens rely on the journal mode a write
+		// connection already set.
+		query.Add("_pragma", "journal_mode(wal)")
+	}
+	query.Add("_pragma", "synchronous(full)")
+	// A pool with more than one connection lets two write transactions
+	// coexist. A deferred transaction that reads before it writes then risks
+	// SQLITE_BUSY on lock promotion, without waiting on busy_timeout, because
+	// its snapshot is already stale by the time it tries to upgrade. Immediate
+	// locking takes the write lock at BEGIN and serializes instead of racing
+	// (DEC-08-2 addendum). The driver applies _txlock only to transactions
+	// that are not read-only, so read-only BeginTx calls are unaffected.
+	query.Set("_txlock", "immediate")
 	u.RawQuery = query.Encode()
 	return u.String(), nil
 }

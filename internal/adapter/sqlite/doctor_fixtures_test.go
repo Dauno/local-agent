@@ -211,7 +211,6 @@ func buildCorruptDoctorFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 	digest := func(value string) string {
 		sum := sha256.Sum256([]byte(value))
@@ -226,6 +225,13 @@ func buildCorruptDoctorFixture(t *testing.T) string {
 	insertIdentityActivationRow(t, db, "corrupt-foreground", "pending", 12, "")
 	insertIdentityActivationRow(t, db, "corrupt-detached", "pending", 0, "")
 	insertIdentityActivationRow(t, db, "corrupt-retired", "failed", 12, domain.ActivationForegroundRetiredCode)
+	// Close before the caller reads the raw file bytes. Under WAL, a recent
+	// commit can still live in the sidecar -wal file until checkpoint; Close
+	// checkpoints it back into the main file, exactly as every other fixture
+	// builder in this file already does.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	return path
 }
 

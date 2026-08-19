@@ -148,8 +148,11 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 	sess.state = mergeStates(appState, userState, sessionState)
 	sess.revision = revision
 
-	// Read scoped state before opening the event cursor. The Store uses one
-	// SQLite connection, so a second query while rows are open would deadlock.
+	// Read scoped state before opening the event cursor. This ordering does
+	// not depend on the pool size: it keeps the state reads (each of which
+	// closes its own *sql.Row) off the connection that later holds open
+	// *sql.Rows for the event scan below, so a saturated pool cannot make
+	// this call wait on its own cursor.
 
 	// Load events
 	query := `SELECT id, invocation_id, author, actions, long_running_tool_ids, routes, output,
