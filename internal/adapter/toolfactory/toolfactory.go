@@ -29,6 +29,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/tooldef"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
+	resultanalysisusecase "github.com/Dauno/slack-local-agent/internal/usecase/resultanalysis"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
 	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
@@ -65,6 +66,7 @@ type Factory struct {
 	declarativeRunner  DeclarativeToolExecutor
 	workstreams        *workstreamusecase.Service
 	resultLinksEnabled bool
+	resultAnalysis     *resultanalysisusecase.Service
 }
 
 func (f *Factory) WithCodeReaders(readers map[string]port.CodeReader) *Factory {
@@ -189,6 +191,17 @@ func (f *Factory) WithResultLinksEnabled(enabled bool) *Factory {
 	return f
 }
 
+// WithResultAnalysis configures the TRD 07 objective-bound result analysis
+// service. The three analysis tools are exposed only when service is
+// non-nil, following the same f.workstreams != nil gating pattern every
+// other optional tool group in this factory already uses.
+func (f *Factory) WithResultAnalysis(service *resultanalysisusecase.Service) *Factory {
+	if f != nil {
+		f.resultAnalysis = service
+	}
+	return f
+}
+
 // WithAllowedUserIDs configures the users allowed to install agent definitions.
 func (f *Factory) WithAllowedUserIDs(ids []string) *Factory {
 	f.allowedUserIDs = append([]string(nil), ids...)
@@ -249,6 +262,21 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 			}
 			tools = append(tools, linkTool)
 		}
+	}
+	if f.resultAnalysis != nil {
+		requestTool, err := f.resultAnalysisRequestTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_request_result_analysis tool: %w", err)
+		}
+		statusTool, err := f.resultAnalysisStatusTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_analysis_status tool: %w", err)
+		}
+		packetTool, err := f.resultAnalysisPacketTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_read_analysis_packet tool: %w", err)
+		}
+		tools = append(tools, requestTool, statusTool, packetTool)
 	}
 	if f.externalJobs != nil {
 		statusTool, err := f.jobStatusTool(actor, key)

@@ -113,6 +113,7 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		Counter:         counterChecker{},
 		Knowledge:       knowledgeChecker{},
 		ResultRetention: resultRetentionChecker{},
+		ResultAnalysis:  resultAnalysisChecker{},
 	}
 	if includeLive {
 		dependencies.Live = liveChecker{}
@@ -356,6 +357,17 @@ func (resultRetentionChecker) CheckResultRetention(ctx context.Context, path str
 	}
 	defer store.Close()
 	return store.CheckResultRetention(ctx, ages, now)
+}
+
+type resultAnalysisChecker struct{}
+
+func (resultAnalysisChecker) CheckResultAnalysisState(ctx context.Context, path string) (domain.ResultAnalysisHealth, error) {
+	store, err := adaptersqlite.OpenExisting(ctx, path)
+	if err != nil {
+		return domain.ResultAnalysisHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckResultAnalysisState(ctx)
 }
 
 func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {

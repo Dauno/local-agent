@@ -117,7 +117,7 @@ func waitExternalAndNotification(ctx context.Context, composition *runtimeCompos
 	if composition == nil {
 		return nil
 	}
-	return waitInParallel(ctx, composition.WaitExternal, composition.WaitNotification, composition.WaitKnowledge, composition.WaitEmbedding)
+	return waitInParallel(ctx, composition.WaitExternal, composition.WaitNotification, composition.WaitKnowledge, composition.WaitEmbedding, composition.WaitResultAnalysis)
 }
 
 func waitInParallel(ctx context.Context, waiters ...func(context.Context) error) error {

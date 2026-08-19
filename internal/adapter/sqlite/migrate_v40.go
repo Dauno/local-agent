@@ -60,7 +60,10 @@ func migrateV40(ctx context.Context, tx *sql.Tx) error {
 			CHECK (source_bytes > 0),
 			CHECK (objective_class = 'bounded_question_v1'),
 			CHECK (length(objective_digest) = 64 AND objective_digest NOT GLOB '*[^0-9a-f]*'),
-			CHECK (length(objective_text) BETWEEN 1 AND 8000),
+			-- 2000 matches domain.HardMaxAnalysisObjectiveRunes. SQLite
+			-- length() on a TEXT column counts characters, not bytes, so
+			-- this bound tracks the domain rune ceiling directly.
+			CHECK (length(objective_text) BETWEEN 1 AND 2000),
 			CHECK (length(segmentation_version) > 0),
 			CHECK (length(prompt_version) > 0),
 			CHECK (length(model_fingerprint) > 0),
@@ -124,6 +127,9 @@ func migrateV40(ctx context.Context, tx *sql.Tx) error {
 			CHECK (length_bytes > 0),
 			CHECK (length(sha256) = 64 AND sha256 NOT GLOB '*[^0-9a-f]*'),
 			CHECK (length(segmenter_version) > 0),
+			-- 4096 must match domain.HardMaxAnalysisOverlapBytes. SQL has no
+			-- way to reference a Go constant, so migrate_v40_test.go carries
+			-- a test that fails if the two values ever drift apart.
 			CHECK (overlap_prev_bytes BETWEEN 0 AND 4096)
 		) WITHOUT ROWID`,
 		`CREATE TRIGGER analysis_segments_immutable
@@ -151,8 +157,14 @@ func migrateV40(ctx context.Context, tx *sql.Tx) error {
 			CHECK (kind IN ('leaf', 'reduction')),
 			CHECK (state IN ('prepared', 'claimed', 'completed', 'failed')),
 			CHECK (attempt >= 0 AND generation >= 0 AND next_attempt >= 0 AND lease_until >= 0),
+			-- segment_ordinal is the only nullable column in v40. A CHECK
+			-- built from "segment_ordinal >= 0" alone evaluates to NULL, not
+			-- false, when segment_ordinal is NULL: SQLite only rejects a row
+			-- whose CHECK evaluates to false, so a leaf without an ordinal
+			-- would otherwise pass. ifnull forces that branch to a concrete
+			-- false for a NULL ordinal.
 			CHECK (
-				(kind = 'leaf' AND segment_ordinal >= 0)
+				(kind = 'leaf' AND ifnull(segment_ordinal, -1) >= 0)
 				OR (kind = 'reduction' AND segment_ordinal IS NULL)
 			),
 			CHECK (failure_code ` + analysisFailureCodeCheck + `),

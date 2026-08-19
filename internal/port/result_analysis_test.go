@@ -30,7 +30,7 @@ func newFakeAnalysisStore() *fakeAnalysisStore {
 	return &fakeAnalysisStore{byDigest: map[string]string{}, rows: map[string]AnalysisRecord{}}
 }
 
-func (f *fakeAnalysisStore) Create(_ context.Context, identity domain.AnalysisIdentity, objectiveText string, scope domain.ResultScope, workstreamID string, now time.Time) (AnalysisRecord, error) {
+func (f *fakeAnalysisStore) Create(_ context.Context, identity domain.AnalysisIdentity, _ domain.AnalysisLimits, objectiveText string, scope domain.ResultScope, workstreamID string, now time.Time) (AnalysisRecord, error) {
 	if err := identity.Validate(); err != nil {
 		return AnalysisRecord{}, err
 	}
@@ -115,14 +115,23 @@ func testIdentity() domain.AnalysisIdentity {
 	}
 }
 
+func testAnalysisLimits() domain.AnalysisLimits {
+	return domain.AnalysisLimits{
+		MaxSegmentBytes: 24576, OverlapBasisPoints: 1000, OverlapMaxBytes: 4096,
+		MaxLeaves: 64, MaxReductionFanIn: 8, MaxReductionDepth: 4, MaxConcurrentLeaves: 2,
+		MaxAttemptsPerStep: 2, CallTimeoutSeconds: 120, WallTimeSeconds: 900,
+		EvidenceExcerptBytes: 2048, EvidenceSelectorsPerLeaf: 8, EvidenceReferencesPerPacket: 32, BundleBytes: 32768,
+	}
+}
+
 func TestFakeAnalysisStoreCreateIsIdempotentBySemanticIdentity(t *testing.T) {
 	store := newFakeAnalysisStore()
 	identity := testIdentity()
-	first, err := store.Create(context.Background(), identity, "which configs use value < 10?", testScope(), "ws-1", time.Now())
+	first, err := store.Create(context.Background(), identity, testAnalysisLimits(), "which configs use value < 10?", testScope(), "ws-1", time.Now())
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
-	second, err := store.Create(context.Background(), identity, "which configs use value < 10?", testScope(), "ws-1", time.Now())
+	second, err := store.Create(context.Background(), identity, testAnalysisLimits(), "which configs use value < 10?", testScope(), "ws-1", time.Now())
 	if err != nil {
 		t.Fatalf("second create failed: %v", err)
 	}
@@ -133,7 +142,7 @@ func TestFakeAnalysisStoreCreateIsIdempotentBySemanticIdentity(t *testing.T) {
 
 func TestFakeAnalysisStoreCompleteAndFailAreTerminalOnce(t *testing.T) {
 	store := newFakeAnalysisStore()
-	record, err := store.Create(context.Background(), testIdentity(), "objective", testScope(), "ws-1", time.Now())
+	record, err := store.Create(context.Background(), testIdentity(), testAnalysisLimits(), "objective", testScope(), "ws-1", time.Now())
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}
@@ -147,7 +156,7 @@ func TestFakeAnalysisStoreCompleteAndFailAreTerminalOnce(t *testing.T) {
 
 func TestFakeAnalysisStoreGetRejectsCrossScope(t *testing.T) {
 	store := newFakeAnalysisStore()
-	record, err := store.Create(context.Background(), testIdentity(), "objective", testScope(), "ws-1", time.Now())
+	record, err := store.Create(context.Background(), testIdentity(), testAnalysisLimits(), "objective", testScope(), "ws-1", time.Now())
 	if err != nil {
 		t.Fatalf("create failed: %v", err)
 	}

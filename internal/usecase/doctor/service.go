@@ -131,6 +131,14 @@ type ResultRetentionChecker interface {
 	CheckResultRetention(ctx context.Context, path string, ages domain.ResultRetentionAges, now time.Time) (domain.ResultRetentionHealth, error)
 }
 
+// ResultAnalysisChecker is the optional offline content-free check for the
+// TRD 07 v40 result analysis state (checkpoint 6). It reports bounded
+// counts and categories only; it never returns source content, an
+// objective, an excerpt, or a digest.
+type ResultAnalysisChecker interface {
+	CheckResultAnalysisState(ctx context.Context, path string) (domain.ResultAnalysisHealth, error)
+}
+
 type Dependencies struct {
 	ConfigPath      string
 	LoadConfig      func(path string) (config.Config, error)
@@ -144,6 +152,7 @@ type Dependencies struct {
 	Counter         CounterChecker
 	Knowledge       KnowledgeChecker
 	ResultRetention ResultRetentionChecker
+	ResultAnalysis  ResultAnalysisChecker
 }
 
 type Status string
@@ -539,6 +548,17 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 					detail += "; exported class is never scanned: its age anchor is a verified-publication event that does not exist yet"
 				}
 				report.pass("v2 result retention", detail)
+			}
+		}
+		if s.deps.ResultAnalysis != nil {
+			health, analysisErr := s.deps.ResultAnalysis.CheckResultAnalysisState(ctx, paths.DatabaseFile)
+			if analysisErr != nil {
+				report.fail("v40 result analysis", redactor.String(analysisErr.Error()),
+					"Run local-agent init --reset-state to rebuild the database, or restore a verified backup; do not hand-edit the analysis tables.", false)
+			} else {
+				report.pass("v40 result analysis", fmt.Sprintf(
+					"schema_version=%d step_queue_depth=%d expired_leases=%d non_terminal_analyses=%d incomplete_coverage_analyses=%d",
+					health.SchemaVersion, health.StepQueueDepth, health.ExpiredLeases, health.NonTerminalAnalyses, health.IncompleteCoverageAnalyses))
 			}
 		}
 		if s.deps.Artifacts != nil {
