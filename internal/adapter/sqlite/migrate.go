@@ -49,6 +49,7 @@ var migrations = map[int]migrationFunc{
 	38: migrateV38,
 	39: migrateV39,
 	40: migrateV40,
+	41: migrateV41,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -79,9 +80,12 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// scoped knowledge and never backfills legacy memory rows. V39 adds
 	// reconstructible retrieval state over V38 and seeds queues without
 	// copying authoritative content. V40 adds the additive objective-bound
-	// result analysis catalog over V39 and rewrites no existing row.
+	// result analysis catalog over V39 and rewrites no existing row. V41
+	// replaces the recoverable-result text scan with an indexed relation
+	// and backfills it from V40 state, aborting instead of rewriting a row
+	// if it cannot prove full coverage by count.
 	// Older schemas retain the existing explicit-reset requirement.
-	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 && current != 24 && current != 25 && current != 26 && current != 27 && current != 28 && current != 29 && current != 30 && current != 31 && current != 32 && current != 33 && current != 34 && current != 35 && current != 36 && current != 37 && current != 38 && current != 39 {
+	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 && current != 24 && current != 25 && current != 26 && current != 27 && current != 28 && current != 29 && current != 30 && current != 31 && current != 32 && current != 33 && current != 34 && current != 35 && current != 36 && current != 37 && current != 38 && current != 39 && current != 40 {
 		return &StateResetNeededError{Found: current, Supported: SchemaVersion}
 	}
 

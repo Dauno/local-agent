@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -335,10 +336,13 @@ func TestMigrationV40UpgradePreservesV39State(t *testing.T) {
 // whose SchemaVersion is lower than a database's PRAGMA user_version refuses
 // to open it. createSchemaAtVersion always leaves PRAGMA user_version at its
 // target version, so it can never itself produce a database claiming a
-// version above this binary's own SchemaVersion (40). To exercise the
-// concrete v40 case, a fully migrated v40 database is opened once to reach
-// SchemaVersion, then its user_version is bumped one past that (41) to
-// simulate a database written by a future binary.
+// version above this binary's own SchemaVersion. To exercise the concrete
+// case, a fully migrated database is opened once to reach SchemaVersion,
+// then its user_version is bumped one past that to simulate a database
+// written by a future binary. The simulated future version is deliberately
+// SchemaVersion+1, not a literal 41: this test predates v41 and must keep
+// exercising "one past current" as SchemaVersion moves, not stay pinned to
+// the value that was current when it was written.
 func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
 	path := t.TempDir() + "/future-v40.db"
 	fresh, err := Initialize(t.Context(), path)
@@ -349,11 +353,12 @@ func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	future := SchemaVersion + 1
 	raw, err := sql.Open("sqlite", mustDataSourceName(t, path))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := raw.ExecContext(t.Context(), `PRAGMA user_version = 41`); err != nil {
+	if _, err := raw.ExecContext(t.Context(), fmt.Sprintf(`PRAGMA user_version = %d`, future)); err != nil {
 		raw.Close()
 		t.Fatal(err)
 	}
@@ -364,11 +369,11 @@ func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
 		store.Close()
-		t.Fatal("OpenExisting succeeded for a v40-schema binary opening a database claiming v41")
+		t.Fatalf("OpenExisting succeeded for a SchemaVersion=%d binary opening a database claiming v%d", SchemaVersion, future)
 	}
 	var versionError *FutureSchemaError
-	if !errors.As(err, &versionError) || versionError.Found != 41 {
-		t.Fatalf("OpenExisting error = %v, want FutureSchemaError{Found: 41}", err)
+	if !errors.As(err, &versionError) || versionError.Found != future {
+		t.Fatalf("OpenExisting error = %v, want FutureSchemaError{Found: %d}", err, future)
 	}
 }
 

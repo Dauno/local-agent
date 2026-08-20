@@ -56,14 +56,28 @@ func (s *ContinuityStore) Commit(ctx context.Context, sessionID string, capsule 
 		return fmt.Errorf("encode continuity capsule: %w", err)
 	}
 	now := time.Now().UTC().Unix()
+
+	// The CAS write and the ref index rewrite must commit together: a
+	// capsule revision that drops a ref has to drop that ref's index row in
+	// the same transaction, or a crash between the two either protects a
+	// result forever (index row survives, safe but leaked) or exposes one
+	// (index row missing while the capsule still names it, unsafe). Both
+	// statements below run on the same tx, so a failure at either point
+	// rolls back both.
+	tx, err := s.store.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("%w: begin continuity commit", port.ErrContinuityUnavailable)
+	}
+	defer func() { _ = tx.Rollback() }()
+
 	var result sql.Result
 	if expectedRevision == 0 {
-		result, err = s.store.db.ExecContext(ctx, `INSERT INTO continuity_capsules
+		result, err = tx.ExecContext(ctx, `INSERT INTO continuity_capsules
 			(session_id, revision, capsule_json, source_digest, covered_through, created_at, updated_at)
 			VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(session_id) DO NOTHING`,
 			sessionID, capsule.Revision, string(raw), capsule.SourceDigest, capsule.CoveredThrough, now, now)
 	} else {
-		result, err = s.store.db.ExecContext(ctx, `UPDATE continuity_capsules
+		result, err = tx.ExecContext(ctx, `UPDATE continuity_capsules
 			SET revision = ?, capsule_json = ?, source_digest = ?, covered_through = ?, updated_at = ?
 			WHERE session_id = ? AND revision = ?`, capsule.Revision, string(raw), capsule.SourceDigest,
 			capsule.CoveredThrough, now, sessionID, expectedRevision)
@@ -77,6 +91,17 @@ func (s *ContinuityStore) Commit(ctx context.Context, sessionID string, capsule 
 	}
 	if affected != 1 {
 		return ErrContinuityCAS
+	}
+
+	// A capsule is rewritten in place, one row per session_id: replace,
+	// not append, so a ref this revision no longer names loses its index
+	// row instead of staying protected forever.
+	if err := replaceRecoverableResultRefs(ctx, tx, recoverableRefOwnerKindCapsule, sessionID, string(raw), now); err != nil {
+		return fmt.Errorf("%w: index continuity capsule refs", port.ErrContinuityUnavailable)
+	}
+
+	if err := tx.Commit(); err != nil {
+		return fmt.Errorf("%w: commit continuity capsule", port.ErrContinuityUnavailable)
 	}
 	return nil
 }
@@ -103,32 +128,4 @@ func validateContinuityCapsule(capsule domain.ContinuityCapsule) error {
 	return nil
 }
 
-func (s *ContinuityStore) IsRecoverableResultReferenced(ctx context.Context, ref string) (bool, error) {
-	if s == nil || s.store == nil || strings.TrimSpace(ref) == "" {
-		return false, errors.New("continuity reference check requires a store and reference")
-	}
-	rows, err := s.store.db.QueryContext(ctx, `SELECT capsule_json FROM continuity_capsules`)
-	if err != nil {
-		return false, fmt.Errorf("check continuity references: %w", err)
-	}
-	defer rows.Close()
-	for rows.Next() {
-		var raw string
-		if err := rows.Scan(&raw); err != nil {
-			return false, err
-		}
-		var capsule domain.ContinuityCapsule
-		if err := json.Unmarshal([]byte(raw), &capsule); err != nil {
-			return false, errors.New("check continuity references: invalid stored data")
-		}
-		for _, active := range capsule.ActiveResults {
-			if active.ResultRef == ref {
-				return true, nil
-			}
-		}
-	}
-	return false, rows.Err()
-}
-
 var _ port.ContinuityStore = (*ContinuityStore)(nil)
-var _ port.RecoverableResultReferenceChecker = (*ContinuityStore)(nil)
