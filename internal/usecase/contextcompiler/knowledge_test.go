@@ -3,6 +3,7 @@ package contextcompiler
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -394,6 +395,91 @@ func TestKnowledgeSelectionMetricsUseFinalSelection(t *testing.T) {
 	tokens, ok := recorder.find(domain.MetricKnowledgeRetrievalCardTokens)
 	if !ok || tokens.Value != float64(fullCost) {
 		t.Fatalf("card tokens metric = %#v found=%t want %d", tokens, ok, fullCost)
+	}
+}
+
+// weightedKnowledgeFrameCounter assigns a fixed authoritative weight to
+// each candidate document by its identity, independent of its rendered
+// rune size. This decouples the local rune-based planning model inside
+// FitKnowledgeFrameCards from the authoritative cost, which is what forces
+// the correction phase to test more than one candidate of the same final
+// selection length: exactly the condition FIND-120 needs to expose a
+// length-keyed cost map.
+type weightedKnowledgeFrameCounter struct {
+	weights map[string]int
+}
+
+func (c *weightedKnowledgeFrameCounter) CountContextFrame(_ context.Context, contents []domain.Content) (port.TokenCount, error) {
+	total := 0
+	for _, content := range contents {
+		for _, part := range content.Parts {
+			if !strings.HasPrefix(part.Text, "[KNOWLEDGE DATA]") {
+				continue
+			}
+			for id, weight := range c.weights {
+				if strings.Contains(part.Text, id) {
+					total += weight
+				}
+			}
+		}
+	}
+	return port.TokenCount{Tokens: total, Strategy: "provider"}, nil
+}
+
+// weightedDocumentCard builds a valid document card of the given word count,
+// identified by id, for weightedKnowledgeFrameCounter to key its weight on.
+func weightedDocumentCard(id string, words int) domain.KnowledgeFrameCard {
+	var b strings.Builder
+	for w := 0; w < words; w++ {
+		fmt.Fprintf(&b, "word%d ", w)
+	}
+	doc := domain.KnowledgeDocumentCard{
+		ID: id, Subject: "subject " + id,
+		ScopeKind: domain.KnowledgeScopeGlobal, Provenance: domain.KnowledgeProvenanceCurated,
+		Status: domain.KnowledgeDocumentActive, Content: strings.TrimSpace(b.String()), RetrievalReason: "lexical",
+	}
+	return domain.KnowledgeFrameCard{Kind: domain.KnowledgeRetrievalDocument, Document: &doc}
+}
+
+// TestKnowledgeFinalMetricMatchesExactSelectionNotLength covers FIND-120: a
+// length-keyed cost map records whichever selection of a given card count
+// was costed last, which is not necessarily the selection FitKnowledgeFrameCards
+// finally returns. With three candidate documents, a budget of 16, and
+// weights 20/8/39 keyed by identity, correction tests a lone card of weight
+// 8 (fits) and then a lone card of weight 20 (does not fit) before settling
+// on the weight-8 card: both attempts have length 1, so a map keyed by
+// length alone would report 20, not the real 8, for the final selection.
+func TestKnowledgeFinalMetricMatchesExactSelectionNotLength(t *testing.T) {
+	fits := "kdoc_" + strings.Repeat("1", 24)
+	rejectedSameLength := "kdoc_" + strings.Repeat("0", 24)
+	tooExpensive := "kdoc_" + strings.Repeat("2", 24)
+	cards := []domain.KnowledgeFrameCard{
+		weightedDocumentCard(rejectedSameLength, 111),
+		weightedDocumentCard(fits, 79),
+		weightedDocumentCard(tooExpensive, 211),
+	}
+	counter := &weightedKnowledgeFrameCounter{weights: map[string]int{rejectedSameLength: 20, fits: 8, tooExpensive: 39}}
+	recorder := &compilerMetricCapture{}
+	result, err := New(newFakeResultStore(), fakeTokenCounter{}, recorder).CompileFrame(t.Context(), domain.CompileRequest{
+		Contents: knowledgeContentsFixture(), ModelBudget: domain.RequestBudget{HardTokens: 10_000, TargetTokens: 10_000},
+		Knowledge: cards, KnowledgeBudgetTokens: 16,
+	}, counter)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.KnowledgeSelectedCount != 1 {
+		t.Fatalf("selected=%d, want exactly the weight-8 document", result.KnowledgeSelectedCount)
+	}
+	wantIdentity := "document:" + fits
+	if len(result.KnowledgeIdentities) != 1 || result.KnowledgeIdentities[0] != wantIdentity {
+		t.Fatalf("identities = %#v, want [%q]", result.KnowledgeIdentities, wantIdentity)
+	}
+	tokens, ok := recorder.find(domain.MetricKnowledgeRetrievalCardTokens)
+	if !ok {
+		t.Fatal("card tokens metric not recorded")
+	}
+	if tokens.Value != 8 {
+		t.Fatalf("card tokens metric = %v, want 8 (the exact returned selection's cost, not 20 from the rejected same-length candidate)", tokens.Value)
 	}
 }
 

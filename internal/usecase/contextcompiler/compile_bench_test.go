@@ -2,10 +2,11 @@ package contextcompiler
 
 // TRD 08 item 4 (docs/root-orchestrator-v2/hallazgos/worker-prompt-trd08-matriz-benchmarks.md):
 // how much of the per-turn cost is repeated frame serialization
-// (FitKnowledgeFrameCards calling the cost function once per candidate
-// card, each call re-serializing the whole candidate frame) versus deep
-// clone (domain.CloneContents, which recursively clones maps and runs
-// seven times per compilation per the TRD's Current Risks table).
+// (FitKnowledgeFrameCards calling the cost function a bounded number of
+// times, capped at knowledgeFrameCardMaxAuthoritativeCalls regardless of
+// candidate count, each call re-serializing the whole candidate frame)
+// versus deep clone (domain.CloneContents, which recursively clones maps
+// and runs seven times per compilation per the TRD's Current Risks table).
 //
 // Repo convention: no Test functions in this file, so `go test ./...` pays
 // only the compile cost. Reuses knowledgeFrameCard/knowledgeContentsFixture
@@ -71,10 +72,19 @@ func compileBenchContents(frameBytes int) []domain.Content {
 	}
 }
 
-// BenchmarkCompileKnowledgeSelection isolates FitKnowledgeFrameCards's cost
-// as N+1 full-candidate-frame serializations for N admitted cards, by
-// running a full Compile with a knowledge candidate pool and a frame
-// counter that reports its call count.
+// BenchmarkCompileKnowledgeSelection isolates the knowledge-selection cost
+// of a full Compile as a bounded number of full-candidate-frame
+// serializations, by running it with a knowledge candidate pool and a frame
+// counter that reports its call count. The reported call count includes the
+// base count and the final compile-wide count around FitKnowledgeFrameCards,
+// so its ceiling is 12, not the 10-call bound
+// knowledgeFrameCardMaxAuthoritativeCalls places on FitKnowledgeFrameCards
+// alone (that 10-call worst case is covered by
+// TestFitKnowledgeFrameCardsGateCBoundsAuthoritativeCalls, not by this
+// benchmark). In practice this benchmark measures 3 calls across all nine
+// frameBytes/cardCount combinations: the budget below is wide enough that
+// the raw local-scale plan admits every candidate on its first pass, so the
+// fast path is taken and neither correction nor refinement ever runs.
 func BenchmarkCompileKnowledgeSelection(b *testing.B) {
 	for _, frameBytes := range compileBenchFrameBytes {
 		for _, cardCount := range compileBenchCardCounts {
@@ -83,10 +93,12 @@ func BenchmarkCompileKnowledgeSelection(b *testing.B) {
 				contents := compileBenchContents(frameBytes)
 				cards := compileBenchKnowledgeCards(cardCount)
 				// A budget wide enough to admit every candidate card, so the
-				// selection loop always runs the full N+1 cost-function calls
-				// rather than stopping early on the first rejection. The
-				// counter's tokens are serialized bytes, not code points, so
-				// this stays deliberately generous.
+				// raw local-scale plan already fits everything on its first
+				// pass and the fast path is taken: 3 calls total (base, one
+				// plan verification, final), never the correction or
+				// refinement rounds. The counter's tokens are serialized
+				// bytes, not code points, so this stays deliberately
+				// generous.
 				const budget = 100_000_000
 
 				var frameCalls int
