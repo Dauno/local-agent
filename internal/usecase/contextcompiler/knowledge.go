@@ -79,16 +79,21 @@ func (c *Compiler) applyKnowledgeSelection(ctx context.Context, state *compilati
 		return nil
 	}
 	cost := c.knowledgeCardCostFunc(ctx, state)
-	// The final selected prefix cost is captured during fitting so the
-	// source token delta is recorded without recounting the frame again.
-	prefixCosts := make(map[int]int, len(valid))
+	// The final selected cost is captured during fitting so the source
+	// token delta is recorded without recounting the frame again. The key
+	// is the exact ordered selection's canonical render, not its length:
+	// correction and refinement can each measure a different selection of
+	// equal length, and a length-keyed map would let the later measurement
+	// silently overwrite the cost of the selection actually returned
+	// (FIND-120).
+	selectionCosts := make(map[string]int, len(valid))
 	fitCost := func(selected []domain.KnowledgeFrameCard) (int, error) {
 		delta, err := cost(selected)
 		if err != nil {
 			return 0, err
 		}
 		if delta >= 0 {
-			prefixCosts[len(selected)] = delta
+			selectionCosts[domain.RenderKnowledgeFrameCards(selected)] = delta
 		}
 		return delta, err
 	}
@@ -100,7 +105,7 @@ func (c *Compiler) applyKnowledgeSelection(ctx context.Context, state *compilati
 	}
 	state.knowledgeCards = selected
 	if len(selected) > 0 {
-		delta, ok := prefixCosts[len(selected)]
+		delta, ok := selectionCosts[domain.RenderKnowledgeFrameCards(selected)]
 		if !ok {
 			state.knowledgeCards = nil
 			return nil
@@ -117,42 +122,61 @@ func (c *Compiler) applyKnowledgeSelection(ctx context.Context, state *compilati
 // counter the envelope is the provider-shaped request; without one the
 // existing conservative request counter is the fallback. Any counting error
 // fails the selection closed, which omits all cards.
+//
+// DEC-08-4 describes an in-memory context cost cache for the knowledge cost
+// path this function builds; this checkpoint does not build one. The fitter
+// FitKnowledgeFrameCards calls into now spends a small, bounded number of
+// authoritative calls (Gate C, checkpoint 4 repair 2, FIND-116), not one per
+// candidate card as it did before checkpoint 4, so there is little left for
+// a cache to save here, and only on an exact repeat of the same rendered
+// content. The real per-turn
+// counting envelope (model, tool set, generation config) is assembled
+// per-invocation by the owning adapter
+// (internal/adapter/adkagent/context_compiler.go's providerFrameCounter,
+// built fresh per call from ToolsForInvocation) and is not reachable from
+// here without widening port.ContextFrameCounter with a profile identifier,
+// which is out of scope for this repair (FIND-118). Caching on content
+// digest alone, without that envelope in the key, lets two turns with the
+// same contents but a different tool set share a cache entry and hand the
+// second turn the first turn's number: with a delta-based cost function the
+// error does not cancel. Given the small, turn-scoped saving and the real
+// collision risk, this checkpoint removes the cache instead of building it
+// with an unreachable key component.
 func (c *Compiler) knowledgeCardCostFunc(ctx context.Context, state *compilationState) domain.KnowledgeFrameCardCostFunc {
 	base := assembleContents(state.summary, state.recent, state.capsule, state.active)
-	if state.frameCounter != nil {
-		baseCount, err := state.frameCounter.CountContextFrame(ctx, base)
-		if err != nil {
-			return func([]domain.KnowledgeFrameCard) (int, error) { return 0, err }
-		}
-		if baseCount.Tokens < 0 {
-			return func([]domain.KnowledgeFrameCard) (int, error) {
-				return 0, fmt.Errorf("frame counter returned a negative token count")
-			}
-		}
-		return func(selected []domain.KnowledgeFrameCard) (int, error) {
-			candidate := assembleContents(state.summary, state.recent, state.capsule, assembleActiveWithKnowledge(state.active, knowledgeBlockContents(selected)))
-			count, err := state.frameCounter.CountContextFrame(ctx, candidate)
-			if err != nil {
-				return 0, err
-			}
-			if count.Tokens < 0 {
-				return 0, fmt.Errorf("frame counter returned a negative token count")
-			}
-			return count.Tokens - baseCount.Tokens, nil
-		}
-	}
-	baseCount, err := c.countProjection(ctx, base, state.request.FixedRequestTokens, nil)
+	baseTokens, err := c.countKnowledgeCandidateTokens(ctx, state, base)
 	if err != nil {
 		return func([]domain.KnowledgeFrameCard) (int, error) { return 0, err }
 	}
 	return func(selected []domain.KnowledgeFrameCard) (int, error) {
 		candidate := assembleContents(state.summary, state.recent, state.capsule, assembleActiveWithKnowledge(state.active, knowledgeBlockContents(selected)))
-		count, err := c.countProjection(ctx, candidate, state.request.FixedRequestTokens, nil)
+		tokens, err := c.countKnowledgeCandidateTokens(ctx, state, candidate)
 		if err != nil {
 			return 0, err
 		}
-		return count.Tokens - baseCount.Tokens, nil
+		return tokens - baseTokens, nil
 	}
+}
+
+// countKnowledgeCandidateTokens performs one real count: the provider-shaped
+// frame count when a frame counter is available, otherwise the conservative
+// request-projection count.
+func (c *Compiler) countKnowledgeCandidateTokens(ctx context.Context, state *compilationState, contents []domain.Content) (int, error) {
+	if state.frameCounter != nil {
+		count, err := state.frameCounter.CountContextFrame(ctx, contents)
+		if err != nil {
+			return 0, err
+		}
+		if count.Tokens < 0 {
+			return 0, fmt.Errorf("frame counter returned a negative token count")
+		}
+		return count.Tokens, nil
+	}
+	count, err := c.countProjection(ctx, contents, state.request.FixedRequestTokens, nil)
+	if err != nil {
+		return 0, err
+	}
+	return count.Tokens, nil
 }
 
 // evictKnowledge removes the entire selected knowledge block as one unit

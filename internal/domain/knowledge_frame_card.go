@@ -3,6 +3,7 @@ package domain
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -402,13 +403,116 @@ func RenderKnowledgeFrameCards(cards []KnowledgeFrameCard) string {
 // unbudgeted frame.
 type KnowledgeFrameCardCostFunc func(selected []KnowledgeFrameCard) (int, error)
 
+// localKnowledgeFrameCardCost estimates, without ever calling the
+// authoritative cost function, the incremental rune cost of adding one more
+// card to a selection that already has selectedSoFar cards in it. It follows
+// the exact shape of RenderKnowledgeFrameCards: the preamble is paid once by
+// the first card, every card after the first also pays one separator, and
+// each card pays the rune cost of its own rendered text. This is the "local
+// and deterministic" per-card measure that plans a selection without a
+// frame-counter call per candidate.
+func localKnowledgeFrameCardCost(selectedSoFar int, card KnowledgeFrameCard) int {
+	n := utf8.RuneCountInString(card.Render())
+	if selectedSoFar == 0 {
+		// +1 for the trailing newline RenderKnowledgeFrameCards always adds.
+		return utf8.RuneCountInString(knowledgeFrameCardsPreamble) + n + 1
+	}
+	return utf8.RuneCountInString("\n---\n") + n
+}
+
+// planKnowledgeFrameCardSelection greedily selects whole cards under budget
+// using only the local cost model above. A card that does not fit is
+// skipped, not selected, and the loop keeps testing the cards that follow:
+// this is the same skip-and-continue contract FitKnowledgeFrameCards has
+// always had, so a large card can be skipped and a smaller later card can
+// still be admitted. It never calls the authoritative cost function.
+func planKnowledgeFrameCardSelection(cards []KnowledgeFrameCard, budget int) []KnowledgeFrameCard {
+	selected := make([]KnowledgeFrameCard, 0, len(cards))
+	total := 0
+	for _, card := range cards {
+		inc := localKnowledgeFrameCardCost(len(selected), card)
+		if total+inc > budget {
+			continue
+		}
+		selected = append(selected, card)
+		total += inc
+	}
+	return selected
+}
+
+// localKnowledgeFrameCardCardSelectionTotal sums the local model over an
+// already-selected slice, in the order given: the same shape
+// planKnowledgeFrameCardSelection accumulates while planning.
+func localKnowledgeFrameCardSelectionTotal(selected []KnowledgeFrameCard) int {
+	total := 0
+	for i, card := range selected {
+		total += localKnowledgeFrameCardCost(i, card)
+	}
+	return total
+}
+
+// knowledgeFrameCardMaxAuthoritativeCalls bounds the authoritative calls
+// FitKnowledgeFrameCards itself may spend to at most 10; this is the
+// constant Gate C (TestFitKnowledgeFrameCardsGateCBoundsAuthoritativeCalls)
+// measures directly against the public FitKnowledgeFrameCards entry point.
+// The benchmark-measured path (BenchmarkCompileKnowledgeSelection, the
+// caller's one base count before this function runs plus this function's
+// own calls plus the caller's one final count after) tops out at 12 for
+// that specific path. There is no global ceiling of 12 for every shape a
+// compilation can take: a general compilation can also count summary,
+// workstream, and total-pressure reduction steps, none of which this
+// constant bounds. DEC-08-5 amended the benchmark path's limit from 4 to 12
+// on 2026-08-20 (checkpoint 4 repair 2, FIND-116): the reviewer's decision
+// is that a constant that does not scale with card count is what Gate C
+// protects, and 4 was an estimate written before any implementation
+// existed, not a measurement. The 10 here is FitKnowledgeFrameCards's own
+// internal limit, leaving two of that amended 12 for the benchmark's base
+// and final counts. This headroom is spent on a per-card refinement pass
+// that closes most of the remaining gap to the unbounded oracle under a
+// non-proportional (word-like) counter.
+const knowledgeFrameCardMaxAuthoritativeCalls = 10
+
 // FitKnowledgeFrameCards selects whole frame cards under a cumulative budget
 // measured over the canonical combined rendering (shared preamble, labels,
 // and separators included). No card is cut in the middle; cards that do not
 // fit are omitted entirely. An unavailable exact counter fails the selection
 // closed. It mirrors the frozen claim-card fitting contract.
+//
+// Selection never calls the authoritative cost function once per candidate.
+// It spends at most knowledgeFrameCardMaxAuthoritativeCalls (10) calls,
+// constant regardless of how many candidate cards are offered, in three
+// phases:
+//
+//  1. Plan and verify: assume the authoritative counter scales with rune
+//     count (localKnowledgeFrameCardCost) and skip-and-continue select under
+//     the raw budget, with zero authoritative calls; if nothing fits at all
+//     under that raw assumption, substitute every candidate card instead of
+//     a single one, so the very first authoritative call already samples a
+//     representative mix rather than whichever card has the least preamble
+//     overhead. One call verifies this plan.
+//  2. Two correction rounds: each round learns a real-to-local scale from
+//     the previous round's own (local, real) pair and replans from the full
+//     candidate list at the budget that scale implies, then verifies once.
+//     The second round is calibrated on the first round's result, which is
+//     shaped much more like the eventual selection than a single card or
+//     the whole pool, so it is the least biased of the three data points.
+//  3. Per-card refinement: starting from the best selection verified safe
+//     so far, try adding the cheapest still-missing card (by the local
+//     model), verify, keep it if it fits, and repeat; stop after two
+//     additions in a row fail to fit, or when the call budget runs out.
+//     This is what closes the gap the two correction rounds alone cannot:
+//     they learn one global scale, but a real counter is not a single
+//     scale away from rune count, so the corrected plan is usually off by a
+//     handful of cards rather than by order of magnitude, and a handful of
+//     one-card, fully-verified steps is exactly what fixes that.
+//
+// Whichever selection is verified safe and best at the end is returned. If
+// nothing is ever verified safe, the result is empty. Gate C's amendment
+// does not touch this: selection never admits over budget under the
+// authoritative count, regardless of how the local model under- or
+// over-estimates the real counter.
 func FitKnowledgeFrameCards(cards []KnowledgeFrameCard, budget int, cost KnowledgeFrameCardCostFunc) ([]KnowledgeFrameCard, error) {
-	if budget <= 0 {
+	if budget <= 0 || len(cards) == 0 {
 		return nil, nil
 	}
 	if cost == nil {
@@ -416,17 +520,196 @@ func FitKnowledgeFrameCards(cards []KnowledgeFrameCard, budget int, cost Knowled
 			return utf8.RuneCountInString(RenderKnowledgeFrameCards(selected)), nil
 		}
 	}
-	selected := make([]KnowledgeFrameCard, 0, len(cards))
-	for _, card := range cards {
-		candidate := append(selected, card)
-		total, err := cost(candidate)
+	callsUsed := 0
+	countedCost := func(selected []KnowledgeFrameCard) (int, error) {
+		callsUsed++
+		return cost(selected)
+	}
+
+	plan1 := planKnowledgeFrameCardSelection(cards, budget)
+	verifySet := plan1
+	substituted := len(plan1) == 0
+	if substituted {
+		// A raw scale=1 assumption fit nothing at all: calibrate from every
+		// candidate card, not the single cheapest one. A lone cheap card is
+		// dominated by its own preamble overhead relative to its content,
+		// which biases the learned scale exactly where it is used most: a
+		// real multi-card selection has that overhead only once, not once
+		// per card.
+		verifySet = cards
+	}
+	total1, err := countedCost(verifySet)
+	if err != nil {
+		return nil, err
+	}
+	fits1 := total1 <= budget
+	safe := verifySet
+	safeTotal := total1
+	safeFits := fits1
+	if substituted && !fits1 {
+		// Every candidate card together does not fit; there is nothing
+		// verified-safe yet to fall back to besides empty.
+		safe, safeTotal, safeFits = nil, 0, true
+	}
+
+	// Nothing was left out of the raw plan, so a correction round could not
+	// gain anything by assuming a different scale, but refinement can still
+	// close a remainder the raw plan's own greedy order missed.
+	skipToRefine := (!substituted && fits1 && len(plan1) == len(cards)) || (substituted && fits1)
+	if !skipToRefine {
+		plan2, total2, err := knowledgeFrameCardCorrection(cards, verifySet, budget, total1, countedCost)
 		if err != nil {
 			return nil, err
 		}
-		if total > budget {
+		if plan2 != nil {
+			if total2 <= budget {
+				safe, safeTotal, safeFits = plan2, total2, true
+			}
+			if !(total2 <= budget && (len(plan2) == len(cards) || total2 == budget)) {
+				// One more round, calibrated on plan2 instead of the first
+				// probe: plan2's shape (card count, mix of overhead-heavy
+				// and content-heavy cards) is much closer to the eventual
+				// selection than a single card or the whole pool was, so
+				// this scale is the least biased of the three. The same
+				// correction step handles both directions: it shrinks when
+				// plan2 overshot and grows when plan2 still had headroom.
+				plan3, total3, err := knowledgeFrameCardCorrection(cards, plan2, budget, total2, countedCost)
+				if err != nil {
+					return nil, err
+				}
+				if plan3 != nil && total3 <= budget {
+					safe, safeTotal, safeFits = plan3, total3, true
+				}
+			}
+		}
+	}
+
+	if !safeFits {
+		return nil, nil
+	}
+	remaining := knowledgeFrameCardMaxAuthoritativeCalls - callsUsed
+	if remaining <= 0 || safe == nil {
+		return safe, nil
+	}
+	refined, _, err := refineKnowledgeFrameCardSelection(cards, safe, safeTotal, budget, remaining, countedCost)
+	if err != nil {
+		return nil, err
+	}
+	return refined, nil
+}
+
+// knowledgeFrameCardCorrection learns a real-to-local scale from the
+// (verifySet, total1) pair already verified by the caller and replans from
+// the full candidate list at the budget that scale implies. It calls cost
+// exactly once, to verify the replanned selection; it returns a nil plan
+// (with a zero total) when nothing can be safely inferred, and the caller
+// falls back to whatever it already had verified.
+func knowledgeFrameCardCorrection(cards, verifySet []KnowledgeFrameCard, budget, total1 int, cost KnowledgeFrameCardCostFunc) ([]KnowledgeFrameCard, int, error) {
+	localTotal := localKnowledgeFrameCardSelectionTotal(verifySet)
+	if localTotal <= 0 || total1 <= 0 {
+		return nil, 0, nil
+	}
+	correctedBudget := budget * localTotal / total1
+	if total1 > budget && correctedBudget >= localTotal {
+		// An overshoot must shed at least one card: integer rounding must
+		// not leave the corrected budget unchanged.
+		correctedBudget = localTotal - 1
+	}
+	if correctedBudget <= 0 {
+		return nil, 0, nil
+	}
+	plan2 := planKnowledgeFrameCardSelection(cards, correctedBudget)
+	if len(plan2) == 0 {
+		return nil, 0, nil
+	}
+	total2, err := cost(plan2)
+	if err != nil {
+		return nil, 0, err
+	}
+	return plan2, total2, nil
+}
+
+// knowledgeFrameCardKey identifies a card by its payload pointer, not by
+// its content-free Identity(): refinement below needs to tell candidate
+// cards apart even when Identity() is empty or repeated. FitKnowledgeFrameCards
+// is a public function that does not validate its input itself, so it
+// cannot assume every caller has already rejected cards with an empty or
+// colliding Identity() before calling it.
+func knowledgeFrameCardKey(c KnowledgeFrameCard) any {
+	switch {
+	case c.Claim != nil:
+		return c.Claim
+	case c.Preference != nil:
+		return c.Preference
+	case c.Document != nil:
+		return c.Document
+	default:
+		return c
+	}
+}
+
+// cardsInOriginalOrder rebuilds a candidate selection in the exact relative
+// order of cards, keeping only the members named by included. Every attempt
+// refinement verifies is built this way, so a selection this package returns
+// never reorders the cards it received (domain.CompileRequest.Knowledge
+// documents them as arriving already ordered): it may omit cards, but it
+// never places one out of its original relative position.
+func cardsInOriginalOrder(cards []KnowledgeFrameCard, included map[any]bool) []KnowledgeFrameCard {
+	ordered := make([]KnowledgeFrameCard, 0, len(included))
+	for _, c := range cards {
+		if included[knowledgeFrameCardKey(c)] {
+			ordered = append(ordered, c)
+		}
+	}
+	return ordered
+}
+
+// refineKnowledgeFrameCardSelection improves an already verified-safe
+// selection by trying to add the cheapest still-missing candidate cards,
+// one at a time, by the local rune-based model. Each attempt is verified
+// for real before being kept: this never returns a selection it has not
+// itself confirmed fits. It stops after two additions in a row fail to fit
+// (diminishing returns), or after maxCalls authoritative calls, whichever
+// comes first. Every attempt and the final result are assembled in the
+// original relative order of cards, never appended to the end of best: an
+// accepted card takes the position it had in cards, not the position it was
+// tried in.
+func refineKnowledgeFrameCardSelection(cards, best []KnowledgeFrameCard, bestTotal, budget, maxCalls int, cost KnowledgeFrameCardCostFunc) ([]KnowledgeFrameCard, int, error) {
+	included := make(map[any]bool, len(best))
+	for _, c := range best {
+		included[knowledgeFrameCardKey(c)] = true
+	}
+	missing := make([]KnowledgeFrameCard, 0, len(cards))
+	for _, c := range cards {
+		if !included[knowledgeFrameCardKey(c)] {
+			missing = append(missing, c)
+		}
+	}
+	sort.SliceStable(missing, func(i, j int) bool {
+		return localKnowledgeFrameCardCost(0, missing[i]) < localKnowledgeFrameCardCost(0, missing[j])
+	})
+
+	callsUsed := 0
+	consecutiveFailures := 0
+	for _, candidate := range missing {
+		if callsUsed >= maxCalls || consecutiveFailures >= 2 {
+			break
+		}
+		candidateKey := knowledgeFrameCardKey(candidate)
+		included[candidateKey] = true
+		attempt := cardsInOriginalOrder(cards, included)
+		total, err := cost(attempt)
+		callsUsed++
+		if err != nil {
+			return best, bestTotal, err
+		}
+		if total <= budget {
+			best, bestTotal = attempt, total
+			consecutiveFailures = 0
 			continue
 		}
-		selected = candidate
+		included[candidateKey] = false
+		consecutiveFailures++
 	}
-	return selected, nil
+	return best, bestTotal, nil
 }
