@@ -686,7 +686,17 @@ func (s *AdkSessionService) insertEvent(ctx context.Context, tx *sql.Tx, lm *loc
 		boolToInt(event.TurnComplete),
 		boolToInt(event.Interrupted),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if len(contentJSON) > 0 {
+		ownerID := adkEventRefOwnerID(lm.appName, lm.userID, lm.sessionID, event.ID)
+		if err := indexRecoverableResultRefs(ctx, tx, recoverableRefOwnerKindEvent, ownerID, string(contentJSON), now.Unix()); err != nil {
+			return fmt.Errorf("index recoverable result refs: %w", err)
+		}
+	}
+	return nil
 }
 
 // --- localSession implements adksession.Session ---

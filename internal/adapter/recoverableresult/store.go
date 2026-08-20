@@ -128,6 +128,17 @@ func (s *Store) Put(ctx context.Context, req port.PutResultRequest) (result doma
 		expiresAt = now.Add(1 * time.Second)
 	}
 
+	// Load-bearing order (FIND-115): this INSERT must commit before Put
+	// returns ref to the caller. The sqlite adapter's recoverable-reference
+	// index (internal/adapter/sqlite/recoverable_reference_index.go) only
+	// records a hex-64 window as a live ref when it matches an existing
+	// recoverable_results row at the moment content naming that ref is
+	// written. If a caller ever received ref before this row existed, an
+	// event or capsule commit racing ahead of this INSERT would find no
+	// match, index nothing, and retention would later delete a result that
+	// was in fact referenced: silent data loss, with no error and no test
+	// failing. Do not return ref, start a goroutine that inserts later, or
+	// otherwise let this statement become non-blocking.
 	_, err = s.db.ExecContext(ctx,
 		`INSERT INTO recoverable_results
 			(ref, actor, conversation_key, kind, storage_locator, size_bytes,
