@@ -45,6 +45,49 @@ func TestDetachedJobIsPersistedBeforeWorkerCompletesIt(t *testing.T) {
 	}
 }
 
+func TestJobAndNotificationWakesFollowDurableCommits(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "wake.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	jobWakes, notificationWakes := 0, 0
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute, PollInterval: time.Minute, Concurrency: 1, MaxAttempts: 1}, Dependencies{
+		Store: jobStore, Runtime: &fakeJobRuntime{}, JobWake: func() { jobWakes++ }, NotificationWake: func() { notificationWakes++ },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.Start(t.Context(), testRequest(domain.JobDetached))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if jobWakes != 1 {
+		t.Fatalf("job wake count = %d, want 1", jobWakes)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "wake-owner", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("ClaimNext() = %#v, %v", claimed, err)
+	}
+	if err := service.transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "done", Inline: true, ResultBytes: 4}, "", time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if notificationWakes != 1 {
+		t.Fatalf("notification wake count = %d, want 1", notificationWakes)
+	}
+
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Start(t.Context(), testRequest(domain.JobDetached)); err == nil {
+		t.Fatal("Start() after store close succeeded")
+	}
+	if jobWakes != 1 || notificationWakes != 1 {
+		t.Fatalf("failed write wake counts = jobs %d, notifications %d", jobWakes, notificationWakes)
+	}
+}
+
 func TestStopAdmissionDrainsRunningJobWithoutClaimingQueuedWork(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "shutdown.db"))
 	if err != nil {
@@ -176,7 +219,11 @@ func TestJobTotalTimeoutIsTerminalAndNeverRequeued(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
 	runtime := &fakeJobRuntime{block: make(chan struct{})}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	// LeaseTTL must clearly outlast waitForJob's poll deadline (3s) plus
+	// normal stall from parallel packages in the suite, so a slow CI run
+	// never lets the lease expire and race the total-timeout path under
+	// test with a requeue.
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: 10 * time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1061,7 +1108,7 @@ func TestStartAndWaitRejectsIncompleteForegroundIdentity(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
 			defer cancel()
 			go service.Run(ctx)
-			if _, err := service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, time.Second)); err == nil || !strings.Contains(err.Error(), testCase.wantCode) {
+			if _, err := service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, 5*time.Second)); err == nil || !strings.Contains(err.Error(), testCase.wantCode) {
 				t.Fatalf("error = %v, want code %s", err, testCase.wantCode)
 			}
 		})

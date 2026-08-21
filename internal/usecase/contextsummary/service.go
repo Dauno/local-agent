@@ -10,6 +10,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 const (
@@ -36,19 +37,23 @@ type Config struct {
 }
 
 type Dependencies struct {
-	Store      port.SummaryStore
-	Summarizer port.ConversationSummarizer
-	TurnSource TurnSource
-	Logger     port.Logger
+	Store        port.SummaryStore
+	Summarizer   port.ConversationSummarizer
+	TurnSource   TurnSource
+	Logger       port.Logger
+	Scheduler    *workpoll.Scheduler
+	ScheduleWake func()
 }
 
 type Service struct {
-	config     Config
-	store      port.SummaryStore
-	summarizer port.ConversationSummarizer
-	turnSource TurnSource
-	logger     port.Logger
-	metrics    *SummaryWorkerMetrics
+	config       Config
+	store        port.SummaryStore
+	summarizer   port.ConversationSummarizer
+	turnSource   TurnSource
+	logger       port.Logger
+	metrics      *SummaryWorkerMetrics
+	scheduler    *workpoll.Scheduler
+	scheduleWake func()
 }
 
 type SummaryWorkerMetrics struct {
@@ -77,7 +82,13 @@ func New(config Config, deps Dependencies) (*Service, error) {
 	if config.JobTimeout <= 0 {
 		config.JobTimeout = defaultJobTimeout
 	}
-	return &Service{config: config, store: deps.Store, summarizer: deps.Summarizer, turnSource: deps.TurnSource, logger: deps.Logger, metrics: &SummaryWorkerMetrics{}}, nil
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(config.WorkerInterval, workpoll.Options{})
+	}
+	if deps.ScheduleWake == nil {
+		deps.ScheduleWake = deps.Scheduler.Wake
+	}
+	return &Service{config: config, store: deps.Store, summarizer: deps.Summarizer, turnSource: deps.TurnSource, logger: deps.Logger, metrics: &SummaryWorkerMetrics{}, scheduler: deps.Scheduler, scheduleWake: deps.ScheduleWake}, nil
 }
 
 // ScheduleConversation finds the newest contiguous closed prefix and relies on
@@ -95,20 +106,28 @@ func (s *Service) ScheduleConversation(ctx context.Context, sessionIdentity stri
 		return nil
 	}
 	target := turns[len(turns)-s.config.RecentTurns-1].Ordinal
-	_, err = s.store.ScheduleSummaryJob(ctx, sessionIdentity, target, time.Now().UTC())
+	scheduled, err := s.store.ScheduleSummaryJob(ctx, sessionIdentity, target, time.Now().UTC())
+	if err == nil && scheduled {
+		s.scheduleWake()
+	}
 	return err
 }
 
 // RunOnce processes one durable job. A summary failure never escapes to the
 // foreground caller; the job is left retryable with bounded attempts.
 func (s *Service) RunOnce(ctx context.Context, now time.Time) error {
+	_, err := s.runOnce(ctx, now)
+	return err
+}
+
+func (s *Service) runOnce(ctx context.Context, now time.Time) (bool, error) {
 	jobCtx, cancel := context.WithTimeout(ctx, s.config.JobTimeout)
 	defer cancel()
 	job, err := s.store.ClaimSummaryJob(jobCtx, now)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.runClaimedJob(ctx, jobCtx, job)
+	return true, s.runClaimedJob(ctx, jobCtx, job)
 }
 
 func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.SummaryJob) error {
@@ -174,24 +193,20 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 		s.logger.Warn("summary CAS lost; job marked obsolete", "session_identity", job.SessionIdentity, "target_ordinal", job.TargetOrdinal)
 	}
 	if effectiveTarget < job.TargetOrdinal {
-		if _, err := s.store.ScheduleSummaryJob(context.WithoutCancel(persistCtx), job.SessionIdentity, job.TargetOrdinal, time.Now().UTC()); err != nil {
+		if scheduled, err := s.store.ScheduleSummaryJob(context.WithoutCancel(persistCtx), job.SessionIdentity, job.TargetOrdinal, time.Now().UTC()); err != nil {
 			return fmt.Errorf("schedule remaining summary batch: %w", err)
+		} else if scheduled {
+			s.scheduleWake()
 		}
 	}
 	return nil
 }
 
 func (s *Service) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.config.WorkerInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			_ = s.RunOnce(ctx, now)
-		}
-	}
+	s.scheduler.Run(ctx, nil, func() bool {
+		worked, _ := s.runOnce(ctx, time.Now().UTC())
+		return worked
+	})
 }
 
 func (s *Service) retry(ctx context.Context, job port.SummaryJob, cause error) error {

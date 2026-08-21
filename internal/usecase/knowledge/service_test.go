@@ -392,6 +392,40 @@ func TestNewServiceValidation(t *testing.T) {
 	}
 }
 
+func TestCommittedKnowledgeMutationWakesAllConsumers(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		storeErr error
+		want     int
+	}{
+		{name: "committed", want: 1},
+		{name: "failed", storeErr: errors.New("write failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := newFakeKnowledgeStore()
+			store.createErr = test.storeErr
+			counts := make([]int, 3)
+			wakes := make([]func(), len(counts))
+			for i := range counts {
+				wakes[i] = func() { counts[i]++ }
+			}
+			service, err := New(Config{Enabled: true}, Dependencies{Store: store, Coordinator: newCountingCoordinator(), Wakes: wakes})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _, gotErr := service.Execute(t.Context(), testBinding(), "evt-wake-"+test.name, rememberText("wake-subject"))
+			if (gotErr != nil) != (test.storeErr != nil) {
+				t.Fatalf("Execute() error = %v", gotErr)
+			}
+			for i, count := range counts {
+				if count != test.want {
+					t.Fatalf("consumer %d wake count = %d, want %d", i, count, test.want)
+				}
+			}
+		})
+	}
+}
+
 func TestParseHumanCommandStrictness(t *testing.T) {
 	if _, matched, err := ParseHumanCommand("not a knowledge command"); matched || err != nil {
 		t.Fatalf("non-command text matched = %v, err = %v", matched, err)

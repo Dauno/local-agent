@@ -35,6 +35,7 @@ type ServiceDependencies struct {
 	Evidence port.AnalysisEvidenceStore
 	Payloads port.AnalysisStepPayloadStore
 	Analyzer port.ResultAnalyzer
+	Wake     func()
 }
 
 // Service is the host-validated surface TRD 07's Tool Surface section
@@ -102,6 +103,9 @@ func (s *Service) RequestAnalysis(ctx context.Context, resultID string, scope do
 	record, err := s.deps.Analyses.Create(ctx, analysisIdentity, s.cfg.Limits, normalizedObjective, scope, workstreamID, now)
 	if err != nil {
 		return RequestAnalysisResult{}, err
+	}
+	if s.deps.Wake != nil {
+		s.deps.Wake()
 	}
 	return RequestAnalysisResult{AnalysisID: record.AnalysisID, State: record.State}, nil
 }

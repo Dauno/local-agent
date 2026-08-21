@@ -791,3 +791,30 @@ func TestKnowledgeRetrievalDoctorDeploymentEvidence(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestKnowledgeQueueRepairWakesOnlyAfterCommittedEnqueue(t *testing.T) {
+	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "queue-wake.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	wakes := 0
+	queue := wakingKnowledgeQueue{
+		KnowledgeQueueStore: adaptersqlite.NewKnowledgeLexicalQueueStore(store),
+		wake:                func() { wakes++ },
+	}
+	if _, err := queue.Enqueue(t.Context(), domain.KnowledgeRetrievalClaim, "claim-wake"); err != nil {
+		t.Fatal(err)
+	}
+	if wakes != 1 {
+		t.Fatalf("queue wake count = %d, want 1", wakes)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := queue.Enqueue(t.Context(), domain.KnowledgeRetrievalClaim, "claim-failed"); err == nil {
+		t.Fatal("Enqueue() after store close succeeded")
+	}
+	if wakes != 1 {
+		t.Fatalf("failed enqueue wake count = %d, want 1", wakes)
+	}
+}

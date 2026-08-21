@@ -11,6 +11,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 // ProjectionWorkerConfig bounds the durable knowledge projection worker.
@@ -33,6 +34,7 @@ type ProjectionWorkerDependencies struct {
 	Logger    port.Logger
 	Sanitize  func(string) string
 	Enabled   func() bool
+	Scheduler *workpoll.Scheduler
 }
 
 // ProjectionWorker polls the knowledge projection outbox, coalesces every
@@ -50,6 +52,7 @@ type ProjectionWorker struct {
 	logger    port.Logger
 	sanitize  func(string) string
 	enabled   func() bool
+	scheduler *workpoll.Scheduler
 }
 
 const (
@@ -78,9 +81,12 @@ func NewProjectionWorker(cfg ProjectionWorkerConfig, deps ProjectionWorkerDepend
 	if deps.Sanitize == nil {
 		deps.Sanitize = func(value string) string { return value }
 	}
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(cfg.Interval, workpoll.Options{})
+	}
 	return &ProjectionWorker{
 		cfg: cfg, store: deps.Store, reader: deps.Reader, projector: deps.Projector,
-		clock: deps.Clock, logger: deps.Logger, sanitize: deps.Sanitize, enabled: deps.Enabled,
+		clock: deps.Clock, logger: deps.Logger, sanitize: deps.Sanitize, enabled: deps.Enabled, scheduler: deps.Scheduler,
 	}, nil
 }
 
@@ -124,19 +130,7 @@ func (w *ProjectionWorker) runWorker(ctx context.Context) {
 	// forgotten content from an interrupted cleanup never survives a
 	// restart. It is mutex-serialized with promotions by the projector.
 	w.recover(ctx)
-	ticker := time.NewTicker(w.cfg.Interval)
-	defer ticker.Stop()
-	// Immediate processing at startup drains whatever the previous run left
-	// pending before the first poll tick.
-	w.tick(ctx)
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			w.tick(ctx)
-		}
-	}
+	w.scheduler.Run(ctx, nil, func() bool { return w.tick(ctx) })
 }
 
 // recover runs projector recovery once at startup. A failure is logged
@@ -151,12 +145,12 @@ func (w *ProjectionWorker) recover(ctx context.Context) {
 	}
 }
 
-func (w *ProjectionWorker) tick(ctx context.Context) {
+func (w *ProjectionWorker) tick(ctx context.Context) bool {
 	if ctx.Err() != nil {
-		return
+		return false
 	}
 	if !w.enabledNow() {
-		return
+		return false
 	}
 	if w.cfg.RetentionDays > 0 {
 		cutoff := w.clock.Now().UTC().AddDate(0, 0, -w.cfg.RetentionDays)
@@ -164,25 +158,27 @@ func (w *ProjectionWorker) tick(ctx context.Context) {
 			w.logger.Warn("knowledge projection cleanup failed", "error", w.sanitize(err.Error()))
 		}
 	}
-	w.processBatches(ctx)
+	return w.processBatches(ctx)
 }
 
 // processBatches claims and renders due batches until none remain, so a
 // mutation committed during a render leaves a pending trigger that forces a
 // second snapshot in the same run.
-func (w *ProjectionWorker) processBatches(ctx context.Context) {
+func (w *ProjectionWorker) processBatches(ctx context.Context) bool {
+	found := false
 	for {
 		if ctx.Err() != nil {
-			return
+			return found
 		}
 		items, err := w.store.ClaimProjectionBatch(ctx)
 		if err != nil {
 			w.logger.Error("knowledge projection batch claim failed", "error", w.sanitize(err.Error()))
-			return
+			return found
 		}
 		if len(items) == 0 {
-			return
+			return found
 		}
+		found = true
 		w.processBatch(ctx, items)
 	}
 }
