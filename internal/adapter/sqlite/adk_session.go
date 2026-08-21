@@ -378,11 +378,40 @@ func (s *AdkSessionService) Delete(ctx context.Context, req *adksession.DeleteRe
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return fmt.Errorf("app_name, user_id, session_id are required")
 	}
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// The adk_sessions delete below cascades adk_events away, but
+	// recoverable_result_refs has no foreign key to adk_events, so that
+	// cascade alone would leave dangling adk_event owner rows (FIND-127).
+	// This delete must run first, in the same transaction, while the
+	// session's events are still visible, and it rebuilds each candidate's
+	// owner_id with the same expression adkEventRefOwnerID uses so the
+	// comparison is exact rather than a prefix match.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM recoverable_result_refs
+		 WHERE owner_kind = ?
+		   AND owner_id IN (
+		     SELECT app_name || char(31) || user_id || char(31) || session_id || char(31) || id
+		     FROM adk_events
+		     WHERE app_name = ? AND user_id = ? AND session_id = ?
+		   )`,
+		recoverableRefOwnerKindEvent, req.AppName, req.UserID, req.SessionID,
+	); err != nil {
+		return fmt.Errorf("delete recoverable result refs for session: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`,
 		req.AppName, req.UserID, req.SessionID,
-	)
-	return err
+	); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 func (s *AdkSessionService) AppendEvent(ctx context.Context, curSession adksession.Session, event *adksession.Event) error {

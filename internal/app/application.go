@@ -114,6 +114,8 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		Knowledge:       knowledgeChecker{},
 		ResultRetention: resultRetentionChecker{},
 		ResultAnalysis:  resultAnalysisChecker{},
+		SQLiteRuntime:   sqliteRuntimeChecker{},
+		RecoverableRefs: recoverableReferenceChecker{},
 	}
 	if includeLive {
 		dependencies.Live = liveChecker{}
@@ -368,6 +370,32 @@ func (resultAnalysisChecker) CheckResultAnalysisState(ctx context.Context, path 
 	}
 	defer store.Close()
 	return store.CheckResultAnalysisState(ctx)
+}
+
+// sqliteRuntimeChecker and recoverableReferenceChecker open the configured
+// database read-only (TRD 08 checkpoint 6): unlike databaseChecker, which
+// migrates via OpenExisting (FIND-109, owned by TRD 09), an offline
+// inspection check must never change database state as a side effect.
+type sqliteRuntimeChecker struct{}
+
+func (sqliteRuntimeChecker) CheckSQLiteRuntime(ctx context.Context, path string) (domain.SQLiteRuntimeHealth, error) {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.SQLiteRuntimeHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckSQLiteRuntime(ctx)
+}
+
+type recoverableReferenceChecker struct{}
+
+func (recoverableReferenceChecker) CheckRecoverableReferenceHealth(ctx context.Context, path string) (domain.RecoverableReferenceHealth, error) {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.RecoverableReferenceHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckRecoverableReferenceHealth(ctx)
 }
 
 func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
