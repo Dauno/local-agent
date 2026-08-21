@@ -3,6 +3,8 @@ package sqlite
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
+	"fmt"
 )
 
 // Owner kinds for recoverable_result_refs (TRD 08 checkpoint 3). The relation
@@ -80,15 +82,26 @@ func isLowerHexByte(b byte) bool {
 // stored: it can never be the answer to a later IsRecoverableResultReferenced
 // lookup (which only ever asks about refs recoverableresult.Store still
 // holds), so storing it would only grow the table for nothing.
+//
+// This issues exactly one INSERT statement no matter how many windows the
+// text contains: the extracted windows are passed as one JSON array bind
+// parameter, and json_each unpacks them inside the same statement. A prior
+// version called ExecContext once per window, which made one owner write
+// cost thousands of statements against a long hex run (FIND-132).
 func indexRecoverableResultRefs(ctx context.Context, exec sqlExecer, ownerKind, ownerID, text string, createdAt int64) error {
-	for _, ref := range extractHex64Windows(text) {
-		if _, err := exec.ExecContext(ctx, `INSERT OR IGNORE INTO recoverable_result_refs (ref, owner_kind, owner_id, created_at)
-			SELECT ?, ?, ?, ? WHERE EXISTS (SELECT 1 FROM recoverable_results WHERE ref = ?)`,
-			ref, ownerKind, ownerID, createdAt, ref); err != nil {
-			return err
-		}
+	windows := extractHex64Windows(text)
+	if len(windows) == 0 {
+		return nil
 	}
-	return nil
+	payload, err := json.Marshal(windows)
+	if err != nil {
+		return fmt.Errorf("encode recoverable ref windows: %w", err)
+	}
+	_, err = exec.ExecContext(ctx, `INSERT OR IGNORE INTO recoverable_result_refs (ref, owner_kind, owner_id, created_at)
+		SELECT w.value, ?, ?, ? FROM json_each(?) AS w
+		WHERE EXISTS (SELECT 1 FROM recoverable_results WHERE ref = w.value)`,
+		ownerKind, ownerID, createdAt, string(payload))
+	return err
 }
 
 // replaceRecoverableResultRefs re-derives the index rows for one owner from
