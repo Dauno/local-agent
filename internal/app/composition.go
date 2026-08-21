@@ -660,6 +660,17 @@ func (c *runtimeComposition) ActivationHealth(ctx context.Context) (domain.Exter
 	return c.activationWorker.SnapshotHealth(ctx, time.Now().UTC())
 }
 
+// bindAndCleanupRecoverableResults binds the recoverable-result store's
+// reference checker to the SQLite-backed index before the first cleanup pass
+// runs, so the two calls can never land in composition separately. A test
+// that only exercises DeleteExpired or IsRecoverableResultReferenced on
+// their own cannot catch a build that drops SetReferenceChecker; a test that
+// calls this same function can (TRD 08 checkpoint 6).
+func bindAndCleanupRecoverableResults(ctx context.Context, store *adaptersqlite.Store, resultStore *recoverableresult.Store, cutoff time.Time, batchSize int) (int, error) {
+	resultStore.SetReferenceChecker(store)
+	return resultStore.DeleteExpired(ctx, cutoff, batchSize)
+}
+
 func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (*runtimeComposition, error) {
 	cfg, paths := setup.cfg, setup.paths
 	defs := setup.defs
@@ -709,8 +720,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	if !models.rootIsAgentCLI && features != nil && features.RecoverableResultsEnabled {
 		resultsCfg := cfg.Context.RecoverableResults
 		resultStore = recoverableresult.NewStore(infra.store.DB(), filepath.Join(paths.StateDir, "recoverable-results"), resultsCfg.MaxResultBytes, resultsCfg.ChunkMaxBytes, resultsCfg.RetentionDays, resultsCfg.CleanupBatchSize, models.metrics)
-		resultStore.SetReferenceChecker(infra.store)
-		if _, cleanupErr := resultStore.DeleteExpired(ctx, time.Now().UTC(), resultsCfg.CleanupBatchSize); cleanupErr != nil {
+		if _, cleanupErr := bindAndCleanupRecoverableResults(ctx, infra.store, resultStore, time.Now().UTC(), resultsCfg.CleanupBatchSize); cleanupErr != nil {
 			return nil, models.redactor.Error(cleanupErr)
 		}
 	}

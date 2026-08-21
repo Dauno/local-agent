@@ -22,6 +22,17 @@ const (
 	defaultAuxiliaryModelTimeoutSeconds = 120
 )
 
+// This release's v41 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
+// checkpoint 6). A database or connection outside this contract fails
+// doctor with actionable remediation rather than being silently accepted.
+const (
+	expectedSQLiteSchemaVersion      = 41
+	expectedSQLiteJournalMode        = "wal"
+	expectedSQLiteSynchronous        = 2 // PRAGMA synchronous FULL
+	expectedSQLiteBusyTimeoutMillis  = 5000
+	expectedSQLiteMaxOpenConnections = 4
+)
+
 type SecretResolver interface {
 	Resolve(keys ...string) (map[string]string, error)
 }
@@ -139,6 +150,20 @@ type ResultAnalysisChecker interface {
 	CheckResultAnalysisState(ctx context.Context, path string) (domain.ResultAnalysisHealth, error)
 }
 
+// SQLiteRuntimeChecker is the optional offline check for the TRD 08
+// connection model (checkpoint 6): pragmas and pool size.
+type SQLiteRuntimeChecker interface {
+	CheckSQLiteRuntime(ctx context.Context, path string) (domain.SQLiteRuntimeHealth, error)
+}
+
+// RecoverableReferenceChecker is the optional offline, content-free check
+// for the recoverable_result_refs relation (TRD 08 checkpoint 6). It
+// reports bounded counts and categories only; it never returns a ref, an
+// owner ID, or a session ID.
+type RecoverableReferenceChecker interface {
+	CheckRecoverableReferenceHealth(ctx context.Context, path string) (domain.RecoverableReferenceHealth, error)
+}
+
 type Dependencies struct {
 	ConfigPath      string
 	LoadConfig      func(path string) (config.Config, error)
@@ -153,6 +178,8 @@ type Dependencies struct {
 	Knowledge       KnowledgeChecker
 	ResultRetention ResultRetentionChecker
 	ResultAnalysis  ResultAnalysisChecker
+	SQLiteRuntime   SQLiteRuntimeChecker
+	RecoverableRefs RecoverableReferenceChecker
 }
 
 type Status string
@@ -561,6 +588,35 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 					health.SchemaVersion, health.StepQueueDepth, health.ExpiredLeases, health.NonTerminalAnalyses, health.IncompleteCoverageAnalyses))
 			}
 		}
+		if s.deps.SQLiteRuntime != nil {
+			health, runtimeErr := s.deps.SQLiteRuntime.CheckSQLiteRuntime(ctx, paths.DatabaseFile)
+			if runtimeErr != nil {
+				report.fail("SQLite connection model", redactDoctorPathError(redactor, runtimeErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
+			} else if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
+				report.fail("SQLite connection model", strings.Join(problems, "; "),
+					"Restore the v41 connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
+			} else {
+				report.pass("SQLite connection model", fmt.Sprintf(
+					"schema_version=%d journal_mode=%s synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
+					health.SchemaVersion, health.JournalMode, health.Synchronous, health.BusyTimeoutMillis, health.ForeignKeys, health.MaxOpenConnections))
+			}
+		}
+		if s.deps.RecoverableRefs != nil {
+			health, refErr := s.deps.RecoverableRefs.CheckRecoverableReferenceHealth(ctx, paths.DatabaseFile)
+			switch {
+			case refErr != nil:
+				report.fail("recoverable reference index", redactDoctorPathError(redactor, refErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
+			case health.DanglingRefs > 0 || health.DanglingOwners > 0:
+				report.fail("recoverable reference index", fmt.Sprintf(
+					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d dangling_refs=%d dangling_owners=%d",
+					health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners, health.DanglingRefs, health.DanglingOwners),
+					"Stop retention cleanup now. Restore a verified backup, or rebuild state through the repair path TRD 09 decides. Do not hand-edit recoverable_result_refs or its owner tables.", false)
+			default:
+				report.pass("recoverable reference index", fmt.Sprintf(
+					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d",
+					health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners))
+			}
+		}
 		if s.deps.Artifacts != nil {
 			if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ACP.MaxResultArtifactBytes); err != nil {
 				report.fail("ACP artifacts", redactor.String(err.Error()), "Fix the configured artifact directory and permissions; do not place secrets in it.", false)
@@ -885,6 +941,46 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		}
 	}
 	return report
+}
+
+// redactDoctorPathError strips the configured database path out of an error
+// message before it reaches Result.Detail, then applies the secret
+// redactor (FIND-129). OpenReadOnly's own open errors include the exact
+// path they were given, and secure.Redactor only strips known credential
+// shapes, not filesystem paths, so this check-specific replacement is
+// required in addition to the redactor. It covers only the two checkpoint-6
+// results; every other doctor result keeps its existing error text.
+func redactDoctorPathError(redactor secure.Redactor, message, databasePath string) string {
+	if strings.TrimSpace(databasePath) != "" {
+		message = strings.ReplaceAll(message, databasePath, "<database path>")
+	}
+	return redactor.String(message)
+}
+
+// validateSQLiteRuntimeContract compares an observed connection model
+// against this release's v41 contract and returns one problem string per
+// mismatch, or nil when the connection model is healthy.
+func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
+	var problems []string
+	if health.SchemaVersion != expectedSQLiteSchemaVersion {
+		problems = append(problems, fmt.Sprintf("user_version=%d, want %d", health.SchemaVersion, expectedSQLiteSchemaVersion))
+	}
+	if health.JournalMode != expectedSQLiteJournalMode {
+		problems = append(problems, fmt.Sprintf("journal_mode=%s, want %s", health.JournalMode, expectedSQLiteJournalMode))
+	}
+	if health.Synchronous != expectedSQLiteSynchronous {
+		problems = append(problems, fmt.Sprintf("synchronous=%d, want %d (FULL)", health.Synchronous, expectedSQLiteSynchronous))
+	}
+	if health.BusyTimeoutMillis != expectedSQLiteBusyTimeoutMillis {
+		problems = append(problems, fmt.Sprintf("busy_timeout_ms=%d, want %d", health.BusyTimeoutMillis, expectedSQLiteBusyTimeoutMillis))
+	}
+	if !health.ForeignKeys {
+		problems = append(problems, "foreign_keys=off, want on")
+	}
+	if health.MaxOpenConnections != expectedSQLiteMaxOpenConnections {
+		problems = append(problems, fmt.Sprintf("max_open_connections=%d, want %d", health.MaxOpenConnections, expectedSQLiteMaxOpenConnections))
+	}
+	return problems
 }
 
 func checkTimeout(ctx context.Context, seconds int) (context.Context, context.CancelFunc) {

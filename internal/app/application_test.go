@@ -11,6 +11,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/app"
 	"github.com/Dauno/slack-local-agent/internal/cli"
 	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
 
 func TestRealCLISetupDoctorManifestAndVersion(t *testing.T) {
@@ -104,6 +105,68 @@ func TestRealCLISetupDoctorManifestAndVersion(t *testing.T) {
 	if code := cli.Execute(t.Context(), command, []string{"version"}, &stderr); code != 0 || !strings.Contains(output.String(), "go1.25") {
 		t.Fatalf("version exit=%d output=%s", code, output.String())
 	}
+}
+
+// TestApplicationDoctorExposesSQLiteRuntimeAndRecoverableReferenceHealth
+// runs Application.Doctor(ctx, false) itself, through the real composition
+// wired in application.go, over a temporary initialized project. It does
+// not inspect doctor.Dependencies as a struct: it observes the two new
+// checkpoint-6 results in the returned report (TRD 08 checkpoint 6, item 2).
+func TestApplicationDoctorExposesSQLiteRuntimeAndRecoverableReferenceHealth(t *testing.T) {
+	clearEnvironment(t, "DEEPSEEK_API_KEY", "SLACK_BOT_TOKEN", "SLACK_APP_TOKEN")
+	rootDir := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootDir, ".git"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rootDir, ".git", "HEAD"), []byte("ref: refs/heads/main\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	application, err := app.New(rootDir, &bytes.Buffer{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	input := strings.NewReader("\n\n\nxoxb-integration-token\nxapp-integration-token\nU12345678\n\n\n\n\nintegration-model-key\ny\n")
+	var output, stderr bytes.Buffer
+	command, err := cli.NewRoot(application, cli.Streams{In: input, Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := cli.Execute(t.Context(), command, []string{"init"}, &stderr); code != 0 {
+		t.Fatalf("init exit=%d stderr=%s output=%s", code, stderr.String(), output.String())
+	}
+
+	report, err := application.Doctor(t.Context(), false)
+	if err != nil {
+		t.Fatalf("Doctor() = %v", err)
+	}
+
+	runtimeResult, ok := findDoctorResult(report, "SQLite connection model")
+	if !ok || runtimeResult.Status != doctor.StatusPass {
+		t.Fatalf("SQLite connection model result = %#v", runtimeResult)
+	}
+	for _, want := range []string{"schema_version=", "journal_mode=wal", "synchronous=2", "busy_timeout_ms=5000", "foreign_keys=true", "max_open_connections=4"} {
+		if !strings.Contains(runtimeResult.Detail, want) {
+			t.Fatalf("SQLite connection model detail %q missing %q", runtimeResult.Detail, want)
+		}
+	}
+
+	referenceResult, ok := findDoctorResult(report, "recoverable reference index")
+	if !ok || referenceResult.Status != doctor.StatusPass {
+		t.Fatalf("recoverable reference index result = %#v", referenceResult)
+	}
+	if !strings.Contains(referenceResult.Detail, "total_ref_rows=") {
+		t.Fatalf("recoverable reference index detail = %q", referenceResult.Detail)
+	}
+}
+
+func findDoctorResult(report doctor.Report, name string) (doctor.Result, bool) {
+	for _, result := range report.Results {
+		if result.Name == name {
+			return result, true
+		}
+	}
+	return doctor.Result{}, false
 }
 
 func TestRunDoesNotBootstrapMissingProject(t *testing.T) {
