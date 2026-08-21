@@ -129,9 +129,39 @@ func (s *Store) ScheduleSummaryJob(ctx context.Context, sessionIdentity string, 
 		WHERE session_identity = ? AND status IN ('pending', 'failed')`, sessionIdentity); err != nil {
 		return false, fmt.Errorf("coalesce ADK context summary jobs: %w", err)
 	}
+	insertTarget := targetOrdinal
 	result, err := tx.ExecContext(ctx, `
 		INSERT INTO adk_context_summary_jobs (session_identity, target_ordinal, status, attempts, next_attempt, created_at, updated_at)
-		VALUES (?, ?, 'pending', 0, ?, ?, ?)`, sessionIdentity, targetOrdinal, nextAttempt.UnixMicro(), now, now)
+		VALUES (?, ?, 'pending', 0, ?, ?, ?)`, sessionIdentity, insertTarget, nextAttempt.UnixMicro(), now, now)
+	if err != nil && domain.IsSummaryDiscoveryTarget(targetOrdinal) && isUniqueConstraint(err) {
+		// The fixed discovery marker collided with a row this session's
+		// jobs table already retains at that exact identity: a still-running
+		// discovery job, or a completed one the coalescing delete above never
+		// touches (FIND-134). Claim the next marker above every target this
+		// session has ever used instead of failing or dropping the request:
+		// that marker cannot collide with anything on record, and it is
+		// still a discovery-range value, so the worker still resolves it as
+		// a discovery job.
+		var maxUsed int64
+		if scanErr := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(target_ordinal), 0)
+			FROM adk_context_summary_jobs WHERE session_identity = ?`, sessionIdentity).Scan(&maxUsed); scanErr != nil {
+			return false, fmt.Errorf("inspect ADK context summary discovery markers: %w", scanErr)
+		}
+		insertTarget, markerErr := domain.NextSummaryDiscoveryMarker(maxUsed)
+		if markerErr != nil {
+			// maxUsed already sits at math.MaxInt64 (corrupt or manually
+			// seeded data): fail explicitly instead of letting insertTarget
+			// wrap to a negative value, which would either violate the
+			// target_ordinal > 0 CHECK constraint or, worse, collide with a
+			// low, concrete ordinal (FIND-135). tx.Rollback() (deferred)
+			// undoes the coalescing delete above, so this leaves every prior
+			// row exactly as it was.
+			return false, fmt.Errorf("schedule ADK context summary discovery: %w", markerErr)
+		}
+		result, err = tx.ExecContext(ctx, `
+			INSERT INTO adk_context_summary_jobs (session_identity, target_ordinal, status, attempts, next_attempt, created_at, updated_at)
+			VALUES (?, ?, 'pending', 0, ?, ?, ?)`, sessionIdentity, insertTarget, nextAttempt.UnixMicro(), now, now)
+	}
 	if err != nil {
 		return false, fmt.Errorf("schedule ADK context summary: %w", err)
 	}

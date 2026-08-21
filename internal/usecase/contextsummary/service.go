@@ -91,26 +91,35 @@ func New(config Config, deps Dependencies) (*Service, error) {
 	return &Service{config: config, store: deps.Store, summarizer: deps.Summarizer, turnSource: deps.TurnSource, logger: deps.Logger, metrics: &SummaryWorkerMetrics{}, scheduler: deps.Scheduler, scheduleWake: deps.ScheduleWake}, nil
 }
 
-// ScheduleConversation finds the newest contiguous closed prefix and relies on
-// the store's session/target uniqueness to coalesce repeated successful turns.
+// ScheduleConversation schedules a discovery job and relies on the store's
+// session/target uniqueness to coalesce repeated successful turns. It
+// performs no event-history read of its own: finding the newest contiguous
+// closed prefix requires reading complete session history (via ClosedTurns),
+// and doing that on every successful foreground turn made scheduling cost
+// scale with total session size (FIND-131). That discovery now runs in the
+// durable worker (resolveDiscoveryTarget), which foreground callers never
+// wait on.
 func (s *Service) ScheduleConversation(ctx context.Context, sessionIdentity string) error {
-	previous, err := s.store.LatestSummary(ctx, sessionIdentity)
-	if err != nil && !errors.Is(err, port.ErrSummaryNotFound) {
-		return err
-	}
-	turns, err := s.turnSource.ClosedTurns(ctx, sessionIdentity, previous.CoveredThroughOrdinal, int64(^uint64(0)>>1))
-	if err != nil {
-		return err
-	}
-	if len(turns) <= s.config.RecentTurns {
-		return nil
-	}
-	target := turns[len(turns)-s.config.RecentTurns-1].Ordinal
-	scheduled, err := s.store.ScheduleSummaryJob(ctx, sessionIdentity, target, time.Now().UTC())
+	scheduled, err := s.store.ScheduleSummaryJob(ctx, sessionIdentity, domain.SummaryDiscoveryTargetFloor, time.Now().UTC())
 	if err == nil && scheduled {
 		s.scheduleWake()
 	}
 	return err
+}
+
+// resolveDiscoveryTarget finds the newest contiguous closed prefix outside
+// the recent-turn retention window, the computation ScheduleConversation used
+// to perform synchronously. It returns previousOrdinal, unchanged, when there
+// is not yet enough closed history to summarize.
+func (s *Service) resolveDiscoveryTarget(ctx context.Context, sessionIdentity string, previousOrdinal int64) (int64, error) {
+	turns, err := s.turnSource.ClosedTurns(ctx, sessionIdentity, previousOrdinal, domain.SummaryDiscoveryTargetFloor)
+	if err != nil {
+		return 0, err
+	}
+	if len(turns) <= s.config.RecentTurns {
+		return previousOrdinal, nil
+	}
+	return turns[len(turns)-s.config.RecentTurns-1].Ordinal, nil
 }
 
 // RunOnce processes one durable job. A summary failure never escapes to the
@@ -139,11 +148,26 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	previousOrdinal := previous.CoveredThroughOrdinal
-	turns, err := s.turnSource.ClosedTurns(ctx, job.SessionIdentity, previousOrdinal, job.TargetOrdinal)
+	targetOrdinal := job.TargetOrdinal
+	if domain.IsSummaryDiscoveryTarget(targetOrdinal) {
+		resolved, err := s.resolveDiscoveryTarget(ctx, job.SessionIdentity, previousOrdinal)
+		if err != nil {
+			return s.retry(context.WithoutCancel(persistCtx), job, err)
+		}
+		if resolved <= previousOrdinal {
+			// Not enough closed history outside the recent-turn window yet.
+			// The discovery job's own row (job.TargetOrdinal, the sentinel)
+			// is done; a later ScheduleConversation call schedules the next
+			// discovery attempt once there is more history.
+			return s.store.CompleteSummaryJob(ctx, job)
+		}
+		targetOrdinal = resolved
+	}
+	turns, err := s.turnSource.ClosedTurns(ctx, job.SessionIdentity, previousOrdinal, targetOrdinal)
 	if err != nil {
 		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
-	if err := validateContiguousTurns(turns, previousOrdinal, job.TargetOrdinal); err != nil {
+	if err := validateContiguousTurns(turns, previousOrdinal, targetOrdinal); err != nil {
 		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	batchTurns := turns
@@ -192,8 +216,8 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 	if !committed && s.logger != nil {
 		s.logger.Warn("summary CAS lost; job marked obsolete", "session_identity", job.SessionIdentity, "target_ordinal", job.TargetOrdinal)
 	}
-	if effectiveTarget < job.TargetOrdinal {
-		if scheduled, err := s.store.ScheduleSummaryJob(context.WithoutCancel(persistCtx), job.SessionIdentity, job.TargetOrdinal, time.Now().UTC()); err != nil {
+	if effectiveTarget < targetOrdinal {
+		if scheduled, err := s.store.ScheduleSummaryJob(context.WithoutCancel(persistCtx), job.SessionIdentity, targetOrdinal, time.Now().UTC()); err != nil {
 			return fmt.Errorf("schedule remaining summary batch: %w", err)
 		} else if scheduled {
 			s.scheduleWake()
