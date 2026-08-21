@@ -36,10 +36,10 @@ func runLegacyKnowledgeImport(ctx context.Context, enabled bool, store *adapters
 // root turns share per-conversation serialization. While the gate is disabled
 // the executor answers memory-human commands with a deterministic disabled
 // response instead of mutating state or reaching the model.
-func composeKnowledgeService(enabled bool, store port.KnowledgeStore, coordinator port.ConversationCoordinator) (*knowledgeusecase.Service, error) {
+func composeKnowledgeService(enabled bool, store port.KnowledgeStore, coordinator port.ConversationCoordinator, wakes ...func()) (*knowledgeusecase.Service, error) {
 	return knowledgeusecase.New(
 		knowledgeusecase.Config{Enabled: enabled},
-		knowledgeusecase.Dependencies{Store: store, Coordinator: coordinator, Clock: port.SystemClock{}},
+		knowledgeusecase.Dependencies{Store: store, Coordinator: coordinator, Clock: port.SystemClock{}, Wakes: wakes},
 	)
 }
 

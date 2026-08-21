@@ -164,6 +164,9 @@ func (s *Store) ClaimSummaryJob(ctx context.Context, now time.Time) (port.Summar
 			(status = 'running' AND attempts < ? AND updated_at <= ?))
 		ORDER BY next_attempt, target_ordinal LIMIT 1`, maxSummaryAttempts, now.UnixMicro(), maxSummaryAttempts, staleBefore).
 		Scan(&job.SessionIdentity, &job.TargetOrdinal, &job.Status, &job.Attempts, &nextMicro, &createdMicro, &updatedMicro)
+	if errors.Is(err, sql.ErrNoRows) {
+		return port.SummaryJob{}, port.ErrSummaryNotFound
+	}
 	if err != nil {
 		return port.SummaryJob{}, err
 	}

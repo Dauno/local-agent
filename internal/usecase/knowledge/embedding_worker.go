@@ -11,6 +11,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 // EmbeddingWorkerConfig bounds the durable embedding worker. ProviderID,
@@ -31,17 +32,18 @@ type EmbeddingWorkerConfig struct {
 // provider, the document resolver, the identity lister, the shared redactor,
 // and the injected clock. Sanitize is the last-mile logger scrubber.
 type EmbeddingWorkerDependencies struct {
-	Queue    port.KnowledgeQueueStore
-	Source   port.KnowledgeIndexSource
-	Index    port.KnowledgeVectorIndex
-	Provider port.EmbeddingProvider
-	Resolver port.KnowledgeDocumentResolver
-	Lister   port.KnowledgeIdentityLister
-	Clock    port.Clock
-	Logger   port.Logger
-	Sanitize func(string) string
-	Redact   func(string) string
-	Metrics  port.MetricRecorder
+	Queue     port.KnowledgeQueueStore
+	Source    port.KnowledgeIndexSource
+	Index     port.KnowledgeVectorIndex
+	Provider  port.EmbeddingProvider
+	Resolver  port.KnowledgeDocumentResolver
+	Lister    port.KnowledgeIdentityLister
+	Clock     port.Clock
+	Logger    port.Logger
+	Sanitize  func(string) string
+	Redact    func(string) string
+	Metrics   port.MetricRecorder
+	Scheduler *workpoll.Scheduler
 }
 
 // EmbeddingWorker claims generation-CAS embedding queue work, rebuilds one
@@ -70,6 +72,7 @@ type EmbeddingWorker struct {
 	metrics     port.MetricRecorder
 	stopped     chan struct{}
 	stopOnce    sync.Once
+	scheduler   *workpoll.Scheduler
 }
 
 const (
@@ -111,13 +114,17 @@ func NewEmbeddingWorker(cfg EmbeddingWorkerConfig, deps EmbeddingWorkerDependenc
 	if deps.Sanitize == nil {
 		deps.Sanitize = func(value string) string { return value }
 	}
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(cfg.Interval, workpoll.Options{})
+	}
 	return &EmbeddingWorker{
 		cfg: cfg, queue: deps.Queue, source: deps.Source, index: deps.Index,
 		provider: deps.Provider, resolver: deps.Resolver, lister: deps.Lister,
 		fingerprint: domain.ModelFingerprint(cfg.ProviderID, cfg.Model, cfg.Dimensions),
 		clock:       deps.Clock, logger: deps.Logger, sanitize: deps.Sanitize,
 		redact: deps.Redact, metrics: deps.Metrics,
-		stopped: make(chan struct{}),
+		stopped:   make(chan struct{}),
+		scheduler: deps.Scheduler,
 	}, nil
 }
 
@@ -165,30 +172,22 @@ func (w *EmbeddingWorker) runWorker(ctx context.Context) {
 	if err := w.Reconcile(ctx); err != nil && ctx.Err() == nil {
 		w.logger.Warn("knowledge embedding reconciliation failed", "error", w.sanitize(err.Error()))
 	}
-	w.tick(ctx)
-	ticker := time.NewTicker(w.cfg.Interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			w.tick(ctx)
-		}
-	}
+	w.scheduler.Run(ctx, nil, func() bool { return w.tick(ctx) })
 }
 
 // tick claims a bounded batch per kind and processes each batch through one
 // provider call, then samples the embedding queue depth gauge.
-func (w *EmbeddingWorker) tick(ctx context.Context) {
+func (w *EmbeddingWorker) tick(ctx context.Context) bool {
+	found := false
 	for _, kind := range []domain.KnowledgeRetrievalItemKind{
 		domain.KnowledgeRetrievalClaim,
 		domain.KnowledgeRetrievalPreference,
 		domain.KnowledgeRetrievalDocument,
 	} {
-		w.drainKind(ctx, kind)
+		found = w.drainKind(ctx, kind) || found
 	}
 	w.recordDepth(ctx)
+	return found
 }
 
 // recordDepth samples the embedding queue depth through the consumer-owned
@@ -210,16 +209,16 @@ func (w *EmbeddingWorker) recordDepth(ctx context.Context) {
 // drainKind claims up to BatchSize items of one kind with fresh claims and
 // processes them through a single batched provider call, so unchanged items
 // skip provider contact without breaking the batch.
-func (w *EmbeddingWorker) drainKind(ctx context.Context, kind domain.KnowledgeRetrievalItemKind) {
+func (w *EmbeddingWorker) drainKind(ctx context.Context, kind domain.KnowledgeRetrievalItemKind) bool {
 	var claims []domain.KnowledgeQueueItem
 	for len(claims) < w.cfg.BatchSize {
 		if ctx.Err() != nil {
-			return
+			return len(claims) > 0
 		}
 		item, ok, err := w.queue.ClaimNext(ctx, kind, w.clock.Now(), embeddingClaimLease)
 		if err != nil {
 			w.logger.Error("knowledge embedding queue claim failed", "error", w.sanitize(err.Error()))
-			return
+			return len(claims) > 0
 		}
 		if !ok {
 			break
@@ -227,9 +226,10 @@ func (w *EmbeddingWorker) drainKind(ctx context.Context, kind domain.KnowledgeRe
 		claims = append(claims, item)
 	}
 	if len(claims) == 0 {
-		return
+		return false
 	}
 	w.processBatch(ctx, kind, claims)
+	return true
 }
 
 // pendingEmbed is one claimed item prepared for provider contact: the claim

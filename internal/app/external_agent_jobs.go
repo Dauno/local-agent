@@ -15,7 +15,30 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
+
+type externalAgentSchedules struct {
+	jobs          *workpoll.Scheduler
+	notifications *workpoll.Scheduler
+	activations   *workpoll.Scheduler
+}
+
+func newExternalAgentSchedules() (externalAgentSchedules, error) {
+	jobs, err := workpoll.New(time.Second, workpoll.Options{})
+	if err != nil {
+		return externalAgentSchedules{}, err
+	}
+	notifications, err := workpoll.New(time.Second, workpoll.Options{})
+	if err != nil {
+		return externalAgentSchedules{}, err
+	}
+	activations, err := workpoll.New(time.Second, workpoll.Options{})
+	if err != nil {
+		return externalAgentSchedules{}, err
+	}
+	return externalAgentSchedules{jobs: jobs, notifications: notifications, activations: activations}, nil
+}
 
 type acpJobDispatcher struct {
 	children              []preparedAgentTool
@@ -324,7 +347,7 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
 }
 
-func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *runtimeInfrastructure) (*externalagent.Service, *externalagent.NotificationWorker, error) {
+func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *runtimeInfrastructure, supplied ...externalAgentSchedules) (*externalagent.Service, *externalagent.NotificationWorker, error) {
 	var children []preparedAgentTool
 	for _, child := range models.preparedAgentTools {
 		if child.acpRuntime != nil {
@@ -333,6 +356,16 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	}
 	if len(children) == 0 {
 		return nil, nil, nil
+	}
+	var schedules externalAgentSchedules
+	if len(supplied) > 0 {
+		schedules = supplied[0]
+	} else {
+		var err error
+		schedules, err = newExternalAgentSchedules()
+		if err != nil {
+			return nil, nil, err
+		}
 	}
 	policy := domain.ResultDeliveryPolicy{
 		MaxMarkdownParts:       cfg.ACP.Delivery.MaxMarkdownParts,
@@ -386,6 +419,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		ProgressStore: store, ProcessRegistry: infra.processRegistry,
 		MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
 		Logger: models.logger, Metrics: models.metrics,
+		Scheduler: schedules.jobs, JobWake: schedules.jobs.Wake, NotificationWake: schedules.notifications.Wake,
 	})
 	if err != nil {
 		return nil, nil, err
@@ -395,11 +429,25 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	}
 	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
 	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, models.artifactStore, store, infra.api, cfg.Slack.PartLabels)
-	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher, HostCompleter: service, Logger: models.logger, Metrics: models.metrics})
+	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher, HostCompleter: service, Logger: models.logger, Metrics: models.metrics, Scheduler: schedules.notifications, ActivationWake: schedules.activations.Wake})
 	if err != nil {
 		return nil, nil, err
 	}
 	return service, notificationWorker, nil
+}
+
+// newExternalAgentActivationWorker builds the root-activation consumer
+// composeRuntime wires over schedules.activations. It selects that
+// scheduler from the full bundle itself, so a composition test can call
+// the identical production construction instead of reproducing it, and so
+// a regression that swaps in the wrong scheduler here is caught by that
+// test rather than only by composeRuntime itself.
+func newExternalAgentActivationWorker(store port.ExternalAgentJobActivationStore, handler port.ExternalAgentJobCompletionHandler, logger port.Logger, metrics port.MetricRecorder, schedules externalAgentSchedules) (*externalagent.ActivationWorker, error) {
+	return externalagent.NewActivationWorker(externalagent.ActivationConfig{
+		PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute,
+	}, externalagent.ActivationDependencies{
+		Store: store, Handler: handler, Logger: logger, Metrics: metrics, Scheduler: schedules.activations,
+	})
 }
 
 func durableACPConfigured(models runtimeModels) bool {

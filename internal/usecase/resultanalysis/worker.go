@@ -11,6 +11,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 // WorkerConfig bounds the durable worker's tick cadence and claim lease.
@@ -43,6 +44,7 @@ type WorkerDependencies struct {
 	Clock      port.Clock
 	Logger     port.Logger
 	Sanitize   func(string) string
+	Scheduler  *workpoll.Scheduler
 }
 
 // Worker drains every non-terminal analysis' step queue: it claims steps
@@ -54,10 +56,11 @@ type WorkerDependencies struct {
 // cancellation for lease-based recovery, never force-failed, matching
 // TRD 07's "cancellation stops unstarted work" rule.
 type Worker struct {
-	cfg      WorkerConfig
-	deps     WorkerDependencies
-	stopped  chan struct{}
-	stopOnce sync.Once
+	cfg       WorkerConfig
+	deps      WorkerDependencies
+	stopped   chan struct{}
+	stopOnce  sync.Once
+	scheduler *workpoll.Scheduler
 }
 
 const (
@@ -92,7 +95,10 @@ func NewWorker(cfg WorkerConfig, deps WorkerDependencies) (*Worker, error) {
 	if deps.Sanitize == nil {
 		deps.Sanitize = func(value string) string { return value }
 	}
-	return &Worker{cfg: cfg, deps: deps, stopped: make(chan struct{})}, nil
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(cfg.Interval, workpoll.Options{})
+	}
+	return &Worker{cfg: cfg, deps: deps, stopped: make(chan struct{}), scheduler: deps.Scheduler}, nil
 }
 
 // WaitStopped blocks until Run returns. A nil worker returns immediately.
@@ -135,44 +141,36 @@ func (w *Worker) Run(ctx context.Context) {
 }
 
 func (w *Worker) runWorker(ctx context.Context) {
-	w.tick(ctx)
-	ticker := time.NewTicker(w.cfg.Interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			w.tick(ctx)
-		}
-	}
+	w.scheduler.Run(ctx, nil, func() bool { return w.tick(ctx) })
 }
 
 // tick processes every non-terminal analysis once, in stable analysis-id
 // pages. A failure listing active analyses stops the tick; a failure on
 // one analysis is logged and never blocks another analysis in the same
 // tick.
-func (w *Worker) tick(ctx context.Context) {
+func (w *Worker) tick(ctx context.Context) bool {
 	after := ""
+	found := false
 	for {
 		if ctx.Err() != nil {
-			return
+			return found
 		}
 		page, err := w.deps.Active.ListActive(ctx, after, workerListPageSize)
 		if err != nil {
 			if ctx.Err() == nil {
 				w.deps.Logger.Error("result analysis list active failed", "error", w.deps.Sanitize(err.Error()))
 			}
-			return
+			return found
 		}
+		found = found || len(page) > 0
 		for _, record := range page {
 			if ctx.Err() != nil {
-				return
+				return found
 			}
 			w.processAnalysis(ctx, record)
 		}
 		if len(page) < workerListPageSize {
-			return
+			return found
 		}
 		after = page[len(page)-1].AnalysisID
 	}

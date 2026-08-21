@@ -62,6 +62,7 @@ import (
 	resultanalysisusecase "github.com/Dauno/slack-local-agent/internal/usecase/resultanalysis"
 	resultsusecase "github.com/Dauno/slack-local-agent/internal/usecase/results"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
@@ -672,6 +673,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	var notificationWorker *externalagentusecase.NotificationWorker
 	var activationStore port.ExternalAgentJobActivationStore
 	var activationWorker *externalagentusecase.ActivationWorker
+	var externalSchedules externalAgentSchedules
 	var notificationDone chan struct{}
 	var summaryScheduler port.SummaryScheduler
 	var continuityStore port.ContinuityStore
@@ -868,7 +870,11 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		if err := wireDeclarativeTools(factory, models, paths, compositeFactory); err != nil {
 			return nil, models.redactor.Error(err)
 		}
-		externalJobService, notificationWorker, err = newExternalAgentJobService(cfg, models, infra)
+		externalSchedules, err = newExternalAgentSchedules()
+		if err != nil {
+			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent schedulers: %w", err))
+		}
+		externalJobService, notificationWorker, err = newExternalAgentJobService(cfg, models, infra, externalSchedules)
 		if err != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent jobs: %w", err))
 		}
@@ -985,7 +991,13 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	// live bundle and each worker preserves the other's file ownership.
 	okfProjector := memoryprojector.New()
 	knowledgeStore := adaptersqlite.NewKnowledgeStore(infra.store)
-	knowledgeService, err := composeKnowledgeService(cfg.Orchestration.Knowledge.Enabled, knowledgeStore, coordinator)
+	knowledgeSchedules, knowledgeWakes, err := newKnowledgeWakeSchedules(cfg)
+	if err != nil {
+		return nil, models.redactor.Error(err)
+	}
+	projectionScheduler := knowledgeSchedules.projection
+	retrievalSchedules := knowledgeSchedules.retrieval
+	knowledgeService, err := composeKnowledgeService(cfg.Orchestration.Knowledge.Enabled, knowledgeStore, coordinator, knowledgeWakes...)
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize knowledge service: %w", err))
 	}
@@ -1013,7 +1025,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			OutputDir:     paths.MemoryDir,
 		}, knowledgeusecase.ProjectionWorkerDependencies{
 			Store: knowledgeStore, Reader: infra.store, Projector: okfProjector,
-			Logger: models.logger, Sanitize: models.redactor.String, Enabled: knowledgeService.Enabled,
+			Logger: models.logger, Sanitize: models.redactor.String, Enabled: knowledgeService.Enabled, Scheduler: projectionScheduler,
 		})
 		if workerErr != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize knowledge projection worker: %w", workerErr))
@@ -1028,7 +1040,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		// embeddings are enabled the embedding provider, vector index, and
 		// embedding worker are composed alongside it and awaited on
 		// shutdown the same way.
-		retrievalComposition, composeErr := composeLexicalRetrieval(cfg, models, infra.modelCalls, infra.store)
+		retrievalComposition, composeErr := composeLexicalRetrieval(cfg, models, infra.modelCalls, infra.store, retrievalSchedules)
 		if composeErr != nil {
 			return nil, models.redactor.Error(composeErr)
 		}
@@ -1094,11 +1106,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		}
 	}
 	if externalJobService != nil {
-		activationWorker, err = externalagentusecase.NewActivationWorker(externalagentusecase.ActivationConfig{
-			PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute,
-		}, externalagentusecase.ActivationDependencies{
-			Store: activationStore, Handler: service, Logger: models.logger, Metrics: models.metrics,
-		})
+		activationWorker, err = newExternalAgentActivationWorker(activationStore, service, models.logger, models.metrics, externalSchedules)
 		if err != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent activation worker: %w", err))
 		}
@@ -1118,7 +1126,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, knowledgeRetriever: knowledgeRetriever, lexicalWorker: knowledgeLexicalWorker, embeddingWorker: knowledgeEmbeddingWorker, resultAnalysisWorker: resultAnalysisWorker, notificationDone: notificationDone}, nil
 }
 
-func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service, projector port.OKFProjector) error {
+func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service, projector port.OKFProjector, supplied ...*workpoll.Scheduler) error {
 	cfg, paths := setup.cfg, setup.paths
 	memorySvc, memErr := memoryusecase.New(memoryusecase.Config{Recall: domain.MemoryRecallConfig{Enabled: true, MaxTopics: cfg.Memory.MaxTopicsRecall, MaxChars: cfg.Memory.MaxCharsRecall, Timeout: time.Duration(cfg.Memory.RecallTimeoutSeconds) * time.Second}, Limits: domain.MemoryLimits{MaxTopics: cfg.Memory.MaxTopics, MaxLinks: cfg.Memory.MaxLinks, MaxTopicChars: cfg.Memory.MaxTopicChars}, MaxPatchOps: cfg.Memory.MaxPatchOps}, memoryusecase.Dependencies{Store: infra.store, Logger: models.logger, SanitizeContent: models.redactor.String})
 	if memErr != nil {
@@ -1139,6 +1147,16 @@ func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup
 	if curErr != nil {
 		return models.redactor.Error(fmt.Errorf("initialize memory curator: %w", curErr))
 	}
+	var memoryScheduler *workpoll.Scheduler
+	if len(supplied) > 0 {
+		memoryScheduler = supplied[0]
+	} else {
+		var schedulerErr error
+		memoryScheduler, schedulerErr = workpoll.New(time.Duration(cfg.Memory.WorkerIntervalSeconds)*time.Second, workpoll.Options{})
+		if schedulerErr != nil {
+			return models.redactor.Error(fmt.Errorf("initialize memory worker scheduler: %w", schedulerErr))
+		}
+	}
 	runner, runnerErr := memoryusecase.NewRunner(memoryusecase.RunnerConfig{
 		Interval:      time.Duration(cfg.Memory.WorkerIntervalSeconds) * time.Second,
 		MaxRetries:    cfg.Memory.CuratorMaxRetries,
@@ -1147,13 +1165,13 @@ func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup
 	}, memoryusecase.RunnerDependencies{
 		Store: infra.store, ExchangeFinder: infra.history, Curator: curator, Memory: memorySvc,
 		Projector: projector, ProjectionReader: infra.store,
-		Logger: models.logger, Sanitize: models.redactor.String,
+		Logger: models.logger, Sanitize: models.redactor.String, Scheduler: memoryScheduler,
 	})
 	if runnerErr != nil {
 		return models.redactor.Error(fmt.Errorf("initialize memory runner: %w", runnerErr))
 	}
 	go runner.Run(ctx)
-	service.AddMemory(memorySvc, infra.store)
+	service.AddMemory(memorySvc, infra.store, memoryScheduler.Wake)
 	models.logger.Info("memory service enabled", "directory", paths.MemoryDir, "max_topics_recall", cfg.Memory.MaxTopicsRecall, "max_chars_recall", cfg.Memory.MaxCharsRecall)
 	return nil
 }

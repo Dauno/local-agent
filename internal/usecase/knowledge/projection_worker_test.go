@@ -10,7 +10,13 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
+
+type blockedProjectionTimer struct{ c chan time.Time }
+
+func (t blockedProjectionTimer) C() <-chan time.Time { return t.c }
+func (blockedProjectionTimer) Stop() bool            { return true }
 
 type workerTestLogger struct{}
 
@@ -540,15 +546,31 @@ func TestProjectionWorkerProcessesImmediatelyOnStart(t *testing.T) {
 	store.enqueue()
 	projector := &workerFakeProjector{rendered: make(chan struct{}, 1)}
 	worker, _ := newWorkerUnderTest(t, store, projector, 3, nil)
+	waiting := make(chan struct{})
+	allowTimer := make(chan struct{})
+	scheduler, err := workpoll.New(time.Hour, workpoll.Options{
+		NewTimer: func(time.Duration) workpoll.Timer {
+			close(waiting)
+			<-allowTimer
+			return blockedProjectionTimer{c: make(chan time.Time)}
+		},
+		Jitter: func(base time.Duration) time.Duration { return base },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	worker.scheduler = scheduler
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
 	go worker.Run(ctx)
+	<-waiting
 	select {
 	case <-projector.rendered:
-	case <-time.After(5 * time.Second):
-		t.Fatal("worker did not process pending triggers at startup")
+	default:
+		t.Fatal("worker waited for recovery timer before startup poll")
 	}
 	cancel()
+	close(allowTimer)
 	if projector.callCount() < 1 {
 		t.Fatalf("render calls = %d, want at least 1", projector.callCount())
 	}

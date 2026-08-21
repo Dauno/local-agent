@@ -10,6 +10,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 const (
@@ -33,11 +34,12 @@ type ActivationConfig struct {
 }
 
 type ActivationDependencies struct {
-	Store   port.ExternalAgentJobActivationStore
-	Handler port.ExternalAgentJobCompletionHandler
-	Clock   port.Clock
-	Logger  port.Logger
-	Metrics port.MetricRecorder
+	Store     port.ExternalAgentJobActivationStore
+	Handler   port.ExternalAgentJobCompletionHandler
+	Clock     port.Clock
+	Logger    port.Logger
+	Metrics   port.MetricRecorder
+	Scheduler *workpoll.Scheduler
 }
 
 // ActivationWorker consumes the activation outbox one claimed activation at a
@@ -55,6 +57,7 @@ type ActivationWorker struct {
 	stopClaims chan struct{}
 	stopOnce   sync.Once
 	stopped    chan struct{}
+	scheduler  *workpoll.Scheduler
 }
 
 func NewActivationWorker(cfg ActivationConfig, deps ActivationDependencies) (*ActivationWorker, error) {
@@ -91,6 +94,9 @@ func NewActivationWorker(cfg ActivationConfig, deps ActivationDependencies) (*Ac
 	if deps.Metrics == nil {
 		deps.Metrics = port.NoopMetricRecorder{}
 	}
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(cfg.PollInterval, workpoll.Options{})
+	}
 	return &ActivationWorker{
 		cfg:        cfg,
 		store:      deps.Store,
@@ -101,6 +107,7 @@ func NewActivationWorker(cfg ActivationConfig, deps ActivationDependencies) (*Ac
 		owner:      "activation-worker_" + randomID(),
 		stopClaims: make(chan struct{}),
 		stopped:    make(chan struct{}),
+		scheduler:  deps.Scheduler,
 	}, nil
 }
 
@@ -109,30 +116,16 @@ func (w *ActivationWorker) Run(ctx context.Context) {
 		return
 	}
 	defer close(w.stopped)
-	ticker := time.NewTicker(w.cfg.PollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-w.stopClaims:
-			return
-		default:
-		}
-		if err := w.ProcessOne(ctx); err != nil && !errors.Is(err, context.Canceled) {
+	w.scheduler.Run(ctx, w.stopClaims, func() bool {
+		worked, err := w.processOne(ctx)
+		if err != nil && !errors.Is(err, context.Canceled) {
 			w.logProcessingError(err)
 		}
 		if _, err := w.SnapshotHealth(ctx, w.clock.Now().UTC()); err != nil && !errors.Is(err, context.Canceled) {
 			w.logger.Error("external-agent activation health snapshot failed", "error_code", activationErrorCode(err))
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-w.stopClaims:
-			return
-		case <-ticker.C:
-		}
-	}
+		return worked
+	})
 }
 
 // StopAdmission prevents new claims while allowing the current activation to
@@ -161,20 +154,25 @@ func (w *ActivationWorker) WaitStopped(ctx context.Context) error {
 // means either no work was available or the claimed work reached a durable
 // state; persistence conflicts remain visible to the caller.
 func (w *ActivationWorker) ProcessOne(ctx context.Context) error {
+	_, err := w.processOne(ctx)
+	return err
+}
+
+func (w *ActivationWorker) processOne(ctx context.Context) (bool, error) {
 	if w == nil {
-		return errors.New("activation worker is unavailable")
+		return false, errors.New("activation worker is unavailable")
 	}
 	now := w.clock.Now().UTC()
 	activation, err := w.store.ClaimNextActivation(ctx, now, w.owner, w.cfg.LeaseTTL)
 	if err != nil {
 		w.recordCASConflict(err)
-		return err
+		return false, err
 	}
 	if activation == nil {
 		activation = w.claimActivationFallback(ctx, now)
 	}
 	if activation == nil {
-		return nil
+		return false, nil
 	}
 	w.metrics.AddCounter(domain.MetricExternalAgentActivationClaimTotal, 1, port.MetricLabels{"activation_outcome": "claimed"})
 	if activation.State == domain.ActivationModelStarted || activation.State == domain.ActivationResponsePrepared {
@@ -197,7 +195,7 @@ func (w *ActivationWorker) ProcessOne(ctx context.Context) error {
 		w.recordCASConflict(processErr)
 	}
 	w.recordActivationOutcome(ctx, activation)
-	return processErr
+	return true, processErr
 }
 
 // claimActivationFallback claims terminal fallback work only when both the

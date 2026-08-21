@@ -15,6 +15,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 type Config struct {
@@ -48,6 +49,9 @@ type Dependencies struct {
 	Clock               port.Clock
 	Logger              port.Logger
 	Metrics             port.MetricRecorder
+	Scheduler           *workpoll.Scheduler
+	JobWake             func()
+	NotificationWake    func()
 }
 
 type Service struct {
@@ -64,6 +68,9 @@ type Service struct {
 	clock               port.Clock
 	logger              port.Logger
 	metrics             port.MetricRecorder
+	scheduler           *workpoll.Scheduler
+	jobWake             func()
+	notificationWake    func()
 	stopClaims          chan struct{}
 	stopOnce            sync.Once
 	admissionMu         sync.RWMutex
@@ -110,10 +117,16 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if metrics == nil {
 		metrics = port.NoopMetricRecorder{}
 	}
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(cfg.PollInterval, workpoll.Options{})
+	}
+	if deps.JobWake == nil {
+		deps.JobWake = deps.Scheduler.Wake
+	}
 	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
 		artifacts: deps.Artifacts, nativeResults: deps.NativeResults, progressStore: deps.ProgressStore, processRegistry: deps.ProcessRegistry,
 		maxResultBytes: deps.MaxResultBytes, maxResultChunkBytes: deps.MaxResultChunkBytes,
-		clock: deps.Clock, logger: logger, metrics: metrics,
+		clock: deps.Clock, logger: logger, metrics: metrics, scheduler: deps.Scheduler, jobWake: deps.JobWake, notificationWake: deps.NotificationWake,
 		stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
 }
 
@@ -160,6 +173,7 @@ func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequ
 		}
 		return existing, nil
 	}
+	s.jobWake()
 	return &job, nil
 }
 
@@ -217,7 +231,7 @@ func (s *Service) cancelForegroundAsync(ctx context.Context, jobID, actor string
 }
 
 func (s *Service) Cancel(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error) {
-	return s.store.RequestCancellation(ctx, jobID, actor)
+	return s.requestCancellation(ctx, jobID, actor)
 }
 
 // verifiedForegroundResult maps a completed row to the synchronous invocation
@@ -634,7 +648,16 @@ func (s *Service) CancelForConversation(ctx context.Context, jobID, actor string
 	if _, err := s.Status(ctx, jobID, actor, conversationKey); err != nil {
 		return nil, err
 	}
-	return s.store.RequestCancellation(ctx, jobID, actor)
+	return s.requestCancellation(ctx, jobID, actor)
+}
+
+func (s *Service) requestCancellation(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error) {
+	job, err := s.store.RequestCancellation(ctx, jobID, actor)
+	if err == nil {
+		s.jobWake()
+		s.wakeNotifications()
+	}
+	return job, err
 }
 
 func (s *Service) Reconcile(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.AcpInvocationResult, error) {
@@ -691,7 +714,7 @@ func (s *Service) ReconcileExpected(ctx context.Context, jobID, actor string, co
 	if runErr != nil {
 		next, code = domain.JobCompletionUnknown, "completion_unknown"
 	}
-	transitionErr := s.store.Transition(context.WithoutCancel(ctx), reconciling.ID, reconciling.LeaseOwner, reconciling.Attempt, next, &result, code, s.clock.Now().UTC())
+	transitionErr := s.transition(context.WithoutCancel(ctx), reconciling.ID, reconciling.LeaseOwner, reconciling.Attempt, next, &result, code, s.clock.Now().UTC())
 	if transitionErr != nil {
 		return domain.AcpInvocationResult{}, errors.New("external-agent reconciliation state update failed")
 	}
@@ -713,27 +736,11 @@ func (s *Service) Run(ctx context.Context) {
 	defer close(s.stopped)
 	var workers sync.WaitGroup
 	sem := make(chan struct{}, s.cfg.Concurrency)
-	ticker := time.NewTicker(s.cfg.PollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-s.stopClaims:
-			workers.Wait()
-			return
-		default:
-		}
-		s.recoverExpired(ctx)
-		s.claimAvailable(ctx, sem, &workers)
-		select {
-		case <-ctx.Done():
-			workers.Wait()
-			return
-		case <-s.stopClaims:
-			workers.Wait()
-			return
-		case <-ticker.C:
-		}
-	}
+	s.scheduler.Run(ctx, s.stopClaims, func() bool {
+		worked := s.recoverExpired(ctx)
+		return s.claimAvailable(ctx, sem, &workers) || worked
+	})
+	workers.Wait()
 }
 
 // StopAdmission prevents new durable claims while allowing already running
@@ -768,27 +775,29 @@ func (s *Service) ShutdownStats(ctx context.Context) (domain.ExternalAgentJobShu
 	return store.ShutdownStats(ctx)
 }
 
-func (s *Service) claimAvailable(ctx context.Context, sem chan struct{}, workers *sync.WaitGroup) {
+func (s *Service) claimAvailable(ctx context.Context, sem chan struct{}, workers *sync.WaitGroup) bool {
+	claimed := false
 	for {
 		s.admissionMu.RLock()
 		select {
 		case <-s.stopClaims:
 			s.admissionMu.RUnlock()
-			return
+			return claimed
 		default:
 		}
 		select {
 		case sem <- struct{}{}:
 		default:
 			s.admissionMu.RUnlock()
-			return
+			return claimed
 		}
 		job, err := s.store.ClaimNext(ctx, s.clock.Now().UTC(), "worker_"+randomID(), s.cfg.LeaseTTL)
 		s.admissionMu.RUnlock()
 		if err != nil || job == nil {
 			<-sem
-			return
+			return claimed
 		}
+		claimed = true
 		workers.Add(1)
 		go func(job *domain.ExternalAgentJob) {
 			defer workers.Done()
@@ -801,7 +810,7 @@ func (s *Service) claimAvailable(ctx context.Context, sem chan struct{}, workers
 func (s *Service) execute(parent context.Context, job *domain.ExternalAgentJob) {
 	if !job.TimeoutAt.After(s.clock.Now().UTC()) {
 		now := s.clock.Now().UTC()
-		if err := s.store.Transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, domain.JobFailed, nil, "acp_job_timeout", now); err == nil {
+		if err := s.transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, domain.JobFailed, nil, "acp_job_timeout", now); err == nil {
 		}
 		return
 	}
@@ -822,11 +831,11 @@ func (s *Service) execute(parent context.Context, job *domain.ExternalAgentJob) 
 	}
 	timedOut := !job.TimeoutAt.IsZero() && !job.TimeoutAt.After(now)
 	next, code := terminalOutcome(current, runErr, ctx.Err(), s.cfg.MaxAttempts, timedOut)
-	if err := s.store.Transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, next, &result, code, now); err != nil {
+	if err := s.transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, next, &result, code, now); err != nil {
 		return
 	}
 	if next == domain.JobInterruptedSafe && job.TimeoutAt.After(now) {
-		_ = s.store.Transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, domain.JobQueued, nil, "", now)
+		_ = s.transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, domain.JobQueued, nil, "", now)
 	}
 	// Terminal delivery is handled by the independent durable notification worker.
 }
@@ -859,11 +868,12 @@ func (s *Service) heartbeat(ctx context.Context, job *domain.ExternalAgentJob, d
 	}
 }
 
-func (s *Service) recoverExpired(ctx context.Context) {
+func (s *Service) recoverExpired(ctx context.Context) bool {
 	jobs, err := s.store.ListExpiredRunning(ctx, s.clock.Now().UTC())
 	if err != nil {
-		return
+		return false
 	}
+	recovered := false
 	for _, job := range jobs {
 		now := s.clock.Now().UTC()
 		next, code := domain.JobQueued, ""
@@ -882,8 +892,45 @@ func (s *Service) recoverExpired(ctx context.Context) {
 		}
 		recovery, ok := s.store.(port.ExpiredExternalAgentJobRecovery)
 		if ok {
-			_ = recovery.RecoverExpired(ctx, job.ID, job.Attempt, job.StatusRevision, now, next, code)
+			if err := recovery.RecoverExpired(ctx, job.ID, job.Attempt, job.StatusRevision, now, next, code); err == nil {
+				recovered = true
+				if next == domain.JobQueued {
+					s.jobWake()
+				}
+				if notificationTerminal(next) {
+					s.wakeNotifications()
+				}
+			}
 		}
+	}
+	return recovered
+}
+
+func (s *Service) transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.AcpInvocationResult, errorCode string, now time.Time) error {
+	if err := s.store.Transition(ctx, jobID, owner, attempt, next, result, errorCode, now); err != nil {
+		return err
+	}
+	if next == domain.JobQueued {
+		s.jobWake()
+	}
+	if notificationTerminal(next) {
+		s.wakeNotifications()
+	}
+	return nil
+}
+
+func (s *Service) wakeNotifications() {
+	if s.notificationWake != nil {
+		s.notificationWake()
+	}
+}
+
+func notificationTerminal(status domain.ExternalAgentJobStatus) bool {
+	switch status {
+	case domain.JobCompleted, domain.JobFailed, domain.JobCancelled, domain.JobCompletionUnknown, domain.JobAbandoned:
+		return true
+	default:
+		return false
 	}
 }
 

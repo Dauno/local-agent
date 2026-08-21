@@ -10,6 +10,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 // LexicalWorkerConfig bounds the durable lexical index worker.
@@ -26,16 +27,17 @@ type LexicalWorkerConfig struct {
 // clock. Sanitize is the last-mile logger scrubber: worker logs never carry
 // identities, content, handles, or digests beyond bounded counts and codes.
 type LexicalWorkerDependencies struct {
-	Queue    port.KnowledgeQueueStore
-	Source   port.KnowledgeIndexSource
-	Index    port.KnowledgeLexicalIndex
-	Resolver port.KnowledgeDocumentResolver
-	Lister   port.KnowledgeIdentityLister
-	Clock    port.Clock
-	Logger   port.Logger
-	Sanitize func(string) string
-	Redact   func(string) string
-	Metrics  port.MetricRecorder
+	Queue     port.KnowledgeQueueStore
+	Source    port.KnowledgeIndexSource
+	Index     port.KnowledgeLexicalIndex
+	Resolver  port.KnowledgeDocumentResolver
+	Lister    port.KnowledgeIdentityLister
+	Clock     port.Clock
+	Logger    port.Logger
+	Sanitize  func(string) string
+	Redact    func(string) string
+	Metrics   port.MetricRecorder
+	Scheduler *workpoll.Scheduler
 }
 
 // QueueDepthSource is the consumer-owned content-free queue depth surface
@@ -58,19 +60,20 @@ type QueueDepthSource interface {
 // and the fresh work survives. Cancellation stops the worker without
 // marking in-flight claims failed.
 type LexicalWorker struct {
-	cfg      LexicalWorkerConfig
-	queue    port.KnowledgeQueueStore
-	source   port.KnowledgeIndexSource
-	index    port.KnowledgeLexicalIndex
-	resolver port.KnowledgeDocumentResolver
-	lister   port.KnowledgeIdentityLister
-	clock    port.Clock
-	logger   port.Logger
-	sanitize func(string) string
-	redact   func(string) string
-	metrics  port.MetricRecorder
-	stopped  chan struct{}
-	stopOnce sync.Once
+	cfg       LexicalWorkerConfig
+	queue     port.KnowledgeQueueStore
+	source    port.KnowledgeIndexSource
+	index     port.KnowledgeLexicalIndex
+	resolver  port.KnowledgeDocumentResolver
+	lister    port.KnowledgeIdentityLister
+	clock     port.Clock
+	logger    port.Logger
+	sanitize  func(string) string
+	redact    func(string) string
+	metrics   port.MetricRecorder
+	stopped   chan struct{}
+	stopOnce  sync.Once
+	scheduler *workpoll.Scheduler
 }
 
 const (
@@ -104,12 +107,16 @@ func NewLexicalWorker(cfg LexicalWorkerConfig, deps LexicalWorkerDependencies) (
 	if deps.Sanitize == nil {
 		deps.Sanitize = func(value string) string { return value }
 	}
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(cfg.Interval, workpoll.Options{})
+	}
 	return &LexicalWorker{
 		cfg: cfg, queue: deps.Queue, source: deps.Source, index: deps.Index,
 		resolver: deps.Resolver, lister: deps.Lister, clock: deps.Clock,
 		logger: deps.Logger, sanitize: deps.Sanitize, redact: deps.Redact,
-		metrics: deps.Metrics,
-		stopped: make(chan struct{}),
+		metrics:   deps.Metrics,
+		stopped:   make(chan struct{}),
+		scheduler: deps.Scheduler,
 	}, nil
 }
 
@@ -157,32 +164,24 @@ func (w *LexicalWorker) runWorker(ctx context.Context) {
 	if err := w.Reconcile(ctx); err != nil && ctx.Err() == nil {
 		w.logger.Warn("knowledge lexical reconciliation failed", "error", w.sanitize(err.Error()))
 	}
-	w.tick(ctx)
-	ticker := time.NewTicker(w.cfg.Interval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-			w.tick(ctx)
-		}
-	}
+	w.scheduler.Run(ctx, nil, func() bool { return w.tick(ctx) })
 }
 
 // tick claims and processes a bounded fair batch per kind. Claim failures
 // stop this tick; per-item failures settle through the queue retry budget.
 // Both closed queue depth gauges are sampled once per tick, after the
 // batch: depth counts pending plus processing rows only.
-func (w *LexicalWorker) tick(ctx context.Context) {
+func (w *LexicalWorker) tick(ctx context.Context) bool {
+	found := false
 	for _, kind := range []domain.KnowledgeRetrievalItemKind{
 		domain.KnowledgeRetrievalClaim,
 		domain.KnowledgeRetrievalPreference,
 		domain.KnowledgeRetrievalDocument,
 	} {
-		w.drainKind(ctx, kind)
+		found = w.drainKind(ctx, kind) || found
 	}
 	w.recordDepths(ctx)
+	return found
 }
 
 // recordDepths samples the lexical and embedding queue depths through the
@@ -207,21 +206,24 @@ func (w *LexicalWorker) recordDepths(ctx context.Context) {
 
 // drainKind processes up to BatchSize items of one kind with fresh claims,
 // so a single item that keeps conflicting cannot starve the tick forever.
-func (w *LexicalWorker) drainKind(ctx context.Context, kind domain.KnowledgeRetrievalItemKind) {
+func (w *LexicalWorker) drainKind(ctx context.Context, kind domain.KnowledgeRetrievalItemKind) bool {
+	found := false
 	for claimed := 0; claimed < w.cfg.BatchSize; claimed++ {
 		if ctx.Err() != nil {
-			return
+			return found
 		}
 		item, ok, err := w.queue.ClaimNext(ctx, kind, w.clock.Now(), lexicalClaimLease)
 		if err != nil {
 			w.logger.Error("knowledge lexical queue claim failed", "error", w.sanitize(err.Error()))
-			return
+			return found
 		}
 		if !ok {
-			return
+			return found
 		}
+		found = true
 		w.processItem(ctx, item)
 	}
+	return found
 }
 
 // processItem rebuilds one identity's lexical index rows and settles the

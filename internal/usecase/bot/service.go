@@ -147,6 +147,7 @@ type Service struct {
 	recall                port.MemoryRetriever
 	exchange              port.AssistantExchangeWriter
 	memoryEnabled         bool
+	memoryWake            func()
 	knowledge             port.KnowledgeCommands
 	knowledgeBindings     port.KnowledgeBindingResolver
 	knowledgeRetriever    port.KnowledgeRetriever
@@ -984,6 +985,9 @@ func (s *Service) persistAssistantTurn(ctx context.Context, metadata domain.Conv
 			s.logger.Error("assistant exchange persistence failed", "conversation_key", metadata.Key, "error", err)
 			return fmt.Errorf("persist assistant exchange: %w", err)
 		}
+		if s.memoryWake != nil {
+			s.memoryWake()
+		}
 		return nil
 	}
 
@@ -1144,10 +1148,13 @@ func messageChars(messages []domain.Message) int {
 	return total
 }
 
-func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.AssistantExchangeWriter) {
+func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.AssistantExchangeWriter, wake ...func()) {
 	s.recall = recall
 	s.exchange = exchange
 	s.memoryEnabled = true
+	if len(wake) > 0 {
+		s.memoryWake = wake[0]
+	}
 }
 
 func (s *Service) processAttachments(ctx context.Context, invocation domain.Invocation, maxChars int) (string, error) {

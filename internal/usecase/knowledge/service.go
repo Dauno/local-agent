@@ -29,6 +29,7 @@ type Dependencies struct {
 	Store       port.KnowledgeStore
 	Clock       port.Clock
 	Coordinator port.ConversationCoordinator
+	Wakes       []func()
 }
 
 type Service struct {
@@ -36,6 +37,7 @@ type Service struct {
 	store       port.KnowledgeStore
 	clock       port.Clock
 	coordinator port.ConversationCoordinator
+	wakes       []func()
 }
 
 var _ port.KnowledgeCommands = (*Service)(nil)
@@ -54,7 +56,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if err := cfg.Limits.Validate(); err != nil {
 		return nil, fmt.Errorf("knowledge limits: %w", err)
 	}
-	return &Service{cfg: cfg, store: deps.Store, clock: deps.Clock, coordinator: deps.Coordinator}, nil
+	return &Service{cfg: cfg, store: deps.Store, clock: deps.Clock, coordinator: deps.Coordinator, wakes: deps.Wakes}, nil
 }
 
 // MatchesKnowledge reports whether text is a memory-human command, including
@@ -117,6 +119,13 @@ func (s *Service) Execute(ctx context.Context, binding domain.KnowledgeWriteBind
 		message, err = s.inspect(ctx, binding, command)
 	default:
 		return true, "", fmt.Errorf("%w: %v", port.ErrKnowledgeValidation, command.Action)
+	}
+	if err == nil && command.Action != domain.KnowledgeActionInspect {
+		for _, wake := range s.wakes {
+			if wake != nil {
+				wake()
+			}
+		}
 	}
 	return true, message, err
 }

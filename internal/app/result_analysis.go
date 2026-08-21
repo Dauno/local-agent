@@ -13,6 +13,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	resultanalysisusecase "github.com/Dauno/slack-local-agent/internal/usecase/resultanalysis"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 // resultAnalysisPromptVersion is the pinned prompt/policy suite version
@@ -53,7 +54,7 @@ type resultAnalysisComposition struct {
 // opened or written and the worker is never created. This mirrors
 // composeLexicalRetrieval's gate exactly: the gate is positive, not a
 // worker that exists and does nothing.
-func composeResultAnalysis(cfg config.Config, models runtimeModels, modelCalls port.ModelCallLimiter, store *sqlite.Store) (*resultAnalysisComposition, error) {
+func composeResultAnalysis(cfg config.Config, models runtimeModels, modelCalls port.ModelCallLimiter, store *sqlite.Store, supplied ...*workpoll.Scheduler) (*resultAnalysisComposition, error) {
 	analysis := cfg.Orchestration.ResultAnalysis
 	if !analysis.Enabled {
 		return nil, nil
@@ -126,6 +127,16 @@ func composeResultAnalysis(cfg config.Config, models runtimeModels, modelCalls p
 	if err := limits.Validate(); err != nil {
 		return nil, fmt.Errorf("result analysis limits are invalid: %w", err)
 	}
+	var scheduler *workpoll.Scheduler
+	if len(supplied) > 0 {
+		scheduler = supplied[0]
+	} else {
+		var err error
+		scheduler, err = workpoll.New(time.Duration(analysis.WorkerIntervalSeconds)*time.Second, workpoll.Options{})
+		if err != nil {
+			return nil, fmt.Errorf("initialize result analysis scheduler: %w", err)
+		}
+	}
 
 	service, err := resultanalysisusecase.NewService(resultanalysisusecase.ServiceConfig{
 		SegmentationVersion: resultanalysisusecase.SegmenterTextV1,
@@ -134,6 +145,7 @@ func composeResultAnalysis(cfg config.Config, models runtimeModels, modelCalls p
 		Limits:              limits,
 	}, resultanalysisusecase.ServiceDependencies{
 		Source: trustedResults, Analyses: analysesStore, Steps: stepsStore, Evidence: evidenceStore, Payloads: stepsStore, Analyzer: analyzer,
+		Wake: scheduler.Wake,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize result analysis service: %w", err)
@@ -149,7 +161,7 @@ func composeResultAnalysis(cfg config.Config, models runtimeModels, modelCalls p
 	}, resultanalysisusecase.WorkerDependencies{
 		Analyses: analysesStore, Active: analysesStore, Running: analysesStore, Steps: stepsStore, Segments: segmentsStore,
 		Evidence: evidenceStore, Payloads: stepsStore, Completion: completionStore, Source: trustedResults, Analyzer: analyzer,
-		Clock: port.SystemClock{}, Logger: models.logger, Sanitize: models.redactor.String,
+		Clock: port.SystemClock{}, Logger: models.logger, Sanitize: models.redactor.String, Scheduler: scheduler,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("initialize result analysis worker: %w", err)

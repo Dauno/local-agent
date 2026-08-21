@@ -269,6 +269,37 @@ func (w *fakeExchangeWriter) FinalizeAssistantExchange(_ context.Context, _ stri
 	return w.err
 }
 
+type memoryWakeTestLogger struct{}
+
+func (memoryWakeTestLogger) Debug(string, ...any) {}
+func (memoryWakeTestLogger) Info(string, ...any)  {}
+func (memoryWakeTestLogger) Warn(string, ...any)  {}
+func (memoryWakeTestLogger) Error(string, ...any) {}
+
+func TestFinalizedMemoryExchangeWakesOnlyAfterCommit(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		finalErr error
+		wantWake int
+	}{
+		{name: "committed", wantWake: 1},
+		{name: "failed", finalErr: errors.New("finalize failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			writer := &fakeExchangeWriter{err: test.finalErr}
+			wakes := 0
+			service := &Service{exchange: writer, memoryEnabled: true, memoryWake: func() { wakes++ }, logger: memoryWakeTestLogger{}}
+			err := service.persistAssistantTurn(t.Context(), domain.ConversationMetadata{Key: "slack:T12345678:dm:D12345678"}, "2.0", "answer", port.PreparedAssistantExchange{ID: "intent"})
+			if (err != nil) != (test.finalErr != nil) {
+				t.Fatalf("persistAssistantTurn() error = %v", err)
+			}
+			if wakes != test.wantWake {
+				t.Fatalf("memory wake count = %d, want %d", wakes, test.wantWake)
+			}
+		})
+	}
+}
+
 func (w *fakeExchangeWriter) DiscardAssistantExchange(context.Context, string) error {
 	w.discards++
 	return nil
