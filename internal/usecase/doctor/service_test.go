@@ -135,8 +135,9 @@ func validDependencies() (Dependencies, *fakeDatabase, *fakeLive) {
 			SlackBotTokenKey:   "xoxb-secret-token",
 			SlackAppTokenKey:   "xapp-secret-token",
 		}},
-		Database: database,
-		Live:     live,
+		Database:      database,
+		Live:          live,
+		SQLiteRuntime: &fakeSQLiteRuntimeChecker{health: healthySQLiteRuntime()},
 	}, database, live
 }
 

@@ -158,8 +158,11 @@ func newDoctorCommand(backend Backend, streams Streams) *cobra.Command {
 			}
 			for _, result := range report.Results {
 				label := "PASS"
-				if result.Status == doctor.StatusFail {
+				switch result.Status {
+				case doctor.StatusFail:
 					label = "FAIL"
+				case doctor.StatusSkipped:
+					label = "SKIP"
 				}
 				fmt.Fprintf(streams.Out, "%s %-24s %s\n", label, result.Name, result.Detail)
 				if result.Remediation != "" {

@@ -33,6 +33,21 @@ const (
 	expectedSQLiteMaxOpenConnections = 4
 )
 
+// Minimum-schema table (TRD 09 checkpoint 2): the oldest schema version each
+// offline database check can run against. A check whose minimum exceeds the
+// detected version is reported as StatusSkipped instead of being called.
+const (
+	minimumSchemaConnectionModel = 1
+	minimumSchemaDatabaseFile    = 1
+	minimumSchemaJobs            = 30
+	minimumSchemaActivations     = 29
+	minimumSchemaResultIdentity  = 32
+	minimumSchemaRecoverableRefs = 41
+	minimumSchemaResultRetention = 34
+	minimumSchemaKnowledge       = 39
+	minimumSchemaResultAnalysis  = 40
+)
+
 type SecretResolver interface {
 	Resolve(keys ...string) (map[string]string, error)
 }
@@ -150,8 +165,10 @@ type ResultAnalysisChecker interface {
 	CheckResultAnalysisState(ctx context.Context, path string) (domain.ResultAnalysisHealth, error)
 }
 
-// SQLiteRuntimeChecker is the optional offline check for the TRD 08
-// connection model (checkpoint 6): pragmas and pool size.
+// SQLiteRuntimeChecker is the mandatory offline schema inspector and
+// connection-model check (TRD 08 checkpoint 6 pragmas and pool; TRD 09
+// checkpoint 2 ownership): doctor.New rejects a composition without it, and
+// its single schema-version read gates every other SQLite check.
 type SQLiteRuntimeChecker interface {
 	CheckSQLiteRuntime(ctx context.Context, path string) (domain.SQLiteRuntimeHealth, error)
 }
@@ -185,8 +202,9 @@ type Dependencies struct {
 type Status string
 
 const (
-	StatusPass Status = "pass"
-	StatusFail Status = "fail"
+	StatusPass    Status = "pass"
+	StatusFail    Status = "fail"
+	StatusSkipped Status = "skipped"
 )
 
 type Result struct {
@@ -245,6 +263,9 @@ func New(deps Dependencies) (*Service, error) {
 	}
 	if deps.Database == nil {
 		return nil, errors.New("doctor database checker is required")
+	}
+	if deps.SQLiteRuntime == nil {
+		return nil, errors.New("doctor SQLite runtime checker is required")
 	}
 	return &Service{deps: deps}, nil
 }
@@ -539,60 +560,43 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	}
 
 	if pathErr == nil {
-		if err := s.deps.Database.CheckDatabase(ctx, paths.DatabaseFile); err != nil {
-			remediation := "Run local-agent init or fix permissions for the configured database path."
-			var actionable RemediableError
-			if errors.As(err, &actionable) && actionable.Remediation() != "" {
-				remediation = actionable.Remediation()
-			}
-			report.fail("SQLite", redactor.String(err.Error()), remediation, false)
-		} else {
-			report.pass("SQLite", "database exists, is migrated, and is readable/writable")
+		// Schema inspector, consumer-owned (TRD 09 checkpoint 2): this is the
+		// only schema-version read per run, and the checker is mandatory in
+		// New. It runs before every other SQLite check, and each later check
+		// consults the local `detected` value. An unreadable version and a
+		// future version are both fatal and stop all later checks with exit
+		// 2; an old version is informational here and lets each check decide
+		// by the minimum-schema table.
+		health, runtimeErr := s.deps.SQLiteRuntime.CheckSQLiteRuntime(ctx, paths.DatabaseFile)
+		if runtimeErr != nil {
+			report.fail("SQLite connection model", redactDoctorPathError(redactor, runtimeErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", true)
+			return report
 		}
-		if s.deps.Knowledge != nil {
-			health, healthErr := s.deps.Knowledge.CheckKnowledgeRetrievalState(ctx, paths.DatabaseFile)
-			if healthErr != nil {
-				report.fail("knowledge retrieval state", redactor.String(healthErr.Error()), "Run: local-agent knowledge rebuild-index to rebuild the reconstructible lexical index, or restart the agent so the lexical and embedding workers can reconcile normally.", false)
+		detected := health.SchemaVersion
+		switch {
+		case detected > expectedSQLiteSchemaVersion:
+			report.fail("SQLite connection model",
+				fmt.Sprintf("user_version=%d is newer than this binary supports (%d)", detected, expectedSQLiteSchemaVersion),
+				"Install a local-agent version that supports this database. To discard local conversation state, stop the agent, back up and delete only the configured database file, then run init.",
+				true)
+			return report
+		case detected < minimumSchemaConnectionModel:
+			// A v0 database (for example an empty file) satisfies no schema
+			// floor; report the frozen skip detail instead of validating
+			// pragmas against it.
+			report.skip("SQLite connection model", fmt.Sprintf("requires schema v%d, database is v%d", minimumSchemaConnectionModel, detected))
+		case detected < expectedSQLiteSchemaVersion:
+			if problems := validatePreUpgradeConnectionModel(health); len(problems) > 0 {
+				report.fail("SQLite connection model", strings.Join(problems, "; "),
+					"Restore the connection contract: synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
 			} else {
-				report.pass("knowledge retrieval state", fmt.Sprintf("lexical queue pending=%d processing=%d stale=%d repairable=%d; embedding queue pending=%d processing=%d stale=%d repairable=%d", health.LexicalQueuePending, health.LexicalQueueProcessing, health.LexicalQueueStaleProcessing, health.LexicalRepairableMismatch, health.EmbeddingQueuePending, health.EmbeddingQueueProcessing, health.EmbeddingQueueStaleProcessing, health.EmbeddingRepairableMismatch))
+				report.pass("SQLite connection model", fmt.Sprintf(
+					"schema v%d, current binary requires v%d; run local-agent db upgrade; journal_mode=%s (informational); synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
+					detected, expectedSQLiteSchemaVersion, health.JournalMode,
+					health.Synchronous, health.BusyTimeoutMillis, health.ForeignKeys, health.MaxOpenConnections))
 			}
-		}
-		if s.deps.ResultRetention != nil {
-			ages := domain.ResultRetentionAges{
-				Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
-				Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
-				Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
-			}
-			health, retentionErr := s.deps.ResultRetention.CheckResultRetention(ctx, paths.DatabaseFile, ages, time.Now().UTC())
-			if retentionErr != nil {
-				report.fail("v2 result retention", redactor.String(retentionErr.Error()), "Fix the configured database path and retry.", false)
-			} else {
-				detail := "no deletion worker is implemented yet (TRD 02 finding 6, deferred to TRD 09); this reports bounded candidate counts only"
-				for _, class := range health.Classes {
-					detail += fmt.Sprintf("; %s candidates=%d reference_protected=%d materialization_pending=%d", class.Class, class.Candidates, class.ReferenceProtected, class.MaterializationPending)
-				}
-				if health.ExportedNotImplemented {
-					detail += "; exported class is never scanned: its age anchor is a verified-publication event that does not exist yet"
-				}
-				report.pass("v2 result retention", detail)
-			}
-		}
-		if s.deps.ResultAnalysis != nil {
-			health, analysisErr := s.deps.ResultAnalysis.CheckResultAnalysisState(ctx, paths.DatabaseFile)
-			if analysisErr != nil {
-				report.fail("v40 result analysis", redactor.String(analysisErr.Error()),
-					"Run local-agent init --reset-state to rebuild the database, or restore a verified backup; do not hand-edit the analysis tables.", false)
-			} else {
-				report.pass("v40 result analysis", fmt.Sprintf(
-					"schema_version=%d step_queue_depth=%d expired_leases=%d non_terminal_analyses=%d incomplete_coverage_analyses=%d",
-					health.SchemaVersion, health.StepQueueDepth, health.ExpiredLeases, health.NonTerminalAnalyses, health.IncompleteCoverageAnalyses))
-			}
-		}
-		if s.deps.SQLiteRuntime != nil {
-			health, runtimeErr := s.deps.SQLiteRuntime.CheckSQLiteRuntime(ctx, paths.DatabaseFile)
-			if runtimeErr != nil {
-				report.fail("SQLite connection model", redactDoctorPathError(redactor, runtimeErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
-			} else if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
+		default:
+			if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
 				report.fail("SQLite connection model", strings.Join(problems, "; "),
 					"Restore the v41 connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
 			} else {
@@ -601,21 +605,88 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 					health.SchemaVersion, health.JournalMode, health.Synchronous, health.BusyTimeoutMillis, health.ForeignKeys, health.MaxOpenConnections))
 			}
 		}
-		if s.deps.RecoverableRefs != nil {
-			health, refErr := s.deps.RecoverableRefs.CheckRecoverableReferenceHealth(ctx, paths.DatabaseFile)
-			switch {
-			case refErr != nil:
-				report.fail("recoverable reference index", redactDoctorPathError(redactor, refErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
-			case health.DanglingRefs > 0 || health.DanglingOwners > 0:
-				report.fail("recoverable reference index", fmt.Sprintf(
-					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d dangling_refs=%d dangling_owners=%d",
-					health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners, health.DanglingRefs, health.DanglingOwners),
-					"Stop retention cleanup now. Restore a verified backup, or rebuild state through the repair path TRD 09 decides. Do not hand-edit recoverable_result_refs or its owner tables.", false)
-			default:
-				report.pass("recoverable reference index", fmt.Sprintf(
-					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d",
-					health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners))
+		// runIfSchema gates one check behind the minimum-schema table.
+		runIfSchema := func(name string, minimum int, run func()) {
+			if detected >= minimum {
+				run()
+				return
 			}
+			report.skip(name, fmt.Sprintf("requires schema v%d, database is v%d", minimum, detected))
+		}
+		runIfSchema("SQLite", minimumSchemaDatabaseFile, func() {
+			if err := s.deps.Database.CheckDatabase(ctx, paths.DatabaseFile); err != nil {
+				remediation := "Run local-agent init or fix permissions for the configured database path."
+				var actionable RemediableError
+				if errors.As(err, &actionable) && actionable.Remediation() != "" {
+					remediation = actionable.Remediation()
+				}
+				report.fail("SQLite", redactor.String(err.Error()), remediation, false)
+			} else {
+				report.pass("SQLite", "database exists and passes the integrity check")
+			}
+		})
+		if s.deps.Knowledge != nil {
+			runIfSchema("knowledge retrieval state", minimumSchemaKnowledge, func() {
+				health, healthErr := s.deps.Knowledge.CheckKnowledgeRetrievalState(ctx, paths.DatabaseFile)
+				if healthErr != nil {
+					report.fail("knowledge retrieval state", redactor.String(healthErr.Error()), "Run: local-agent knowledge rebuild-index to rebuild the reconstructible lexical index, or restart the agent so the lexical and embedding workers can reconcile normally.", false)
+				} else {
+					report.pass("knowledge retrieval state", fmt.Sprintf("lexical queue pending=%d processing=%d stale=%d repairable=%d; embedding queue pending=%d processing=%d stale=%d repairable=%d", health.LexicalQueuePending, health.LexicalQueueProcessing, health.LexicalQueueStaleProcessing, health.LexicalRepairableMismatch, health.EmbeddingQueuePending, health.EmbeddingQueueProcessing, health.EmbeddingQueueStaleProcessing, health.EmbeddingRepairableMismatch))
+				}
+			})
+		}
+		if s.deps.ResultRetention != nil {
+			runIfSchema("v2 result retention", minimumSchemaResultRetention, func() {
+				ages := domain.ResultRetentionAges{
+					Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
+					Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
+					Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
+				}
+				health, retentionErr := s.deps.ResultRetention.CheckResultRetention(ctx, paths.DatabaseFile, ages, time.Now().UTC())
+				if retentionErr != nil {
+					report.fail("v2 result retention", redactor.String(retentionErr.Error()), "Fix the configured database path and retry.", false)
+				} else {
+					detail := "no deletion worker is implemented yet (TRD 02 finding 6, deferred to TRD 09); this reports bounded candidate counts only"
+					for _, class := range health.Classes {
+						detail += fmt.Sprintf("; %s candidates=%d reference_protected=%d materialization_pending=%d", class.Class, class.Candidates, class.ReferenceProtected, class.MaterializationPending)
+					}
+					if health.ExportedNotImplemented {
+						detail += "; exported class is never scanned: its age anchor is a verified-publication event that does not exist yet"
+					}
+					report.pass("v2 result retention", detail)
+				}
+			})
+		}
+		if s.deps.ResultAnalysis != nil {
+			runIfSchema("v40 result analysis", minimumSchemaResultAnalysis, func() {
+				health, analysisErr := s.deps.ResultAnalysis.CheckResultAnalysisState(ctx, paths.DatabaseFile)
+				if analysisErr != nil {
+					report.fail("v40 result analysis", redactor.String(analysisErr.Error()),
+						"Run local-agent init --reset-state to rebuild the database, or restore a verified backup; do not hand-edit the analysis tables.", false)
+				} else {
+					report.pass("v40 result analysis", fmt.Sprintf(
+						"schema_version=%d step_queue_depth=%d expired_leases=%d non_terminal_analyses=%d incomplete_coverage_analyses=%d",
+						health.SchemaVersion, health.StepQueueDepth, health.ExpiredLeases, health.NonTerminalAnalyses, health.IncompleteCoverageAnalyses))
+				}
+			})
+		}
+		if s.deps.RecoverableRefs != nil {
+			runIfSchema("recoverable reference index", minimumSchemaRecoverableRefs, func() {
+				health, refErr := s.deps.RecoverableRefs.CheckRecoverableReferenceHealth(ctx, paths.DatabaseFile)
+				switch {
+				case refErr != nil:
+					report.fail("recoverable reference index", redactDoctorPathError(redactor, refErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
+				case health.DanglingRefs > 0 || health.DanglingOwners > 0:
+					report.fail("recoverable reference index", fmt.Sprintf(
+						"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d dangling_refs=%d dangling_owners=%d",
+						health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners, health.DanglingRefs, health.DanglingOwners),
+						"Stop retention cleanup now. Restore a verified backup, or rebuild state through the repair path TRD 09 decides. Do not hand-edit recoverable_result_refs or its owner tables.", false)
+				default:
+					report.pass("recoverable reference index", fmt.Sprintf(
+						"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d",
+						health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners))
+				}
+			})
 		}
 		if s.deps.Artifacts != nil {
 			if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ACP.MaxResultArtifactBytes); err != nil {
@@ -625,21 +696,25 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			}
 		}
 		if s.deps.Jobs != nil {
-			if err := s.deps.Jobs.CheckExternalAgentJobs(ctx, paths.DatabaseFile); err != nil {
-				report.fail("external-agent jobs", redactor.String(err.Error()), "Run local-agent init to migrate the local job store, or repair the configured database.", false)
-			} else {
-				report.pass("external-agent jobs", "durable job and notification outbox are available")
-			}
-			if healthChecker, ok := s.deps.Jobs.(JobStoreHealthChecker); ok {
-				health, healthErr := healthChecker.CheckExternalAgentActivationHealth(ctx, paths.DatabaseFile)
-				if healthErr != nil {
-					report.fail("external-agent activations", redactor.String(healthErr.Error()), "Drain or investigate the activation outbox before starting the agent.", false)
-				} else if health.Stuck > 0 {
-					report.fail("external-agent activations", fmt.Sprintf("activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)", health.Stuck, health.Pending, health.Processed, health.CompletionUnknown), "Inspect the activation worker and let expired leases become reclaimable.", false)
+			runIfSchema("external-agent jobs", minimumSchemaJobs, func() {
+				if err := s.deps.Jobs.CheckExternalAgentJobs(ctx, paths.DatabaseFile); err != nil {
+					report.fail("external-agent jobs", redactor.String(err.Error()), "Run local-agent init to migrate the local job store, or repair the configured database.", false)
 				} else {
-					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
+					report.pass("external-agent jobs", "durable job and notification outbox are available")
 				}
-			}
+			})
+			runIfSchema("external-agent activations", minimumSchemaActivations, func() {
+				if healthChecker, ok := s.deps.Jobs.(JobStoreHealthChecker); ok {
+					health, healthErr := healthChecker.CheckExternalAgentActivationHealth(ctx, paths.DatabaseFile)
+					if healthErr != nil {
+						report.fail("external-agent activations", redactor.String(healthErr.Error()), "Drain or investigate the activation outbox before starting the agent.", false)
+					} else if health.Stuck > 0 {
+						report.fail("external-agent activations", fmt.Sprintf("activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)", health.Stuck, health.Pending, health.Processed, health.CompletionUnknown), "Inspect the activation worker and let expired leases become reclaimable.", false)
+					} else {
+						report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
+					}
+				}
+			})
 			// Operational decision (P2-02): a non-terminal foreground
 			// activation is the P0 contract violation and fails doctor; an
 			// incomplete delivery identity (notification or activation) also
@@ -649,19 +724,21 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			// marked in the existing event ledger and remain informational; current
 			// incomplete rows fail closed. Only counts are emitted; no job ID, actor,
 			// conversation, digest, reference, or content value.
-			if identityChecker, ok := s.deps.Jobs.(JobStoreIdentityChecker); ok {
-				identity, identityErr := identityChecker.CheckExternalAgentResultIdentityHealth(ctx, paths.DatabaseFile)
-				switch {
-				case identityErr != nil:
-					report.fail("external-agent result identity", redactor.String(identityErr.Error()), "Repair the configured database so every durable result carries a complete identity, or reset state after backup.", false)
-				case identity.ForegroundActivationsActive > 0:
-					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d non-terminal foreground activations (defect), %d notifications without identity, %d activations without content, %d activations without identity, %d retired foreground activations, %d current completed jobs without result identity", identity.ForegroundActivationsActive, identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity), "Stop the agent and restore the foreground-suppression build: foreground jobs must never produce claimable activations.", false)
-				case identity.NotificationsWithoutIdentity > 0 || identity.ActivationsWithoutContent > 0 || identity.ActivationsWithoutIdentity > 0 || identity.JobsCompletedWithoutResultIdentity > 0:
-					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d notifications without identity, %d activations without content, %d activations without identity, %d non-terminal foreground activations, %d retired foreground activations, %d current completed jobs without result identity, %d historical completed jobs without result identity", identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.ForegroundActivationsActive, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity, identity.JobsCompletedWithoutResultIdentityLegacy), "Do not start the agent until incomplete delivery identity is repaired; results must carry bytes and SHA-256 after transformation.", false)
-				default:
-					report.pass("external-agent result identity", fmt.Sprintf("result identity is complete (informational: %d historical completed jobs without result identity, %d retired foreground activations)", identity.JobsCompletedWithoutResultIdentityLegacy, identity.RetiredForegroundActivations))
+			runIfSchema("external-agent result identity", minimumSchemaResultIdentity, func() {
+				if identityChecker, ok := s.deps.Jobs.(JobStoreIdentityChecker); ok {
+					identity, identityErr := identityChecker.CheckExternalAgentResultIdentityHealth(ctx, paths.DatabaseFile)
+					switch {
+					case identityErr != nil:
+						report.fail("external-agent result identity", redactor.String(identityErr.Error()), "Repair the configured database so every durable result carries a complete identity, or reset state after backup.", false)
+					case identity.ForegroundActivationsActive > 0:
+						report.fail("external-agent result identity", fmt.Sprintf("identity health: %d non-terminal foreground activations (defect), %d notifications without identity, %d activations without content, %d activations without identity, %d retired foreground activations, %d current completed jobs without result identity", identity.ForegroundActivationsActive, identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity), "Stop the agent and restore the foreground-suppression build: foreground jobs must never produce claimable activations.", false)
+					case identity.NotificationsWithoutIdentity > 0 || identity.ActivationsWithoutContent > 0 || identity.ActivationsWithoutIdentity > 0 || identity.JobsCompletedWithoutResultIdentity > 0:
+						report.fail("external-agent result identity", fmt.Sprintf("identity health: %d notifications without identity, %d activations without content, %d activations without identity, %d non-terminal foreground activations, %d retired foreground activations, %d current completed jobs without result identity, %d historical completed jobs without result identity", identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.ForegroundActivationsActive, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity, identity.JobsCompletedWithoutResultIdentityLegacy), "Do not start the agent until incomplete delivery identity is repaired; results must carry bytes and SHA-256 after transformation.", false)
+					default:
+						report.pass("external-agent result identity", fmt.Sprintf("result identity is complete (informational: %d historical completed jobs without result identity, %d retired foreground activations)", identity.JobsCompletedWithoutResultIdentityLegacy, identity.RetiredForegroundActivations))
+					}
 				}
-			}
+			})
 		}
 	}
 	if pathErr == nil {
@@ -957,17 +1034,12 @@ func redactDoctorPathError(redactor secure.Redactor, message, databasePath strin
 	return redactor.String(message)
 }
 
-// validateSQLiteRuntimeContract compares an observed connection model
-// against this release's v41 contract and returns one problem string per
-// mismatch, or nil when the connection model is healthy.
-func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
+// validateConnectionPragmas checks the connection-level settings this
+// binary's own DSN applies on every open: they are validated at every
+// detected schema version, unlike journal_mode, which is an on-disk
+// property only the upgrade itself changes.
+func validateConnectionPragmas(health domain.SQLiteRuntimeHealth) []string {
 	var problems []string
-	if health.SchemaVersion != expectedSQLiteSchemaVersion {
-		problems = append(problems, fmt.Sprintf("user_version=%d, want %d", health.SchemaVersion, expectedSQLiteSchemaVersion))
-	}
-	if health.JournalMode != expectedSQLiteJournalMode {
-		problems = append(problems, fmt.Sprintf("journal_mode=%s, want %s", health.JournalMode, expectedSQLiteJournalMode))
-	}
 	if health.Synchronous != expectedSQLiteSynchronous {
 		problems = append(problems, fmt.Sprintf("synchronous=%d, want %d (FULL)", health.Synchronous, expectedSQLiteSynchronous))
 	}
@@ -981,6 +1053,29 @@ func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
 		problems = append(problems, fmt.Sprintf("max_open_connections=%d, want %d", health.MaxOpenConnections, expectedSQLiteMaxOpenConnections))
 	}
 	return problems
+}
+
+// validateSQLiteRuntimeContract compares an observed connection model
+// against this release's full v41 contract and returns one problem string
+// per mismatch, or nil when the connection model is healthy.
+func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
+	var problems []string
+	if health.SchemaVersion != expectedSQLiteSchemaVersion {
+		problems = append(problems, fmt.Sprintf("user_version=%d, want %d", health.SchemaVersion, expectedSQLiteSchemaVersion))
+	}
+	if health.JournalMode != expectedSQLiteJournalMode {
+		problems = append(problems, fmt.Sprintf("journal_mode=%s, want %s", health.JournalMode, expectedSQLiteJournalMode))
+	}
+	return append(problems, validateConnectionPragmas(health)...)
+}
+
+// validatePreUpgradeConnectionModel validates a database whose schema is
+// older than this release (TRD 09 checkpoint 2). The version mismatch and
+// the on-disk journal mode are informational there, not defects: no v34+
+// binary has opened the file read-write yet, so journal_mode may still be
+// delete until `db upgrade` switches it to WAL.
+func validatePreUpgradeConnectionModel(health domain.SQLiteRuntimeHealth) []string {
+	return validateConnectionPragmas(health)
 }
 
 func checkTimeout(ctx context.Context, seconds int) (context.Context, context.CancelFunc) {
@@ -1005,6 +1100,10 @@ func uniqueStrings(values []string) []string {
 
 func (r *Report) pass(name, detail string) {
 	r.Results = append(r.Results, Result{Name: name, Status: StatusPass, Detail: detail})
+}
+
+func (r *Report) skip(name, detail string) {
+	r.Results = append(r.Results, Result{Name: name, Status: StatusSkipped, Detail: detail})
 }
 
 func (r *Report) fail(name, detail, remediation string, fatal bool) {

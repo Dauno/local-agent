@@ -154,6 +154,32 @@ func TestInitCancellationKeepsBaseArtifactsWithoutApplying(t *testing.T) {
 	}
 }
 
+// TestDoctorRendersSkipWithoutChangingExitCode proves the SKIP label renders
+// alongside PASS/FAIL and that a skipped check is inert for the exit code.
+func TestDoctorRendersSkipWithoutChangingExitCode(t *testing.T) {
+	b := setupBackend()
+	b.report.Results = []doctor.Result{
+		{Name: "SQLite connection model", Status: doctor.StatusPass, Detail: "schema v41"},
+		{Name: "v40 result analysis", Status: doctor.StatusSkipped, Detail: "requires schema v40, database is v33"},
+	}
+	var output, stderr bytes.Buffer
+	root, _ := NewRoot(b, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if code := Execute(t.Context(), root, []string{"doctor"}, &stderr); code != 0 {
+		t.Fatalf("exit=%d want=0", code)
+	}
+	rendered := output.String()
+	if !strings.Contains(rendered, "PASS SQLite connection model") {
+		t.Fatalf("PASS line missing: %q", rendered)
+	}
+	if line := "SKIP v40 result analysis"; !strings.Contains(rendered, line) ||
+		!strings.Contains(rendered, "requires schema v40, database is v33") {
+		t.Fatalf("SKIP line missing: %q", rendered)
+	}
+	if strings.Contains(rendered, "\nFAIL ") {
+		t.Fatalf("a skip must not render as FAIL: %q", rendered)
+	}
+}
+
 func TestCommandExitCodes(t *testing.T) {
 	tests := []struct {
 		name    string

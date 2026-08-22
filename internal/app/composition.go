@@ -425,16 +425,17 @@ func composeModelContextAdmission(resolved *agentdef.ResolvedModel, cfg config.C
 
 func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runtimeSetup, models runtimeModels) (*runtimeInfrastructure, error) {
 	cfg, paths := setup.cfg, setup.paths
-	store, err := adaptersqlite.OpenExisting(ctx, paths.DatabaseFile)
+	store, err := a.openCurrentTraced(ctx, paths.DatabaseFile)
 	if err != nil {
 		if errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {
 			return nil, errors.New("Local state not found. Run: local-agent init")
 		}
+		if errors.Is(err, adaptersqlite.ErrSchemaUpgradeRequired) {
+			// Exact shared text; the schema gate must never open mode=rw.
+			return nil, errors.New(schemaBehindMessage)
+		}
 		if errors.Is(err, adaptersqlite.ErrFutureSchema) {
 			return nil, models.redactor.Error(fmt.Errorf("%w. Install a local-agent version that supports this database or back up and remove only the configured database file", err))
-		}
-		if errors.Is(err, adaptersqlite.ErrStateResetNeeded) {
-			return nil, models.redactor.Error(fmt.Errorf("%w. Run: local-agent init --reset-state", err))
 		}
 		return nil, models.redactor.Error(fmt.Errorf("open runtime database: %w", err))
 	}

@@ -15,13 +15,14 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
 
-// doctorFixtureJobsChecker is the real composition-root wiring for the doctor
-// job-store checks: it opens the database by path, migrates it, and returns
-// the bounded content-free aggregates.
+// doctorFixtureJobsChecker mirrors the production composition wiring for the
+// read-only doctor job-store checks: every method opens with OpenReadOnly,
+// exactly like internal/app's checkers, and never migrates a fixture
+// (FIND-186).
 type doctorFixtureJobsChecker struct{}
 
 func (doctorFixtureJobsChecker) CheckExternalAgentJobs(ctx context.Context, path string) error {
-	store, err := OpenExisting(ctx, path)
+	store, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -30,7 +31,7 @@ func (doctorFixtureJobsChecker) CheckExternalAgentJobs(ctx context.Context, path
 }
 
 func (doctorFixtureJobsChecker) CheckExternalAgentActivationHealth(ctx context.Context, path string) (domain.ExternalAgentJobActivationHealth, error) {
-	store, err := OpenExisting(ctx, path)
+	store, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobActivationHealth{}, err
 	}
@@ -39,12 +40,26 @@ func (doctorFixtureJobsChecker) CheckExternalAgentActivationHealth(ctx context.C
 }
 
 func (doctorFixtureJobsChecker) CheckExternalAgentResultIdentityHealth(ctx context.Context, path string) (domain.ExternalAgentJobIdentityHealth, error) {
-	store, err := OpenExisting(ctx, path)
+	store, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobIdentityHealth{}, err
 	}
 	defer store.Close()
 	return NewExternalAgentJobStore(store).IdentityHealth(ctx)
+}
+
+// doctorFixtureRuntimeChecker mirrors the production composition wiring for
+// the mandatory schema inspector: a read-only open plus the real runtime
+// health read.
+type doctorFixtureRuntimeChecker struct{}
+
+func (doctorFixtureRuntimeChecker) CheckSQLiteRuntime(ctx context.Context, path string) (domain.SQLiteRuntimeHealth, error) {
+	store, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.SQLiteRuntimeHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckSQLiteRuntime(ctx)
 }
 
 type doctorFixtureSecrets struct{}
@@ -87,11 +102,12 @@ func runDoctorOnFixture(t *testing.T, fixturePath string) doctor.Report {
 		t.Fatal(err)
 	}
 	deps := doctor.Dependencies{
-		ConfigPath: filepath.Join(stateDir, "config.yaml"),
-		LoadConfig: func(string) (config.Config, error) { return config.Default(), nil },
-		Secrets:    doctorFixtureSecrets{},
-		Database:   doctorFixtureDatabase{},
-		Jobs:       doctorFixtureJobsChecker{},
+		ConfigPath:    filepath.Join(stateDir, "config.yaml"),
+		LoadConfig:    func(string) (config.Config, error) { return config.Default(), nil },
+		Secrets:       doctorFixtureSecrets{},
+		Database:      doctorFixtureDatabase{},
+		Jobs:          doctorFixtureJobsChecker{},
+		SQLiteRuntime: doctorFixtureRuntimeChecker{},
 	}
 	service, err := doctor.New(deps)
 	if err != nil {
@@ -194,6 +210,16 @@ func buildUpgradedDoctorFixture(t *testing.T) string {
 	insertV30JobRow(t, raw, "fg-invalid-utf8", "foreground", "completed", "\xff\xfe", "", "", 0)
 	insertV30JobRow(t, raw, "detached-inline", "detached", "completed", "d", "", "", 0)
 	if err := raw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	// Finish the upgrade the fixture name promises: the seeded v30 state is
+	// migrated to the current release so the doctor run inspects a real
+	// post-upgrade database instead of a rewound header.
+	upgraded, err := OpenExisting(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.Close(); err != nil {
 		t.Fatal(err)
 	}
 	return path
