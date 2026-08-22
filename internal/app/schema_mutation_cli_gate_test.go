@@ -27,11 +27,15 @@ const mutationHeldText = "another local-agent process is using the database; wai
 
 // rewindToV33Delete rewinds a fully migrated database to header v33 with an
 // on-disk journal_mode=delete, mirroring the known deployment, and returns
-// the exact byte content.
+// the exact byte content. The adoption-at-creation keys Create writes since
+// checkpoint 4 are stripped: the known pre-rollout deployment has none.
 func rewindToV33Delete(t *testing.T, dbPath string) string {
 	t.Helper()
 	plain, err := sql.Open("sqlite", dbPath)
 	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Exec("DELETE FROM runtime_state"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := plain.Exec("PRAGMA journal_mode = delete"); err != nil {

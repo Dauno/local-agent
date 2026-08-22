@@ -425,19 +425,22 @@ func composeModelContextAdmission(resolved *agentdef.ResolvedModel, cfg config.C
 
 func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runtimeSetup, models runtimeModels) (*runtimeInfrastructure, error) {
 	cfg, paths := setup.cfg, setup.paths
+	// Rollout-completeness half of run's preflight (checkpoint 4): read-only
+	// reads under the lock acquired in Run, strictly before OpenCurrent's
+	// own mode=rw open. The disposition-marker half is checkpoint 5.
+	a.traceSchemaEvent("preflight")
+	if err := a.requireRolloutComplete(ctx, paths.DatabaseFile); err != nil {
+		if errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {
+			return nil, errors.New("Local state not found. Run: local-agent init")
+		}
+		return nil, rolloutPreflightFailure(err)
+	}
 	store, err := a.openCurrentTraced(ctx, paths.DatabaseFile)
 	if err != nil {
 		if errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {
 			return nil, errors.New("Local state not found. Run: local-agent init")
 		}
-		if errors.Is(err, adaptersqlite.ErrSchemaUpgradeRequired) {
-			// Exact shared text; the schema gate must never open mode=rw.
-			return nil, errors.New(schemaBehindMessage)
-		}
-		if errors.Is(err, adaptersqlite.ErrFutureSchema) {
-			return nil, models.redactor.Error(fmt.Errorf("%w. Install a local-agent version that supports this database or back up and remove only the configured database file", err))
-		}
-		return nil, models.redactor.Error(fmt.Errorf("open runtime database: %w", err))
+		return nil, models.redactor.Error(schemaOpenFailure(err))
 	}
 	ok := false
 	defer func() {
