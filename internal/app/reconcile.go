@@ -34,6 +34,12 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 		return domain.ExternalAgentJobStatusView{}, schemaLockFailure(err)
 	}
 	defer func() { _ = lock.Release() }()
+	// Rollout-completeness preflight (checkpoint 5): read-only reads under the
+	// lock, strictly before OpenCurrent's own mode=rw open, mirroring run.
+	a.traceSchemaEvent("preflight")
+	if err := a.requireRolloutComplete(ctx, setup.paths.DatabaseFile); err != nil {
+		return domain.ExternalAgentJobStatusView{}, rolloutPreflightFailure(err)
+	}
 	store, err := a.openCurrentTraced(ctx, setup.paths.DatabaseFile)
 	if err != nil {
 		return domain.ExternalAgentJobStatusView{}, schemaOpenFailure(err)

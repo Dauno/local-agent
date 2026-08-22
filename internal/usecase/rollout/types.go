@@ -188,3 +188,22 @@ type SummaryDiscoveryDrainStatus struct {
 	Clear                    bool
 	PendingSessionIdentities []string
 }
+
+// LegacyIdentityQuarantinePreview is the content-free read of the two frozen
+// match predicates. AlreadyApplied short-circuits both counts: a completed
+// disposition is final, so a preview never re-runs the match queries.
+type LegacyIdentityQuarantinePreview struct {
+	Cutoff             time.Time
+	JobsMatched        int
+	ActivationsMatched int
+	AlreadyApplied     bool
+	AppliedAt          time.Time
+}
+
+// LegacyIdentityQuarantineReport is the outcome of one apply transaction.
+type LegacyIdentityQuarantineReport struct {
+	JobsMarked        int
+	ActivationsMarked int
+	AppliedAt         time.Time
+	AlreadyApplied    bool
+}

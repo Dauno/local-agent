@@ -435,6 +435,13 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 		}
 		return nil, rolloutPreflightFailure(err)
 	}
+	// Legacy-disposition half of run's preflight (checkpoint 5, closes
+	// FIND-168): one more read-only marker read in the same lock-held pass,
+	// still strictly before OpenCurrent.
+	a.traceSchemaEvent("disposition")
+	if err := a.requireLegacyIdentityDispositionComplete(ctx, paths.DatabaseFile); err != nil {
+		return nil, rolloutPreflightFailure(err)
+	}
 	store, err := a.openCurrentTraced(ctx, paths.DatabaseFile)
 	if err != nil {
 		if errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {

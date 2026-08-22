@@ -50,6 +50,12 @@ func (a *Application) RebuildKnowledgeIndexes(ctx context.Context) (domain.Knowl
 		return domain.KnowledgeIndexRebuildResult{}, schemaLockFailure(err)
 	}
 	defer func() { _ = lock.Release() }()
+	// Rollout-completeness preflight (checkpoint 5): read-only reads under the
+	// lock, strictly before OpenCurrent's own mode=rw open, mirroring run.
+	a.traceSchemaEvent("preflight")
+	if err := a.requireRolloutComplete(ctx, paths.DatabaseFile); err != nil {
+		return domain.KnowledgeIndexRebuildResult{}, rolloutPreflightFailure(err)
+	}
 	store, err := a.openCurrentTraced(ctx, paths.DatabaseFile)
 	if err != nil {
 		return domain.KnowledgeIndexRebuildResult{}, schemaOpenFailure(err)

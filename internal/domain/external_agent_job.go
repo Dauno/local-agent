@@ -150,6 +150,12 @@ const (
 	// v31 repair migration on foreground activations retired without model
 	// execution or response publication. It is not a worker classification.
 	ActivationForegroundRetiredCode = "foreground_activation_retired"
+
+	// ActivationLegacyContentCode is the bounded informational code stamped by
+	// the legacy identity quarantine on historical completed activations whose
+	// content was never delivered. It is never a worker classification and is
+	// never written over an existing error code.
+	ActivationLegacyContentCode = "legacy_activation_content"
 )
 
 // ExternalAgentJobActivation is the durable host-originated root-turn outbox
@@ -358,6 +364,10 @@ type ExternalAgentJobIdentityHealth struct {
 	// count is not positive. Failed, cancelled, completion_unknown, and
 	// abandoned activations legitimately carry no result content.
 	ActivationsWithoutContent int
+	// ActivationsWithoutContentLegacy counts historical completed activations
+	// whose unavailable content is informational (quarantined with the bounded
+	// ActivationLegacyContentCode) rather than a current defect.
+	ActivationsWithoutContentLegacy int
 	// ActivationsWithoutIdentity counts activations whose notification digest is
 	// not lowercase hexadecimal SHA-256.
 	ActivationsWithoutIdentity int
