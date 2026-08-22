@@ -76,6 +76,8 @@ func rolloutPreflightFailure(err error) error {
 		return err
 	case errors.Is(err, rollout.ErrPostflightNotPassed):
 		return errors.New(rolloutIncompleteMessage)
+	case errors.Is(err, rollout.ErrLegacyIdentityDispositionIncomplete):
+		return dispositionIncompleteError{}
 	default:
 		// A Corrupt reading keeps its own message: it names the observed
 		// keys and reasons instead of conflating untrustworthy state with

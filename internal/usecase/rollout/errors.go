@@ -43,6 +43,19 @@ var (
 	// ErrPostflightNotPassed reports a database whose rollout has not yet
 	// recorded a passing postflight.
 	ErrPostflightNotPassed = errors.New("the schema rollout has not completed (missing cutoff or postflight)")
+
+	// ErrLegacyIdentityDispositionIncomplete reports a database whose rollout
+	// is complete but whose legacy identity quarantine has not run yet.
+	ErrLegacyIdentityDispositionIncomplete = errors.New("legacy identity disposition has not completed")
+
+	// ErrLegacyIdentityQuarantineMismatch reports a quarantine apply whose
+	// re-read match counts diverge from the previewed --expect-* counts.
+	ErrLegacyIdentityQuarantineMismatch = errors.New("legacy identity quarantine match counts diverged from the expected counts")
+
+	// ErrLegacyCutoffNotRecorded reports a database that reached v41 without
+	// db upgrade ever freezing a rollout cutoff. Its message is the operator
+	// text the preview renders verbatim.
+	ErrLegacyCutoffNotRecorded = errors.New("no cutoff recorded, run local-agent db upgrade")
 )
 
 // UnsupportedSourceSchemaError carries the observed schema and the closed

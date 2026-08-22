@@ -37,6 +37,9 @@ type Application struct {
 	schemaProbe     rollout.SchemaProbe
 	schemaBackupper rollout.DatabaseBackupper
 	schemaWriter    rollout.SchemaWriter
+	// quarantineStore is the private test seam for the legacy identity
+	// disposition; nil selects the SQLite implementation.
+	quarantineStore rollout.LegacyIdentityQuarantineStore
 	// schemaTrace is the private test seam for the mutation call order
 	// (FIND-190): when non-nil it receives ordered "open-current"/"create"
 	// markers to place next to the locker's own events. It is nil in
@@ -404,6 +407,15 @@ func (a *Application) bootstrapService() (*bootstrap.Service, error) {
 			return schemaLockFailure(err)
 		}
 		defer func() { _ = lock.Release() }()
+
+		// Rollout-completeness preflight (checkpoint 5): an existing database
+		// must already sit on a completed rollout before the write-capable
+		// opener runs. A missing file skips the gate and takes the create path
+		// below, which records its own complete rollout state at creation.
+		a.traceSchemaEvent("preflight")
+		if err := a.requireRolloutComplete(ctx, path); err != nil && !errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {
+			return rolloutPreflightFailure(err)
+		}
 
 		store, err := a.openCurrentTraced(ctx, path)
 		switch {

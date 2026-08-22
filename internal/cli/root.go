@@ -13,6 +13,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
+	"github.com/Dauno/slack-local-agent/internal/usecase/rollout"
 )
 
 type Backend interface {
@@ -40,6 +41,20 @@ type JobReconciliationBackend interface {
 // reconstructible-knowledge-index rebuild command.
 type KnowledgeIndexRebuildBackend interface {
 	RebuildKnowledgeIndexes(ctx context.Context) (domain.KnowledgeIndexRebuildResult, error)
+}
+
+// LegacyIdentityQuarantinePreviewBackend is optional so existing embedders of
+// the CLI backend remain valid while the concrete application exposes the
+// read-only legacy identity quarantine preview.
+type LegacyIdentityQuarantinePreviewBackend interface {
+	PreviewLegacyIdentityQuarantine(ctx context.Context) (rollout.LegacyIdentityQuarantinePreview, error)
+}
+
+// LegacyIdentityQuarantineApplyBackend is optional for the same reason; it
+// carries only the confirmed apply so a preview-only embedder never sees a
+// mutating method.
+type LegacyIdentityQuarantineApplyBackend interface {
+	ApplyLegacyIdentityQuarantine(ctx context.Context, expected rollout.LegacyIdentityQuarantinePreview) (rollout.LegacyIdentityQuarantineReport, error)
 }
 
 type Streams struct {
@@ -281,8 +296,98 @@ func newJobsCommand(backend Backend, streams Streams) *cobra.Command {
 			return command.Help()
 		},
 	}
-	command.AddCommand(newJobsInspectCommand(backend, streams), newJobsReconcileCommand(backend, streams))
+	command.AddCommand(newJobsInspectCommand(backend, streams), newJobsReconcileCommand(backend, streams), newJobsQuarantineLegacyIdentityCommand(backend, streams))
 	return command
+}
+
+// Frozen invariant predicate texts the preview prints next to the counts.
+// They describe exactly what the command matches and marks; no row value is
+// ever printed.
+const (
+	quarantineJobsPredicateText        = "jobs predicate: status = 'completed' AND result identity incomplete (result_bytes <= 0 OR result_sha256 is not 64 lowercase hex chars) AND created_at <= cutoff"
+	quarantineActivationsPredicateText = "activations predicate: terminal_status = 'completed' AND content_bytes <= 0 AND last_error_code = '' AND created_at <= cutoff"
+)
+
+func newJobsQuarantineLegacyIdentityCommand(backend Backend, streams Streams) *cobra.Command {
+	var apply bool
+	var expectJobs int
+	var expectActivations int
+	var assumeYes bool
+	command := &cobra.Command{
+		Use:   "quarantine-legacy-identity",
+		Short: "Mark historical jobs and activations without result identity as informational legacy rows",
+		Long: "Previews how many completed external-agent jobs and activations carry no result identity " +
+			"and predate the frozen rollout cutoff. With --apply it stamps those exact rows with the " +
+			"informational legacy markers inside one checked transaction. It never generates or repairs content.",
+		Args: cobra.NoArgs,
+		RunE: func(command *cobra.Command, _ []string) error {
+			ctx := command.Context()
+			if !apply {
+				previewer, ok := backend.(LegacyIdentityQuarantinePreviewBackend)
+				if !ok {
+					return &ExitError{Code: 1, Cause: errors.New("jobs quarantine-legacy-identity is unavailable")}
+				}
+				preview, err := previewer.PreviewLegacyIdentityQuarantine(ctx)
+				if err != nil {
+					return &ExitError{Code: 1, Cause: err}
+				}
+				printQuarantinePreview(streams.Out, preview)
+				return nil
+			}
+			if !command.Flags().Changed("expect-jobs-matched") {
+				return &ExitError{Code: 1, Cause: errors.New("--expect-jobs-matched is required with --apply")}
+			}
+			if !command.Flags().Changed("expect-activations-matched") {
+				return &ExitError{Code: 1, Cause: errors.New("--expect-activations-matched is required with --apply")}
+			}
+			applier, ok := backend.(LegacyIdentityQuarantineApplyBackend)
+			if !ok {
+				return &ExitError{Code: 1, Cause: errors.New("jobs quarantine-legacy-identity --apply is unavailable")}
+			}
+			if !assumeYes {
+				prompt := fmt.Sprintf("Marcar %d jobs y %d activations legacy sin identidad de resultado como excepcion informativa. No se genera ni repara contenido.", expectJobs, expectActivations)
+				confirmed, err := NewPrompter(streams.In, streams.Out).Confirm(prompt, false)
+				if err != nil {
+					return &ExitError{Code: 1, Cause: err}
+				}
+				if !confirmed {
+					fmt.Fprintln(streams.Out, "Operacion cancelada.")
+					return nil
+				}
+			}
+			expected := rollout.LegacyIdentityQuarantinePreview{JobsMatched: expectJobs, ActivationsMatched: expectActivations}
+			report, err := applier.ApplyLegacyIdentityQuarantine(ctx, expected)
+			if err != nil {
+				return &ExitError{Code: 1, Cause: err}
+			}
+			if report.AlreadyApplied {
+				fmt.Fprintf(streams.Out, "already_applied: true\napplied_at: %s\n", inspectionTime(report.AppliedAt))
+				return nil
+			}
+			fmt.Fprintf(streams.Out, "jobs_marked: %d\nactivations_marked: %d\napplied_at: %s\n", report.JobsMarked, report.ActivationsMarked, inspectionTime(report.AppliedAt))
+			return nil
+		},
+	}
+	command.Flags().BoolVar(&apply, "apply", false, "mark the matched rows instead of only previewing them")
+	command.Flags().IntVar(&expectJobs, "expect-jobs-matched", -1, "exact job count a fresh preview must reproduce before any write")
+	command.Flags().IntVar(&expectActivations, "expect-activations-matched", -1, "exact activation count a fresh preview must reproduce before any write")
+	command.Flags().BoolVar(&assumeYes, "yes", false, "skip the confirmation prompt")
+	return command
+}
+
+// printQuarantinePreview renders the content-free preview. A completed
+// disposition reports already_applied with zero counts and never re-runs the
+// match queries.
+func printQuarantinePreview(out io.Writer, preview rollout.LegacyIdentityQuarantinePreview) {
+	if preview.AlreadyApplied {
+		fmt.Fprintf(out, "already_applied: true\napplied_at: %s\njobs_matched: 0\nactivations_matched: 0\n", inspectionTime(preview.AppliedAt))
+		return
+	}
+	fmt.Fprintf(out, "cutoff: %s\n", inspectionTime(preview.Cutoff))
+	fmt.Fprintf(out, "jobs_matched: %d\n", preview.JobsMatched)
+	fmt.Fprintf(out, "activations_matched: %d\n", preview.ActivationsMatched)
+	fmt.Fprintln(out, quarantineJobsPredicateText)
+	fmt.Fprintln(out, quarantineActivationsPredicateText)
 }
 
 func newJobsReconcileCommand(backend Backend, streams Streams) *cobra.Command {

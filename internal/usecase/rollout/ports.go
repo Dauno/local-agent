@@ -2,6 +2,7 @@ package rollout
 
 import (
 	"context"
+	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
@@ -42,4 +43,20 @@ type SchemaWriter interface {
 	RecordBaselineAndCutoff(ctx context.Context, path string, baseline IdentityBaseline, cutoffUnixNanos int64, backup BackupIdentity) error
 	Migrate(ctx context.Context, path string) error
 	RecordPostflight(ctx context.Context, path string, status PostflightStatus, detail string) error
+}
+
+// LegacyIdentityQuarantineStore owns the durable reads and the single marking
+// transaction of the legacy identity disposition. Reads open their own
+// mode=ro connections keyed only by path; Apply performs the whole
+// CAS-guarded write in one transaction and never migrates.
+type LegacyIdentityQuarantineStore interface {
+	ReadCutoff(ctx context.Context, path string) (time.Time, bool, error)
+	ReadAppliedAt(ctx context.Context, path string) (time.Time, bool, error)
+	// CountMatches runs the two frozen COUNT(*) predicates read-only against
+	// the given cutoff. It never reads row content.
+	CountMatches(ctx context.Context, path string, cutoff time.Time) (jobs int, activations int, err error)
+	// Apply re-reads the cutoff and both counts inside one write transaction,
+	// refuses on any divergence from the expected counts, marks matching rows,
+	// and inserts the completion marker with ON CONFLICT DO NOTHING.
+	Apply(ctx context.Context, path string, expectJobs, expectActivations int) (LegacyIdentityQuarantineReport, error)
 }

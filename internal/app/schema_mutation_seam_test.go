@@ -176,20 +176,21 @@ func TestSeamRecordsOpenBetweenLockAndUnlock(t *testing.T) {
 	if _, _, err := application.PrepareSetup(ctx); err != nil {
 		t.Fatalf("PrepareSetup fresh: %v", err)
 	}
-	// Fresh init probes first (not found), then creates under the same lock.
-	assertOrder(t, log, "open-current,create")
+	// Fresh init runs the preflight (not found), then creates under the same
+	// lock.
+	assertOrder(t, log, "preflight,open-current,create")
 
 	log.events = nil
 	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent")) // idempotent rewrite
 	if _, err := application.RebuildKnowledgeIndexes(ctx); err != nil {
 		t.Fatalf("RebuildKnowledgeIndexes: %v", err)
 	}
-	assertOrder(t, log, "open-current")
+	assertOrder(t, log, "preflight,open-current")
 }
 
 // TestSeamReconcileRecordsOpenBetweenLockAndUnlock covers the jobs reconcile
-// site: the store opens strictly inside the locked window even though the
-// job lookup itself fails.
+// site: the preflight and the store open run strictly inside the locked window
+// even though the job lookup itself fails.
 func TestSeamReconcileRecordsOpenBetweenLockAndUnlock(t *testing.T) {
 	application, log, dbPath := newSeamApplication(t)
 	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
@@ -205,12 +206,13 @@ func TestSeamReconcileRecordsOpenBetweenLockAndUnlock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "external-agent job was not found") {
 		t.Fatalf("err = %v, want missing-job failure after a clean open", err)
 	}
-	assertOrder(t, log, "open-current")
+	assertOrder(t, log, "preflight,open-current")
 }
 
-// TestSeamBehindSchemaStillLocksThenOpensThenUnlocks proves the rejection
-// path keeps the same recorded shape on a v33-delete fixture.
-func TestSeamBehindSchemaStillLocksThenOpensThenUnlocks(t *testing.T) {
+// TestSeamBehindSchemaRefusesBeforeOpen proves the rejection path never opens
+// the database at all: the v33 fixture fails the read-only preflight under the
+// lock, so no open-current marker is recorded and the bytes stay untouched.
+func TestSeamBehindSchemaRefusesBeforeOpen(t *testing.T) {
 	application, log, dbPath := newSeamApplication(t)
 	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
 	before := buildBehindFixture(t, dbPath)
@@ -219,7 +221,7 @@ func TestSeamBehindSchemaStillLocksThenOpensThenUnlocks(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), schemaBehindMessage) {
 		t.Fatalf("err = %v, want %q", err, schemaBehindMessage)
 	}
-	assertOrder(t, log, "open-current")
+	assertOrder(t, log, "preflight")
 	assertFileDigest(t, dbPath, before)
 }
 
@@ -363,7 +365,7 @@ func TestSeamRunSuccessPathRecordsFullSequence(t *testing.T) {
 	}
 
 	runErr := application.Run(ctx)
-	assertOrder(t, log, "preflight,open-current")
+	assertOrder(t, log, "preflight,disposition,open-current")
 	if runErr == nil {
 		t.Log("run returned cleanly after the cancelled context")
 	}
