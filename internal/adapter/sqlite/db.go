@@ -93,6 +93,11 @@ func OpenReadOnly(ctx context.Context, path string) (*Store, error) {
 
 // Create creates a new database file with restrictive permissions and applies
 // all known migrations. It fails rather than opening an existing file.
+// Transaction 1 is OpenExisting's migration commit; transaction 2 records
+// the adoption-at-creation rollout state on the already-open pool, so a
+// fresh file classifies AlreadyComplete immediately and the crash window
+// between the two transactions recovers through Recovery Table row 3
+// (Adoption) with no special-cased code.
 func Create(ctx context.Context, path string) (*Store, error) {
 	file, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_RDWR, 0o600)
 	if err != nil {
@@ -107,6 +112,11 @@ func Create(ctx context.Context, path string) (*Store, error) {
 	if err != nil {
 		_ = os.Remove(path)
 		return nil, err
+	}
+	if err := recordAdoptionAtCreation(ctx, store.db); err != nil {
+		_ = store.Close()
+		_ = os.Remove(path)
+		return nil, fmt.Errorf("record adoption-at-creation state on %q: %w", path, err)
 	}
 	return store, nil
 }

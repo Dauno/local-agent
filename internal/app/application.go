@@ -32,6 +32,11 @@ type Application struct {
 	forceShutdown chan struct{}
 	forceOnce     sync.Once
 	schemaLocker  rollout.SchemaLocker
+	// schemaProbe, schemaBackupper, and schemaWriter are the private test
+	// seams for the db upgrade flow; nil selects the SQLite implementations.
+	schemaProbe     rollout.SchemaProbe
+	schemaBackupper rollout.DatabaseBackupper
+	schemaWriter    rollout.SchemaWriter
 	// schemaTrace is the private test seam for the mutation call order
 	// (FIND-190): when non-nil it receives ordered "open-current"/"create"
 	// markers to place next to the locker's own events. It is nil in
@@ -116,11 +121,22 @@ func schemaLockFailure(err error) error {
 	}
 }
 
-// schemaOpenFailure maps OpenCurrent rejections to the shared operator text;
-// every other error keeps its own shape.
+// schemaOpenFailure maps OpenCurrent rejections to the shared operator
+// texts; every other error keeps its own shape. A schema inside [33, 40]
+// keeps the upgrade-first message because db upgrade accepts it; a schema
+// outside [33, 41] maps to the terminal message that never recommends
+// db upgrade for a file db upgrade itself refuses (FIND-179).
 func schemaOpenFailure(err error) error {
-	if errors.Is(err, adaptersqlite.ErrSchemaUpgradeRequired) {
-		return errors.New(schemaBehindMessage)
+	var upgrade *adaptersqlite.SchemaUpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		if upgrade.Found >= rollout.MinSourceVersion && upgrade.Found <= rollout.MaxSourceVersion {
+			return errors.New(schemaBehindMessage)
+		}
+		return newTerminalSchemaError(rollout.ErrUnsupportedSourceSchema, upgrade.Found)
+	}
+	var future *adaptersqlite.FutureSchemaError
+	if errors.As(err, &future) {
+		return newTerminalSchemaError(rollout.ErrFutureSchema, future.Found)
 	}
 	return err
 }

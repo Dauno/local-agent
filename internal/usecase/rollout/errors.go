@@ -1,0 +1,60 @@
+package rollout
+
+import (
+	"errors"
+	"fmt"
+)
+
+var (
+	// ErrFutureSchema reports a schema newer than this binary's target.
+	ErrFutureSchema = errors.New("database schema is newer than this binary supports")
+
+	// ErrSchemaUpgradeRequired reports a schema in [33, 40] that db upgrade
+	// must process before ordinary commands may open the file.
+	ErrSchemaUpgradeRequired = errors.New("database schema is behind this binary's v41")
+
+	// ErrBackupPrimitiveUnsupported reports platforms without the backup
+	// primitive. Distinct from ErrMutationLockUnsupported so a caller can
+	// tell "no lock primitive" from "no backup primitive".
+	ErrBackupPrimitiveUnsupported = errors.New("database backup primitive is not supported on this platform")
+
+	// ErrRolloutStateCorrupt reports a durable rollout reading that matches
+	// neither a Recovery Table row nor one of the three backup-identity
+	// shapes. Every return names the observed keys and reasons.
+	ErrRolloutStateCorrupt = errors.New("rollout state cannot be trusted")
+
+	// ErrAdoptionUnsupportedIncompleteRows reports an Adoption target that
+	// already carries nonzero postflight-fatal counts. Returned before any
+	// backup or write, so its presence proves no mutation happened.
+	ErrAdoptionUnsupportedIncompleteRows = errors.New("adoption target already carries incomplete rows that postflight would fail on")
+
+	// ErrUnsupportedSourceSchema reports a source schema below 33, including
+	// a never-migrated schema-0 file.
+	ErrUnsupportedSourceSchema = errors.New("source schema version is outside the range this binary can upgrade")
+
+	// ErrBackupVerificationFailed reports a backup artifact that failed its
+	// integrity, foreign-key, size, digest, or source-version revalidation.
+	ErrBackupVerificationFailed = errors.New("backup verification failed")
+
+	// ErrPostflightRegression reports a live identity count that exceeds the
+	// durable baseline after the rollout advanced.
+	ErrPostflightRegression = errors.New("postflight identity regression")
+
+	// ErrPostflightNotPassed reports a database whose rollout has not yet
+	// recorded a passing postflight.
+	ErrPostflightNotPassed = errors.New("the schema rollout has not completed (missing cutoff or postflight)")
+)
+
+// UnsupportedSourceSchemaError carries the observed schema and the closed
+// supported range, mirroring the adapter-level StateResetNeededError shape.
+type UnsupportedSourceSchemaError struct {
+	Found        int
+	MinSupported int
+	MaxSupported int
+}
+
+func (e UnsupportedSourceSchemaError) Error() string {
+	return fmt.Sprintf("%v: found version %d, supported source range [%d, %d]", ErrUnsupportedSourceSchema, e.Found, e.MinSupported, e.MaxSupported)
+}
+
+func (e UnsupportedSourceSchemaError) Unwrap() error { return ErrUnsupportedSourceSchema }

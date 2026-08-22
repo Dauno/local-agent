@@ -119,6 +119,12 @@ func buildBehindFixture(t *testing.T, dbPath string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Create now records adoption-at-creation rollout keys; the known
+	// pre-rollout deployment this fixture simulates carries none, so strip
+	// them to keep the behind-schema classification honest.
+	if _, err := plain.Exec("DELETE FROM runtime_state"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := plain.Exec("PRAGMA journal_mode = delete"); err != nil {
 		t.Fatal(err)
 	}
@@ -278,11 +284,12 @@ func TestSeamResetStateRecordsCreateUnderLock(t *testing.T) {
 	}
 }
 
-// TestSeamRunRecordsOpenBetweenLockAndUnlock covers the composition entry
-// (run): the lock acquisition precedes the runtime infrastructure open and
-// the release follows it on the rejection path (FIND-190 requires direct
-// seam evidence for all five call sites).
-func TestSeamRunRecordsOpenBetweenLockAndUnlock(t *testing.T) {
+// TestSeamRunRecordsPreflightBetweenLockAndOpen covers the composition entry
+// (run): the lock acquisition precedes the rollout-completeness preflight,
+// which precedes the infrastructure open; the release follows both on the
+// rejection path (checkpoint 4 inserts requireRolloutComplete between the
+// checkpoint-3 lock and open).
+func TestSeamRunRecordsPreflightBetweenLockAndOpen(t *testing.T) {
 	application, log, dbPath := newSeamApplication(t)
 	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
 	before := buildBehindFixture(t, dbPath)
@@ -297,7 +304,7 @@ func TestSeamRunRecordsOpenBetweenLockAndUnlock(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), schemaBehindMessage) {
 		t.Fatalf("err = %v, want %q", err, schemaBehindMessage)
 	}
-	assertOrder(t, log, "open-current")
+	assertOrder(t, log, "preflight")
 	assertFileDigest(t, dbPath, before)
 }
 
@@ -319,4 +326,45 @@ func probeUserVersion(t *testing.T, dbPath string) int {
 		t.Fatal(err)
 	}
 	return version
+}
+
+// TestSeamRunSuccessPathRecordsFullSequence closes FIND-191: the success
+// path of run needs direct sequence evidence too. The fixture is exactly
+// what Create just wrote (AlreadyComplete), so the preflight passes and the
+// real store opens; the context cancels right after a successful open, so
+// Run unwinds deterministically with no network or Slack dependency, and
+// unlock follows both earlier events.
+func TestSeamRunSuccessPathRecordsFullSequence(t *testing.T) {
+	application, log, dbPath := newSeamApplication(t)
+	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
+	store, createErr := adaptersqlite.Create(context.Background(), dbPath)
+	if createErr != nil {
+		t.Fatal(createErr)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SLACK_BOT_TOKEN", "xoxb-seam-token")
+	t.Setenv("SLACK_APP_TOKEN", "xapp-seam-token")
+	t.Setenv("SEAM_MODEL_KEY", "seam-model-key")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	realOpen := adaptersqlite.OpenCurrent
+	application.openCurrent = func(openCtx context.Context, path string) (*adaptersqlite.Store, error) {
+		opened, openErr := realOpen(openCtx, path)
+		if openErr == nil {
+			// Every success-path event is recorded once the store opens;
+			// cancelling here makes Run return deterministically without
+			// ever reaching Slack or the network.
+			cancel()
+		}
+		return opened, openErr
+	}
+
+	runErr := application.Run(ctx)
+	assertOrder(t, log, "preflight,open-current")
+	if runErr == nil {
+		t.Log("run returned cleanly after the cancelled context")
+	}
 }
