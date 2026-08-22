@@ -29,9 +29,14 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 	if setup.defs == nil {
 		return domain.ExternalAgentJobStatusView{}, errors.New("durable ACP definitions are unavailable")
 	}
-	store, err := adaptersqlite.OpenExisting(ctx, setup.paths.DatabaseFile)
+	lock, err := a.schemaLock(setup.paths.DatabaseFile)
 	if err != nil {
-		return domain.ExternalAgentJobStatusView{}, err
+		return domain.ExternalAgentJobStatusView{}, schemaLockFailure(err)
+	}
+	defer func() { _ = lock.Release() }()
+	store, err := a.openCurrentTraced(ctx, setup.paths.DatabaseFile)
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, schemaOpenFailure(err)
 	}
 	defer store.Close()
 	jobStore := adaptersqlite.NewExternalAgentJobStore(store)

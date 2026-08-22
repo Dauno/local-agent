@@ -17,6 +17,14 @@ func (a *Application) Run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
+	// Cross-process exclusion: the lock is acquired before any database
+	// open and held for the process's entire life. The deferred release
+	// below runs after the store-close defer registered later.
+	lock, err := a.schemaLock(setup.paths.DatabaseFile)
+	if err != nil {
+		return schemaLockFailure(err)
+	}
+	defer func() { _ = lock.Release() }()
 	models, err := a.prepareRuntimeModels(ctx, setup)
 	if err != nil {
 		return err

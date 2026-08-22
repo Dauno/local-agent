@@ -23,6 +23,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
+	"github.com/Dauno/slack-local-agent/internal/usecase/rollout"
 )
 
 type Application struct {
@@ -30,6 +31,38 @@ type Application struct {
 	logOutput     io.Writer
 	forceShutdown chan struct{}
 	forceOnce     sync.Once
+	schemaLocker  rollout.SchemaLocker
+	// schemaTrace is the private test seam for the mutation call order
+	// (FIND-190): when non-nil it receives ordered "open-current"/"create"
+	// markers to place next to the locker's own events. It is nil in
+	// production and never a package-level global.
+	schemaTrace func(string)
+	openCurrent func(context.Context, string) (*adaptersqlite.Store, error)
+	create      func(context.Context, string) (*adaptersqlite.Store, error)
+}
+
+func (a *Application) traceSchemaEvent(event string) {
+	if a.schemaTrace != nil {
+		a.schemaTrace(event)
+	}
+}
+
+func (a *Application) openCurrentTraced(ctx context.Context, path string) (*adaptersqlite.Store, error) {
+	a.traceSchemaEvent("open-current")
+	open := a.openCurrent
+	if open == nil {
+		open = adaptersqlite.OpenCurrent
+	}
+	return open(ctx, path)
+}
+
+func (a *Application) createTraced(ctx context.Context, path string) (*adaptersqlite.Store, error) {
+	a.traceSchemaEvent("create")
+	create := a.create
+	if create == nil {
+		create = adaptersqlite.Create
+	}
+	return create(ctx, path)
 }
 
 func New(projectRoot string, logOutput io.Writer) (*Application, error) {
@@ -44,6 +77,52 @@ func New(projectRoot string, logOutput io.Writer) (*Application, error) {
 		logOutput = io.Discard
 	}
 	return &Application{root: root, logOutput: logOutput, forceShutdown: make(chan struct{})}, nil
+}
+
+// schemaLock acquires the exclusive cross-process mutation lock for one
+// database path through the configured locker, defaulting to the
+// kernel-held file lock.
+func (a *Application) schemaLock(databasePath string) (rollout.Lock, error) {
+	locker := a.schemaLocker
+	if locker == nil {
+		locker = adaptersqlite.FileSchemaLocker{}
+	}
+	return locker.AcquireExclusive(databasePath)
+}
+
+const (
+	schemaBehindMessage     = "database schema is behind this binary's v41; run local-agent db upgrade first"
+	mutationLockHeldMessage = "another local-agent process is using the database; wait for it to finish"
+)
+
+// lockHeldError carries the shared operator text while keeping
+// errors.Is(err, rollout.ErrMutationLockHeld) true for callers that need
+// the typed distinction.
+type lockHeldError struct{}
+
+func (lockHeldError) Error() string { return mutationLockHeldMessage }
+func (lockHeldError) Unwrap() error { return rollout.ErrMutationLockHeld }
+
+// schemaLockFailure maps locker failures to the operator-facing texts every
+// mutable command shares.
+func schemaLockFailure(err error) error {
+	switch {
+	case errors.Is(err, rollout.ErrMutationLockHeld):
+		return lockHeldError{}
+	case errors.Is(err, rollout.ErrMutationLockUnsupported):
+		return fmt.Errorf("%w", rollout.ErrMutationLockUnsupported)
+	default:
+		return fmt.Errorf("acquire database mutation lock: %w", err)
+	}
+}
+
+// schemaOpenFailure maps OpenCurrent rejections to the shared operator text;
+// every other error keeps its own shape.
+func schemaOpenFailure(err error) error {
+	if errors.Is(err, adaptersqlite.ErrSchemaUpgradeRequired) {
+		return errors.New(schemaBehindMessage)
+	}
+	return err
 }
 
 // ForceShutdown skips the configured drain period while preserving durable
@@ -263,6 +342,14 @@ func (a *Application) ResetState(ctx context.Context) error {
 	}
 
 	dbPath := paths.DatabaseFile
+	// The lock is taken before the existence check so a concurrent reset or
+	// mutator can never interleave with the destructive replacement below.
+	lock, err := a.schemaLock(dbPath)
+	if err != nil {
+		return schemaLockFailure(err)
+	}
+	defer func() { _ = lock.Release() }()
+
 	if _, statErr := os.Stat(dbPath); errors.Is(statErr, os.ErrNotExist) {
 		return errors.New("no existing database found — nothing to reset")
 	}
@@ -270,7 +357,10 @@ func (a *Application) ResetState(ctx context.Context) error {
 	if err := os.Remove(dbPath); err != nil {
 		return fmt.Errorf("delete database %s: %w", dbPath, err)
 	}
-	store, err := adaptersqlite.Initialize(ctx, dbPath)
+	// A confirmed reset may replace an outdated database outright: Create
+	// builds the current schema directly, and no OpenCurrent gate applies to
+	// this destructive flow.
+	store, err := a.createTraced(ctx, dbPath)
 	if err != nil {
 		return fmt.Errorf("initialize fresh database: %w", err)
 	}
@@ -292,11 +382,39 @@ func (a *Application) ResetState(ctx context.Context) error {
 
 func (a *Application) bootstrapService() (*bootstrap.Service, error) {
 	return bootstrap.New(fsproject.New(), bootstrap.DatabaseInitializerFunc(func(ctx context.Context, path string) error {
-		store, err := adaptersqlite.Initialize(ctx, path)
+		// Lock first; every database decision below happens under it.
+		lock, err := a.schemaLock(path)
 		if err != nil {
-			return err
+			return schemaLockFailure(err)
 		}
-		return store.Close()
+		defer func() { _ = lock.Release() }()
+
+		store, err := a.openCurrentTraced(ctx, path)
+		switch {
+		case err == nil:
+			return store.Close()
+		case errors.Is(err, adaptersqlite.ErrDatabaseNotFound):
+			// Brand-new file: the full create-and-migrate chain runs under
+			// the same lock.
+			created, createErr := a.createTraced(ctx, path)
+			if errors.Is(createErr, os.ErrExist) {
+				// Another initializer won the O_EXCL race; revalidate the
+				// winner's version instead of migrating it implicitly.
+				raced, openErr := a.openCurrentTraced(ctx, path)
+				if openErr != nil {
+					return schemaOpenFailure(openErr)
+				}
+				return raced.Close()
+			}
+			if createErr != nil {
+				return createErr
+			}
+			return created.Close()
+		default:
+			// An existing outdated database never reaches Create or
+			// OpenExisting: init reports the upgrade requirement and stops.
+			return schemaOpenFailure(err)
+		}
 	}), bootstrap.SecretEditorFunc(envfile.Render))
 }
 
@@ -311,7 +429,7 @@ func (artifactChecker) CheckArtifactStore(ctx context.Context, path string, maxB
 type jobStoreChecker struct{}
 
 func (jobStoreChecker) CheckExternalAgentJobs(ctx context.Context, path string) error {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -320,7 +438,7 @@ func (jobStoreChecker) CheckExternalAgentJobs(ctx context.Context, path string) 
 }
 
 func (jobStoreChecker) CheckExternalAgentActivationHealth(ctx context.Context, path string) (domain.ExternalAgentJobActivationHealth, error) {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobActivationHealth{}, err
 	}
@@ -330,7 +448,7 @@ func (jobStoreChecker) CheckExternalAgentActivationHealth(ctx context.Context, p
 }
 
 func (jobStoreChecker) CheckExternalAgentResultIdentityHealth(ctx context.Context, path string) (domain.ExternalAgentJobIdentityHealth, error) {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobIdentityHealth{}, err
 	}
@@ -342,7 +460,7 @@ func (jobStoreChecker) CheckExternalAgentResultIdentityHealth(ctx context.Contex
 type knowledgeChecker struct{}
 
 func (knowledgeChecker) CheckKnowledgeRetrievalState(ctx context.Context, path string) (domain.KnowledgeRetrievalHealth, error) {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.KnowledgeRetrievalHealth{}, err
 	}
@@ -353,7 +471,7 @@ func (knowledgeChecker) CheckKnowledgeRetrievalState(ctx context.Context, path s
 type resultRetentionChecker struct{}
 
 func (resultRetentionChecker) CheckResultRetention(ctx context.Context, path string, ages domain.ResultRetentionAges, now time.Time) (domain.ResultRetentionHealth, error) {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ResultRetentionHealth{}, err
 	}
@@ -364,7 +482,7 @@ func (resultRetentionChecker) CheckResultRetention(ctx context.Context, path str
 type resultAnalysisChecker struct{}
 
 func (resultAnalysisChecker) CheckResultAnalysisState(ctx context.Context, path string) (domain.ResultAnalysisHealth, error) {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ResultAnalysisHealth{}, err
 	}
@@ -372,10 +490,9 @@ func (resultAnalysisChecker) CheckResultAnalysisState(ctx context.Context, path 
 	return store.CheckResultAnalysisState(ctx)
 }
 
-// sqliteRuntimeChecker and recoverableReferenceChecker open the configured
-// database read-only (TRD 08 checkpoint 6): unlike databaseChecker, which
-// migrates via OpenExisting (FIND-109, owned by TRD 09), an offline
-// inspection check must never change database state as a side effect.
+// Every doctor checker opens the configured database read-only (TRD 09
+// checkpoint 2): an offline inspection can never migrate or otherwise change
+// database state as a side effect.
 type sqliteRuntimeChecker struct{}
 
 func (sqliteRuntimeChecker) CheckSQLiteRuntime(ctx context.Context, path string) (domain.SQLiteRuntimeHealth, error) {
@@ -398,23 +515,22 @@ func (recoverableReferenceChecker) CheckRecoverableReferenceHealth(ctx context.C
 	return store.CheckRecoverableReferenceHealth(ctx)
 }
 
+// CheckDatabase is a pure read (TRD 09 checkpoint 2): it opens the database
+// read-only and asserts PRAGMA integrity_check returns ok. Write capability
+// is no longer doctor's concern; a mutable command's own OpenCurrent call is
+// where write access is exercised, at the moment it is needed.
 func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
-		if errors.Is(err, adaptersqlite.ErrFutureSchema) {
-			return &doctor.ActionableError{
-				Err: err,
-				Fix: "Install a local-agent version that supports this database. To discard local conversation state, stop the agent, back up and delete only the configured database file, then run init.",
-			}
-		}
-		if errors.Is(err, adaptersqlite.ErrStateResetNeeded) {
-			return &doctor.ActionableError{
-				Err: err,
-				Fix: "Run: local-agent init --reset-state to discard incompatible local state.",
-			}
-		}
 		return err
 	}
 	defer store.Close()
-	return store.ProbeReadWrite(ctx)
+	var outcome string
+	if err := store.DB().QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&outcome); err != nil {
+		return fmt.Errorf("SQLite integrity check: %w", err)
+	}
+	if outcome != "ok" {
+		return fmt.Errorf("SQLite integrity check reported %q", outcome)
+	}
+	return nil
 }

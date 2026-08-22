@@ -73,7 +73,9 @@ func TestDoctorFailsSQLiteRuntimeOnContractMismatch(t *testing.T) {
 		mutate func(domain.SQLiteRuntimeHealth) domain.SQLiteRuntimeHealth
 		want   string
 	}{
-		{"schema", func(h domain.SQLiteRuntimeHealth) domain.SQLiteRuntimeHealth { h.SchemaVersion = 40; return h }, "user_version=40"},
+		// A schema version below 41 is informational at v41-era contract
+		// checks only under the pre-upgrade branch (TRD 09 checkpoint 2); a
+		// v41-detected database must not carry a mismatching user_version.
 		{"journal_mode", func(h domain.SQLiteRuntimeHealth) domain.SQLiteRuntimeHealth { h.JournalMode = "delete"; return h }, "journal_mode=delete"},
 		{"synchronous", func(h domain.SQLiteRuntimeHealth) domain.SQLiteRuntimeHealth { h.Synchronous = 1; return h }, "synchronous=1"},
 		{"busy_timeout", func(h domain.SQLiteRuntimeHealth) domain.SQLiteRuntimeHealth { h.BusyTimeoutMillis = 1000; return h }, "busy_timeout_ms=1000"},
@@ -138,15 +140,15 @@ func TestDoctorSQLiteRuntimeCheckerErrorDoesNotExposeDatabasePath(t *testing.T) 
 	}
 }
 
-func TestDoctorSkipsSQLiteRuntimeWhenCheckerAbsent(t *testing.T) {
+// TestDoctorRejectsNilSQLiteRuntimeChecker pins FIND-183: the schema
+// inspector is mandatory. A composition without it cannot run a single
+// schema read, so New must reject it instead of falling back to ungated
+// checks.
+func TestDoctorRejectsNilSQLiteRuntimeChecker(t *testing.T) {
 	deps, _, _ := validDependencies()
-	service, err := New(deps)
-	if err != nil {
-		t.Fatal(err)
-	}
-	report := service.Run(t.Context(), false)
-	if _, ok := findResult(report, "SQLite connection model"); ok {
-		t.Fatal("SQLite connection model result present with no checker configured")
+	deps.SQLiteRuntime = nil
+	if _, err := New(deps); err == nil || !strings.Contains(err.Error(), "runtime checker") {
+		t.Fatalf("err = %v, want runtime checker required", err)
 	}
 }
 

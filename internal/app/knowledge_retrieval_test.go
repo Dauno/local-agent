@@ -758,11 +758,12 @@ func TestKnowledgeRetrievalDoctorDeploymentEvidence(t *testing.T) {
 	}
 
 	deps := doctor.Dependencies{
-		ConfigPath: filepath.Join(stateDir, "config.yaml"),
-		LoadConfig: func(string) (config.Config, error) { return cfg, nil },
-		Secrets:    doctorTestSecrets{},
-		Database:   doctorTestDatabase{},
-		Knowledge:  doctorStoreKnowledgeChecker{dbPath: dbPath},
+		ConfigPath:    filepath.Join(stateDir, "config.yaml"),
+		LoadConfig:    func(string) (config.Config, error) { return cfg, nil },
+		Secrets:       doctorTestSecrets{},
+		Database:      doctorTestDatabase{},
+		Knowledge:     doctorStoreKnowledgeChecker{dbPath: dbPath},
+		SQLiteRuntime: sqliteRuntimeChecker{},
 	}
 	service, err := doctor.New(deps)
 	if err != nil {

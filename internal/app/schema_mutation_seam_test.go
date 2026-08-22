@@ -1,0 +1,322 @@
+package app
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
+	"errors"
+	"os"
+	"path/filepath"
+	"strings"
+	"testing"
+
+	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
+	"github.com/Dauno/slack-local-agent/internal/config"
+	"github.com/Dauno/slack-local-agent/internal/usecase/rollout"
+)
+
+// eventLog is the ordered sink shared by the fake locker and the
+// Application's own schema-trace seam (FIND-190). It is per-test state, never
+// a global.
+type eventLog struct{ events []string }
+
+func (l *eventLog) record(event string) { l.events = append(l.events, event) }
+
+func (l *eventLog) joined() string { return strings.Join(l.events, ",") }
+
+type seamLocker struct{ log *eventLog }
+
+func (l seamLocker) AcquireExclusive(databasePath string) (rollout.Lock, error) {
+	l.log.record("lock:" + filepath.Base(databasePath))
+	return seamLock{log: l.log}, nil
+}
+
+type seamLock struct{ log *eventLog }
+
+func (l seamLock) Release() error {
+	l.log.record("unlock")
+	return nil
+}
+
+// newSeamApplication builds an application over a minimal valid project with
+// the recording locker and the trace sink wired together.
+func newSeamApplication(t *testing.T) (*Application, *eventLog, string) {
+	t.Helper()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Orchestration.Knowledge.Enabled = true
+	if err := config.Save(filepath.Join(stateDir, "config.yaml"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(stateDir, "local-agent.db")
+	log := &eventLog{}
+	application := &Application{
+		root:          root,
+		logOutput:     &bytes.Buffer{},
+		forceShutdown: make(chan struct{}),
+		schemaLocker:  seamLocker{log: log},
+		schemaTrace:   log.record,
+	}
+	return application, log, dbPath
+}
+
+// writeMinimalDefinitions seeds a valid openai_compatible provider plus the
+// root agent so loadRuntimeSetup resolves definitions.
+func writeMinimalDefinitions(t *testing.T, stateDir string) {
+	t.Helper()
+	for _, dir := range []string{"agents", "providers"} {
+		if err := os.MkdirAll(filepath.Join(stateDir, dir), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	provider := `
+name: seam-openai
+type: openai_compatible
+base_url: http://127.0.0.1:9/v1
+api_key_env: SEAM_MODEL_KEY
+profiles:
+  root:
+    model: seam-model
+    context_window_tokens: 100000
+    max_output_tokens: 1024
+    token_counter:
+      strategy: byte_bound
+`
+	agent := `
+agent_class: LlmAgent
+name: root_agent
+model: seam-openai/root
+global_instruction: policy
+instruction: root
+`
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "seam-openai.yaml"), []byte(provider), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(agent), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// buildBehindFixture replaces dbPath with a real database whose header says
+// v33 and whose on-disk journal mode is delete, mirroring the known
+// deployment. It returns the exact byte content for identity assertions.
+func buildBehindFixture(t *testing.T, dbPath string) string {
+	t.Helper()
+	store, err := adaptersqlite.Create(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	plain, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Exec("PRAGMA journal_mode = delete"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := plain.Exec("PRAGMA user_version = 33"); err != nil {
+		t.Fatal(err)
+	}
+	if err := plain.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+
+func assertFileDigest(t *testing.T, dbPath, want string) {
+	t.Helper()
+	data, err := os.ReadFile(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(data)
+	if got := hex.EncodeToString(sum[:]); got != want {
+		t.Fatalf("fixture bytes changed: before=%s after=%s", want, got)
+	}
+}
+
+// assertOrder pins the frozen call-order contract: exactly one lock event,
+// then the given database events (open-current and/or create) in order,
+// then exactly one unlock.
+func assertOrder(t *testing.T, log *eventLog, openEvents string) {
+	t.Helper()
+	want := "lock:local-agent.db," + openEvents + ",unlock"
+	if got := log.joined(); got != want {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
+// TestSeamRecordsOpenBetweenLockAndUnlock proves the recorded sequence for
+// every direct call site: the open or create happens strictly between the
+// lock acquisition and its release (FIND-190).
+func TestSeamRecordsOpenBetweenLockAndUnlock(t *testing.T) {
+	ctx := context.Background()
+
+	application, log, _ := newSeamApplication(t)
+	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
+	if _, _, err := application.PrepareSetup(ctx); err != nil {
+		t.Fatalf("PrepareSetup fresh: %v", err)
+	}
+	// Fresh init probes first (not found), then creates under the same lock.
+	assertOrder(t, log, "open-current,create")
+
+	log.events = nil
+	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent")) // idempotent rewrite
+	if _, err := application.RebuildKnowledgeIndexes(ctx); err != nil {
+		t.Fatalf("RebuildKnowledgeIndexes: %v", err)
+	}
+	assertOrder(t, log, "open-current")
+}
+
+// TestSeamReconcileRecordsOpenBetweenLockAndUnlock covers the jobs reconcile
+// site: the store opens strictly inside the locked window even though the
+// job lookup itself fails.
+func TestSeamReconcileRecordsOpenBetweenLockAndUnlock(t *testing.T) {
+	application, log, dbPath := newSeamApplication(t)
+	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
+	store, err := adaptersqlite.Create(context.Background(), dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = application.ReconcileJob(context.Background(), "missing-job", 0)
+	if err == nil || !strings.Contains(err.Error(), "external-agent job was not found") {
+		t.Fatalf("err = %v, want missing-job failure after a clean open", err)
+	}
+	assertOrder(t, log, "open-current")
+}
+
+// TestSeamBehindSchemaStillLocksThenOpensThenUnlocks proves the rejection
+// path keeps the same recorded shape on a v33-delete fixture.
+func TestSeamBehindSchemaStillLocksThenOpensThenUnlocks(t *testing.T) {
+	application, log, dbPath := newSeamApplication(t)
+	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
+	before := buildBehindFixture(t, dbPath)
+
+	_, err := application.ReconcileJob(context.Background(), "missing-job", 0)
+	if err == nil || !strings.Contains(err.Error(), schemaBehindMessage) {
+		t.Fatalf("err = %v, want %q", err, schemaBehindMessage)
+	}
+	assertOrder(t, log, "open-current")
+	assertFileDigest(t, dbPath, before)
+}
+
+// TestSeamContentionRecordsNoDatabaseEvents is the direct-event order gate:
+// with the locker refusing, no open-current or create marker may appear at
+// all, so any implementation that opened before locking fails this
+// assertion instead of merely changing the final error text.
+func TestSeamContentionRecordsNoDatabaseEvents(t *testing.T) {
+	application, log, dbPath := newSeamApplication(t)
+	application.schemaLocker = refusingLocker{}
+	before := buildBehindFixture(t, dbPath)
+
+	if err := application.ResetState(context.Background()); !errors.Is(err, rollout.ErrMutationLockHeld) {
+		t.Fatalf("reset err = %v, want ErrMutationLockHeld", err)
+	}
+	if _, err := application.RebuildKnowledgeIndexes(context.Background()); !errors.Is(err, rollout.ErrMutationLockHeld) {
+		t.Fatalf("rebuild err = %v, want ErrMutationLockHeld", err)
+	}
+	if _, _, err := application.PrepareSetup(context.Background()); !errors.Is(err, rollout.ErrMutationLockHeld) {
+		t.Fatalf("init err = %v, want ErrMutationLockHeld", err)
+	}
+	if got := log.joined(); got != "" {
+		t.Fatalf("database events recorded while the lock was never acquired: %q", got)
+	}
+	assertFileDigest(t, dbPath, before)
+	var mode string
+	plain, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	if err := plain.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "delete" {
+		t.Fatalf("journal_mode=%q err=%v, want delete untouched on every refused path", mode, err)
+	}
+}
+
+// TestSeamResetStateRecordsCreateUnderLock covers the destructive flow's two
+// paths: confirmed reset records create between lock and unlock, and the
+// nothing-to-reset failure records neither.
+func TestSeamResetStateRecordsCreateUnderLock(t *testing.T) {
+	application, log, dbPath := newSeamApplication(t)
+	buildBehindFixture(t, dbPath)
+
+	if err := application.ResetState(context.Background()); err != nil {
+		t.Fatalf("ResetState: %v", err)
+	}
+	assertOrder(t, log, "create")
+	if version := probeUserVersion(t, dbPath); version != 41 {
+		t.Fatalf("post-reset user_version = %d, want 41", version)
+	}
+
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	log.events = nil
+	err := application.ResetState(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "nothing to reset") {
+		t.Fatalf("err = %v, want nothing-to-reset", err)
+	}
+	if got := log.joined(); got != "lock:local-agent.db,unlock" {
+		t.Fatalf("failed-reset events = %q", got)
+	}
+}
+
+// TestSeamRunRecordsOpenBetweenLockAndUnlock covers the composition entry
+// (run): the lock acquisition precedes the runtime infrastructure open and
+// the release follows it on the rejection path (FIND-190 requires direct
+// seam evidence for all five call sites).
+func TestSeamRunRecordsOpenBetweenLockAndUnlock(t *testing.T) {
+	application, log, dbPath := newSeamApplication(t)
+	writeMinimalDefinitions(t, filepath.Join(application.root, ".local-agent"))
+	before := buildBehindFixture(t, dbPath)
+	// Slack tokens are validated during model preparation, before the
+	// database opens; provide them plus the provider key so Run reaches the
+	// schema gate.
+	t.Setenv("SLACK_BOT_TOKEN", "xoxb-seam-token")
+	t.Setenv("SLACK_APP_TOKEN", "xapp-seam-token")
+	t.Setenv("SEAM_MODEL_KEY", "seam-model-key")
+
+	err := application.Run(context.Background())
+	if err == nil || !strings.Contains(err.Error(), schemaBehindMessage) {
+		t.Fatalf("err = %v, want %q", err, schemaBehindMessage)
+	}
+	assertOrder(t, log, "open-current")
+	assertFileDigest(t, dbPath, before)
+}
+
+type refusingLocker struct{}
+
+func (refusingLocker) AcquireExclusive(string) (rollout.Lock, error) {
+	return nil, rollout.ErrMutationLockHeld
+}
+
+func probeUserVersion(t *testing.T, dbPath string) int {
+	t.Helper()
+	plain, err := sql.Open("sqlite", dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer plain.Close()
+	var version int
+	if err := plain.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
+		t.Fatal(err)
+	}
+	return version
+}

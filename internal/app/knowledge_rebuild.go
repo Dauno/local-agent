@@ -45,9 +45,14 @@ func (a *Application) RebuildKnowledgeIndexes(ctx context.Context) (domain.Knowl
 	if err != nil {
 		return domain.KnowledgeIndexRebuildResult{}, err
 	}
-	store, err := adaptersqlite.OpenExisting(ctx, paths.DatabaseFile)
+	lock, err := a.schemaLock(paths.DatabaseFile)
 	if err != nil {
-		return domain.KnowledgeIndexRebuildResult{}, err
+		return domain.KnowledgeIndexRebuildResult{}, schemaLockFailure(err)
+	}
+	defer func() { _ = lock.Release() }()
+	store, err := a.openCurrentTraced(ctx, paths.DatabaseFile)
+	if err != nil {
+		return domain.KnowledgeIndexRebuildResult{}, schemaOpenFailure(err)
 	}
 	defer store.Close()
 
