@@ -77,7 +77,10 @@ func (r *Recorder) AddCounter(name string, delta int64, labels port.MetricLabels
 	if r == nil || strings.TrimSpace(name) == "" || delta < 0 {
 		return
 	}
-	clean := sanitizeLabels(name, labels)
+	clean, ok := sanitizeLabels(name, labels)
+	if !ok {
+		return
+	}
 	k := metricKey(name, clean)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -93,7 +96,10 @@ func (r *Recorder) SetGauge(name string, value int64, labels port.MetricLabels) 
 	if r == nil || strings.TrimSpace(name) == "" {
 		return
 	}
-	clean := sanitizeLabels(name, labels)
+	clean, ok := sanitizeLabels(name, labels)
+	if !ok {
+		return
+	}
 	k := metricKey(name, clean)
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -104,7 +110,10 @@ func (r *Recorder) Observe(name string, value float64, labels port.MetricLabels)
 	if r == nil || strings.TrimSpace(name) == "" || math.IsNaN(value) || math.IsInf(value, 0) {
 		return
 	}
-	clean := sanitizeLabels(name, labels)
+	clean, ok := sanitizeLabels(name, labels)
+	if !ok {
+		return
+	}
 	r.mu.Lock()
 	if len(r.observed) < maxObservationSamples {
 		r.observed = append(r.observed, sample{name: name, kind: port.MetricKindObservation, labels: clean, value: value})
@@ -149,12 +158,30 @@ func (r *Recorder) Snapshot() []port.MetricSample {
 	return result
 }
 
-// sanitizeLabels filters labels by metric: metrics with a per-metric allowlist
-// accept exactly those keys (an empty set rejects every key, forcing
-// label-free recording), all other metrics accept the global allowlist.
-func sanitizeLabels(name string, labels port.MetricLabels) port.MetricLabels {
+// sanitizeLabels filters labels by metric: knowledge retrieval metrics
+// enforce their exact frozen per-metric label contract through
+// ValidateKnowledgeMetricLabels and an invalid sample is dropped entirely
+// rather than becoming an unlabeled sample; metrics with a per-metric
+// allowlist accept exactly those keys (an empty set rejects every key,
+// forcing label-free recording); all other metrics accept the global
+// allowlist.
+func sanitizeLabels(name string, labels port.MetricLabels) (port.MetricLabels, bool) {
+	if domain.IsKnowledgeRetrievalMetric(name) {
+		clean := make(port.MetricLabels, len(labels))
+		for key, value := range labels {
+			value = strings.TrimSpace(value)
+			if value == "" || len(value) > maxLabelValueLength {
+				return nil, false
+			}
+			clean[key] = value
+		}
+		if err := domain.ValidateKnowledgeMetricLabels(name, clean); err != nil {
+			return nil, false
+		}
+		return clean, true
+	}
 	if len(labels) == 0 {
-		return nil
+		return nil, true
 	}
 	allowed, ok := perMetricAllowedLabelKeys[name]
 	if !ok {
@@ -174,7 +201,7 @@ func sanitizeLabels(name string, labels port.MetricLabels) port.MetricLabels {
 		}
 		clean[key] = value
 	}
-	return clean
+	return clean, true
 }
 
 func metricKey(name string, labels port.MetricLabels) key {

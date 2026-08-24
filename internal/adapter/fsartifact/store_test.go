@@ -13,6 +13,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 func TestResultArtifactStoreWritesPrivateAtomicArtifact(t *testing.T) {
@@ -81,6 +82,39 @@ func TestResultArtifactStoreCreateNoReplaceIsAtomic(t *testing.T) {
 	}
 	if wins != 1 {
 		t.Fatalf("successful create calls = %d, want exactly one", wins)
+	}
+}
+
+func TestTypedStoreBindsCatalogIDToVerifiedPrivateArtifact(t *testing.T) {
+	store, err := fsartifact.NewTypedStore(t.TempDir(), 1024)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storage, err := store.StorageFor(strings.Repeat("a", 64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	const payload = "complete 🔥 result"
+	digest := sha256.Sum256([]byte(payload))
+	expectedSHA256 := fmt.Sprintf("%x", digest)
+	if err := store.Publish(t.Context(), storage, payload); err != nil {
+		t.Fatalf("publish typed artifact: %v", err)
+	}
+	if err := store.Publish(t.Context(), storage, payload); err != nil {
+		t.Fatalf("repeat typed artifact publication: %v", err)
+	}
+	if err := store.Verify(t.Context(), storage, expectedSHA256, int64(len(payload))); err != nil {
+		t.Fatalf("verify typed artifact: %v", err)
+	}
+	chunk, err := store.ReadRange(t.Context(), storage, expectedSHA256, int64(len(payload)), 0, 9)
+	if err != nil {
+		t.Fatalf("read typed artifact range: %v", err)
+	}
+	if chunk.Content != "complete " || chunk.NextOffsetBytes != int64(len("complete ")) || chunk.SHA256 != expectedSHA256 {
+		t.Fatalf("typed artifact chunk = %+v", chunk)
+	}
+	if err := store.Publish(t.Context(), storage, "different payload"); !errors.Is(err, port.ErrResultPayloadConflict) {
+		t.Fatalf("conflicting typed artifact publication error = %v", err)
 	}
 }
 

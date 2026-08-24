@@ -2,11 +2,13 @@ package sqlite
 
 import (
 	"context"
+	"errors"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
+	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 func TestExternalAgentJobStoreClaimsAndTerminalizesOneAttempt(t *testing.T) {
@@ -48,6 +50,249 @@ func TestExternalAgentJobStoreClaimsAndTerminalizesOneAttempt(t *testing.T) {
 	}
 	if err := jobStore.Transition(t.Context(), job.ID, "worker-1", 1, domain.JobFailed, nil, "late", now.Add(2*time.Second)); err == nil {
 		t.Fatal("stale attempt terminalized a completed job")
+	}
+}
+
+func TestExternalAgentJobStoreAtomicallyBindsNativeCompletedResult(t *testing.T) {
+	store, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "native-job.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	now := time.Now().UTC()
+	job := testExternalAgentJob(now)
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create = %v, err = %v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), now, "native-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
+	results, err := NewResultStore(store, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const content = "native completed result"
+	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Payload:  content, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
+		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &domain.AcpInvocationResult{
+		Text: content, Inline: true, NativeResultID: handle.ResultID,
+		ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes,
+	}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", now.Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var referencedResult, referenceState string
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT result_id, state FROM result_references
+		WHERE owner_kind = ? AND owner_id = ?`, externalAgentResultOwnerKind, job.ID+":2").Scan(&referencedResult, &referenceState); err != nil {
+		t.Fatal(err)
+	}
+	if referencedResult != handle.ResultID || referenceState != "live" {
+		t.Fatalf("native reference = %q/%q", referencedResult, referenceState)
+	}
+	resolvedResult, err := jobs.NativeResultIDForJob(t.Context(), job.ID, 2)
+	if err != nil || resolvedResult != handle.ResultID {
+		t.Fatalf("native job binding = %q, %v", resolvedResult, err)
+	}
+	if _, err := jobs.NativeResultIDForJob(t.Context(), job.ID, 1); !errors.Is(err, domain.ErrResultUnavailable) {
+		t.Fatalf("stale native job binding error = %v", err)
+	}
+}
+
+func TestExternalAgentJobStoreRejectsNativeResultWithMismatchedBytes(t *testing.T) {
+	store, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "native-job-bytes.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	now := time.Now().UTC()
+	job := testExternalAgentJob(now)
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create = %v, err = %v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), now, "native-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
+	results, err := NewResultStore(store, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Payload:  "native result", Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
+		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := &domain.AcpInvocationResult{Text: "native result", Inline: true, NativeResultID: handle.ResultID, ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes + 1}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", now.Add(time.Second)); err == nil {
+		t.Fatal("native result with mismatched bytes was accepted")
+	}
+	var state string
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT state FROM result_records WHERE result_id = ?`, handle.ResultID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(domain.ResultQuarantined) {
+		t.Fatalf("mismatched native result state = %q", state)
+	}
+}
+
+func TestExternalAgentJobStoreQuarantinesNativeResultWhenTerminalRevisionChanges(t *testing.T) {
+	store, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "native-cancel.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	now := time.Now().UTC()
+	job := testExternalAgentJob(now)
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create = %v, err = %v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), now, "native-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
+	results, err := NewResultStore(store, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const content = "result raced with cancellation"
+	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Payload:  content, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
+		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := jobs.RequestCancellation(t.Context(), job.ID, job.Actor); err != nil {
+		t.Fatal(err)
+	}
+	result := &domain.AcpInvocationResult{
+		Text: content, Inline: true, NativeResultID: handle.ResultID,
+		ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes,
+	}
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", now.Add(time.Second)); err == nil {
+		t.Fatal("cancel-requested job accepted stale native completion")
+	}
+	var state string
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT state FROM result_records WHERE result_id = ?`, handle.ResultID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(domain.ResultQuarantined) {
+		t.Fatalf("raced native result state = %q", state)
+	}
+	var references int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM result_references WHERE result_id = ?`, handle.ResultID).Scan(&references); err != nil {
+		t.Fatal(err)
+	}
+	if references != 0 {
+		t.Fatalf("raced native result references = %d", references)
+	}
+}
+
+func TestExternalAgentJobStoreRecoveryQuarantinesUnboundNativeResult(t *testing.T) {
+	store, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "native-recovery.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobs := NewExternalAgentJobStore(store)
+	now := time.Now().UTC()
+	job := testExternalAgentJob(now)
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create = %v, err = %v", created, err)
+	}
+	claimed, err := jobs.ClaimNext(t.Context(), now, "native-worker", time.Second)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
+	results, err := NewResultStore(store, payloads)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const content = "published before worker crash"
+	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Payload:  content, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
+		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.RecoverExpired(t.Context(), job.ID, claimed.Attempt, claimed.StatusRevision, now.Add(2*time.Second), domain.JobCompletionUnknown, "completion_unknown"); err != nil {
+		t.Fatal(err)
+	}
+	var state string
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT state FROM result_records WHERE result_id = ?`, handle.ResultID).Scan(&state); err != nil {
+		t.Fatal(err)
+	}
+	if state != string(domain.ResultQuarantined) {
+		t.Fatalf("crash-orphan native result state = %q", state)
+	}
+}
+
+func TestExternalAgentJobStoreExpiredCancellationDoesNotRequeue(t *testing.T) {
+	for _, tc := range []struct {
+		name           string
+		withSideEffect bool
+		wantStatus     domain.ExternalAgentJobStatus
+		wantErrorCode  string
+	}{
+		{name: "safe cancellation", wantStatus: domain.JobCancelled},
+		{name: "possible side effect", withSideEffect: true, wantStatus: domain.JobCompletionUnknown, wantErrorCode: "completion_unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "expired-cancellation.db"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = store.Close() })
+			jobs := NewExternalAgentJobStore(store)
+			now := time.Now().UTC()
+			job := testExternalAgentJob(now)
+			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+				t.Fatalf("create = %v, err = %v", created, err)
+			}
+			claimed, err := jobs.ClaimNext(t.Context(), now, "cancel-recovery-worker", time.Minute)
+			if err != nil || claimed == nil {
+				t.Fatalf("claim = %#v, err = %v", claimed, err)
+			}
+			if tc.withSideEffect {
+				if err := jobs.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cancelled, err := jobs.RequestCancellation(t.Context(), job.ID, job.Actor)
+			if err != nil || cancelled == nil || cancelled.Status != domain.JobCancelRequested {
+				t.Fatalf("request cancellation = %#v, err = %v", cancelled, err)
+			}
+			if err := jobs.RecoverExpired(t.Context(), job.ID, claimed.Attempt, cancelled.StatusRevision, now.Add(2*time.Minute), tc.wantStatus, tc.wantErrorCode); err != nil {
+				t.Fatal(err)
+			}
+			finished, err := jobs.GetJob(t.Context(), job.ID)
+			if err != nil || finished == nil {
+				t.Fatalf("finished = %#v, err = %v", finished, err)
+			}
+			if finished.Status != tc.wantStatus || finished.ErrorCode != tc.wantErrorCode {
+				t.Fatalf("finished = %#v, want status=%s error=%q", finished, tc.wantStatus, tc.wantErrorCode)
+			}
+		})
 	}
 }
 
@@ -144,6 +389,7 @@ func TestExpiredRecoveryToQueuedRetryCreatesNoTerminalNotification(t *testing.T)
 			store, jobs, now := newActivationTestStore(t)
 			job := activationTestJob("activation-retry-"+string(mode), now)
 			job.Mode = mode
+			seedActivationTestBinding(t, jobs, job, now)
 			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 				t.Fatalf("create = %v, err = %v", created, err)
 			}

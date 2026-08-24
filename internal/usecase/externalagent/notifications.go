@@ -12,6 +12,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 type NotificationConfig struct {
@@ -24,24 +25,28 @@ type NotificationConfig struct {
 }
 
 type NotificationDependencies struct {
-	Store         port.ExternalAgentJobNotificationStore
-	Publisher     port.JobNotificationPublisher
-	HostCompleter port.ExternalAgentJobHostCompleter
-	Logger        port.Logger
-	Metrics       port.MetricRecorder
+	Store          port.ExternalAgentJobNotificationStore
+	Publisher      port.JobNotificationPublisher
+	HostCompleter  port.ExternalAgentJobHostCompleter
+	Logger         port.Logger
+	Metrics        port.MetricRecorder
+	Scheduler      *workpoll.Scheduler
+	ActivationWake func()
 }
 
 type NotificationWorker struct {
-	cfg        NotificationConfig
-	store      port.ExternalAgentJobNotificationStore
-	publisher  port.JobNotificationPublisher
-	completer  port.ExternalAgentJobHostCompleter
-	logger     port.Logger
-	metrics    port.MetricRecorder
-	owner      string
-	stopClaims chan struct{}
-	stopOnce   sync.Once
-	stopped    chan struct{}
+	cfg            NotificationConfig
+	store          port.ExternalAgentJobNotificationStore
+	publisher      port.JobNotificationPublisher
+	completer      port.ExternalAgentJobHostCompleter
+	logger         port.Logger
+	metrics        port.MetricRecorder
+	owner          string
+	stopClaims     chan struct{}
+	stopOnce       sync.Once
+	stopped        chan struct{}
+	scheduler      *workpoll.Scheduler
+	activationWake func()
 }
 
 const defaultNotificationStuckThreshold = 5 * time.Minute
@@ -83,8 +88,12 @@ func NewNotificationWorker(cfg NotificationConfig, deps NotificationDependencies
 	if metrics == nil {
 		metrics = port.NoopMetricRecorder{}
 	}
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(cfg.PollInterval, workpoll.Options{})
+	}
 	return &NotificationWorker{cfg: cfg, store: deps.Store, publisher: deps.Publisher, completer: deps.HostCompleter,
-		logger: logger, metrics: metrics, owner: "notification-worker", stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
+		logger: logger, metrics: metrics, owner: "notification-worker", stopClaims: make(chan struct{}), stopped: make(chan struct{}),
+		scheduler: deps.Scheduler, activationWake: deps.ActivationWake}, nil
 }
 
 func (w *NotificationWorker) Run(ctx context.Context) {
@@ -92,15 +101,9 @@ func (w *NotificationWorker) Run(ctx context.Context) {
 		return
 	}
 	defer close(w.stopped)
-	ticker := time.NewTicker(w.cfg.PollInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-w.stopClaims:
-			return
-		default:
-		}
-		if err := w.ProcessOne(ctx); err != nil {
+	w.scheduler.Run(ctx, w.stopClaims, func() bool {
+		worked, err := w.processOne(ctx)
+		if err != nil {
 			w.logProcessingError(err)
 		}
 		if _, supported := w.store.(port.ExternalAgentJobNotificationHealthStore); supported {
@@ -108,14 +111,8 @@ func (w *NotificationWorker) Run(ctx context.Context) {
 				w.logger.Error("external-agent notification health snapshot failed", "error_code", notificationErrorCode(err))
 			}
 		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-w.stopClaims:
-			return
-		case <-ticker.C:
-		}
-	}
+		return worked
+	})
 }
 
 // StopAdmission prevents new notification claims while allowing the current
@@ -144,13 +141,18 @@ func (w *NotificationWorker) WaitStopped(ctx context.Context) error {
 // ProcessOne durably classifies provider failures after a claim. Persistence
 // errors remain visible to the caller instead of being converted into success.
 func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
+	_, err := w.processOne(ctx)
+	return err
+}
+
+func (w *NotificationWorker) processOne(ctx context.Context) (bool, error) {
 	notification, err := w.store.ClaimNextNotification(ctx, time.Now().UTC(), w.owner, w.cfg.LeaseTTL)
 	if err != nil {
 		w.recordCASConflict(err, nil)
-		return err
+		return false, err
 	}
 	if notification == nil {
-		return err
+		return false, err
 	}
 	w.metrics.AddCounter(domain.MetricExternalAgentNotificationClaimTotal, 1, port.MetricLabels{
 		"result_kind": boundedResultKind(notification.Kind),
@@ -163,43 +165,51 @@ func (w *NotificationWorker) ProcessOne(ctx context.Context) error {
 			// An ambiguous URL request did not leave a durable Slack file ID.
 			// Reissuing it could create a duplicate file that cannot be
 			// reconciled by identity, so fail closed instead.
-			return wrapNotificationError(notification, w.recordFailure(ctx, notification, port.NewNotificationPublishError("result_file_upload_unknown", false, false, errors.New("Slack file identity is unavailable"))))
+			return true, wrapNotificationError(notification, w.recordFailure(ctx, notification, port.NewNotificationPublishError("result_file_upload_unknown", false, false, errors.New("Slack file identity is unavailable"))))
 		}
 		ts, found, reconcileErr := w.publisher.Reconcile(ctx, *notification)
 		if reconcileErr != nil {
-			return wrapNotificationError(notification, w.recordFailure(ctx, notification, reconcileErr))
+			return true, wrapNotificationError(notification, w.recordFailure(ctx, notification, reconcileErr))
 		}
 		if found {
 			if err := w.store.MarkNotificationPublished(context.WithoutCancel(ctx), notification, ts, time.Now().UTC()); err != nil {
 				w.recordCASConflict(err, notification)
-				return wrapNotificationError(notification, err)
+				return true, wrapNotificationError(notification, err)
 			}
+			w.wakeActivations()
 			w.recordActivationSuppression(notification)
 			w.metrics.AddCounter(domain.MetricExternalAgentNotificationPublishTotal, 1, port.MetricLabels{
 				"delivery_mode": boundedDeliveryMode(notification.DeliveryMode),
 			})
-			return nil
+			return true, nil
 		}
 	}
 	if err := w.verifyHostCompletion(ctx, notification); err != nil {
-		return wrapNotificationError(notification, w.recordFailure(ctx, notification, err))
+		return true, wrapNotificationError(notification, w.recordFailure(ctx, notification, err))
 	}
 	response, publishErr := w.publisher.Publish(ctx, *notification)
 	if publishErr != nil || response.LastMessageTS == "" {
 		if publishErr == nil {
 			publishErr = port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("publisher returned no Slack timestamp"))
 		}
-		return wrapNotificationError(notification, w.recordFailure(ctx, notification, publishErr))
+		return true, wrapNotificationError(notification, w.recordFailure(ctx, notification, publishErr))
 	}
 	if err := w.store.MarkNotificationPublished(context.WithoutCancel(ctx), notification, response.LastMessageTS, time.Now().UTC()); err != nil {
 		w.recordCASConflict(err, notification)
-		return wrapNotificationError(notification, err)
+		return true, wrapNotificationError(notification, err)
 	}
+	w.wakeActivations()
 	w.recordActivationSuppression(notification)
 	w.metrics.AddCounter(domain.MetricExternalAgentNotificationPublishTotal, 1, port.MetricLabels{
 		"delivery_mode": boundedDeliveryMode(notification.DeliveryMode),
 	})
-	return nil
+	return true, nil
+}
+
+func (w *NotificationWorker) wakeActivations() {
+	if w.activationWake != nil {
+		w.activationWake()
+	}
 }
 
 // recordActivationSuppression counts a terminal publication that was
@@ -298,6 +308,7 @@ func (w *NotificationWorker) recordFailure(ctx context.Context, notification *do
 		}
 		return err
 	}
+	w.scheduler.Wake()
 	w.recordFailureMetric(notification, code)
 	w.logPersistedFailure(notification, code)
 	// A retry persistence error is surfaced even when the conservative fallback

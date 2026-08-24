@@ -11,12 +11,13 @@ import (
 )
 
 type summaryStoreFake struct {
-	record    port.SummaryRecord
-	hasRecord bool
-	job       port.SummaryJob
-	scheduled int64
-	completed bool
-	failed    bool
+	record      port.SummaryRecord
+	hasRecord   bool
+	job         port.SummaryJob
+	scheduled   int64
+	completed   bool
+	failed      bool
+	scheduleErr error
 }
 
 func (s *summaryStoreFake) LatestSummary(context.Context, string) (port.SummaryRecord, error) {
@@ -32,7 +33,41 @@ func (s *summaryStoreFake) CommitSummary(_ context.Context, commit port.SummaryC
 }
 func (s *summaryStoreFake) ScheduleSummaryJob(context.Context, string, int64, time.Time) (bool, error) {
 	s.scheduled++
-	return true, nil
+	return s.scheduleErr == nil, s.scheduleErr
+}
+
+func TestScheduleConversationWakesOnlyAfterCommittedInsert(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		storeErr error
+		wantWake bool
+	}{
+		{name: "committed", wantWake: true},
+		{name: "failed", storeErr: errors.New("write failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &summaryStoreFake{scheduleErr: test.storeErr}
+			wakes := 0
+			service, err := New(Config{MaxChars: 100, RecentTurns: 1, WorkerInterval: time.Hour}, Dependencies{
+				Store: store, Summarizer: summarizerFake{}, ScheduleWake: func() { wakes++ },
+				TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}, {Ordinal: 2, Closed: true}}},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotErr := service.ScheduleConversation(t.Context(), "session-wake")
+			if (gotErr != nil) != (test.storeErr != nil) {
+				t.Fatalf("ScheduleConversation() error = %v", gotErr)
+			}
+			want := 0
+			if test.wantWake {
+				want = 1
+			}
+			if wakes != want {
+				t.Fatalf("summary wake count = %d, want %d", wakes, want)
+			}
+		})
+	}
 }
 func (s *summaryStoreFake) ClaimSummaryJob(context.Context, time.Time) (port.SummaryJob, error) {
 	return s.job, nil

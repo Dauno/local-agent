@@ -10,6 +10,8 @@
 /.worktrees/
 /bin/
 /local-agent
+.local-agent
+.claude
 coverage.out
 docs/
 .agents-cli-spec.md

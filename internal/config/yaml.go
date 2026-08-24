@@ -24,9 +24,6 @@ type schemaField struct {
 }
 
 var configSchema = []schemaField{
-	{name: "agent", children: []schemaField{
-		{name: "name"},
-	}},
 	{name: "state", children: []schemaField{
 		{name: "dir"},
 		{name: "db"},
@@ -50,6 +47,7 @@ var configSchema = []schemaField{
 			{name: "recent_turns"},
 			{name: "summary_enabled"},
 			{name: "summary_max_chars"},
+			{name: "summary_budget_tokens"},
 		}},
 		{name: "context_features", children: []schemaField{
 			{name: "model_budget_enabled"},
@@ -65,14 +63,6 @@ var configSchema = []schemaField{
 		{name: "shutdown_grace_seconds"},
 		{name: "busy_message"},
 		{name: "model_error_message"},
-	}},
-	{name: "model", children: []schemaField{
-		{name: "name"},
-		{name: "base_url"},
-		{name: "api_key_env"},
-		{name: "headers"},
-		{name: "reasoning_effort"},
-		{name: "extra_body"},
 	}},
 	{name: "slack", children: []schemaField{
 		{name: "app_name"},
@@ -105,21 +95,6 @@ var configSchema = []schemaField{
 			{name: "transcription_profile"},
 			{name: "transcription_timeout_seconds"},
 		}},
-	}},
-	{name: "memory", children: []schemaField{
-		{name: "enabled"},
-		{name: "directory"},
-		{name: "max_topics_recall"},
-		{name: "max_chars_recall"},
-		{name: "recall_timeout_seconds"},
-		{name: "curator_timeout_seconds"},
-		{name: "curator_max_retries"},
-		{name: "worker_interval_seconds"},
-		{name: "retention_days"},
-		{name: "max_topics"},
-		{name: "max_links"},
-		{name: "max_topic_chars"},
-		{name: "max_patch_ops"},
 	}},
 	{name: "sandbox", children: []schemaField{
 		{name: "enabled"},
@@ -170,6 +145,74 @@ var configSchema = []schemaField{
 		{name: "lsp_servers"},
 		{name: "lsp_routes"},
 	}},
+	{name: "orchestration", children: []schemaField{
+		{name: "workstreams", children: []schemaField{
+			{name: "enabled"},
+			{name: "max_non_terminal_tasks"},
+			{name: "max_dependencies_per_task"},
+		}},
+		{name: "result_handles", children: []schemaField{
+			{name: "enabled"},
+			{name: "max_producing_calls_per_step"},
+			{name: "producing_call_reserve_tokens"},
+		}},
+		{name: "knowledge", children: []schemaField{
+			{name: "enabled"},
+			{name: "projection_interval_seconds"},
+			{name: "projection_max_retries"},
+			{name: "projection_retention_days"},
+			{name: "max_card_tokens"},
+			{name: "retrieval", children: []schemaField{
+				{name: "enabled"},
+				{name: "timeout_seconds"},
+				{name: "max_query_runes"},
+				{name: "max_candidates_per_channel"},
+				{name: "max_cards"},
+				{name: "max_document_bytes"},
+				{name: "worker_interval_seconds"},
+				{name: "worker_max_retries"},
+				{name: "worker_batch_size"},
+				{name: "embedding", children: []schemaField{
+					{name: "enabled"},
+					{name: "provider_id"},
+					{name: "base_url"},
+					{name: "api_key_env"},
+					{name: "model"},
+					{name: "dimensions"},
+					{name: "min_similarity_basis_points"},
+					{name: "timeout_seconds"},
+				}},
+			}},
+		}},
+		{name: "result_analysis", children: []schemaField{
+			{name: "enabled"},
+			{name: "max_segment_bytes"},
+			{name: "overlap_basis_points"},
+			{name: "overlap_max_bytes"},
+			{name: "max_leaves"},
+			{name: "max_reduction_fan_in"},
+			{name: "max_reduction_depth"},
+			{name: "max_concurrent_leaves"},
+			{name: "max_attempts_per_step"},
+			{name: "call_timeout_seconds"},
+			{name: "wall_time_seconds"},
+			{name: "worker_interval_seconds"},
+			{name: "evidence", children: []schemaField{
+				{name: "excerpt_bytes"},
+				{name: "selectors_per_leaf"},
+				{name: "references_per_packet"},
+				{name: "bundle_bytes"},
+			}},
+			{name: "model", children: []schemaField{
+				{name: "enabled"},
+				{name: "provider_id"},
+				{name: "base_url"},
+				{name: "api_key_env"},
+				{name: "model"},
+				{name: "reasoning_effort"},
+			}},
+		}},
+	}},
 }
 
 // Load reads, applies defaults to, and validates a YAML config file.
@@ -204,6 +247,7 @@ func Parse(data []byte) (Config, error) {
 	if err := document.Decode(&syntax); err != nil {
 		return Config{}, fmt.Errorf("decode configuration YAML: %w", err)
 	}
+	removeMappingEntries(root, "agent", "model", "memory")
 
 	effective, err := configNode(Default())
 	if err != nil {
@@ -468,6 +512,28 @@ func mappingEntry(mapping *yaml.Node, name string) (key, value *yaml.Node, found
 		}
 	}
 	return nil, nil, false
+}
+
+func removeMappingEntries(mapping *yaml.Node, keys ...string) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return
+	}
+	keep := mapping.Content[:0]
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		key := mapping.Content[index]
+		remove := false
+		for _, candidate := range keys {
+			if key.Value == candidate {
+				remove = true
+				break
+			}
+		}
+		if remove {
+			continue
+		}
+		keep = append(keep, mapping.Content[index], mapping.Content[index+1])
+	}
+	mapping.Content = keep
 }
 
 func replaceMappingValue(mapping *yaml.Node, name string, value *yaml.Node) {

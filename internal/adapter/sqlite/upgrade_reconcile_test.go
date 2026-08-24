@@ -119,8 +119,8 @@ func countActivations(t *testing.T, store *Store, detached bool) int {
 // scenario for Markdown delivery: a v30 database holds a detached delivery_v1
 // notification stuck in publishing whose Slack message was accepted with the
 // result digest as notification_sha256. After the real v30->v31->v32 upgrade,
-// Reconcile must classify the delivery as published and MarkNotificationPublished
-// must create exactly one detached activation and zero foreground activations.
+// Reconcile must classify the delivery as published. The historical row has no
+// v37 completion binding, so publication remains audit/delivery only.
 func TestUpgradeV30ToV32ReconcilesPreV32MarkdownEvidence(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 30)
@@ -153,20 +153,19 @@ func TestUpgradeV30ToV32ReconcilesPreV32MarkdownEvidence(t *testing.T) {
 		t.Fatalf("mark published: %v", err)
 	}
 	assertPublishedDelivery(t, store, "upgrade-markdown", ts)
-	if got := countActivations(t, store, true); got != 1 {
-		t.Fatalf("detached activations = %d, want 1", got)
+	if got := countActivations(t, store, true); got != 0 {
+		t.Fatalf("historical detached activations = %d, want 0", got)
 	}
 	if got := countActivations(t, store, false); got != 0 {
 		t.Fatalf("foreground activations = %d, want 0", got)
 	}
-	assertActivationIdentity(t, store, "upgrade-markdown", "markdown", contentSHA256Hex(markdown), int64(len(resultContent)))
 }
 
 // TestUpgradeV30ToV32ReconcilesPreV32FileEvidence reproduces the CR1 scenario
 // for file delivery: the v30 binary completed the external upload, posted the
 // status message with the legacy metadata, and crashed before the local CAS.
-// After the upgrade, Reconcile must recover the delivery and create exactly one
-// detached activation.
+// After the upgrade, Reconcile must recover the delivery without manufacturing
+// a new activation for the unbound historical row.
 func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 30)
@@ -201,13 +200,12 @@ func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 		t.Fatalf("mark published: %v", err)
 	}
 	assertPublishedDelivery(t, store, "upgrade-file", ts)
-	if got := countActivations(t, store, true); got != 1 {
-		t.Fatalf("detached activations = %d, want 1", got)
+	if got := countActivations(t, store, true); got != 0 {
+		t.Fatalf("historical detached activations = %d, want 0", got)
 	}
 	if got := countActivations(t, store, false); got != 0 {
 		t.Fatalf("foreground activations = %d, want 0", got)
 	}
-	assertActivationIdentity(t, store, "upgrade-file", "file", contentSHA256Hex(markdown), int64(len(resultContent)))
 }
 
 // TestUpgradeV30ToV32V32EvidenceStillVerifiedStrictly proves the new-contract
@@ -226,7 +224,7 @@ func TestUpgradeV30ToV32V32EvidenceStillVerifiedStrictly(t *testing.T) {
 		wantError         bool
 		wantOneActivation bool
 	}{
-		{name: "complete_v32_metadata", wantFound: true, wantOneActivation: true},
+		{name: "complete_v32_metadata", wantFound: true, wantOneActivation: false},
 		{name: "tampered_v32_digest", tampered: true, wantError: true},
 	} {
 		t.Run(scenario.name, func(t *testing.T) {
@@ -268,8 +266,12 @@ func TestUpgradeV30ToV32V32EvidenceStillVerifiedStrictly(t *testing.T) {
 				t.Fatalf("mark published: %v", err)
 			}
 			assertPublishedDelivery(t, store, "upgrade-strict", ts)
-			if got := countActivations(t, store, true); got != 1 {
-				t.Fatalf("detached activations = %d, want 1", got)
+			wantActivations := 0
+			if scenario.wantOneActivation {
+				wantActivations = 1
+			}
+			if got := countActivations(t, store, true); got != wantActivations {
+				t.Fatalf("detached activations = %d, want %d", got, wantActivations)
 			}
 			if got := countActivations(t, store, false); got != 0 {
 				t.Fatalf("foreground activations = %d, want 0", got)

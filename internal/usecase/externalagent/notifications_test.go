@@ -146,6 +146,39 @@ func contentSHA256ForTest(value string) string {
 	return fmt.Sprintf("%x", sha256.Sum256([]byte(value)))
 }
 
+func TestPublishedNotificationWakesActivationOnlyAfterCommit(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		markErr   error
+		wantWakes int
+	}{
+		{name: "committed", wantWakes: 1},
+		{name: "failed", markErr: errors.New("write failed")},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			store := &fakeNotificationStore{markPublishedErr: test.markErr, notification: domain.ExternalAgentJobNotification{
+				JobID: "job-wake", Kind: domain.JobNotificationTerminal, PublishState: domain.NotificationPending,
+				CanonicalMarkdown: "safe", RendererVersion: domain.JobNotificationRenderer,
+			}}
+			publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "2.0"}}
+			wakes := 0
+			worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Second, LeaseTTL: time.Second}, NotificationDependencies{
+				Store: store, Publisher: publisher, ActivationWake: func() { wakes++ },
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			gotErr := worker.ProcessOne(t.Context())
+			if (gotErr != nil) != (test.markErr != nil) {
+				t.Fatalf("ProcessOne() error = %v", gotErr)
+			}
+			if wakes != test.wantWakes {
+				t.Fatalf("activation wake count = %d, want %d", wakes, test.wantWakes)
+			}
+		})
+	}
+}
+
 func TestNotificationWorkerRetriesDefinitiveFailureWithPersistedBackoff(t *testing.T) {
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
@@ -317,6 +350,7 @@ func TestNotificationWorkerRejectsDeliveryV1WithoutHostCompleter(t *testing.T) {
 type recordingNotificationLogger struct {
 	warnings []string
 	errors   []string
+	onError  func()
 }
 
 func (l *recordingNotificationLogger) Debug(string, ...any) {}
@@ -326,6 +360,9 @@ func (l *recordingNotificationLogger) Warn(message string, args ...any) {
 }
 func (l *recordingNotificationLogger) Error(message string, args ...any) {
 	l.errors = append(l.errors, fmt.Sprint(append([]any{message}, args...)...))
+	if l.onError != nil {
+		l.onError()
+	}
 }
 
 type recordingNotificationMetrics struct {
@@ -347,7 +384,8 @@ func (m *recordingNotificationMetrics) Snapshot() []port.MetricSample {
 
 func TestNotificationWorkerRunLogsProcessErrorsAndKeepsCodesBounded(t *testing.T) {
 	secret := "provider response body should not appear"
-	logger := &recordingNotificationLogger{}
+	ctx, cancel := context.WithCancel(t.Context())
+	logger := &recordingNotificationLogger{onError: cancel}
 	store := &fakeNotificationStore{claimErr: errors.New(secret)}
 	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Hour, LeaseTTL: time.Second}, NotificationDependencies{
 		Store: store, Publisher: &fakeNotificationPublisher{}, Logger: logger,
@@ -355,8 +393,6 @@ func TestNotificationWorkerRunLogsProcessErrorsAndKeepsCodesBounded(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
 	worker.Run(ctx)
 	if len(logger.errors) != 1 {
 		t.Fatalf("logged errors = %d, want 1", len(logger.errors))

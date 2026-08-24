@@ -52,6 +52,94 @@ const (
 	MetricContinuityCheckpointRenderCodePoints  = "continuity_checkpoint_render_code_points"
 )
 
+// Knowledge retrieval metrics. Emitted with only the closed enum labels
+// channel, outcome, and reason; values never carry queries, content,
+// vectors, handles, digests, source references, actor, conversation, or
+// credential data.
+const (
+	MetricKnowledgeRetrievalTotal           = "knowledge_retrieval_total"
+	MetricKnowledgeRetrievalDuration        = "knowledge_retrieval_duration_seconds"
+	MetricKnowledgeRetrievalCandidates      = "knowledge_retrieval_candidates"
+	MetricKnowledgeRetrievalSelected        = "knowledge_retrieval_selected"
+	MetricKnowledgeRetrievalEmptyTotal      = "knowledge_retrieval_empty_total"
+	MetricKnowledgeRetrievalChannelFailure  = "knowledge_retrieval_channel_failure_total"
+	MetricKnowledgeRetrievalStaleIndex      = "knowledge_retrieval_stale_index_total"
+	MetricKnowledgeRetrievalCardTokens      = "knowledge_retrieval_card_tokens"
+	MetricKnowledgeLexicalQueueDepth        = "knowledge_lexical_queue_depth"
+	MetricKnowledgeEmbeddingQueueDepth      = "knowledge_embedding_queue_depth"
+	MetricKnowledgeEmbeddingRequestDuration = "knowledge_embedding_request_duration_seconds"
+)
+
+// Closed knowledge retrieval metric label names.
+const (
+	MetricLabelChannel = "channel"
+	MetricLabelOutcome = "outcome"
+	MetricLabelReason  = "reason"
+)
+
+// KnowledgeRetrievalOutcome is the closed outcome label set for knowledge
+// retrieval metrics.
+type KnowledgeRetrievalOutcome string
+
+const (
+	KnowledgeRetrievalOutcomeSuccess            KnowledgeRetrievalOutcome = "success"
+	KnowledgeRetrievalOutcomeEmpty              KnowledgeRetrievalOutcome = "empty"
+	KnowledgeRetrievalOutcomeValidationRejected KnowledgeRetrievalOutcome = "validation_rejected"
+	KnowledgeRetrievalOutcomeUnavailable        KnowledgeRetrievalOutcome = "unavailable"
+)
+
+// KnowledgeRetrievalReasonLabel is the closed reason label set beyond the
+// shared failure categories: stale-index exclusions and oversized
+// omissions.
+type KnowledgeRetrievalReasonLabel string
+
+const (
+	KnowledgeRetrievalReasonLabelStaleIndex KnowledgeRetrievalReasonLabel = "stale_index"
+	KnowledgeRetrievalReasonLabelOversized  KnowledgeRetrievalReasonLabel = "oversized"
+)
+
+// knowledgeRetrievalMetricLabelKeys freezes the admissible label keys per
+// knowledge retrieval metric. Metrics not listed accept no labels.
+var knowledgeRetrievalMetricLabelKeys = map[string]map[string]bool{
+	MetricKnowledgeRetrievalTotal:           {MetricLabelOutcome: true},
+	MetricKnowledgeRetrievalDuration:        {MetricLabelOutcome: true},
+	MetricKnowledgeRetrievalCandidates:      {MetricLabelChannel: true},
+	MetricKnowledgeRetrievalSelected:        {MetricLabelChannel: true},
+	MetricKnowledgeRetrievalEmptyTotal:      {MetricLabelOutcome: true},
+	MetricKnowledgeRetrievalChannelFailure:  {MetricLabelChannel: true, MetricLabelReason: true},
+	MetricKnowledgeRetrievalStaleIndex:      {MetricLabelChannel: true, MetricLabelReason: true},
+	MetricKnowledgeRetrievalCardTokens:      {},
+	MetricKnowledgeLexicalQueueDepth:        {},
+	MetricKnowledgeEmbeddingQueueDepth:      {},
+	MetricKnowledgeEmbeddingRequestDuration: {MetricLabelOutcome: true},
+}
+
+// knowledgeRetrievalMetricRequiredKeys freezes the mandatory label presence
+// per knowledge retrieval metric: counts and observations must carry their
+// attribution label, while queue depths and card tokens stay unlabeled.
+var knowledgeRetrievalMetricRequiredKeys = map[string]map[string]bool{
+	MetricKnowledgeRetrievalTotal:           {MetricLabelOutcome: true},
+	MetricKnowledgeRetrievalDuration:        {MetricLabelOutcome: true},
+	MetricKnowledgeRetrievalCandidates:      {MetricLabelChannel: true},
+	MetricKnowledgeRetrievalSelected:        {MetricLabelChannel: true},
+	MetricKnowledgeRetrievalEmptyTotal:      {MetricLabelOutcome: true},
+	MetricKnowledgeRetrievalChannelFailure:  {MetricLabelChannel: true, MetricLabelReason: true},
+	MetricKnowledgeRetrievalStaleIndex:      {MetricLabelChannel: true, MetricLabelReason: true},
+	MetricKnowledgeEmbeddingRequestDuration: {MetricLabelOutcome: true},
+}
+
+func validKnowledgeRetrievalMetricName(metric string) bool {
+	_, known := knowledgeRetrievalMetricLabelKeys[metric]
+	return known
+}
+
+// IsKnowledgeRetrievalMetric reports whether name is one of the frozen
+// knowledge retrieval metric names. The metrics adapter uses it to apply the
+// exact per-metric label contract instead of the global allowlist.
+func IsKnowledgeRetrievalMetric(metric string) bool {
+	return validKnowledgeRetrievalMetricName(metric)
+}
+
 // Code intelligence metrics.
 const (
 	MetricCodeReadFullTotal       = "code_read_full_total"

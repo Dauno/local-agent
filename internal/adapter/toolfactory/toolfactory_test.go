@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"google.golang.org/adk/v2/agent"
+	"google.golang.org/adk/v2/tool/toolconfirmation"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/toolfactory"
@@ -21,6 +22,7 @@ import (
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
+	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
 type stubConversationStore struct {
@@ -31,6 +33,15 @@ type stubExternalJobReader struct {
 	job    *domain.ExternalAgentJob
 	result domain.ExternalAgentJobResult
 	chunk  domain.ResultChunk
+}
+
+type nativeExternalJobReader struct {
+	stubExternalJobReader
+	handle domain.ResultHandle
+}
+
+func (r nativeExternalJobReader) NativeResultHandleForJob(context.Context, string, string, domain.ConversationKey) (domain.ResultHandle, bool, error) {
+	return r.handle, true, nil
 }
 
 type recordingBuilderLauncher struct {
@@ -202,6 +213,58 @@ type stubToolContext struct {
 	ctx    context.Context
 }
 
+type recordingConfirmationContext struct {
+	stubToolContext
+	requested bool
+	hint      string
+	payload   any
+	confirmed *toolconfirmation.ToolConfirmation
+}
+
+func (c *recordingConfirmationContext) RequestConfirmation(hint string, payload any) error {
+	c.requested = true
+	c.hint = hint
+	c.payload = payload
+	return nil
+}
+
+func (c *recordingConfirmationContext) ToolConfirmation() *toolconfirmation.ToolConfirmation {
+	return c.confirmed
+}
+
+type stubWorkstreamStore struct {
+	workstream     domain.Workstream
+	lastTransition domain.WorkstreamTransition
+}
+
+func (s *stubWorkstreamStore) Create(_ context.Context, workstream domain.Workstream, _ domain.WorkstreamTransitionSource, _ string) error {
+	s.workstream = workstream
+	return nil
+}
+
+func (s *stubWorkstreamStore) Get(_ context.Context, id string) (domain.Workstream, error) {
+	if s.workstream.ID != id {
+		return domain.Workstream{}, port.ErrWorkstreamNotFound
+	}
+	return s.workstream, nil
+}
+
+func (s *stubWorkstreamStore) ActiveForConversation(_ context.Context, key domain.ConversationKey) (domain.Workstream, error) {
+	if s.workstream.ID == "" || s.workstream.ConversationKey != key || s.workstream.Status.Terminal() {
+		return domain.Workstream{}, port.ErrWorkstreamNotFound
+	}
+	return s.workstream, nil
+}
+
+func (s *stubWorkstreamStore) Apply(_ context.Context, transition domain.WorkstreamTransition, limits domain.WorkstreamLimits, now time.Time) (domain.WorkstreamTransitionRecord, error) {
+	s.lastTransition = transition
+	return (&s.workstream).ApplyTransitionWithLimits(transition, limits, now)
+}
+
+func (s *stubWorkstreamStore) Transitions(_ context.Context, _ string) ([]domain.WorkstreamTransitionRecord, error) {
+	return nil, nil
+}
+
 func (c *stubToolContext) FunctionCallID() string      { return c.callID }
 func (c *stubToolContext) Deadline() (time.Time, bool) { return c.context().Deadline() }
 func (c *stubToolContext) Done() <-chan struct{}       { return c.context().Done() }
@@ -232,6 +295,143 @@ func TestFactoryWithoutSandboxExposesOnlyConversationTools(t *testing.T) {
 	}
 	if len(tools) != 1 {
 		t.Fatalf("expected 1 tool without sandbox, got %d", len(tools))
+	}
+}
+
+func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	store := &stubWorkstreamStore{workstream: domain.Workstream{
+		ID: "ws-1", ConversationKey: key, OwnerActor: "U12345678", Project: "workspace",
+		Status: domain.WorkstreamProposed, Revision: 0, Objective: "bounded objective",
+	}}
+	service, err := workstreamusecase.New(workstreamusecase.Config{
+		Enabled: true, ResultHandlesEnabled: true, AllowedProjects: map[string]struct{}{"workspace": {}},
+	}, workstreamusecase.Dependencies{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithWorkstreams(service).WithResultLinksEnabled(true)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := make(map[string]runnableFunctionTool)
+	for _, raw := range tools {
+		if candidate, ok := raw.(runnableFunctionTool); ok {
+			byName[candidate.Name()] = candidate
+		}
+	}
+	for _, name := range []string{"workstream_get", "workstream_active", "workstream_create", "workstream_transition", "workstream_link_completed_result", "workstream_result_handle", "workstream_read_result_chunk"} {
+		if byName[name] == nil {
+			t.Fatalf("%s tool was not registered", name)
+		}
+	}
+
+	if _, err := byName["workstream_get"].Run(&stubToolContext{callID: "get-1"}, map[string]any{"workstream_id": "ws-1", "project": "workspace"}); err != nil {
+		t.Fatalf("bound workstream read failed: %v", err)
+	}
+	if _, err := byName["workstream_transition"].Run(&stubToolContext{callID: "transition-1"}, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 0,
+		"action": "propose_task", "task_id": "task-1", "task_description": "inspect",
+	}); err != nil {
+		t.Fatalf("planning transition failed: %v", err)
+	}
+	if store.lastTransition.Actor != "U12345678" || store.lastTransition.Project != "workspace" || store.lastTransition.ConversationKey != key || store.lastTransition.Source != domain.WorkstreamSourceRoot {
+		t.Fatalf("tool supplied untrusted transition binding: %+v", store.lastTransition)
+	}
+	if _, err := byName["workstream_transition"].Run(&stubToolContext{callID: "unverified-result-1"}, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "link_completed_result",
+	}); err == nil {
+		t.Fatal("unverified result-link action was accepted")
+	}
+
+	confirmationContext := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "activate-1"}}
+	if _, err := byName["workstream_transition"].Run(confirmationContext, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "activate_workstream",
+	}); err != nil {
+		t.Fatalf("confirmation request failed: %v", err)
+	}
+	if !confirmationContext.requested || !strings.Contains(confirmationContext.hint, "ws-1") || !strings.Contains(confirmationContext.hint, "revision 1") {
+		t.Fatalf("confirmation request = %+v", confirmationContext)
+	}
+	if store.workstream.Revision != 1 {
+		t.Fatalf("authority transition executed before confirmation: revision %d", store.workstream.Revision)
+	}
+	linkConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "link-result-1"}}
+	if _, err := byName["workstream_link_completed_result"].Run(linkConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"result_id": strings.Repeat("a", 64), "result_link_id": "link-1",
+	}); err != nil || !linkConfirmation.requested {
+		t.Fatalf("result-link confirmation = requested:%t err:%v", linkConfirmation.requested, err)
+	}
+	if store.workstream.Revision != 1 {
+		t.Fatalf("result-link transition executed before confirmation: revision %d", store.workstream.Revision)
+	}
+	rejectTaskConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "reject-task-1"}}
+	if _, err := byName["workstream_transition"].Run(rejectTaskConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "reject_task", "task_id": "task-1",
+	}); err != nil {
+		t.Fatalf("task rejection confirmation request failed: %v", err)
+	}
+	if !rejectTaskConfirmation.requested {
+		t.Fatal("root task rejection did not require confirmation")
+	}
+	blockConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "block-1"}}
+	if _, err := byName["workstream_transition"].Run(blockConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "block_workstream",
+	}); err == nil || blockConfirmation.requested {
+		t.Fatalf("root block action remained exposed: requested=%t err=%v", blockConfirmation.requested, err)
+	}
+	invalidConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "complete-1"}}
+	if _, err := byName["workstream_transition"].Run(invalidConfirmation, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "complete_workstream",
+	}); err == nil || invalidConfirmation.requested {
+		t.Fatalf("invalid action was presented for confirmation: requested=%t err=%v", invalidConfirmation.requested, err)
+	}
+	createConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "create-1"}}
+	if _, err := byName["workstream_create"].Run(createConfirmation, map[string]any{
+		"workstream_id": "ws-2", "project": "workspace", "objective": "second objective",
+	}); err == nil || createConfirmation.requested {
+		t.Fatalf("conflicting creation was presented for confirmation: requested=%t err=%v", createConfirmation.requested, err)
+	}
+	confirmedContext := &recordingConfirmationContext{
+		stubToolContext: stubToolContext{callID: "activate-1"},
+		confirmed:       &toolconfirmation.ToolConfirmation{Confirmed: true},
+	}
+	if _, err := byName["workstream_transition"].Run(confirmedContext, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
+		"action": "activate_workstream",
+	}); err != nil {
+		t.Fatalf("confirmed authority transition failed: %v", err)
+	}
+	if store.workstream.Status != domain.WorkstreamActive || store.workstream.Revision != 2 {
+		t.Fatalf("confirmed transition state = %+v", store.workstream)
+	}
+}
+
+func TestWorkstreamResultLinkToolStaysHiddenUntilFeatureGateEnabled(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	service, err := workstreamusecase.New(workstreamusecase.Config{
+		Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}},
+	}, workstreamusecase.Dependencies{Store: &stubWorkstreamStore{workstream: domain.Workstream{
+		ID: "ws-1", ConversationKey: key, OwnerActor: "U12345678", Project: "workspace", Status: domain.WorkstreamProposed, Objective: "bounded objective",
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tools, err := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithWorkstreams(service).ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range tools {
+		if named, ok := raw.(interface{ Name() string }); ok && named.Name() == "workstream_link_completed_result" {
+			t.Fatal("result-link tool is exposed while result handles are disabled")
+		}
 	}
 }
 
@@ -358,8 +558,7 @@ func TestFactoryExposesBoundedJobResultChunkTool(t *testing.T) {
 func TestFactoryActivationScopeBindsRevisionAndContainsOnlyHostTools(t *testing.T) {
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
 	reader := &stubExternalJobReader{
-		job:   &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete"},
-		chunk: domain.ResultChunk{Content: "part", OffsetBytes: 0, NextOffsetBytes: 4, EOF: true, SHA256: "digest"},
+		job: &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete"},
 	}
 	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
 	activation := domain.ExternalAgentJobActivation{
@@ -370,28 +569,28 @@ func TestFactoryActivationScopeBindsRevisionAndContainsOnlyHostTools(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(tools) != 2 || tools[0].(interface{ Name() string }).Name() != "job_status" || tools[1].(interface{ Name() string }).Name() != "read_job_result_chunk" {
+	if len(tools) != 0 {
 		t.Fatalf("activation tools = %v", tools)
 	}
-	var status, chunk runnableFunctionTool
-	for _, candidate := range tools {
-		named := candidate.(interface{ Name() string })
-		switch named.Name() {
-		case "job_status":
-			status = candidate.(runnableFunctionTool)
-		case "read_job_result_chunk":
-			chunk = candidate.(runnableFunctionTool)
-		}
+}
+
+func TestFactoryActivationScopeDoesNotExposeResultReaders(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	reader := &stubExternalJobReader{
+		job: &domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: "complete"},
 	}
-	if _, err := status.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"}); err != nil {
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	activation := domain.ExternalAgentJobActivation{
+		ActivationID: "activation_1", JobID: "job_1", StatusRevision: 4, Kind: "terminal",
+		TerminalStatus: domain.JobCompleted, Actor: "U12345678", ConversationKey: key,
+	}
+
+	tools, err := factory.ToolsForActivation(activation.Actor, key, activation)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := chunk.Run(&stubToolContext{}, map[string]any{"job_id": "job_1", "offset_bytes": 0, "max_bytes": 4}); err != nil {
-		t.Fatal(err)
-	}
-	reader.job.StatusRevision = 6
-	if _, err := chunk.Run(&stubToolContext{}, map[string]any{"job_id": "job_1"}); err == nil {
-		t.Fatal("activation tool read a reconciled later revision")
+	if len(tools) != 0 {
+		t.Fatalf("activation result-reader tools = %d, want none", len(tools))
 	}
 }
 
@@ -425,6 +624,39 @@ func TestFactoryDoesNotPlaceFileModeResultInToolResponse(t *testing.T) {
 	}
 	if value["result"] != "" || value["host_delivery"] != true || value["result_available"] != true {
 		t.Fatalf("file-mode tool response leaked content: %#v", value)
+	}
+}
+
+func TestFactoryReturnsNativeJobHandleWithoutCompleteResult(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	handle := domain.ResultHandle{
+		ResultID: strings.Repeat("a", 64), SHA256: strings.Repeat("b", 64), Bytes: 4096,
+		MediaType: "text/plain; charset=utf-8", Availability: []domain.ResultAvailability{domain.ResultAvailabilityRangeRead},
+	}
+	reader := nativeExternalJobReader{
+		stubExternalJobReader: stubExternalJobReader{
+			job:    &domain.ExternalAgentJob{ID: "job_native", Status: domain.JobCompleted, StatusRevision: 4},
+			result: domain.ExternalAgentJobResult{Text: "must not enter ADK"},
+		},
+		handle: handle,
+	}
+	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
+	tools, err := factory.ToolsForInvocation("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var read runnableFunctionTool
+	for _, candidate := range tools {
+		if named, ok := candidate.(interface{ Name() string }); ok && named.Name() == "read_job_result" {
+			read, _ = candidate.(runnableFunctionTool)
+		}
+	}
+	value, err := read.Run(&stubToolContext{}, map[string]any{"job_id": "job_native"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if value["result"] != "" || value["result_id"] != handle.ResultID || value["content_bytes"] != float64(handle.Bytes) {
+		t.Fatalf("native job result = %#v", value)
 	}
 }
 

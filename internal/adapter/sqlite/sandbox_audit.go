@@ -54,8 +54,8 @@ func (s *SandboxAuditStore) UpdateAuditState(ctx context.Context, callID string,
 func (s *SandboxAuditStore) GetAuditByCallID(ctx context.Context, callID string) (*domain.ToolAuditRecord, error) {
 	var (
 		capability, authResult, idempotencyKey, lifecycleState string
-		actor                                                    string
-		createdAt, completedAt                                   int64
+		actor                                                  string
+		createdAt, completedAt                                 int64
 	)
 	err := s.db.QueryRowContext(ctx,
 		`SELECT capability, actor, authorization_result, idempotency_key,
@@ -74,7 +74,7 @@ func (s *SandboxAuditStore) GetAuditByCallID(ctx context.Context, callID string)
 		OriginalCallID:      callID,
 		Capability:          domain.Capability(capability),
 		Actor:               actor,
-		AuthorizationResult:  authResult,
+		AuthorizationResult: authResult,
 		IdempotencyKey:      idempotencyKey,
 		LifecycleState:      domain.ToolLifecycleState(lifecycleState),
 		CreatedAt:           time.Unix(createdAt, 0),

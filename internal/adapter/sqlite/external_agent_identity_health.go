@@ -28,8 +28,9 @@ func invalidDigestPredicate(column string) string {
 // notification rows, activation rows, digest values, references, or content.
 // Digest predicates use SQLite's negated GLOB class plus an octet-safe length
 // check; this enforces lowercase hexadecimal without selecting digest values
-// into Go. The only activation identity it inspects is the bounded
-// foreground_activation_retired error code and the non-terminal state set.
+// into Go. The only activation identities it inspects are the two bounded
+// error codes (foreground_activation_retired and legacy_activation_content)
+// and the non-terminal state set.
 func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.ExternalAgentJobIdentityHealth, error) {
 	if s == nil || s.db == nil {
 		return domain.ExternalAgentJobIdentityHealth{}, errors.New("external-agent identity health store is not configured")
@@ -86,8 +87,18 @@ func (s *ExternalAgentJobStore) IdentityHealth(ctx context.Context) (domain.Exte
 		{
 			name: "activations without content bytes",
 			query: `SELECT COUNT(*) FROM external_agent_job_activations
-				WHERE terminal_status = 'completed' AND content_bytes <= 0`,
+				WHERE terminal_status = 'completed' AND content_bytes <= 0
+					AND last_error_code != ?`,
 			target: &health.ActivationsWithoutContent,
+			args:   []any{domain.ActivationLegacyContentCode},
+		},
+		{
+			name: "legacy activations without content bytes",
+			query: `SELECT COUNT(*) FROM external_agent_job_activations
+				WHERE terminal_status = 'completed' AND content_bytes <= 0
+					AND last_error_code = ?`,
+			target: &health.ActivationsWithoutContentLegacy,
+			args:   []any{domain.ActivationLegacyContentCode},
 		},
 		{
 			name: "activations without notification identity",

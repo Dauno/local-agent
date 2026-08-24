@@ -10,6 +10,7 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
 const (
@@ -36,19 +37,23 @@ type Config struct {
 }
 
 type Dependencies struct {
-	Store      port.SummaryStore
-	Summarizer port.ConversationSummarizer
-	TurnSource TurnSource
-	Logger     port.Logger
+	Store        port.SummaryStore
+	Summarizer   port.ConversationSummarizer
+	TurnSource   TurnSource
+	Logger       port.Logger
+	Scheduler    *workpoll.Scheduler
+	ScheduleWake func()
 }
 
 type Service struct {
-	config     Config
-	store      port.SummaryStore
-	summarizer port.ConversationSummarizer
-	turnSource TurnSource
-	logger     port.Logger
-	metrics    *SummaryWorkerMetrics
+	config       Config
+	store        port.SummaryStore
+	summarizer   port.ConversationSummarizer
+	turnSource   TurnSource
+	logger       port.Logger
+	metrics      *SummaryWorkerMetrics
+	scheduler    *workpoll.Scheduler
+	scheduleWake func()
 }
 
 type SummaryWorkerMetrics struct {
@@ -77,38 +82,61 @@ func New(config Config, deps Dependencies) (*Service, error) {
 	if config.JobTimeout <= 0 {
 		config.JobTimeout = defaultJobTimeout
 	}
-	return &Service{config: config, store: deps.Store, summarizer: deps.Summarizer, turnSource: deps.TurnSource, logger: deps.Logger, metrics: &SummaryWorkerMetrics{}}, nil
+	if deps.Scheduler == nil {
+		deps.Scheduler, _ = workpoll.New(config.WorkerInterval, workpoll.Options{})
+	}
+	if deps.ScheduleWake == nil {
+		deps.ScheduleWake = deps.Scheduler.Wake
+	}
+	return &Service{config: config, store: deps.Store, summarizer: deps.Summarizer, turnSource: deps.TurnSource, logger: deps.Logger, metrics: &SummaryWorkerMetrics{}, scheduler: deps.Scheduler, scheduleWake: deps.ScheduleWake}, nil
 }
 
-// ScheduleConversation finds the newest contiguous closed prefix and relies on
-// the store's session/target uniqueness to coalesce repeated successful turns.
+// ScheduleConversation schedules a discovery job and relies on the store's
+// session/target uniqueness to coalesce repeated successful turns. It
+// performs no event-history read of its own: finding the newest contiguous
+// closed prefix requires reading complete session history (via ClosedTurns),
+// and doing that on every successful foreground turn made scheduling cost
+// scale with total session size (FIND-131). That discovery now runs in the
+// durable worker (resolveDiscoveryTarget), which foreground callers never
+// wait on.
 func (s *Service) ScheduleConversation(ctx context.Context, sessionIdentity string) error {
-	previous, err := s.store.LatestSummary(ctx, sessionIdentity)
-	if err != nil && !errors.Is(err, port.ErrSummaryNotFound) {
-		return err
+	scheduled, err := s.store.ScheduleSummaryJob(ctx, sessionIdentity, domain.SummaryDiscoveryTargetFloor, time.Now().UTC())
+	if err == nil && scheduled {
+		s.scheduleWake()
 	}
-	turns, err := s.turnSource.ClosedTurns(ctx, sessionIdentity, previous.CoveredThroughOrdinal, int64(^uint64(0)>>1))
+	return err
+}
+
+// resolveDiscoveryTarget finds the newest contiguous closed prefix outside
+// the recent-turn retention window, the computation ScheduleConversation used
+// to perform synchronously. It returns previousOrdinal, unchanged, when there
+// is not yet enough closed history to summarize.
+func (s *Service) resolveDiscoveryTarget(ctx context.Context, sessionIdentity string, previousOrdinal int64) (int64, error) {
+	turns, err := s.turnSource.ClosedTurns(ctx, sessionIdentity, previousOrdinal, domain.SummaryDiscoveryTargetFloor)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if len(turns) <= s.config.RecentTurns {
-		return nil
+		return previousOrdinal, nil
 	}
-	target := turns[len(turns)-s.config.RecentTurns-1].Ordinal
-	_, err = s.store.ScheduleSummaryJob(ctx, sessionIdentity, target, time.Now().UTC())
-	return err
+	return turns[len(turns)-s.config.RecentTurns-1].Ordinal, nil
 }
 
 // RunOnce processes one durable job. A summary failure never escapes to the
 // foreground caller; the job is left retryable with bounded attempts.
 func (s *Service) RunOnce(ctx context.Context, now time.Time) error {
+	_, err := s.runOnce(ctx, now)
+	return err
+}
+
+func (s *Service) runOnce(ctx context.Context, now time.Time) (bool, error) {
 	jobCtx, cancel := context.WithTimeout(ctx, s.config.JobTimeout)
 	defer cancel()
 	job, err := s.store.ClaimSummaryJob(jobCtx, now)
 	if err != nil {
-		return err
+		return false, err
 	}
-	return s.runClaimedJob(ctx, jobCtx, job)
+	return true, s.runClaimedJob(ctx, jobCtx, job)
 }
 
 func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.SummaryJob) error {
@@ -120,11 +148,26 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	previousOrdinal := previous.CoveredThroughOrdinal
-	turns, err := s.turnSource.ClosedTurns(ctx, job.SessionIdentity, previousOrdinal, job.TargetOrdinal)
+	targetOrdinal := job.TargetOrdinal
+	if domain.IsSummaryDiscoveryTarget(targetOrdinal) {
+		resolved, err := s.resolveDiscoveryTarget(ctx, job.SessionIdentity, previousOrdinal)
+		if err != nil {
+			return s.retry(context.WithoutCancel(persistCtx), job, err)
+		}
+		if resolved <= previousOrdinal {
+			// Not enough closed history outside the recent-turn window yet.
+			// The discovery job's own row (job.TargetOrdinal, the sentinel)
+			// is done; a later ScheduleConversation call schedules the next
+			// discovery attempt once there is more history.
+			return s.store.CompleteSummaryJob(ctx, job)
+		}
+		targetOrdinal = resolved
+	}
+	turns, err := s.turnSource.ClosedTurns(ctx, job.SessionIdentity, previousOrdinal, targetOrdinal)
 	if err != nil {
 		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
-	if err := validateContiguousTurns(turns, previousOrdinal, job.TargetOrdinal); err != nil {
+	if err := validateContiguousTurns(turns, previousOrdinal, targetOrdinal); err != nil {
 		return s.retry(context.WithoutCancel(persistCtx), job, err)
 	}
 	batchTurns := turns
@@ -173,25 +216,21 @@ func (s *Service) runClaimedJob(persistCtx, ctx context.Context, job port.Summar
 	if !committed && s.logger != nil {
 		s.logger.Warn("summary CAS lost; job marked obsolete", "session_identity", job.SessionIdentity, "target_ordinal", job.TargetOrdinal)
 	}
-	if effectiveTarget < job.TargetOrdinal {
-		if _, err := s.store.ScheduleSummaryJob(context.WithoutCancel(persistCtx), job.SessionIdentity, job.TargetOrdinal, time.Now().UTC()); err != nil {
+	if effectiveTarget < targetOrdinal {
+		if scheduled, err := s.store.ScheduleSummaryJob(context.WithoutCancel(persistCtx), job.SessionIdentity, targetOrdinal, time.Now().UTC()); err != nil {
 			return fmt.Errorf("schedule remaining summary batch: %w", err)
+		} else if scheduled {
+			s.scheduleWake()
 		}
 	}
 	return nil
 }
 
 func (s *Service) Run(ctx context.Context) {
-	ticker := time.NewTicker(s.config.WorkerInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case now := <-ticker.C:
-			_ = s.RunOnce(ctx, now)
-		}
-	}
+	s.scheduler.Run(ctx, nil, func() bool {
+		worked, _ := s.runOnce(ctx, time.Now().UTC())
+		return worked
+	})
 }
 
 func (s *Service) retry(ctx context.Context, job port.SummaryJob, cause error) error {

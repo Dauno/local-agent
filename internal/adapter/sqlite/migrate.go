@@ -41,6 +41,16 @@ var migrations = map[int]migrationFunc{
 	30: migrateV30,
 	31: migrateV31,
 	32: migrateV32,
+	33: migrateV33,
+	34: migrateV34,
+	35: migrateV35,
+	36: migrateV36,
+	37: migrateV37,
+	38: migrateV38,
+	39: migrateV39,
+	40: migrateV40,
+	41: migrateV41,
+	42: migrateV42,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -61,9 +71,23 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// V20 is an additive draft migration and is safe for V19 state.
 	// V30-V32 are delivery-contract migrations; V31 repairs historical
 	// foreground identity and retires claimable foreground activations on V30
-	// state, and V32 applies its defensive backfills after V30 or V31.
+	// state, and V32 applies its defensive backfills after V30 or V31. V33 is
+	// additive workstream state and preserves every pre-existing ledger. V34 is
+	// an additive result catalog and does not backfill or reinterpret V33 links.
+	// V35 preserves the complete workstream journal while extending its typed
+	// action constraint for verified result links. V36 adds epoch metadata only;
+	// it does not synthesize epochs for existing sessions. V37 adds completion
+	// binding snapshots; historical rows remain unbound. V38 adds additive
+	// scoped knowledge and never backfills legacy memory rows. V39 adds
+	// reconstructible retrieval state over V38 and seeds queues without
+	// copying authoritative content. V40 adds the additive objective-bound
+	// result analysis catalog over V39 and rewrites no existing row. V41
+	// replaces the recoverable-result text scan with an indexed relation
+	// and backfills it from V40 state, aborting instead of rewriting a row
+	// if it cannot prove full coverage by count.
+	// V42 removes retired memory V1 tables and imported legacy documents.
 	// Older schemas retain the existing explicit-reset requirement.
-	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 && current != 24 && current != 25 && current != 26 && current != 27 && current != 28 && current != 29 && current != 30 && current != 31 {
+	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 && current != 24 && current != 25 && current != 26 && current != 27 && current != 28 && current != 29 && current != 30 && current != 31 && current != 32 && current != 33 && current != 34 && current != 35 && current != 36 && current != 37 && current != 38 && current != 39 && current != 40 && current != 41 {
 		return &StateResetNeededError{Found: current, Supported: SchemaVersion}
 	}
 

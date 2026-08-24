@@ -86,6 +86,52 @@ func TestDoctorResultIdentityCheckerErrorIsActionable(t *testing.T) {
 	}
 }
 
+// TestDoctorResultIdentityRendersActivationLegacyInformationally pins the
+// checkpoint-5 carve-out: activations quarantined with the bounded legacy code
+// never fail doctor and surface only as an informational count, in both the
+// passing and failing branches.
+func TestDoctorResultIdentityRendersActivationLegacyInformationally(t *testing.T) {
+	run := func(identity domain.ExternalAgentJobIdentityHealth) Result {
+		t.Helper()
+		deps, _, _ := validDependencies()
+		deps.Jobs = fakeIdentityJobsChecker{identity: identity}
+		service, err := New(deps)
+		if err != nil {
+			t.Fatal(err)
+		}
+		report := service.Run(t.Context(), false)
+		result, ok := findResult(report, "external-agent result identity")
+		if !ok {
+			t.Fatalf("identity result missing: %#v", report.Results)
+		}
+		return result
+	}
+
+	pass := run(domain.ExternalAgentJobIdentityHealth{
+		JobsCompletedWithoutResultIdentityLegacy: 3,
+		ActivationsWithoutContentLegacy:          4,
+	})
+	if pass.Status != StatusPass {
+		t.Fatalf("legacy-only identity status = %q, want pass", pass.Status)
+	}
+	for _, want := range []string{"3 historical completed jobs without result identity", "4 historical activations without content"} {
+		if !strings.Contains(pass.Detail, want) {
+			t.Fatalf("pass detail %q lacks %q", pass.Detail, want)
+		}
+	}
+
+	fail := run(domain.ExternalAgentJobIdentityHealth{
+		ActivationsWithoutContent:       1,
+		ActivationsWithoutContentLegacy: 4,
+	})
+	if fail.Status != StatusFail {
+		t.Fatalf("current-defect identity status = %q, want fail", fail.Status)
+	}
+	if !strings.Contains(fail.Detail, "4 historical activations without content") {
+		t.Fatalf("fail detail %q lacks the informational legacy count", fail.Detail)
+	}
+}
+
 func findResult(report Report, name string) (Result, bool) {
 	for _, result := range report.Results {
 		if result.Name == name {

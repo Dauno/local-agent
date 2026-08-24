@@ -21,6 +21,7 @@ func TestConfirmationStorePreservesPresentationAndHandlesPublishedRejection(t *t
 		TeamID:         "T12345678",
 		ChannelID:      "D12345678",
 		Summary:        "Delete worktree",
+		Payload:        `{"workstream_id":"ws-1","action":"cancel_workstream"}`,
 		ParameterHash:  "hash",
 		Expiry:         time.Now().Add(time.Hour),
 	}
@@ -43,7 +44,7 @@ func TestConfirmationStorePreservesPresentationAndHandlesPublishedRejection(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.Status != port.ConfirmationRejected || got.Summary != delivery.Summary || got.ParameterHash != delivery.ParameterHash ||
+	if got == nil || got.Status != port.ConfirmationRejected || got.Summary != delivery.Summary || got.Payload != delivery.Payload || got.ParameterHash != delivery.ParameterHash ||
 		got.SlackMessageTS != "1234.5678" || got.RendererMode != "test_v1" {
 		t.Fatalf("delivery = %#v", got)
 	}

@@ -18,21 +18,6 @@ type fakeClock struct{ now time.Time }
 
 func (c fakeClock) Now() time.Time { return c.now }
 
-func TestMemoryContextFitsExactRenderedUnicodeBudget(t *testing.T) {
-	snippets := []domain.MemorySnippet{{Title: "Topic", Slug: "topic", RevisionNumber: 1, Content: "abcdef🚀"}}
-	full := domain.RenderMemoryReference(snippets)
-	result := domain.FitMemorySnippets(snippets, len([]rune(full))-1)
-	if len(result) != 1 || result[0].Content != "abcdef" {
-		t.Fatalf("FitMemorySnippets() = %#v", result)
-	}
-	if got := len([]rune(domain.RenderMemoryReference(result))); got > len([]rune(full))-1 {
-		t.Fatalf("rendered memory has %d runes, exceeds budget", got)
-	}
-	if result := domain.FitMemorySnippets(snippets, 1); len(result) != 0 {
-		t.Fatalf("FitMemorySnippets() with no room = %#v", result)
-	}
-}
-
 type fakeStore struct {
 	mu           sync.Mutex
 	claimed      bool
@@ -116,6 +101,11 @@ type fakeRuntime struct {
 }
 
 func (r *fakeRuntime) Run(ctx context.Context, request port.AgentRequest) (port.AgentTurn, error) {
+	if request.BeforeModel != nil {
+		if err := request.BeforeModel(ctx); err != nil {
+			return port.AgentTurn{}, err
+		}
+	}
 	r.runCalls++
 	r.runRequest = request
 	if r.onRun != nil {
@@ -229,25 +219,23 @@ type fakeExchangeWriter struct {
 	err              error
 	onAppend         func()
 	publishedTS      string
-	memoryEligible   bool
 	presentationJSON string
 }
 
-func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, metadata domain.ConversationMetadata, message domain.Message, _ int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
+func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, metadata domain.ConversationMetadata, message domain.Message, _ int) (port.PreparedAssistantExchange, error) {
 	w.prepares++
 	w.metadata = metadata
 	w.message = message
-	w.memoryEligible = memoryEligible
 	if w.prepared.ID == "" {
 		w.prepared = port.PreparedAssistantExchange{ID: "intent", CorrelationID: "intent-correlation"}
 	}
 	return w.prepared, nil
 }
 
-func (w *fakeExchangeWriter) PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int, memoryEligible bool) (port.PreparedAssistantExchange, error) {
+func (w *fakeExchangeWriter) PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int) (port.PreparedAssistantExchange, error) {
 	w.structured++
 	w.presentationJSON = presentationJSON
-	return w.PrepareAssistantExchange(ctx, metadata, message, retain, memoryEligible)
+	return w.PrepareAssistantExchange(ctx, metadata, message, retain)
 }
 
 func (w *fakeExchangeWriter) MarkAssistantExchangePublished(_ context.Context, _ string, assistantTS string) error {
@@ -270,12 +258,6 @@ func (w *fakeExchangeWriter) DiscardAssistantExchange(context.Context, string) e
 }
 func (*fakeExchangeWriter) ReconcileAssistantExchanges(context.Context, port.AssistantExchangeFinder) error {
 	return nil
-}
-
-type fakeRecall struct{ snippets []domain.MemorySnippet }
-
-func (r fakeRecall) Recall(context.Context, string, string) ([]domain.MemorySnippet, error) {
-	return append([]domain.MemorySnippet(nil), r.snippets...), nil
 }
 
 type fakeEnricher struct {
@@ -552,6 +534,23 @@ func TestHandleAuthorizedDM(t *testing.T) {
 	}
 }
 
+func TestHumanWorkstreamCommandIsTheOnlyPathThatMutatesWorkstream(t *testing.T) {
+	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
+	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "workstream-human {\"project\":\"workspace\",\"workstream_id\":\"ws-1\",\"expected_revision\":0,\"action\":\"pause_workstream\"}"}}
+	publisher := &fakePublisher{}
+	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
+	workstreams := &fakeActivationWorkstreamService{}
+	service.workstreams = workstreams
+
+	invocation := botInvocation()
+	if outcome, err := service.Handle(t.Context(), invocation); err != nil || outcome != OutcomeResponded {
+		t.Fatalf("proposal-shaped model response outcome=%q err=%v", outcome, err)
+	}
+	if len(workstreams.applyHumanCalls) != 0 || len(publisher.calls) != 1 || !strings.Contains(publisher.calls[0].text, "workstream-human") {
+		t.Fatalf("model proposal crossed human command boundary: applies=%d publishes=%#v", len(workstreams.applyHumanCalls), publisher.calls)
+	}
+}
+
 func TestHandleStandardDMProgressReachesTerminalState(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	standard := &fakeStandardExperience{}
@@ -815,7 +814,7 @@ func TestHandleStructuredTurnSanitizesAndPersistsCanonicalFallback(t *testing.T)
 	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Presentation: presentation}}, &fakeHistory{}, markdownPublisher, nil)
 	service.structuredPublisher = structuredPublisher
 	service.sanitize = func(value string) string { return strings.ReplaceAll(value, secret, "redacted") }
-	service.AddMemory(nil, writer)
+	service.SetExchange(writer)
 	if err := domain.ValidatePresentation(sanitizePresentation(*presentation, service.sanitize)); err != nil {
 		t.Fatalf("test presentation is invalid: %v", err)
 	}
@@ -1151,18 +1150,18 @@ func TestReconcileConfirmationsRepublishesOnlyUnprovenPendingDelivery(t *testing
 	}
 }
 
-func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) {
+func TestHandleUsesAtomicAssistantExchangeWriterWithoutLegacyMemory(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	writer := &fakeExchangeWriter{}
 	publisher := &fakePublisher{}
 	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, publisher, nil)
-	service.AddMemory(nil, writer)
+	service.SetExchange(writer)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if writer.prepares != 1 || writer.published != 1 || writer.publishedTS != "1700000002.000003" || writer.calls != 1 || !writer.memoryEligible {
+	if writer.prepares != 1 || writer.published != 1 || writer.publishedTS != "1700000002.000003" || writer.calls != 1 {
 		t.Fatalf("atomic writer = %#v", writer)
 	}
 	if got := publisher.calls[0].target.CorrelationID; got != "intent-correlation" {
@@ -1173,7 +1172,7 @@ func TestHandleUsesAtomicAssistantExchangeWriterWhenMemoryEnabled(t *testing.T) 
 	}
 }
 
-func TestHandleAtomicExchangeDoesNotQueueMemoryWhenMemoryIsDisabled(t *testing.T) {
+func TestHandleAtomicExchangeDoesNotQueueLegacyMemory(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	writer := &fakeExchangeWriter{}
 	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, &fakePublisher{}, nil)
@@ -1183,7 +1182,7 @@ func TestHandleAtomicExchangeDoesNotQueueMemoryWhenMemoryIsDisabled(t *testing.T
 	if err != nil || outcome != OutcomeResponded {
 		t.Fatalf("outcome=%q err=%v", outcome, err)
 	}
-	if writer.prepares != 1 || writer.memoryEligible {
+	if writer.prepares != 1 {
 		t.Fatalf("memory-disabled exchange = %#v", writer)
 	}
 }
@@ -1206,7 +1205,7 @@ func TestHandleAttachmentBoundsCurrentTurnAndKeepsDurableDelivery(t *testing.T) 
 	service.attachmentProc = processor
 	service.maxAttachmentBytes = 5 * 1024 * 1024
 	service.maxAttachmentChars = 400
-	service.AddMemory(nil, writer)
+	service.SetExchange(writer)
 
 	invocation := botInvocation()
 	invocation.Text = "review"
@@ -1222,7 +1221,7 @@ func TestHandleAttachmentBoundsCurrentTurnAndKeepsDurableDelivery(t *testing.T) 
 	if len([]rune(current)) > 500 || !strings.Contains(current, "[TRUNCATED:") || !strings.HasSuffix(current, "</attachments>") {
 		t.Fatalf("bounded current turn (%d runes) = %q", len([]rune(current)), current)
 	}
-	if writer.prepares != 1 || writer.published != 1 || writer.calls != 1 || writer.memoryEligible {
+	if writer.prepares != 1 || writer.published != 1 || writer.calls != 1 {
 		t.Fatalf("attachment durable exchange = %#v", writer)
 	}
 	if got := publisher.calls[0].target.CorrelationID; got != "intent-correlation" {
@@ -1286,7 +1285,7 @@ func TestHandlePublishesOnlyAfterExchangeIntentIsPrepared(t *testing.T) {
 	preparedAtPublish := false
 	publisher := &fakePublisher{onPublish: func() { preparedAtPublish = writer.prepares == 1 }}
 	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, publisher, nil)
-	service.AddMemory(nil, writer)
+	service.SetExchange(writer)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err == nil || outcome != "" {
@@ -1297,24 +1296,6 @@ func TestHandlePublishesOnlyAfterExchangeIntentIsPrepared(t *testing.T) {
 	}
 	if !preparedAtPublish || len(publisher.calls) != 1 || publisher.calls[0].text != "answer" {
 		t.Fatalf("Slack publish did not occur before injected finalization failure: %#v", publisher.calls)
-	}
-}
-
-func TestHandleEnforcesCombinedMessageAndRenderedMemoryBudget(t *testing.T) {
-	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
-	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
-	service := newTestService(t, store, runtime, &fakeHistory{}, &fakePublisher{}, func(cfg *Config) {
-		cfg.ContextLimits.MaxChars = 500
-	})
-	service.AddMemory(fakeRecall{snippets: []domain.MemorySnippet{{Title: "Topic", RevisionNumber: 1, Content: strings.Repeat("é", 200)}}}, nil)
-	if outcome, err := service.Handle(t.Context(), botInvocation()); err != nil || outcome != OutcomeResponded {
-		t.Fatalf("outcome=%q err=%v", outcome, err)
-	}
-	if len(runtime.runRequest.Memory) != 1 {
-		t.Fatalf("memory = %#v", runtime.runRequest.Memory)
-	}
-	if got := len([]rune(runtime.runRequest.Messages[0].Content)) + len([]rune(domain.RenderMemoryReference(runtime.runRequest.Memory))); got > 500 {
-		t.Fatalf("combined model context has %d runes, exceeds 500", got)
 	}
 }
 
@@ -1434,7 +1415,7 @@ func TestPublishErrorRetainsPreparedExchangeForRecovery(t *testing.T) {
 	writer := &fakeExchangeWriter{}
 	publisher := &fakePublisher{err: errors.New("connection closed after Slack accepted reply")}
 	service := newTestService(t, store, &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}, &fakeHistory{}, publisher, nil)
-	service.AddMemory(nil, writer)
+	service.SetExchange(writer)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomePublishFailed {
@@ -1468,7 +1449,7 @@ func TestSharedModelPermitOnlyCoversModelCall(t *testing.T) {
 	}}
 	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	service.modelCalls = limiter
-	service.AddMemory(nil, writer)
+	service.SetExchange(writer)
 
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomeResponded {

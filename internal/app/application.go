@@ -23,6 +23,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/bootstrap"
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
+	"github.com/Dauno/slack-local-agent/internal/usecase/rollout"
 )
 
 type Application struct {
@@ -30,6 +31,46 @@ type Application struct {
 	logOutput     io.Writer
 	forceShutdown chan struct{}
 	forceOnce     sync.Once
+	schemaLocker  rollout.SchemaLocker
+	// schemaProbe, schemaBackupper, and schemaWriter are the private test
+	// seams for the db upgrade flow; nil selects the SQLite implementations.
+	schemaProbe     rollout.SchemaProbe
+	schemaBackupper rollout.DatabaseBackupper
+	schemaWriter    rollout.SchemaWriter
+	// quarantineStore is the private test seam for the legacy identity
+	// disposition; nil selects the SQLite implementation.
+	quarantineStore rollout.LegacyIdentityQuarantineStore
+	// schemaTrace is the private test seam for the mutation call order
+	// (FIND-190): when non-nil it receives ordered "open-current"/"create"
+	// markers to place next to the locker's own events. It is nil in
+	// production and never a package-level global.
+	schemaTrace func(string)
+	openCurrent func(context.Context, string) (*adaptersqlite.Store, error)
+	create      func(context.Context, string) (*adaptersqlite.Store, error)
+}
+
+func (a *Application) traceSchemaEvent(event string) {
+	if a.schemaTrace != nil {
+		a.schemaTrace(event)
+	}
+}
+
+func (a *Application) openCurrentTraced(ctx context.Context, path string) (*adaptersqlite.Store, error) {
+	a.traceSchemaEvent("open-current")
+	open := a.openCurrent
+	if open == nil {
+		open = adaptersqlite.OpenCurrent
+	}
+	return open(ctx, path)
+}
+
+func (a *Application) createTraced(ctx context.Context, path string) (*adaptersqlite.Store, error) {
+	a.traceSchemaEvent("create")
+	create := a.create
+	if create == nil {
+		create = adaptersqlite.Create
+	}
+	return create(ctx, path)
 }
 
 func New(projectRoot string, logOutput io.Writer) (*Application, error) {
@@ -44,6 +85,63 @@ func New(projectRoot string, logOutput io.Writer) (*Application, error) {
 		logOutput = io.Discard
 	}
 	return &Application{root: root, logOutput: logOutput, forceShutdown: make(chan struct{})}, nil
+}
+
+// schemaLock acquires the exclusive cross-process mutation lock for one
+// database path through the configured locker, defaulting to the
+// kernel-held file lock.
+func (a *Application) schemaLock(databasePath string) (rollout.Lock, error) {
+	locker := a.schemaLocker
+	if locker == nil {
+		locker = adaptersqlite.FileSchemaLocker{}
+	}
+	return locker.AcquireExclusive(databasePath)
+}
+
+const (
+	schemaBehindMessage     = "database schema is behind this binary's v42; run local-agent db upgrade first"
+	mutationLockHeldMessage = "another local-agent process is using the database; wait for it to finish"
+)
+
+// lockHeldError carries the shared operator text while keeping
+// errors.Is(err, rollout.ErrMutationLockHeld) true for callers that need
+// the typed distinction.
+type lockHeldError struct{}
+
+func (lockHeldError) Error() string { return mutationLockHeldMessage }
+func (lockHeldError) Unwrap() error { return rollout.ErrMutationLockHeld }
+
+// schemaLockFailure maps locker failures to the operator-facing texts every
+// mutable command shares.
+func schemaLockFailure(err error) error {
+	switch {
+	case errors.Is(err, rollout.ErrMutationLockHeld):
+		return lockHeldError{}
+	case errors.Is(err, rollout.ErrMutationLockUnsupported):
+		return fmt.Errorf("%w", rollout.ErrMutationLockUnsupported)
+	default:
+		return fmt.Errorf("acquire database mutation lock: %w", err)
+	}
+}
+
+// schemaOpenFailure maps OpenCurrent rejections to the shared operator
+// texts; every other error keeps its own shape. A schema inside [33, 40]
+// keeps the upgrade-first message because db upgrade accepts it; a schema
+// outside [33, 42] maps to the terminal message that never recommends
+// db upgrade for a file db upgrade itself refuses (FIND-179).
+func schemaOpenFailure(err error) error {
+	var upgrade *adaptersqlite.SchemaUpgradeRequiredError
+	if errors.As(err, &upgrade) {
+		if upgrade.Found >= rollout.MinSourceVersion && upgrade.Found <= rollout.MaxSourceVersion {
+			return errors.New(schemaBehindMessage)
+		}
+		return newTerminalSchemaError(rollout.ErrUnsupportedSourceSchema, upgrade.Found)
+	}
+	var future *adaptersqlite.FutureSchemaError
+	if errors.As(err, &future) {
+		return newTerminalSchemaError(rollout.ErrFutureSchema, future.Found)
+	}
+	return err
 }
 
 // ForceShutdown skips the configured drain period while preserving durable
@@ -64,19 +162,27 @@ func (a *Application) PrepareSetup(ctx context.Context) (bootstrap.Snapshot, boo
 	if err != nil {
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
 	}
+	snapshot.ModelAPIKeyEnv, err = resolveSetupModelAPIKeyEnv(snapshot.Paths.StateDir)
+	if err != nil {
+		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
+	}
+	snapshot.ModelAPIKeyEnvResolved = true
+	if err := service.RewriteEnvExample(ctx, snapshot.Paths, snapshot.ModelAPIKeyEnv); err != nil {
+		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
+	}
 	if err := os.MkdirAll(snapshot.Paths.ArtifactDir, 0o700); err != nil {
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, fmt.Errorf("create ACP artifact directory: %w", err)
 	}
-	values, err := envfile.NewResolver(snapshot.Paths.EnvFile).Resolve(
-		snapshot.Config.Model.APIKeyEnv,
-		bootstrap.SlackBotTokenEnv,
-		bootstrap.SlackAppTokenEnv,
-	)
+	keys := []string{bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv}
+	if snapshot.ModelAPIKeyEnv != "" {
+		keys = append([]string{snapshot.ModelAPIKeyEnv}, keys...)
+	}
+	values, err := envfile.NewResolver(snapshot.Paths.EnvFile).Resolve(keys...)
 	if err != nil {
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
 	}
 	return snapshot, bootstrap.Secrets{
-		ModelAPIKey:   values[snapshot.Config.Model.APIKeyEnv],
+		ModelAPIKey:   values[snapshot.ModelAPIKeyEnv],
 		SlackBotToken: values[bootstrap.SlackBotTokenEnv],
 		SlackAppToken: values[bootstrap.SlackAppTokenEnv],
 	}, nil
@@ -93,8 +199,31 @@ func (a *Application) ApplySetup(
 	if err != nil {
 		return err
 	}
+	if !snapshot.ModelAPIKeyEnvResolved {
+		snapshot.ModelAPIKeyEnv, err = resolveSetupModelAPIKeyEnv(snapshot.Paths.StateDir)
+		if err != nil {
+			return err
+		}
+		snapshot.ModelAPIKeyEnvResolved = true
+	}
 	_, err = service.ApplyConfirmedUpdates(ctx, snapshot, identity, access, secrets)
 	return err
+}
+
+func resolveSetupModelAPIKeyEnv(stateDir string) (string, error) {
+	defs, err := agentdef.Load(stateDir)
+	if err != nil {
+		return "", fmt.Errorf("load declarative agent definitions: %w", err)
+	}
+	root, ok := defs.Agents["root_agent"]
+	if !ok {
+		return "", errors.New("root_agent definition is missing")
+	}
+	resolved, err := defs.ResolveModel(root.Model)
+	if err != nil {
+		return "", fmt.Errorf("resolve root agent model for setup: %w", err)
+	}
+	return resolved.APIKeyEnv, nil
 }
 
 func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Report, error) {
@@ -103,14 +232,19 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		return doctor.Report{}, err
 	}
 	dependencies := doctor.Dependencies{
-		ConfigPath: configPath,
-		Secrets:    envfile.NewResolver(filepath.Join(a.root, config.DefaultEnvFile)),
-		Database:   databaseChecker{},
-		Artifacts:  artifactChecker{},
-		Jobs:       jobStoreChecker{},
-		CLI:        cliProviderChecker{},
-		ACP:        acpProviderChecker{},
-		Counter:    counterChecker{},
+		ConfigPath:      configPath,
+		Secrets:         envfile.NewResolver(filepath.Join(a.root, config.DefaultEnvFile)),
+		Database:        databaseChecker{},
+		Artifacts:       artifactChecker{},
+		Jobs:            jobStoreChecker{},
+		CLI:             cliProviderChecker{},
+		ACP:             acpProviderChecker{},
+		Counter:         counterChecker{},
+		Knowledge:       knowledgeChecker{},
+		ResultRetention: resultRetentionChecker{},
+		ResultAnalysis:  resultAnalysisChecker{},
+		SQLiteRuntime:   sqliteRuntimeChecker{},
+		RecoverableRefs: recoverableReferenceChecker{},
 	}
 	if includeLive {
 		dependencies.Live = liveChecker{}
@@ -258,6 +392,14 @@ func (a *Application) ResetState(ctx context.Context) error {
 	}
 
 	dbPath := paths.DatabaseFile
+	// The lock is taken before the existence check so a concurrent reset or
+	// mutator can never interleave with the destructive replacement below.
+	lock, err := a.schemaLock(dbPath)
+	if err != nil {
+		return schemaLockFailure(err)
+	}
+	defer func() { _ = lock.Release() }()
+
 	if _, statErr := os.Stat(dbPath); errors.Is(statErr, os.ErrNotExist) {
 		return errors.New("no existing database found — nothing to reset")
 	}
@@ -265,16 +407,26 @@ func (a *Application) ResetState(ctx context.Context) error {
 	if err := os.Remove(dbPath); err != nil {
 		return fmt.Errorf("delete database %s: %w", dbPath, err)
 	}
-	store, err := adaptersqlite.Initialize(ctx, dbPath)
+	// A confirmed reset may replace an outdated database outright: Create
+	// builds the current schema directly, and no OpenCurrent gate applies to
+	// this destructive flow.
+	store, err := a.createTraced(ctx, dbPath)
 	if err != nil {
 		return fmt.Errorf("initialize fresh database: %w", err)
 	}
 	if err := store.Close(); err != nil {
 		return fmt.Errorf("close fresh database: %w", err)
 	}
+	canonicalConfig, err := config.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("render canonical configuration: %w", err)
+	}
+	if err := os.WriteFile(configPath, canonicalConfig, 0o644); err != nil {
+		return fmt.Errorf("rewrite canonical configuration: %w", err)
+	}
 
 	// Clean up memory projections if they exist.
-	memoryDir := filepath.Join(a.root, ".local-agent", "memory")
+	memoryDir := paths.MemoryDir
 	if _, statErr := os.Stat(memoryDir); statErr == nil {
 		if err := os.RemoveAll(memoryDir); err != nil {
 			return fmt.Errorf("delete memory projections: %w", err)
@@ -287,11 +439,48 @@ func (a *Application) ResetState(ctx context.Context) error {
 
 func (a *Application) bootstrapService() (*bootstrap.Service, error) {
 	return bootstrap.New(fsproject.New(), bootstrap.DatabaseInitializerFunc(func(ctx context.Context, path string) error {
-		store, err := adaptersqlite.Initialize(ctx, path)
+		// Lock first; every database decision below happens under it.
+		lock, err := a.schemaLock(path)
 		if err != nil {
-			return err
+			return schemaLockFailure(err)
 		}
-		return store.Close()
+		defer func() { _ = lock.Release() }()
+
+		// Rollout-completeness preflight (checkpoint 5): an existing database
+		// must already sit on a completed rollout before the write-capable
+		// opener runs. A missing file skips the gate and takes the create path
+		// below, which records its own complete rollout state at creation.
+		a.traceSchemaEvent("preflight")
+		if err := a.requireRolloutComplete(ctx, path); err != nil && !errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {
+			return rolloutPreflightFailure(err)
+		}
+
+		store, err := a.openCurrentTraced(ctx, path)
+		switch {
+		case err == nil:
+			return store.Close()
+		case errors.Is(err, adaptersqlite.ErrDatabaseNotFound):
+			// Brand-new file: the full create-and-migrate chain runs under
+			// the same lock.
+			created, createErr := a.createTraced(ctx, path)
+			if errors.Is(createErr, os.ErrExist) {
+				// Another initializer won the O_EXCL race; revalidate the
+				// winner's version instead of migrating it implicitly.
+				raced, openErr := a.openCurrentTraced(ctx, path)
+				if openErr != nil {
+					return schemaOpenFailure(openErr)
+				}
+				return raced.Close()
+			}
+			if createErr != nil {
+				return createErr
+			}
+			return created.Close()
+		default:
+			// An existing outdated database never reaches Create or
+			// OpenExisting: init reports the upgrade requirement and stops.
+			return schemaOpenFailure(err)
+		}
 	}), bootstrap.SecretEditorFunc(envfile.Render))
 }
 
@@ -306,7 +495,7 @@ func (artifactChecker) CheckArtifactStore(ctx context.Context, path string, maxB
 type jobStoreChecker struct{}
 
 func (jobStoreChecker) CheckExternalAgentJobs(ctx context.Context, path string) error {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -315,7 +504,7 @@ func (jobStoreChecker) CheckExternalAgentJobs(ctx context.Context, path string) 
 }
 
 func (jobStoreChecker) CheckExternalAgentActivationHealth(ctx context.Context, path string) (domain.ExternalAgentJobActivationHealth, error) {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobActivationHealth{}, err
 	}
@@ -325,7 +514,7 @@ func (jobStoreChecker) CheckExternalAgentActivationHealth(ctx context.Context, p
 }
 
 func (jobStoreChecker) CheckExternalAgentResultIdentityHealth(ctx context.Context, path string) (domain.ExternalAgentJobIdentityHealth, error) {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobIdentityHealth{}, err
 	}
@@ -334,23 +523,80 @@ func (jobStoreChecker) CheckExternalAgentResultIdentityHealth(ctx context.Contex
 	return jobs.IdentityHealth(ctx)
 }
 
-func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
-	store, err := adaptersqlite.OpenExisting(ctx, path)
+type knowledgeChecker struct{}
+
+func (knowledgeChecker) CheckKnowledgeRetrievalState(ctx context.Context, path string) (domain.KnowledgeRetrievalHealth, error) {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
 	if err != nil {
-		if errors.Is(err, adaptersqlite.ErrFutureSchema) {
-			return &doctor.ActionableError{
-				Err: err,
-				Fix: "Install a local-agent version that supports this database. To discard local conversation state, stop the agent, back up and delete only the configured database file, then run init.",
-			}
-		}
-		if errors.Is(err, adaptersqlite.ErrStateResetNeeded) {
-			return &doctor.ActionableError{
-				Err: err,
-				Fix: "Run: local-agent init --reset-state to discard incompatible local state.",
-			}
-		}
+		return domain.KnowledgeRetrievalHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckKnowledgeRetrievalState(ctx)
+}
+
+type resultRetentionChecker struct{}
+
+func (resultRetentionChecker) CheckResultRetention(ctx context.Context, path string, ages domain.ResultRetentionAges, now time.Time) (domain.ResultRetentionHealth, error) {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.ResultRetentionHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckResultRetention(ctx, ages, now)
+}
+
+type resultAnalysisChecker struct{}
+
+func (resultAnalysisChecker) CheckResultAnalysisState(ctx context.Context, path string) (domain.ResultAnalysisHealth, error) {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.ResultAnalysisHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckResultAnalysisState(ctx)
+}
+
+// Every doctor checker opens the configured database read-only (TRD 09
+// checkpoint 2): an offline inspection can never migrate or otherwise change
+// database state as a side effect.
+type sqliteRuntimeChecker struct{}
+
+func (sqliteRuntimeChecker) CheckSQLiteRuntime(ctx context.Context, path string) (domain.SQLiteRuntimeHealth, error) {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.SQLiteRuntimeHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckSQLiteRuntime(ctx)
+}
+
+type recoverableReferenceChecker struct{}
+
+func (recoverableReferenceChecker) CheckRecoverableReferenceHealth(ctx context.Context, path string) (domain.RecoverableReferenceHealth, error) {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.RecoverableReferenceHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckRecoverableReferenceHealth(ctx)
+}
+
+// CheckDatabase is a pure read (TRD 09 checkpoint 2): it opens the database
+// read-only and asserts PRAGMA integrity_check returns ok. Write capability
+// is no longer doctor's concern; a mutable command's own OpenCurrent call is
+// where write access is exercised, at the moment it is needed.
+func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
+	store, err := adaptersqlite.OpenReadOnly(ctx, path)
+	if err != nil {
 		return err
 	}
 	defer store.Close()
-	return store.ProbeReadWrite(ctx)
+	var outcome string
+	if err := store.DB().QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&outcome); err != nil {
+		return fmt.Errorf("SQLite integrity check: %w", err)
+	}
+	if outcome != "ok" {
+		return fmt.Errorf("SQLite integrity check reported %q", outcome)
+	}
+	return nil
 }

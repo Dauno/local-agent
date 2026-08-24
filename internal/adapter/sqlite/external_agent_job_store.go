@@ -77,18 +77,30 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 	if job.TimeoutAt.IsZero() {
 		return false, nil, errors.New("external-agent job timeout is required")
 	}
-	result, err := s.db.ExecContext(ctx, `INSERT INTO external_agent_jobs (
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return false, nil, fmt.Errorf("begin external-agent job admission: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
+		if err := validateCompletionBindingAdmission(ctx, tx, job); err != nil {
+			return false, nil, err
+		}
+	}
+	result, err := tx.ExecContext(ctx, `INSERT INTO external_agent_jobs (
 		job_id, mode, provider, profile, primary_project, additional_projects,
 		registry_revision, task, request_sha256, wrapper_call_id, original_call_id,
-		actor, slack_team_id, conversation_key, status, attempt, acp_session_id,
+		actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
+		status, attempt, acp_session_id,
 		side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at,
 		result_summary, result_artifact, result_sha256, result_bytes, error_code,
 		status_revision, created_at, started_at, finished_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
 		job.ID, job.Mode, job.Provider, job.Profile, job.PrimaryProject, string(projects),
 		job.RegistryRevision, job.Task, job.RequestSHA256, job.WrapperCallID, job.OriginalCallID,
-		job.Actor, job.TeamID, string(job.ConversationKey), job.Status, job.Attempt, job.ACPSessionID,
+		job.Actor, job.TeamID, string(job.ConversationKey), job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision,
+		job.Status, job.Attempt, job.ACPSessionID,
 		boolInt(job.SideEffectsPossible), job.LeaseOwner, unix(job.LeaseExpiry), unix(job.HeartbeatAt), unix(job.TimeoutAt),
 		job.ResultSummary, job.ResultArtifact, job.ResultSHA256, job.ResultBytes, job.ErrorCode,
 		job.StatusRevision, unix(job.CreatedAt), unix(job.StartedAt), unix(job.FinishedAt), unix(job.UpdatedAt),
@@ -101,10 +113,44 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 		return false, nil, fmt.Errorf("inspect external-agent job insert: %w", err)
 	}
 	if affected == 1 {
+		if err := tx.Commit(); err != nil {
+			return false, nil, fmt.Errorf("commit external-agent job admission: %w", err)
+		}
 		return true, nil, nil
 	}
-	existing, err := s.findExisting(ctx, job.ID, job.OriginalCallID)
-	return false, existing, err
+	existing, err := s.load(ctx, tx, `WHERE job_id = ? OR original_call_id = ?`, job.ID, job.OriginalCallID)
+	if errors.Is(err, sql.ErrNoRows) {
+		existing = domain.ExternalAgentJob{}
+	} else if err != nil {
+		return false, nil, fmt.Errorf("load existing external-agent job: %w", err)
+	}
+	if err := tx.Commit(); err != nil {
+		return false, nil, fmt.Errorf("commit existing external-agent job lookup: %w", err)
+	}
+	if existing.ID == "" {
+		return false, nil, nil
+	}
+	return false, &existing, nil
+}
+
+func validateCompletionBindingAdmission(ctx context.Context, queryer queryRower, job domain.ExternalAgentJob) error {
+	var eligible int
+	err := queryer.QueryRowContext(ctx, `SELECT COUNT(*)
+		FROM workstreams w
+		JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
+		WHERE w.workstream_id = ? AND w.conversation_key = ? AND w.owner_actor = ?
+			AND w.project = ? AND w.status = 'active' AND w.revision >= ?
+			AND t.task_id = ? AND t.project = ? AND t.description = ?
+			AND t.status = 'running' AND t.execution_identity = ?`,
+		job.WorkstreamID, string(job.ConversationKey), job.Actor, job.PrimaryProject,
+		job.AdmissionRevision, job.TaskID, job.PrimaryProject, job.Task, job.ExecutionIdentity).Scan(&eligible)
+	if err != nil {
+		return fmt.Errorf("check external-agent completion binding: %w", err)
+	}
+	if eligible != 1 {
+		return errors.New("external-agent completion binding is not admitted")
+	}
+	return nil
 }
 
 func (s *ExternalAgentJobStore) findExisting(ctx context.Context, jobID, originalCallID string) (*domain.ExternalAgentJob, error) {
@@ -502,13 +548,25 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 	if err != nil {
 		return err
 	}
+	failAfterQuarantine := func(cause error) error {
+		if result == nil || result.NativeResultID == "" {
+			return cause
+		}
+		if err := quarantineNativeACPResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
+			return fmt.Errorf("quarantine unbound native ACP result: %w", err)
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("commit native ACP result quarantine: %w", err)
+		}
+		return cause
+	}
 	if job.Attempt != attempt || job.LeaseOwner != owner || job.LeaseExpiry.IsZero() || !job.LeaseExpiry.After(now) {
-		return errors.New("external-agent job lease is lost")
+		return failAfterQuarantine(errors.New("external-agent job lease is lost"))
 	}
 	expectedRevision := job.StatusRevision
 	previous := job.Status
 	if err := job.Transition(next); err != nil {
-		return err
+		return failAfterQuarantine(err)
 	}
 	job.StatusRevision++
 	job.UpdatedAt = now.UTC()
@@ -519,6 +577,21 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 		job.ResultSummary, job.ResultArtifact, job.ResultSHA256, job.ResultBytes = result.Text, result.ArtifactRef, result.ResultSHA256, result.ResultBytes
 		if result.DeliveryMode == domain.JobResultDeliveryFile {
 			job.ResultSummary = ""
+		}
+	}
+	if result != nil && result.NativeResultID != "" {
+		if next != domain.JobCompleted {
+			if err := quarantineNativeACPResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
+				return fmt.Errorf("quarantine non-completed native ACP result: %w", err)
+			}
+		} else if err := bindNativeACPResult(ctx, tx, job, *result); err != nil {
+			if quarantineErr := quarantineNativeACPResult(ctx, tx, result.NativeResultID, job.ID); quarantineErr != nil {
+				return fmt.Errorf("validate native ACP result: %v; quarantine: %w", err, quarantineErr)
+			}
+			if commitErr := tx.Commit(); commitErr != nil {
+				return fmt.Errorf("commit invalid native ACP result quarantine: %w", commitErr)
+			}
+			return fmt.Errorf("validate native ACP result: %w", err)
 		}
 	}
 	job.ErrorCode = errorCode
@@ -551,6 +624,109 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 		}
 	}
 	return tx.Commit()
+}
+
+const externalAgentResultOwnerKind = "external_agent_job_completion"
+
+func (s *ExternalAgentJobStore) NativeResultIDForJob(ctx context.Context, jobID string, statusRevision int) (string, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(jobID) == "" || statusRevision < 0 {
+		return "", domain.ErrResultInvalid
+	}
+	ownerID := fmt.Sprintf("%s:%d", jobID, statusRevision)
+	var resultID string
+	err := s.db.QueryRowContext(ctx, `SELECT result_id FROM result_references
+		WHERE owner_kind = ? AND owner_id = ? AND state = 'live'`, externalAgentResultOwnerKind, ownerID).Scan(&resultID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", domain.ErrResultUnavailable
+	}
+	if err != nil || !validResultOpaqueID(resultID) {
+		return "", domain.ErrResultUnavailable
+	}
+	return resultID, nil
+}
+
+var _ port.ExternalAgentJobNativeResultStore = (*ExternalAgentJobStore)(nil)
+
+func bindNativeACPResult(ctx context.Context, tx *sql.Tx, job domain.ExternalAgentJob, result domain.AcpInvocationResult) error {
+	if !validResultOpaqueID(result.NativeResultID) || job.Status != domain.JobCompleted {
+		return domain.ErrResultInvalid
+	}
+	var producerKind, producerID, state, sha256Hex, actor, teamID, conversationKey, project string
+	var producerRevision int
+	var resultBytes int64
+	err := tx.QueryRowContext(ctx, `SELECT producer_kind, producer_id, producer_revision, state,
+		sha256, bytes, actor, team_id, conversation_key, project
+		FROM result_records WHERE result_id = ?`, result.NativeResultID).Scan(
+		&producerKind, &producerID, &producerRevision, &state, &sha256Hex, &resultBytes,
+		&actor, &teamID, &conversationKey, &project)
+	if err != nil {
+		return domain.ErrResultUnavailable
+	}
+	if producerKind != string(domain.ResultProducerACPJob) || producerID != job.ID || producerRevision != job.StatusRevision ||
+		state != string(domain.ResultAvailable) || sha256Hex != result.ResultSHA256 || resultBytes != job.ResultBytes ||
+		actor != job.Actor || teamID != job.TeamID || conversationKey != string(job.ConversationKey) || project != job.PrimaryProject {
+		return domain.ErrResultInvalid
+	}
+	ownerID := fmt.Sprintf("%s:%d", job.ID, job.StatusRevision)
+	var existingResultID string
+	err = tx.QueryRowContext(ctx, `SELECT result_id FROM result_references
+		WHERE owner_kind = ? AND owner_id = ? AND state = 'live'`, externalAgentResultOwnerKind, ownerID).Scan(&existingResultID)
+	if err == nil {
+		if existingResultID == result.NativeResultID {
+			return nil
+		}
+		return domain.ErrResultInvalid
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	referenceDigest := sha256.Sum256([]byte(externalAgentResultOwnerKind + "\x00" + ownerID + "\x00" + result.NativeResultID))
+	_, err = tx.ExecContext(ctx, `INSERT INTO result_references (
+		reference_id, result_id, owner_kind, owner_id, state, created_at)
+		VALUES (?, ?, ?, ?, 'live', ?)`, fmt.Sprintf("%x", referenceDigest), result.NativeResultID,
+		externalAgentResultOwnerKind, ownerID, job.UpdatedAt.UnixNano())
+	return err
+}
+
+func quarantineNativeACPResult(ctx context.Context, tx *sql.Tx, resultID, jobID string) error {
+	if !validResultOpaqueID(resultID) || strings.TrimSpace(jobID) == "" {
+		return domain.ErrResultInvalid
+	}
+	changed, err := tx.ExecContext(ctx, `UPDATE result_records SET state = 'quarantined'
+		WHERE result_id = ? AND producer_kind = ? AND producer_id = ? AND state = 'available'`,
+		resultID, domain.ResultProducerACPJob, jobID)
+	if err != nil {
+		return err
+	}
+	rows, err := changed.RowsAffected()
+	if err != nil || rows == 1 {
+		return err
+	}
+	var producerKind, producerID, state string
+	err = tx.QueryRowContext(ctx, `SELECT producer_kind, producer_id, state FROM result_records WHERE result_id = ?`, resultID).Scan(&producerKind, &producerID, &state)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if producerKind != string(domain.ResultProducerACPJob) || producerID != jobID || state != string(domain.ResultQuarantined) {
+		return domain.ErrResultInvalid
+	}
+	return nil
+}
+
+func quarantineUnboundNativeACPResults(ctx context.Context, tx *sql.Tx, jobID string) error {
+	if strings.TrimSpace(jobID) == "" {
+		return domain.ErrResultInvalid
+	}
+	_, err := tx.ExecContext(ctx, `UPDATE result_records SET state = 'quarantined'
+		WHERE producer_kind = ? AND producer_id = ? AND state = 'available'
+		AND NOT EXISTS (
+			SELECT 1 FROM result_references rr
+			WHERE rr.result_id = result_records.result_id AND rr.state = 'live'
+		)`, domain.ResultProducerACPJob, jobID)
+	return err
 }
 
 func (s *ExternalAgentJobStore) ListExpiredRunning(ctx context.Context, now time.Time) ([]domain.ExternalAgentJob, error) {
@@ -598,7 +774,7 @@ func (s *ExternalAgentJobStore) ShutdownStats(ctx context.Context) (domain.Exter
 }
 
 func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string, attempt, statusRevision int, now time.Time, next domain.ExternalAgentJobStatus, errorCode string) error {
-	if next != domain.JobQueued && next != domain.JobFailed && next != domain.JobCompletionUnknown {
+	if next != domain.JobQueued && next != domain.JobFailed && next != domain.JobCancelled && next != domain.JobCompletionUnknown {
 		return errors.New("invalid expired external-agent recovery status")
 	}
 	finished := int64(0)
@@ -627,6 +803,9 @@ func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string
 	job, err := s.load(ctx, tx, `WHERE job_id = ?`, jobID)
 	if err != nil {
 		return err
+	}
+	if err := quarantineUnboundNativeACPResults(ctx, tx, job.ID); err != nil {
+		return fmt.Errorf("quarantine unbound native ACP results during recovery: %w", err)
 	}
 	if err := insertJobEvent(ctx, tx, job, "recovery"); err != nil {
 		return err
@@ -671,9 +850,10 @@ func insertJobNotification(ctx context.Context, exec interface {
 		lease_expiry, attempts, next_attempt_at, recovered_slack_ts, last_error_code,
 		created_at, updated_at, delivery_mode, policy_version, artifact_ref, result_bytes,
 		max_markdown_parts, upload_state, slack_file_id,
-		root_activation_required, notification_sha256, notification_bytes, result_sha256)
+		root_activation_required, notification_sha256, notification_bytes, result_sha256,
+		workstream_id, task_id, execution_identity, admission_revision)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, '', '', ?, ?, ?, ?, ?, ?, ?, ?, '',
-			?, ?, ?, ?)
+			?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 		notification.JobID, notification.StatusRevision, notification.Kind, notification.TerminalStatus,
 		notification.CanonicalMarkdown, legacyContentSHA, notification.RendererVersion,
@@ -682,6 +862,7 @@ func insertJobNotification(ctx context.Context, exec interface {
 		notification.ArtifactRef, notification.ResultBytes, notification.MaxMarkdownParts, notification.UploadState,
 		boolInt(notification.RootActivationRequired), notification.NotificationSHA256,
 		notification.NotificationBytes, notification.ResultSHA256,
+		notification.WorkstreamID, notification.TaskID, notification.ExecutionIdentity, notification.AdmissionRevision,
 	)
 	return err
 }
@@ -766,22 +947,50 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return ErrNotificationStateConflict
 	}
+	// SQLite triggers that RAISE(IGNORE) can report one affected row despite
+	// leaving the notification untouched. Re-read the durable evidence before
+	// committing success so a lost publication CAS remains visible to the worker.
+	var publishState domain.NotificationPublishState
+	var recoveredSlackTS string
+	if err := tx.QueryRowContext(ctx, `SELECT publish_state, recovered_slack_ts
+		FROM external_agent_job_notifications
+		WHERE job_id = ? AND status_revision = ? AND kind = ?`,
+		notification.JobID, notification.StatusRevision, notification.Kind,
+	).Scan(&publishState, &recoveredSlackTS); err != nil {
+		return fmt.Errorf("verify notification publication: %w", err)
+	}
+	if publishState != domain.NotificationPublished || recoveredSlackTS != slackTS {
+		return ErrNotificationStateConflict
+	}
 	activationID := domain.ExternalAgentJobActivationID(notification.JobID, notification.StatusRevision, notification.Kind)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO external_agent_job_activations (
 		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
-		actor, team_id, conversation_key, original_call_id, delivery_mode, content_bytes,
+		result_sha256, actor, team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
+		original_call_id, delivery_mode, content_bytes,
 		slack_message_ts, published_at, state, attempt, lease_owner, lease_expiry,
 		next_attempt_at, last_error_code, response_body, response_sha256, exchange_intent_id,
 		correlation_id, response_slack_ts, created_at, updated_at)
 		SELECT n.job_id, n.status_revision, n.kind, ?, n.terminal_status, n.notification_sha256,
-			j.actor, j.slack_team_id, j.conversation_key, j.original_call_id, n.delivery_mode,
+			n.result_sha256, j.actor, j.slack_team_id, j.conversation_key, j.workstream_id, j.task_id, j.execution_identity, j.admission_revision,
+			j.original_call_id, n.delivery_mode,
 			n.result_bytes,
 			n.recovered_slack_ts, n.published_at, 'pending', 0, '', 0, n.published_at,
 			'', '', '', '', '', '', n.published_at, n.published_at
 		FROM external_agent_job_notifications n
 		JOIN external_agent_jobs j ON j.job_id = n.job_id
-		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ? AND n.terminal_status != ''
+		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ? AND n.terminal_status = 'completed'
 			AND n.root_activation_required = 1 AND j.mode = 'detached'
+			AND length(j.workstream_id) > 0 AND length(j.task_id) > 0 AND length(j.execution_identity) > 0
+			AND EXISTS (
+				SELECT 1 FROM workstreams w
+				JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
+				WHERE w.workstream_id = j.workstream_id AND w.conversation_key = j.conversation_key
+					AND w.owner_actor = j.actor AND w.project = j.primary_project
+					AND w.status = 'active' AND w.revision >= j.admission_revision
+					AND t.task_id = j.task_id AND t.project = j.primary_project
+					AND t.description = j.task AND t.status = 'running'
+					AND t.execution_identity = j.execution_identity
+			)
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 		activationID, notification.JobID, notification.StatusRevision, notification.Kind); err != nil {
 		return fmt.Errorf("insert external-agent activation: %w", err)
@@ -899,15 +1108,17 @@ func (s *ExternalAgentJobStore) MarkNotificationUnknown(ctx context.Context, not
 			lease_expiry, attempts, next_attempt_at, recovered_slack_ts, last_error_code,
 			created_at, updated_at, delivery_mode, policy_version, artifact_ref, result_bytes,
 			max_markdown_parts, upload_state, slack_file_id,
-			root_activation_required, notification_sha256, notification_bytes, result_sha256)
+			root_activation_required, notification_sha256, notification_bytes, result_sha256,
+			workstream_id, task_id, execution_identity, admission_revision)
 			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', 0, 0, ?, '', '', ?, ?, 'markdown', 'legacy_v1', '', 0, 1, 'not_applicable', '',
-				0, ?, ?, '')
+				0, ?, ?, '', ?, ?, ?, ?)
 			ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 			notification.JobID, notification.StatusRevision, domain.JobNotificationFailure,
 			markdown, fmt.Sprintf("%x", digest), domain.JobNotificationRenderer,
 			notification.Target.ChannelID, notification.Target.ThreadTS,
 			domain.NotificationPending, now.UnixNano(), now.UnixNano(), now.UnixNano(),
-			fmt.Sprintf("%x", digest), int64(len([]byte(markdown))))
+			fmt.Sprintf("%x", digest), int64(len([]byte(markdown))), notification.WorkstreamID,
+			notification.TaskID, notification.ExecutionIdentity, notification.AdmissionRevision)
 		if err != nil {
 			return fmt.Errorf("enqueue result delivery failure notification: %w", err)
 		}
@@ -1074,7 +1285,7 @@ func safeAdminUploadState(value string) domain.JobResultUploadState {
 	}
 }
 
-const notificationColumns = `n.job_id, n.status_revision, n.kind, n.terminal_status, n.published_at, n.canonical_markdown, n.content_sha256, n.renderer_version, n.channel_id, n.thread_ts, n.publish_state, n.lease_owner, n.lease_expiry, n.attempts, n.next_attempt_at, n.recovered_slack_ts, n.last_error_code, n.created_at, n.updated_at, n.delivery_mode, n.policy_version, n.artifact_ref, n.result_bytes, n.max_markdown_parts, n.upload_state, n.slack_file_id, n.root_activation_required, n.notification_sha256, n.notification_bytes, n.result_sha256`
+const notificationColumns = `n.job_id, n.status_revision, n.kind, n.terminal_status, n.published_at, n.canonical_markdown, n.content_sha256, n.renderer_version, n.channel_id, n.thread_ts, n.publish_state, n.lease_owner, n.lease_expiry, n.attempts, n.next_attempt_at, n.recovered_slack_ts, n.last_error_code, n.created_at, n.updated_at, n.delivery_mode, n.policy_version, n.artifact_ref, n.result_bytes, n.max_markdown_parts, n.upload_state, n.slack_file_id, n.root_activation_required, n.notification_sha256, n.notification_bytes, n.result_sha256, n.workstream_id, n.task_id, n.execution_identity, n.admission_revision`
 
 func loadNotification(ctx context.Context, queryer queryRower, jobID string, revision int, kind string) (domain.ExternalAgentJobNotification, error) {
 	var n domain.ExternalAgentJobNotification
@@ -1089,7 +1300,7 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 	var terminalStatus string
 	var publishedAt int64
 	var legacyContentSHA string
-	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &terminalStatus, &publishedAt, &n.CanonicalMarkdown, &legacyContentSHA, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID, &rootActivationRequired, &n.NotificationSHA256, &n.NotificationBytes, &n.ResultSHA256, &n.Actor, &n.ConversationKey)
+	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &terminalStatus, &publishedAt, &n.CanonicalMarkdown, &legacyContentSHA, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID, &rootActivationRequired, &n.NotificationSHA256, &n.NotificationBytes, &n.ResultSHA256, &n.WorkstreamID, &n.TaskID, &n.ExecutionIdentity, &n.AdmissionRevision, &n.Actor, &n.ConversationKey)
 	if err != nil {
 		return domain.ExternalAgentJobNotification{}, fmt.Errorf("load notification: %w", err)
 	}
@@ -1106,7 +1317,7 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 	return n, nil
 }
 
-const jobColumns = `job_id, mode, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, status, attempt, acp_session_id, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
+const jobColumns = `job_id, mode, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision, status, attempt, acp_session_id, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
 
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -1126,7 +1337,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 		leaseExpiry, heartbeat, timeout, created, started, finished, updated int64
 		sideEffects                                                          int
 	)
-	err := row.Scan(&job.ID, &mode, &job.Provider, &job.Profile, &job.PrimaryProject, &projects, &job.RegistryRevision, &job.Task, &job.RequestSHA256, &job.WrapperCallID, &job.OriginalCallID, &job.Actor, &job.TeamID, &conversation, &status, &job.Attempt, &job.ACPSessionID, &sideEffects, &job.LeaseOwner, &leaseExpiry, &heartbeat, &timeout, &job.ResultSummary, &job.ResultArtifact, &job.ResultSHA256, &job.ResultBytes, &job.ErrorCode, &job.StatusRevision, &created, &started, &finished, &updated)
+	err := row.Scan(&job.ID, &mode, &job.Provider, &job.Profile, &job.PrimaryProject, &projects, &job.RegistryRevision, &job.Task, &job.RequestSHA256, &job.WrapperCallID, &job.OriginalCallID, &job.Actor, &job.TeamID, &conversation, &job.WorkstreamID, &job.TaskID, &job.ExecutionIdentity, &job.AdmissionRevision, &status, &job.Attempt, &job.ACPSessionID, &sideEffects, &job.LeaseOwner, &leaseExpiry, &heartbeat, &timeout, &job.ResultSummary, &job.ResultArtifact, &job.ResultSHA256, &job.ResultBytes, &job.ErrorCode, &job.StatusRevision, &created, &started, &finished, &updated)
 	if err != nil {
 		return domain.ExternalAgentJob{}, err
 	}

@@ -144,19 +144,6 @@ func SeedAttachmentAnalyzer(modelRef string) AgentDef {
 	}
 }
 
-func SeedMemoryCurator(modelRef string) AgentDef {
-	return AgentDef{
-		AgentClass:      "LlmAgent",
-		Name:            "memory_curator",
-		Model:           modelRef,
-		Description:     "Extracts durable knowledge as JSON.",
-		Instruction:     "You are a Memory Curator for a knowledge management system.\n\nReturn only one JSON object with an operations array.\nExample: {\"operations\":[]}\n",
-		IncludeContents: "none",
-		TimeoutSeconds:  120,
-		Role:            "memory_curator",
-	}
-}
-
 // SeedOpenCodeProviderExample returns the inactive agent_cli provider example
 // written as opencode.yaml.example. Activating it is an explicit operator
 // action; init never changes active agents.

@@ -11,14 +11,18 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-// Compiler implements port.ContextCompiler by producing a bounded model-facing
-// projection. It externalizes oversized FunctionResponse payloads via a
-// RecoverableResultStore while preserving protocol identity and ordering.
+// Compiler implements port.ContextCompiler by producing a bounded, read-only
+// model-facing projection. Durable result creation belongs to producers.
 type Compiler struct {
-	resultStore  port.RecoverableResultStore
-	tokenCounter port.RequestTokenCounter
-	metrics      port.MetricRecorder
+	resultStore              port.RecoverableResultStore
+	tokenCounter             port.RequestTokenCounter
+	metrics                  port.MetricRecorder
+	projectionWritesDisabled bool
 }
+
+// legacyProjectionWritesForTests keeps historical projection fixtures
+// executable without exposing a production switch back to compiler writes.
+var legacyProjectionWritesForTests bool
 
 // New creates a compiler. The request counter is the admission authority;
 // code-point costs are retained only for deterministic allocation heuristics.
@@ -27,12 +31,22 @@ func New(resultStore port.RecoverableResultStore, counter port.RequestTokenCount
 	if len(recorders) > 0 {
 		recorder = recorders[0]
 	}
-	return &Compiler{resultStore: resultStore, tokenCounter: counter, metrics: recorder}
+	return &Compiler{resultStore: resultStore, tokenCounter: counter, metrics: recorder, projectionWritesDisabled: !legacyProjectionWritesForTests}
 }
 
 // Compile coordinates analysis, assembly, admission, allocation, and
 // externalization phases.
 func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (domain.CompileResult, error) {
+	return c.compile(ctx, req, nil)
+}
+
+// CompileFrame counts candidates through the owning provider adapter when it
+// can build the same envelope used by its final request guard.
+func (c *Compiler) CompileFrame(ctx context.Context, req domain.CompileRequest, counter port.ContextFrameCounter) (domain.CompileResult, error) {
+	return c.compile(ctx, req, counter)
+}
+
+func (c *Compiler) compile(ctx context.Context, req domain.CompileRequest, frameCounter port.ContextFrameCounter) (domain.CompileResult, error) {
 	if c == nil {
 		return domain.CompileResult{}, errors.New("context compiler: compiler is required")
 	}
@@ -44,6 +58,12 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	}
 	if err := domain.ValidateRequestBudget(req.ModelBudget); err != nil {
 		return domain.CompileResult{}, fmt.Errorf("context compiler: validate request budget: %w", err)
+	}
+	if frameCounter != nil {
+		// The provider frame counter includes request config, tools, and output
+		// settings. Keeping the legacy fixed estimate would evict optional input
+		// twice before the exact candidate is counted.
+		req.FixedRequestTokens = 0
 	}
 
 	started := time.Now()
@@ -57,8 +77,25 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	if err != nil {
 		return domain.CompileResult{}, err
 	}
+	state.frameCounter = frameCounter
+	if err := c.applySourceBudgets(ctx, &state); err != nil {
+		return domain.CompileResult{}, err
+	}
+	if err := c.applyWorkstreamSelection(ctx, &state); err != nil {
+		return domain.CompileResult{}, err
+	}
+	if err := c.applyKnowledgeSelection(ctx, &state); err != nil {
+		return domain.CompileResult{}, err
+	}
 	if len(state.turns) == 0 {
-		return domain.CompileResult{Contents: nil, Diagnostics: state.diagnostics}, nil
+		// Without turns there is no current model-facing turn to attach the
+		// selected block to: every delivered candidate is omitted from the
+		// final (empty) request.
+		state.knowledgeCards = nil
+		state.knowledgeSourceTokens = 0
+		state.workstream = nil
+		state.workstreamSourceTokens = 0
+		return state.completeEmptyKnowledgeResult(), nil
 	}
 	if c.metrics != nil && state.diagnostics.ContinuityCodePoints > 0 {
 		c.metrics.Observe(domain.MetricContinuityCheckpointRenderCodePoints, float64(state.diagnostics.ContinuityCodePoints), nil)
@@ -83,8 +120,42 @@ func (c *Compiler) Compile(ctx context.Context, req domain.CompileRequest) (doma
 	return c.completeCompilation(state, false)
 }
 
+// applySourceBudgets enforces optional-source limits in the same token unit as
+// final admission. Retrieval is intentionally absent from CompileRequest in V1;
+// TRD 05/06 own its scoped input and budget contract.
+func (c *Compiler) applySourceBudgets(ctx context.Context, state *compilationState) error {
+	if state == nil || state.request.Compaction.SummaryBudgetTokens <= 0 || len(state.summary) == 0 {
+		return nil
+	}
+	count, err := c.countSource(ctx, state.summary, state.frameCounter)
+	if err != nil {
+		return fmt.Errorf("context compiler: count summary source: %w", err)
+	}
+	state.diagnostics.SummarySourceTokens = count.Tokens
+	if count.Tokens > state.request.Compaction.SummaryBudgetTokens {
+		state.summary = nil
+		state.diagnostics.SummaryOmitted = true
+		state.diagnostics.SummaryOmissionReason = "source_budget"
+	}
+	return nil
+}
+
+func (c *Compiler) countSource(ctx context.Context, contents []domain.Content, frameCounter port.ContextFrameCounter) (port.TokenCount, error) {
+	if frameCounter != nil {
+		count, err := frameCounter.CountContextFrame(ctx, contents)
+		if err != nil {
+			return port.TokenCount{}, err
+		}
+		if count.Tokens < 0 {
+			return port.TokenCount{}, errors.New("request_token_count_unavailable: summary source counter returned a negative token count")
+		}
+		return count, nil
+	}
+	return c.countProjection(ctx, contents, 0, nil)
+}
+
 func (c *Compiler) countCompilation(ctx context.Context, state compilationState, initial bool) (compilationState, error) {
-	count, err := c.countProjection(ctx, state.result.Contents, state.request.FixedRequestTokens)
+	count, err := c.countProjection(ctx, state.result.Contents, state.request.FixedRequestTokens, state.frameCounter)
 	if err != nil {
 		return state, err
 	}
@@ -102,7 +173,8 @@ func (c *Compiler) completeCompilation(state compilationState, unchanged bool) (
 		state.diagnostics.ReductionReason = "irreducible"
 		state.diagnostics.ReductionStage = "min_irreducible"
 		c.recordDiagnostics(state.diagnostics, true)
-		return domain.CompileResult{Diagnostics: state.diagnostics}, &domain.IrreducibleContextError{
+		result := c.fillKnowledgeResult(domain.CompileResult{Diagnostics: state.diagnostics}, state)
+		return result, &domain.IrreducibleContextError{
 			MinimumTokens: state.count.Tokens,
 			HardTokens:    state.hardLimit,
 		}
@@ -130,7 +202,21 @@ func (c *Compiler) completeCompilation(state compilationState, unchanged bool) (
 		}
 	}
 	c.recordDiagnostics(state.diagnostics, false)
-	return domain.CompileResult{Contents: state.result.Contents, Diagnostics: state.diagnostics}, nil
+	result := c.fillKnowledgeResult(domain.CompileResult{Contents: state.result.Contents, Diagnostics: state.diagnostics}, state)
+	return result, nil
+}
+
+// fillKnowledgeResult attaches the final content-free knowledge facts and
+// emits the closed final-selection metrics after any total-pressure
+// eviction. Omitted counts every candidate delivered to the compiler that
+// is absent from the final request; the pre-compiler retrieval diagnostics
+// are never used as the final selection.
+func (c *Compiler) fillKnowledgeResult(result domain.CompileResult, state compilationState) domain.CompileResult {
+	result.KnowledgeIdentities, result.KnowledgeSelectedCount, result.KnowledgeOmittedCount = state.knowledgeResultFields()
+	result.WorkstreamSnapshotIncluded, result.WorkstreamOmissionReason = state.workstreamResultFields()
+	result.SummaryIncluded = len(state.summary) > 0
+	c.recordKnowledgeSelection(state)
+	return result
 }
 
 func (c *Compiler) compilationError(state compilationState, err error) (domain.CompileResult, error) {
@@ -193,7 +279,17 @@ func (c *Compiler) recordDiagnostics(diag domain.CompileDiagnostics, irreducible
 	}
 }
 
-func (c *Compiler) countProjection(ctx context.Context, contents []domain.Content, fixedTokens int) (port.TokenCount, error) {
+func (c *Compiler) countProjection(ctx context.Context, contents []domain.Content, fixedTokens int, frameCounter port.ContextFrameCounter) (port.TokenCount, error) {
+	if frameCounter != nil {
+		count, err := frameCounter.CountContextFrame(ctx, contents)
+		if err != nil {
+			return port.TokenCount{}, fmt.Errorf("context compiler: count provider-shaped frame: %w", err)
+		}
+		if count.Tokens < 0 {
+			return port.TokenCount{}, errors.New("request_token_count_unavailable: frame counter returned a negative token count")
+		}
+		return count, nil
+	}
 	serialized, err := domain.CanonicalJSON(contents)
 	if err != nil {
 		return port.TokenCount{}, fmt.Errorf("context compiler: serialize final projection: %w", err)

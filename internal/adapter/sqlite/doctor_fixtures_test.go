@@ -15,13 +15,14 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/doctor"
 )
 
-// doctorFixtureJobsChecker is the real composition-root wiring for the doctor
-// job-store checks: it opens the database by path, migrates it, and returns
-// the bounded content-free aggregates.
+// doctorFixtureJobsChecker mirrors the production composition wiring for the
+// read-only doctor job-store checks: every method opens with OpenReadOnly,
+// exactly like internal/app's checkers, and never migrates a fixture
+// (FIND-186).
 type doctorFixtureJobsChecker struct{}
 
 func (doctorFixtureJobsChecker) CheckExternalAgentJobs(ctx context.Context, path string) error {
-	store, err := OpenExisting(ctx, path)
+	store, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		return err
 	}
@@ -30,7 +31,7 @@ func (doctorFixtureJobsChecker) CheckExternalAgentJobs(ctx context.Context, path
 }
 
 func (doctorFixtureJobsChecker) CheckExternalAgentActivationHealth(ctx context.Context, path string) (domain.ExternalAgentJobActivationHealth, error) {
-	store, err := OpenExisting(ctx, path)
+	store, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobActivationHealth{}, err
 	}
@@ -39,12 +40,26 @@ func (doctorFixtureJobsChecker) CheckExternalAgentActivationHealth(ctx context.C
 }
 
 func (doctorFixtureJobsChecker) CheckExternalAgentResultIdentityHealth(ctx context.Context, path string) (domain.ExternalAgentJobIdentityHealth, error) {
-	store, err := OpenExisting(ctx, path)
+	store, err := OpenReadOnly(ctx, path)
 	if err != nil {
 		return domain.ExternalAgentJobIdentityHealth{}, err
 	}
 	defer store.Close()
 	return NewExternalAgentJobStore(store).IdentityHealth(ctx)
+}
+
+// doctorFixtureRuntimeChecker mirrors the production composition wiring for
+// the mandatory schema inspector: a read-only open plus the real runtime
+// health read.
+type doctorFixtureRuntimeChecker struct{}
+
+func (doctorFixtureRuntimeChecker) CheckSQLiteRuntime(ctx context.Context, path string) (domain.SQLiteRuntimeHealth, error) {
+	store, err := OpenReadOnly(ctx, path)
+	if err != nil {
+		return domain.SQLiteRuntimeHealth{}, err
+	}
+	defer store.Close()
+	return store.CheckSQLiteRuntime(ctx)
 }
 
 type doctorFixtureSecrets struct{}
@@ -87,11 +102,12 @@ func runDoctorOnFixture(t *testing.T, fixturePath string) doctor.Report {
 		t.Fatal(err)
 	}
 	deps := doctor.Dependencies{
-		ConfigPath: filepath.Join(stateDir, "config.yaml"),
-		LoadConfig: func(string) (config.Config, error) { return config.Default(), nil },
-		Secrets:    doctorFixtureSecrets{},
-		Database:   doctorFixtureDatabase{},
-		Jobs:       doctorFixtureJobsChecker{},
+		ConfigPath:    filepath.Join(stateDir, "config.yaml"),
+		LoadConfig:    func(string) (config.Config, error) { return config.Default(), nil },
+		Secrets:       doctorFixtureSecrets{},
+		Database:      doctorFixtureDatabase{},
+		Jobs:          doctorFixtureJobsChecker{},
+		SQLiteRuntime: doctorFixtureRuntimeChecker{},
 	}
 	service, err := doctor.New(deps)
 	if err != nil {
@@ -196,6 +212,16 @@ func buildUpgradedDoctorFixture(t *testing.T) string {
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
+	// Finish the upgrade the fixture name promises: the seeded v30 state is
+	// migrated to the current release so the doctor run inspects a real
+	// post-upgrade database instead of a rewound header.
+	upgraded, err := OpenExisting(context.Background(), path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := upgraded.Close(); err != nil {
+		t.Fatal(err)
+	}
 	return path
 }
 
@@ -211,7 +237,6 @@ func buildCorruptDoctorFixture(t *testing.T) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = store.Close() })
 	db := store.DB()
 	digest := func(value string) string {
 		sum := sha256.Sum256([]byte(value))
@@ -226,6 +251,13 @@ func buildCorruptDoctorFixture(t *testing.T) string {
 	insertIdentityActivationRow(t, db, "corrupt-foreground", "pending", 12, "")
 	insertIdentityActivationRow(t, db, "corrupt-detached", "pending", 0, "")
 	insertIdentityActivationRow(t, db, "corrupt-retired", "failed", 12, domain.ActivationForegroundRetiredCode)
+	// Close before the caller reads the raw file bytes. Under WAL, a recent
+	// commit can still live in the sidecar -wal file until checkpoint; Close
+	// checkpoints it back into the main file, exactly as every other fixture
+	// builder in this file already does.
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
 	return path
 }
 

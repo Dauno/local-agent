@@ -148,8 +148,11 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 	sess.state = mergeStates(appState, userState, sessionState)
 	sess.revision = revision
 
-	// Read scoped state before opening the event cursor. The Store uses one
-	// SQLite connection, so a second query while rows are open would deadlock.
+	// Read scoped state before opening the event cursor. This ordering does
+	// not depend on the pool size: it keeps the state reads (each of which
+	// closes its own *sql.Row) off the connection that later holds open
+	// *sql.Rows for the event scan below, so a saturated pool cannot make
+	// this call wait on its own cursor.
 
 	// Load events
 	query := `SELECT id, invocation_id, author, actions, long_running_tool_ids, routes, output,
@@ -158,19 +161,26 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 		error_code, error_message, partial, turn_complete, interrupted
 		FROM adk_events
 		WHERE app_name = ? AND user_id = ? AND session_id = ?
-		ORDER BY ordinal DESC`
+		`
+	args := []any{req.AppName, req.UserID, req.SessionID}
+	if !req.After.IsZero() {
+		query += ` AND timestamp >= ?`
+		args = append(args, req.After.UnixMicro())
+	}
+	query += ` ORDER BY ordinal DESC`
 
 	if req.NumRecentEvents > 0 {
-		query += fmt.Sprintf(" LIMIT %d", req.NumRecentEvents)
+		query += ` LIMIT ?`
+		args = append(args, req.NumRecentEvents)
 	}
 
-	rows, err := s.db.QueryContext(ctx, query, req.AppName, req.UserID, req.SessionID)
+	rows, err := s.db.QueryContext(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("fetch events: %w", err)
 	}
 	defer rows.Close()
 
-	loadedEvents, err := scanEvents(rows, req.After)
+	loadedEvents, err := scanEvents(rows, time.Time{})
 	if err != nil {
 		return nil, err
 	}
@@ -184,6 +194,98 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 	sess.events = loadedEvents
 
 	return &adksession.GetResponse{Session: sess}, nil
+}
+
+// LoadEventRange loads a bounded ascending ordinal range without loading the
+// rest of the session. Epoch callers use the exclusive afterOrdinal cursor to
+// walk selected ADK history in finite batches.
+func (s *AdkSessionService) LoadEventRange(ctx context.Context, appName, userID, sessionID string, afterOrdinal int64, limit int64) ([]*adksession.Event, error) {
+	if s == nil || s.db == nil {
+		return nil, errors.New("session service is not configured")
+	}
+	if appName == "" || userID == "" || sessionID == "" {
+		return nil, errors.New("app_name, user_id, session_id are required")
+	}
+	if afterOrdinal < -1 || limit <= 0 || limit > domain.MaxContextEpochRange {
+		return nil, errors.New("session event range is outside bounded limits")
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id, invocation_id, author, actions, long_running_tool_ids, routes, output,
+		node_info, requested_input, branch, isolation_scope, timestamp, content,
+		grounding_metadata, custom_metadata, usage_metadata, citation_metadata,
+		error_code, error_message, partial, turn_complete, interrupted
+		FROM adk_events
+		WHERE app_name = ? AND user_id = ? AND session_id = ? AND ordinal > ?
+		ORDER BY ordinal ASC LIMIT ?`, appName, userID, sessionID, afterOrdinal, limit)
+	if err != nil {
+		return nil, fmt.Errorf("fetch event range: %w", err)
+	}
+	defer rows.Close()
+	loadedEvents, err := scanEventsOrdered(rows, time.Time{}, false)
+	if err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate event range: %w", err)
+	}
+	return loadedEvents, nil
+}
+
+// LatestEventOrdinal returns the session-local event head without loading event
+// content. A session with no persisted events has head -1.
+func (s *AdkSessionService) LatestEventOrdinal(ctx context.Context, appName, userID, sessionID string) (int64, error) {
+	if s == nil || s.db == nil {
+		return 0, errors.New("session service is not configured")
+	}
+	var exists int
+	if err := s.db.QueryRowContext(ctx, `SELECT 1 FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`, appName, userID, sessionID).Scan(&exists); err != nil {
+		return 0, err
+	}
+	var head int64
+	if err := s.db.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordinal), -1) FROM adk_events WHERE app_name = ? AND user_id = ? AND session_id = ?`, appName, userID, sessionID).Scan(&head); err != nil {
+		return 0, err
+	}
+	return head, nil
+}
+
+// SessionExists reports whether a session row exists and, if so, returns its
+// merged state without loading any events. It backs an idempotent
+// get-or-create for callers that only need to validate provider family, not
+// event history: ensureSession no longer has to use a failed Create as its
+// existing-session path.
+func (s *AdkSessionService) SessionExists(ctx context.Context, appName, userID, sessionID string) (adksession.Session, bool, error) {
+	if appName == "" || userID == "" || sessionID == "" {
+		return nil, false, errors.New("app_name, user_id, session_id are required")
+	}
+
+	var stateJSON string
+	var updateMicro, revision int64
+	err := s.db.QueryRowContext(ctx,
+		`SELECT state, update_time, revision FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+		appName, userID, sessionID,
+	).Scan(&stateJSON, &updateMicro, &revision)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, nil
+		}
+		return nil, false, fmt.Errorf("fetch session: %w", err)
+	}
+
+	var sessionState map[string]any
+	if err := json.Unmarshal([]byte(stateJSON), &sessionState); err != nil {
+		return nil, false, fmt.Errorf("unmarshal session state: %w", err)
+	}
+	appState, err := s.appState(ctx, s.db, appName)
+	if err != nil {
+		return nil, false, fmt.Errorf("read app state: %w", err)
+	}
+	userState, err := s.userState(ctx, s.db, appName, userID)
+	if err != nil {
+		return nil, false, fmt.Errorf("read user state: %w", err)
+	}
+	sess := newLocalSession(appName, userID, sessionID, time.UnixMicro(updateMicro))
+	sess.state = mergeStates(appState, userState, sessionState)
+	sess.revision = revision
+	return sess, true, nil
 }
 
 func (s *AdkSessionService) List(ctx context.Context, req *adksession.ListRequest) (*adksession.ListResponse, error) {
@@ -276,11 +378,40 @@ func (s *AdkSessionService) Delete(ctx context.Context, req *adksession.DeleteRe
 	if req.AppName == "" || req.UserID == "" || req.SessionID == "" {
 		return fmt.Errorf("app_name, user_id, session_id are required")
 	}
-	_, err := s.db.ExecContext(ctx,
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("begin transaction: %w", err)
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	// The adk_sessions delete below cascades adk_events away, but
+	// recoverable_result_refs has no foreign key to adk_events, so that
+	// cascade alone would leave dangling adk_event owner rows (FIND-127).
+	// This delete must run first, in the same transaction, while the
+	// session's events are still visible, and it rebuilds each candidate's
+	// owner_id with the same expression adkEventRefOwnerID uses so the
+	// comparison is exact rather than a prefix match.
+	if _, err := tx.ExecContext(ctx,
+		`DELETE FROM recoverable_result_refs
+		 WHERE owner_kind = ?
+		   AND owner_id IN (
+		     SELECT app_name || char(31) || user_id || char(31) || session_id || char(31) || id
+		     FROM adk_events
+		     WHERE app_name = ? AND user_id = ? AND session_id = ?
+		   )`,
+		recoverableRefOwnerKindEvent, req.AppName, req.UserID, req.SessionID,
+	); err != nil {
+		return fmt.Errorf("delete recoverable result refs for session: %w", err)
+	}
+
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`,
 		req.AppName, req.UserID, req.SessionID,
-	)
-	return err
+	); err != nil {
+		return fmt.Errorf("delete session: %w", err)
+	}
+
+	return tx.Commit()
 }
 
 func (s *AdkSessionService) AppendEvent(ctx context.Context, curSession adksession.Session, event *adksession.Event) error {
@@ -307,26 +438,6 @@ func (s *AdkSessionService) AppendEvent(ctx context.Context, curSession adksessi
 	}
 	defer func() { _ = tx.Rollback() }()
 
-	// Verify the session exists and is not stale.
-	var storageUpdateMicro, storageRevision int64
-	err = tx.QueryRowContext(ctx,
-		`SELECT update_time, revision FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`,
-		ls.appName, ls.userID, ls.sessionID,
-	).Scan(&storageUpdateMicro, &storageRevision)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return fmt.Errorf("session not found, cannot apply event")
-		}
-		return fmt.Errorf("fetch session for append: %w", err)
-	}
-
-	if storageRevision != ls.revision {
-		return fmt.Errorf(
-			"stale session error: local revision (%d) differs from database (%d)",
-			ls.revision, storageRevision,
-		)
-	}
-
 	// Apply state deltas.
 	now := time.Now().UTC()
 	appDelta, userDelta, sessionDelta := extractStateDeltas(event.Actions.StateDelta)
@@ -348,34 +459,36 @@ func (s *AdkSessionService) AppendEvent(ctx context.Context, curSession adksessi
 		if err != nil {
 			return fmt.Errorf("marshal session state: %w", err)
 		}
-		_, err = tx.ExecContext(ctx,
-			`UPDATE adk_sessions SET state = ?, update_time = ? WHERE app_name = ? AND user_id = ? AND session_id = ?`,
-			string(sessionStateJSON), event.Timestamp.UnixMicro(), ls.appName, ls.userID, ls.sessionID,
-		)
-		if err != nil {
+		if _, err := tx.ExecContext(ctx,
+			`UPDATE adk_sessions SET state = ? WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+			string(sessionStateJSON), ls.appName, ls.userID, ls.sessionID,
+		); err != nil {
 			return fmt.Errorf("update session state: %w", err)
 		}
 	}
 
-	// Insert event.
-	var ordinal int64
-	if err := tx.QueryRowContext(ctx,
-		`SELECT COALESCE(MAX(ordinal), -1) + 1 FROM adk_events WHERE app_name = ? AND user_id = ? AND session_id = ?`,
-		ls.appName, ls.userID, ls.sessionID,
-	).Scan(&ordinal); err != nil {
-		return fmt.Errorf("allocate event ordinal: %w", err)
+	// Allocate the event ordinal and bump the session revision in one CAS
+	// statement (DEC-08-3): the WHERE clause both verifies the session exists
+	// and that it is not stale, and RETURNING hands back the new revision, from
+	// which the ordinal follows structurally as new_revision-1. A transaction
+	// rollback discards the state update above if this CAS does not match.
+	var newRevision int64
+	err = tx.QueryRowContext(ctx,
+		`UPDATE adk_sessions SET update_time = ?, revision = revision + 1
+		 WHERE app_name = ? AND user_id = ? AND session_id = ? AND revision = ?
+		 RETURNING revision`,
+		event.Timestamp.UnixMicro(), ls.appName, ls.userID, ls.sessionID, ls.revision,
+	).Scan(&newRevision)
+	if err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return s.appendEventConflictError(ctx, tx, ls)
+		}
+		return fmt.Errorf("allocate ordinal and revision: %w", err)
 	}
+	ordinal := newRevision - 1
+
 	if err := s.insertEvent(ctx, tx, ls, event, ordinal, now); err != nil {
 		return fmt.Errorf("insert event: %w", err)
-	}
-
-	// Update session timestamp.
-	_, err = tx.ExecContext(ctx,
-		`UPDATE adk_sessions SET update_time = ?, revision = revision + 1 WHERE app_name = ? AND user_id = ? AND session_id = ?`,
-		event.Timestamp.UnixMicro(), ls.appName, ls.userID, ls.sessionID,
-	)
-	if err != nil {
-		return fmt.Errorf("update session timestamp: %w", err)
 	}
 
 	if err := tx.Commit(); err != nil {
@@ -394,9 +507,27 @@ func (s *AdkSessionService) AppendEvent(ctx context.Context, curSession adksessi
 		ls.state[adksession.KeyPrefixUser+key] = value
 	}
 	ls.updatedAt = event.Timestamp
-	ls.revision++
+	ls.revision = newRevision
 
 	return nil
+}
+
+// appendEventConflictError distinguishes a missing session from a stale local
+// revision after the AppendEvent CAS matches no row, so callers keep the two
+// distinct error paths the unbounded pre-CAS check used to give them.
+func (s *AdkSessionService) appendEventConflictError(ctx context.Context, tx *sql.Tx, ls *localSession) error {
+	var exists int
+	err := tx.QueryRowContext(ctx,
+		`SELECT 1 FROM adk_sessions WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+		ls.appName, ls.userID, ls.sessionID,
+	).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("session not found, cannot apply event")
+	}
+	if err != nil {
+		return fmt.Errorf("check session existence: %w", err)
+	}
+	return fmt.Errorf("stale session error: local revision (%d) differs from database", ls.revision)
 }
 
 // --- internal helpers ---
@@ -584,7 +715,17 @@ func (s *AdkSessionService) insertEvent(ctx context.Context, tx *sql.Tx, lm *loc
 		boolToInt(event.TurnComplete),
 		boolToInt(event.Interrupted),
 	)
-	return err
+	if err != nil {
+		return err
+	}
+
+	if len(contentJSON) > 0 {
+		ownerID := adkEventRefOwnerID(lm.appName, lm.userID, lm.sessionID, event.ID)
+		if err := indexRecoverableResultRefs(ctx, tx, recoverableRefOwnerKindEvent, ownerID, string(contentJSON), now.Unix()); err != nil {
+			return fmt.Errorf("index recoverable result refs: %w", err)
+		}
+	}
+	return nil
 }
 
 // --- localSession implements adksession.Session ---
@@ -741,6 +882,10 @@ func trimTempDeltaState(event *adksession.Event) *adksession.Event {
 }
 
 func scanEvents(rows *sql.Rows, after time.Time) ([]*adksession.Event, error) {
+	return scanEventsOrdered(rows, after, false)
+}
+
+func scanEventsOrdered(rows *sql.Rows, after time.Time, reverse bool) ([]*adksession.Event, error) {
 	var loaded []*adksession.Event
 	for rows.Next() {
 		var (
@@ -868,6 +1013,9 @@ func scanEvents(rows *sql.Rows, after time.Time) ([]*adksession.Event, error) {
 		}
 
 		loaded = append(loaded, event)
+	}
+	if reverse {
+		reverseEvents(loaded)
 	}
 	return loaded, nil
 }

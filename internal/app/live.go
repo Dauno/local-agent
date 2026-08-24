@@ -1,16 +1,21 @@
 package app
 
 import (
+	"bytes"
 	"context"
-	"encoding/base64"
+	"encoding/binary"
 	"errors"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
 	"iter"
 	"net/http"
 	"os/exec"
 	"strings"
 	"sync/atomic"
+	"time"
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
@@ -104,31 +109,6 @@ func hasSlackScope(grantedScopes, required string) bool {
 	return false
 }
 
-func (liveChecker) CheckModel(ctx context.Context, cfg config.ModelConfig, apiKey string) error {
-	llm, err := newModel(cfg, apiKey)
-	if err != nil {
-		return err
-	}
-	counter, _ := tokencounter.New("byte_bound", "")
-	budget, _ := domain.NewRequestBudget(domain.MaxSafeContextWindow, domain.RequestBudgetPolicy{MaxRequestPercent: 60})
-	if err := llm.ConfigureRequestGuard(counter, budget, "legacy-doctor-probe"); err != nil {
-		return err
-	}
-	request := &model.LLMRequest{
-		Contents: []*genai.Content{genai.NewContentFromText("Reply with OK.", genai.RoleUser)},
-	}
-	for response, generateErr := range llm.GenerateContent(ctx, request, false) {
-		if generateErr != nil {
-			return generateErr
-		}
-		if response == nil || response.Content == nil {
-			return errors.New("model endpoint returned no assistant content")
-		}
-		return nil
-	}
-	return errors.New("model endpoint returned no response")
-}
-
 func (liveChecker) CheckResolvedModel(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error {
 	llm, err := newModelFromResolved(resolved, apiKey)
 	if err != nil {
@@ -156,14 +136,10 @@ func (liveChecker) CheckAttachmentAnalyzer(ctx context.Context, resolved *agentd
 	}
 	tracker := &toolCallTrackingModel{delegate: llm}
 	processor := adkartifact.NewProcessor(artifact.InMemoryService(), tracker, "Load the image artifact named in the current request and describe it.", defaultAttachmentTimeout, modelcalllimiter.New(1))
-	image, err := base64.StdEncoding.DecodeString("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=")
-	if err != nil {
-		return errors.New("decode attachment analyzer diagnostic image")
-	}
 	_, err = processor.Process(ctx, port.AttachmentRequest{
 		ProcessingID: "doctor-attachment-check",
 		Attachment: port.LoadedAttachment{
-			ID: "doctor-image", Name: "doctor.png", MIMEType: "image/png", Data: image,
+			ID: "doctor-image", Name: "doctor.png", MIMEType: "image/png", Data: diagnosticPNG(),
 		},
 	})
 	if err != nil {
@@ -198,15 +174,76 @@ func (liveChecker) CheckAudioTranscription(ctx context.Context, resolved *agentd
 	return nil
 }
 
-func diagnosticWAV() []byte {
-	// One silent PCM sample is sufficient to validate multipart routing without
-	// depending on a real Slack attachment or transcript quality.
-	return []byte{
-		'R', 'I', 'F', 'F', 0x25, 0x00, 0x00, 0x00, 'W', 'A', 'V', 'E',
-		'f', 'm', 't', ' ', 0x10, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00,
-		0x40, 0x1f, 0x00, 0x00, 0x40, 0x1f, 0x00, 0x00, 0x01, 0x00, 0x08, 0x00,
-		'd', 'a', 't', 'a', 0x01, 0x00, 0x00, 0x00, 0x80,
+func (liveChecker) CheckKnowledgeEmbedding(ctx context.Context, cfg config.KnowledgeEmbeddingConfig, apiKey string) error {
+	provider, err := openaillm.NewEmbeddingProvider(openaillm.EmbeddingProviderConfig{
+		APIKey:     apiKey,
+		BaseURL:    cfg.BaseURL,
+		Model:      cfg.Model,
+		Dimensions: cfg.Dimensions,
+		Timeout:    time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatch:   1,
+		Limiter:    modelcalllimiter.New(1),
+	})
+	if err != nil {
+		return err
 	}
+	vectors, err := provider.Embed(ctx, []string{"OK"})
+	if err != nil {
+		return fmt.Errorf("embedding endpoint check failed: %w", err)
+	}
+	if len(vectors) != 1 {
+		return fmt.Errorf("embedding endpoint returned %d vectors for one input", len(vectors))
+	}
+	if err := domain.ValidateEmbeddingOutput(vectors[0], cfg.Dimensions); err != nil {
+		return fmt.Errorf("embedding endpoint output is invalid: %w", err)
+	}
+	return nil
+}
+
+func diagnosticWAV() []byte {
+	const (
+		sampleRate = 16000
+		seconds    = 1
+		channels   = 1
+		bits       = 16
+	)
+	dataBytes := sampleRate * seconds * channels * bits / 8
+	data := make([]byte, dataBytes)
+	var wav bytes.Buffer
+	wav.WriteString("RIFF")
+	_ = binary.Write(&wav, binary.LittleEndian, uint32(36+dataBytes))
+	wav.WriteString("WAVEfmt ")
+	_ = binary.Write(&wav, binary.LittleEndian, uint32(16))
+	_ = binary.Write(&wav, binary.LittleEndian, uint16(1))
+	_ = binary.Write(&wav, binary.LittleEndian, uint16(channels))
+	_ = binary.Write(&wav, binary.LittleEndian, uint32(sampleRate))
+	_ = binary.Write(&wav, binary.LittleEndian, uint32(sampleRate*channels*bits/8))
+	_ = binary.Write(&wav, binary.LittleEndian, uint16(channels*bits/8))
+	_ = binary.Write(&wav, binary.LittleEndian, uint16(bits))
+	wav.WriteString("data")
+	_ = binary.Write(&wav, binary.LittleEndian, uint32(dataBytes))
+	_, _ = wav.Write(data)
+	return wav.Bytes()
+}
+
+func diagnosticPNG() []byte {
+	imageData := image.NewRGBA(image.Rect(0, 0, 16, 16))
+	colors := []color.RGBA{
+		{R: 0x22, G: 0x66, B: 0xaa, A: 0xff},
+		{R: 0xaa, G: 0x66, B: 0x22, A: 0xff},
+		{R: 0x66, G: 0xaa, B: 0x22, A: 0xff},
+		{R: 0xaa, G: 0x22, B: 0x66, A: 0xff},
+	}
+	for y := range 16 {
+		for x := range 16 {
+			imageData.Set(x, y, colors[(x/8+2*(y/8))%len(colors)])
+		}
+	}
+	var encoded bytes.Buffer
+	if err := png.Encode(&encoded, imageData); err != nil {
+		return nil
+	}
+	return encoded.Bytes()
 }
 
 type toolCallTrackingModel struct {

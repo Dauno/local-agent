@@ -514,6 +514,9 @@ func validateProfile(providerPrefix, providerType, name string, profile Profile)
 	if providerType != ProviderTypeACP && strings.TrimSpace(profile.Model) == "" {
 		errs = append(errs, fmt.Sprintf("%s: model must not be empty", prefix))
 	}
+	if profile.ResultHandles.MaxDirectInlineBytes < 0 || profile.ResultHandles.MaxDirectInlineBytes > HardMaxDirectInlineBytes {
+		errs = append(errs, fmt.Sprintf("%s: result_handles.max_direct_inline_bytes must be between 0 and %d", prefix, HardMaxDirectInlineBytes))
+	}
 
 	switch providerType {
 	case ProviderTypeACP, ProviderTypeAgentCLI:
