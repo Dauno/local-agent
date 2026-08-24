@@ -560,23 +560,20 @@ func TestActivationRestartAfterModelStartedDoesNotReplay(t *testing.T) {
 	}
 }
 
-func TestActivationOutboxDoesNotWriteConversationMemory(t *testing.T) {
+func TestActivationOutboxDoesNotWriteConversationHistory(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
-	job := activationTestJob("activation-no-memory", now)
+	job := activationTestJob("activation-no-history", now)
 	terminalizeActivationTestJob(t, jobs, job, now)
 	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
 	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000010", now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	var messages, memoryOutbox int
+	var messages int
 	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages`).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_outbox`).Scan(&memoryOutbox); err != nil {
-		t.Fatal(err)
-	}
-	if messages != 0 || memoryOutbox != 0 {
-		t.Fatalf("activation changed memory tables: messages=%d outbox=%d", messages, memoryOutbox)
+	if messages != 0 {
+		t.Fatalf("activation changed conversation history: messages=%d", messages)
 	}
 }
 

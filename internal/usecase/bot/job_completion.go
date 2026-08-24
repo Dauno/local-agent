@@ -378,7 +378,7 @@ func (s *Service) prepareActivationResponse(ctx context.Context, activation *dom
 	if s.exchange == nil {
 		return port.PreparedAssistantExchange{}, errAssistantExchangeUnavailable
 	}
-	prepared, err := s.exchange.PrepareAssistantExchange(ctx, metadata, message, s.cfg.RetainMessages, false)
+	prepared, err := s.exchange.PrepareAssistantExchange(ctx, metadata, message, s.cfg.RetainMessages)
 	if err != nil {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("prepare assistant exchange: %w", err)
 	}

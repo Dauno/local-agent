@@ -9,8 +9,8 @@ package integration_test
 //
 // Fixture shape (schema "knowledge-retrieval-eval/v1"): "now_unix" and
 // "exchange_ts" pin every validity-window evaluation; "seed" carries truth
-// rows (claims, preferences, documents plus memory topics and revision
-// content for legacy handles) and per-row FTS flags ("fts": false leaves a
+// rows (claims, preferences, documents plus document-source revision content)
+// and per-row FTS flags ("fts": false leaves a
 // row unindexed, "fts_stale_revision"/"fts_stale_digest" seed a stale index
 // row); "cases" carry the query, an optional workstream-grounded context,
 // and the exact ordered expected identities ("want") and primary card
@@ -83,23 +83,21 @@ type evalSeedDocument struct {
 	Subject       string    `json:"subject"`
 	ScopeKind     string    `json:"scope_kind"`
 	Status        string    `json:"status"`
-	Topic         string    `json:"topic"`
 	SourceRev     int       `json:"source_rev"`
 	SourceID      string    `json:"source_id"`
-	RevisionRowID int64     `json:"revision_row_id"`
 	ContentDigest string    `json:"content_digest"`
 	FTS           *bool     `json:"fts"`
 	Vector        []float32 `json:"vector"`
 }
 
-type evalMemoryRevision struct {
+type evalDocumentRevision struct {
 	Number  int    `json:"number"`
 	Content string `json:"content"`
 }
 
-type evalMemoryTopic struct {
-	ID        string               `json:"id"`
-	Revisions []evalMemoryRevision `json:"revisions"`
+type evalDocumentSource struct {
+	ID        string                 `json:"id"`
+	Revisions []evalDocumentRevision `json:"revisions"`
 }
 
 type evalCaseWorkstream struct {
@@ -129,10 +127,10 @@ type evalDataset struct {
 	NowUnix    int64  `json:"now_unix"`
 	ExchangeTS string `json:"exchange_ts"`
 	Seed       struct {
-		Claims       []evalSeedClaim      `json:"claims"`
-		Preferences  []evalSeedPreference `json:"preferences"`
-		Documents    []evalSeedDocument   `json:"documents"`
-		MemoryTopics []evalMemoryTopic    `json:"memory_topics"`
+		Claims          []evalSeedClaim      `json:"claims"`
+		Preferences     []evalSeedPreference `json:"preferences"`
+		Documents       []evalSeedDocument   `json:"documents"`
+		DocumentSources []evalDocumentSource `json:"document_sources"`
 	} `json:"seed"`
 	Cases []evalCase `json:"cases"`
 }
@@ -165,12 +163,34 @@ func knowledgeEvalNow(dataset evalDataset) time.Time {
 // knowledgeEvalHarness seeds one dataset into a fresh migrated store and
 // composes the real lexical-only retriever.
 type knowledgeEvalHarness struct {
-	store         *adaptersqlite.Store
-	retriever     port.KnowledgeRetriever
-	dataset       evalDataset
-	preferenceIDs map[string]string
-	fingerprint   string
-	limits        domain.KnowledgeRetrievalLimits
+	store           *adaptersqlite.Store
+	retriever       port.KnowledgeRetriever
+	dataset         evalDataset
+	documentContent map[string][]byte
+	preferenceIDs   map[string]string
+	fingerprint     string
+	limits          domain.KnowledgeRetrievalLimits
+}
+
+type knowledgeEvalDocumentResolver struct {
+	contents map[string][]byte
+}
+
+func (r knowledgeEvalDocumentResolver) Resolve(ctx context.Context, document domain.KnowledgeDocument, limits domain.KnowledgeRetrievalLimits) ([]byte, error) {
+	select {
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	default:
+	}
+	content, ok := r.contents[string(document.ID)]
+	if !ok || len(content) == 0 || len(content) > limits.MaxDocumentBytes {
+		return nil, port.ErrKnowledgeUnavailable
+	}
+	digest := sha256.Sum256(content)
+	if document.ContentDigest != "" && hex.EncodeToString(digest[:]) != document.ContentDigest {
+		return nil, port.ErrKnowledgeUnavailable
+	}
+	return append([]byte(nil), content...), nil
 }
 
 const (
@@ -210,14 +230,14 @@ func newKnowledgeEvalHarnessWithFingerprint(t *testing.T, dataset evalDataset, f
 		limits.MinSimilarityBasisPoints = 5000
 	}
 	harness := &knowledgeEvalHarness{
-		store: store, dataset: dataset, preferenceIDs: make(map[string]string),
-		fingerprint: fingerprint, limits: limits,
+		store: store, dataset: dataset, documentContent: make(map[string][]byte),
+		preferenceIDs: make(map[string]string), fingerprint: fingerprint, limits: limits,
 	}
 	harness.seed(ctx, t)
 	retriever, err := knowledgeusecase.NewRetriever(knowledgeusecase.RetrieverDependencies{
 		Reader:   adaptersqlite.NewKnowledgeCandidateReader(store),
 		Index:    adaptersqlite.NewKnowledgeLexicalIndexStore(store, fingerprint),
-		Resolver: adaptersqlite.NewKnowledgeDocumentResolver(store),
+		Resolver: knowledgeEvalDocumentResolver{contents: harness.documentContent},
 		Queue:    adaptersqlite.NewKnowledgeLexicalQueueStore(store),
 		Provider: provider,
 		Clock:    port.SystemClock{},
@@ -237,7 +257,7 @@ func (h *knowledgeEvalHarness) withProvider(provider port.EmbeddingProvider) por
 	retriever, err := knowledgeusecase.NewRetriever(knowledgeusecase.RetrieverDependencies{
 		Reader:   adaptersqlite.NewKnowledgeCandidateReader(h.store),
 		Index:    adaptersqlite.NewKnowledgeLexicalIndexStore(h.store, h.fingerprint),
-		Resolver: adaptersqlite.NewKnowledgeDocumentResolver(h.store),
+		Resolver: knowledgeEvalDocumentResolver{contents: h.documentContent},
 		Queue:    adaptersqlite.NewKnowledgeLexicalQueueStore(h.store),
 		Provider: provider,
 		Clock:    port.SystemClock{},
@@ -252,27 +272,13 @@ func (h *knowledgeEvalHarness) withProvider(provider port.EmbeddingProvider) por
 func (h *knowledgeEvalHarness) seed(ctx context.Context, t *testing.T) {
 	t.Helper()
 	now := knowledgeEvalNow(h.dataset).Unix()
-	revisionRows := make(map[string]int64)
-	for _, topic := range h.dataset.Seed.MemoryTopics {
-		slug := topic.ID
-		if _, err := h.store.DB().ExecContext(ctx, `
-			INSERT INTO memory_topics (id, slug, title, description, status, tags, content, current_rev, created_at, updated_at)
-			VALUES (?, ?, ?, '', 'active', '[]', '', ?, ?, ?)`, topic.ID, slug, topic.ID, len(topic.Revisions), now, now); err != nil {
-			t.Fatalf("seed memory topic %s: %v", topic.ID, err)
+	documentContents := make(map[string]map[int]string)
+	for _, source := range h.dataset.Seed.DocumentSources {
+		revisions := make(map[int]string, len(source.Revisions))
+		for _, revision := range source.Revisions {
+			revisions[revision.Number] = revision.Content
 		}
-		for _, revision := range topic.Revisions {
-			result, err := h.store.DB().ExecContext(ctx, `
-				INSERT INTO memory_topic_revisions (topic_id, revision_number, content, change_reason, created_at)
-				VALUES (?, ?, ?, 'eval', ?)`, topic.ID, revision.Number, revision.Content, now)
-			if err != nil {
-				t.Fatalf("seed memory revision %s/%d: %v", topic.ID, revision.Number, err)
-			}
-			rowID, err := result.LastInsertId()
-			if err != nil {
-				t.Fatalf("memory revision row id: %v", err)
-			}
-			revisionRows[fmt.Sprintf("%s\x00%d", topic.ID, revision.Number)] = rowID
-		}
+		documentContents[source.ID] = revisions
 	}
 
 	seedClaim := func(claim evalSeedClaim) port.KnowledgeAuthoritativeItem {
@@ -365,41 +371,22 @@ func (h *knowledgeEvalHarness) seed(ctx context.Context, t *testing.T) {
 	}
 
 	for _, document := range h.dataset.Seed.Documents {
-		topic := document.Topic
 		sourceID := document.SourceID
-		if sourceID == "" {
-			sourceID = topic
-		}
-		revisionRowID := document.RevisionRowID
 		content := ""
-		if revisionRowID == 0 {
-			if row, ok := revisionRows[topic+"\x00"+fmt.Sprintf("%d", document.SourceRev)]; ok {
-				revisionRowID = row
-				for _, seeded := range h.dataset.Seed.MemoryTopics {
-					if seeded.ID != topic {
-						continue
-					}
-					for _, revision := range seeded.Revisions {
-						if revision.Number == document.SourceRev {
-							content = revision.Content
-						}
-					}
-				}
-			} else {
-				revisionRowID = 99
-			}
+		if revisions, ok := documentContents[sourceID]; ok {
+			content = revisions[document.SourceRev]
 		}
+		h.documentContent[document.ID] = []byte(content)
 		digest := document.ContentDigest
 		if digest == "" {
 			sum := sha256.Sum256([]byte(content))
 			digest = hex.EncodeToString(sum[:])
 		}
-		handle := fmt.Sprintf("memory_topics:%s:revision:%d", topic, revisionRowID)
-		provenance := "legacy_curated_document"
+		handle := fmt.Sprintf("result:%s", document.ID)
 		if _, err := h.store.DB().ExecContext(ctx, `
 			INSERT INTO knowledge_documents (id, subject, scope_kind, scope_id, content_digest, content_handle, source_id, source_rev, provenance, status, current_rev, created_at, updated_at)
-			VALUES (?, ?, ?, '', ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-			document.ID, document.Subject, document.ScopeKind, digest, handle, sourceID, document.SourceRev, provenance, document.Status, now, now); err != nil {
+			VALUES (?, ?, ?, '', ?, ?, '', 0, 'curated', ?, 1, ?, ?)`,
+			document.ID, document.Subject, document.ScopeKind, digest, handle, document.Status, now, now); err != nil {
 			t.Fatalf("seed document %s: %v", document.ID, err)
 		}
 		if document.FTS != nil && !*document.FTS {
@@ -411,8 +398,7 @@ func (h *knowledgeEvalHarness) seed(ctx context.Context, t *testing.T) {
 				ID: domain.KnowledgeDocumentID(document.ID), Subject: document.Subject,
 				ScopeKind:     domain.KnowledgeScopeKind(document.ScopeKind),
 				ContentDigest: digest, ContentHandle: handle,
-				SourceID: sourceID, SourceRev: document.SourceRev,
-				Provenance: domain.KnowledgeProvenanceLegacyCurated,
+				Provenance: domain.KnowledgeProvenanceCurated,
 				Status:     domain.KnowledgeDocumentStatus(document.Status), Revision: 1,
 			},
 		}
@@ -462,25 +448,17 @@ func (h *knowledgeEvalHarness) seed(ctx context.Context, t *testing.T) {
 				continue
 			}
 			content := ""
-			for _, topic := range h.dataset.Seed.MemoryTopics {
-				if topic.ID != document.Topic {
-					continue
-				}
-				for _, revision := range topic.Revisions {
-					if revision.Number == document.SourceRev {
-						content = revision.Content
-					}
-				}
+			if revisions, ok := documentContents[document.SourceID]; ok {
+				content = revisions[document.SourceRev]
 			}
 			item := port.KnowledgeAuthoritativeItem{
 				Kind: domain.KnowledgeRetrievalDocument, ID: document.ID,
 				Document: &domain.KnowledgeDocument{
 					ID: domain.KnowledgeDocumentID(document.ID), Subject: document.Subject,
 					ScopeKind:     domain.KnowledgeScopeKind(document.ScopeKind),
-					ContentHandle: fmt.Sprintf("memory_topics:%s:revision:%d", document.Topic, 1),
-					SourceID:      document.Topic, SourceRev: document.SourceRev,
-					Provenance: domain.KnowledgeProvenanceLegacyCurated,
-					Status:     domain.KnowledgeDocumentStatus(document.Status), Revision: 1,
+					ContentHandle: fmt.Sprintf("result:%s", document.ID),
+					Provenance:    domain.KnowledgeProvenanceCurated,
+					Status:        domain.KnowledgeDocumentStatus(document.Status), Revision: 1,
 				},
 			}
 			text, err := knowledgeusecase.BuildKnowledgeIndexText(domain.KnowledgeRetrievalDocument, item, content, nil)

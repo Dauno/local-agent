@@ -1,220 +1,99 @@
 package sqlite
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-func digestOf(content []byte) string {
-	digest := sha256.Sum256(content)
-	return hex.EncodeToString(digest[:])
+type documentResolverPayload struct {
+	storage            domain.ResultStorage
+	content            string
+	storageForOverride *domain.ResultStorage
+	readErr            error
+	truncate           bool
 }
 
-func legacyResolverDocument(subject, content string, topicID domain.TopicID, revisionRowID int64, sourceRev int) domain.KnowledgeDocument {
-	now := time.Now().UTC()
-	return domain.KnowledgeDocument{
-		ID:            domain.KnowledgeDocumentID("kdoc-" + subject),
-		Subject:       subject,
-		ScopeKind:     domain.KnowledgeScopeGlobal,
-		ContentDigest: digestOf([]byte(content)),
-		ContentHandle: domain.LegacyTopicRevisionHandle(topicID, revisionRowID),
-		SourceID:      string(topicID),
-		SourceRev:     sourceRev,
-		Provenance:    domain.KnowledgeProvenanceLegacyCurated,
-		Status:        domain.KnowledgeDocumentActive,
-		Revision:      1,
-		CreatedAt:     now,
-		UpdatedAt:     now,
+func (p documentResolverPayload) StorageFor(string) (domain.ResultStorage, error) {
+	if p.storageForOverride != nil {
+		return *p.storageForOverride, nil
 	}
+	return p.storage, nil
 }
 
-func TestKnowledgeDocumentResolverReturnsExactVerifiedBytes(t *testing.T) {
-	store, _ := newTestStore(t)
-	content := "immutable revision content"
-	topic, err := store.CreateTopic(t.Context(), "legacy", "Legacy", "desc", nil, content, "init")
+func (p documentResolverPayload) Publish(context.Context, domain.ResultStorage, string) error {
+	return nil
+}
+
+func (p documentResolverPayload) Verify(context.Context, domain.ResultStorage, string, int64) error {
+	return nil
+}
+
+func (p documentResolverPayload) ReadRange(_ context.Context, _ domain.ResultStorage, _ string, _ int64, offset, max int64) (domain.ResultChunk, error) {
+	if p.readErr != nil {
+		return domain.ResultChunk{}, p.readErr
+	}
+	if offset != 0 || max < int64(len(p.content)) {
+		return domain.ResultChunk{}, errors.New("invalid range")
+	}
+	if p.truncate && len(p.content) > 0 {
+		truncated := p.content[:len(p.content)-1]
+		return domain.ResultChunk{Content: truncated, OffsetBytes: 0, NextOffsetBytes: int64(len(truncated)), EOF: true}, nil
+	}
+	return domain.ResultChunk{Content: p.content, OffsetBytes: 0, NextOffsetBytes: int64(len(p.content)), EOF: true}, nil
+}
+
+func TestKnowledgeDocumentResolverReadsVerifiedCuratedResult(t *testing.T) {
+	store, err := Initialize(t.Context(), t.TempDir()+"/resolver.db")
 	if err != nil {
 		t.Fatal(err)
 	}
-	var revisionRowID int64
-	var revisionNumber int
-	if err := store.DB().QueryRowContext(t.Context(), `
-		SELECT id, revision_number FROM memory_topic_revisions WHERE topic_id = ? ORDER BY id DESC LIMIT 1`,
-		string(topic.ID)).Scan(&revisionRowID, &revisionNumber); err != nil {
+	defer store.Close()
+
+	resultID := strings.Repeat("a", 64)
+	content := "curated document content"
+	digest := sha256.Sum256([]byte(content))
+	storage := domain.ResultStorage{Kind: domain.ResultStorageArtifact, Key: "result-key"}
+	if _, err := store.DB().ExecContext(t.Context(), `
+		INSERT INTO result_records
+			(result_id, producer_kind, producer_id, producer_revision, storage_kind, storage_key, sha256, bytes, media_type, actor, team_id, conversation_key, project, retention_class, created_at, state)
+		VALUES (?, 'tool_operation', 'producer', 1, ?, ?, ?, ?, 'text/markdown', 'U12345678', 'T12345678', 'slack:T12345678:dm:D12345678', 'project', 'conversation', 1, 'available')`,
+		resultID, storage.Kind, storage.Key, hex.EncodeToString(digest[:]), len(content)); err != nil {
 		t.Fatal(err)
 	}
-	resolver := NewKnowledgeDocumentResolver(store)
-
-	// The mutable topic row carries different content; resolution must
-	// return the immutable revision bytes, never memory_topics.content.
-	if _, err := store.DB().ExecContext(t.Context(), `UPDATE memory_topics SET content = 'mutable decoy content' WHERE id = ?`, string(topic.ID)); err != nil {
-		t.Fatal(err)
+	resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: storage, content: content})
+	document := domain.KnowledgeDocument{
+		ID: "doc-1", Subject: "architecture", ScopeKind: domain.KnowledgeScopeTeam, ScopeID: "T12345678",
+		ContentDigest: hex.EncodeToString(digest[:]), ContentHandle: "result:" + resultID,
+		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}
-
-	got, err := resolver.Resolve(t.Context(), legacyResolverDocument("legacy", content, topic.ID, revisionRowID, revisionNumber), domain.KnowledgeRetrievalLimits{})
+	got, err := resolver.Resolve(t.Context(), document, domain.DefaultKnowledgeRetrievalLimits())
 	if err != nil {
-		t.Fatalf("Resolve() error = %v", err)
+		t.Fatal(err)
 	}
 	if string(got) != content {
-		t.Fatalf("resolved content = %q, want %q", string(got), content)
-	}
-	var mutable string
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT content FROM memory_topics WHERE id = ?`, string(topic.ID)).Scan(&mutable); err != nil || mutable != "mutable decoy content" {
-		t.Fatalf("mutable topic content = %q, %v", mutable, err)
+		t.Fatalf("resolved content = %q, want %q", got, content)
 	}
 }
 
-func TestKnowledgeDocumentResolverRejectsMalformedHandles(t *testing.T) {
-	store, _ := newTestStore(t)
-	topic, revisionRowID := seedGuardedTopic(t, store, "legacy", "Legacy")
-	resolver := NewKnowledgeDocumentResolver(store)
-	content := "immutable revision content"
-
-	malformed := []string{
-		"",
-		"memory_topics:",
-		"memory_topics:mem_x:revision:",
-		"memory_topics::revision:1",
-		"memory_topics:mem_x:rev:1",
-		"memory_topics:mem_x:revision:01",
-		"memory_topics:mem_x:revision:007",
-		"memory_topics:mem_x:revision:0",
-		"memory_topics:mem_x:revision:-1",
-		"memory_topics:mem_x:revision:+1",
-		"memory_topics:mem_x:revision:1:extra",
-		"memory_topics:mem_x:revision:1suffix",
-		"memory_topics:mem_x:revision:1.5",
-		"memory_topics:mem_x:revision:99999999999999999999",
-		"memory_topics:mem_x:revision:9223372036854775808",
-		"memory_topics:mem:a:revision:1",
-		"memory_topics:mem_x:revision:1:revision:2",
-		"memory:mem_x:revision:1",
-		"memory_topics:mem_x",
-		"memory_topics:mem_x:revision:1 ",
-	}
-	for _, handle := range malformed {
-		document := legacyResolverDocument("legacy", content, topic.ID, revisionRowID, 1)
-		document.ContentHandle = handle
-		_, err := resolver.Resolve(t.Context(), document, domain.KnowledgeRetrievalLimits{})
-		if !errors.Is(err, port.ErrKnowledgeValidation) {
-			t.Errorf("handle %q: error = %v, want ErrKnowledgeValidation", handle, err)
-		}
-		if err != nil && handle != "" && (strings.Contains(err.Error(), handle) || strings.Contains(err.Error(), content)) {
-			t.Errorf("handle %q: error leaks input: %v", handle, err)
-		}
-	}
-}
-
-func TestKnowledgeDocumentResolverRejectsUnavailableContent(t *testing.T) {
-	store, _ := newTestStore(t)
-	topic, revisionRowID := seedGuardedTopic(t, store, "legacy", "Legacy")
-	resolver := NewKnowledgeDocumentResolver(store)
-	content := "immutable revision content"
-
-	unavailable := []struct {
-		name    string
-		mutate  func(*domain.KnowledgeDocument)
-		limits  domain.KnowledgeRetrievalLimits
-		secrets []string
-	}{
-		{"missing revision row", func(d *domain.KnowledgeDocument) {
-			d.ContentHandle = domain.LegacyTopicRevisionHandle(topic.ID, revisionRowID+1000)
-		}, domain.KnowledgeRetrievalLimits{}, []string{}},
-		{"cross-topic source", func(d *domain.KnowledgeDocument) {
-			d.SourceID = "mem_other_topic"
-		}, domain.KnowledgeRetrievalLimits{}, []string{}},
-		{"wrong revision number", func(d *domain.KnowledgeDocument) {
-			d.SourceRev = 2
-		}, domain.KnowledgeRetrievalLimits{}, []string{}},
-		{"oversized content", nil, domain.KnowledgeRetrievalLimits{MaxDocumentBytes: 1}, []string{}},
-		{"digest mismatch", func(d *domain.KnowledgeDocument) {
-			d.ContentDigest = digestOf([]byte("other content"))
-		}, domain.KnowledgeRetrievalLimits{}, []string{}},
-		{"unsupported provenance", func(d *domain.KnowledgeDocument) {
-			d.Provenance = domain.KnowledgeProvenanceCurated
-		}, domain.KnowledgeRetrievalLimits{}, []string{}},
-	}
-	for _, candidate := range unavailable {
-		t.Run(candidate.name, func(t *testing.T) {
-			document := legacyResolverDocument("legacy", content, topic.ID, revisionRowID, 1)
-			if candidate.mutate != nil {
-				candidate.mutate(&document)
-			}
-			_, err := resolver.Resolve(t.Context(), document, candidate.limits)
-			if !errors.Is(err, port.ErrKnowledgeUnavailable) {
-				t.Fatalf("error = %v, want ErrKnowledgeUnavailable", err)
-			}
-			for _, secret := range append(candidate.secrets, content, document.ContentDigest, document.ContentHandle) {
-				if secret != "" && err != nil && strings.Contains(err.Error(), secret) {
-					t.Fatalf("error leaks %q: %v", secret, err)
-				}
-			}
-		})
-	}
-}
-
-func TestKnowledgeDocumentResolverRejectsInvalidLimits(t *testing.T) {
-	store, _ := newTestStore(t)
-	topic, revisionRowID := seedGuardedTopic(t, store, "legacy", "Legacy")
-	resolver := NewKnowledgeDocumentResolver(store)
-	content := "immutable revision content"
-
-	invalid := []struct {
-		name   string
-		limits domain.KnowledgeRetrievalLimits
-	}{
-		{"document bytes over hard cap", domain.KnowledgeRetrievalLimits{
-			MaxDocumentBytes: domain.HardMaxKnowledgeRetrievalMaxDocumentBytes + 1,
-		}},
-		{"timeout over hard cap", domain.KnowledgeRetrievalLimits{
-			TimeoutSeconds: domain.HardMaxKnowledgeRetrievalTimeoutSeconds + 1,
-		}},
-		{"max cards over hard cap", domain.KnowledgeRetrievalLimits{
-			MaxCards: domain.HardMaxKnowledgeRetrievalMaxCards + 1,
-		}},
-	}
-	for _, candidate := range invalid {
-		t.Run(candidate.name, func(t *testing.T) {
-			document := legacyResolverDocument("legacy", content, topic.ID, revisionRowID, 1)
-			_, err := resolver.Resolve(t.Context(), document, candidate.limits)
-			if !errors.Is(err, port.ErrKnowledgeValidation) {
-				t.Fatalf("error = %v, want ErrKnowledgeValidation", err)
-			}
-			if err != nil && strings.Contains(err.Error(), content) {
-				t.Fatalf("error leaks content: %v", err)
-			}
-		})
-	}
-}
-
-func TestKnowledgeDocumentResolverRejectsInvalidUTF8(t *testing.T) {
-	store, _ := newTestStore(t)
-	resolver := NewKnowledgeDocumentResolver(store)
-
-	topic, err := store.CreateTopic(t.Context(), "invalid-utf8", "Invalid UTF-8", "desc", nil, "placeholder", "init")
+func TestKnowledgeDocumentResolverRejectsInvalidCuratedContent(t *testing.T) {
+	store, err := Initialize(t.Context(), t.TempDir()+"/resolver-invalid.db")
 	if err != nil {
 		t.Fatal(err)
 	}
-	invalid := []byte{0xff, 0xfe, 0xfd, 0x00}
-	var revisionRowID int64
-	var revisionNumber int
-	if err := store.DB().QueryRowContext(t.Context(), `
-		SELECT id, revision_number FROM memory_topic_revisions WHERE topic_id = ? ORDER BY id DESC LIMIT 1`,
-		string(topic.ID)).Scan(&revisionRowID, &revisionNumber); err != nil {
-		t.Fatal(err)
+	defer store.Close()
+	resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{})
+	document := domain.KnowledgeDocument{
+		ContentDigest: strings.Repeat("a", 64), ContentHandle: "memory_topics:old:revision:1",
+		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}
-	if _, err := store.DB().ExecContext(t.Context(), `
-		UPDATE memory_topic_revisions SET content = ? WHERE id = ?`, string(invalid), revisionRowID); err != nil {
-		t.Fatalf("seed invalid UTF-8 revision: %v", err)
-	}
-	document := legacyResolverDocument("invalid", string(invalid), topic.ID, revisionRowID, revisionNumber)
-	if _, err := resolver.Resolve(t.Context(), document, domain.KnowledgeRetrievalLimits{}); !errors.Is(err, port.ErrKnowledgeUnavailable) {
-		t.Fatalf("invalid UTF-8: error = %v, want ErrKnowledgeUnavailable", err)
+	if _, err := resolver.Resolve(t.Context(), document, domain.DefaultKnowledgeRetrievalLimits()); !errors.Is(err, port.ErrKnowledgeValidation) {
+		t.Fatalf("invalid handle error = %v, want ErrKnowledgeValidation", err)
 	}
 }

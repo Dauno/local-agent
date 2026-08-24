@@ -131,7 +131,7 @@ func buildQuarantineFixture(t *testing.T, h *upgradeHarness, state map[string]st
 func buildQuarantineFixtureWithFreshDefects(t *testing.T, h *upgradeHarness, state map[string]string, includeFreshDefects bool) string {
 	t.Helper()
 	dbPath := h.paths.DatabaseFile
-	replaceFixture(t, dbPath, 41, nil)
+	replaceFixture(t, dbPath, rollout.TargetVersion, nil)
 	seedRolloutKeys(t, dbPath, state)
 	seedFind110Rows(t, dbPath, includeFreshDefects)
 	return sha256File(t, dbPath)

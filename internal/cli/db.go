@@ -25,10 +25,10 @@ type DatabaseRollbackCheckBackend interface {
 }
 
 const (
-	databaseAlreadyCompleteText = "database already at schema v41; nothing to do"
-	freshUpgradeSummaryFormat   = "will migrate v%d to v41; backup will be written under %s"
-	adoptionSummaryFormat       = "database is already at v41 but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under %s"
-	resumeNeededSummaryText     = "database is at v41 with an incomplete rollout (postflight not yet passed); will re-run postflight"
+	databaseAlreadyCompleteText = "database already at schema v42; nothing to do"
+	freshUpgradeSummaryFormat   = "will migrate v%d to v42; backup will be written under %s"
+	adoptionSummaryFormat       = "database is already at v42 but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under %s"
+	resumeNeededSummaryText     = "database is at v42 with an incomplete rollout (postflight not yet passed); will re-run postflight"
 	upgradeCancelledText        = "Actualizacion cancelada."
 )
 
@@ -50,7 +50,7 @@ func newDBUpgradeCommand(backend Backend, streams Streams) *cobra.Command {
 	var backupDir string
 	command := &cobra.Command{
 		Use:   "upgrade",
-		Short: "Migrate the database to schema v41 through a verified backup",
+		Short: "Migrate the database to schema v42 through a verified backup",
 		Long: "Classifies the durable database state, shows what will happen, and after " +
 			"confirmation creates a verified backup before any write. A previously " +
 			"interrupted run resumes from its durable state without repeating a completed row.",
@@ -114,11 +114,11 @@ func confirmUpgrade(streams Streams, preview rollout.UpgradePreview) bool {
 	}
 	switch preview.Kind {
 	case rollout.UpgradeFreshUpgrade:
-		first := fmt.Sprintf("Aplicar la migracion de schema v%d a v41 sobre %s. Se creara un backup verificado antes de escribir. Confirmar.", preview.FromVersion, preview.DatabasePath)
+		first := fmt.Sprintf("Aplicar la migracion de schema v%d a v42 sobre %s. Se creara un backup verificado antes de escribir. Confirmar.", preview.FromVersion, preview.DatabasePath)
 		return confirm(first) && confirm("El proceso v33 desplegado no participa en el protocolo de bloqueo de este comando. Confirme que ese proceso esta detenido antes de continuar.")
 	case rollout.UpgradeAdoption:
 		first := fmt.Sprintf(adoptionSummaryFormat, preview.ResolvedBackupDir)
-		return confirm(first) && confirm("Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v41. Confirme que ningun proceso asi esta en ejecucion antes de continuar.")
+		return confirm(first) && confirm("Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v42. Confirme que ningun proceso asi esta en ejecucion antes de continuar.")
 	default:
 		return confirm(resumeNeededSummaryText)
 	}

@@ -269,8 +269,8 @@ func TestSeamResetStateRecordsCreateUnderLock(t *testing.T) {
 		t.Fatalf("ResetState: %v", err)
 	}
 	assertOrder(t, log, "create")
-	if version := probeUserVersion(t, dbPath); version != 41 {
-		t.Fatalf("post-reset user_version = %d, want 41", version)
+	if version := probeUserVersion(t, dbPath); version != 42 {
+		t.Fatalf("post-reset user_version = %d, want 42", version)
 	}
 
 	if err := os.Remove(dbPath); err != nil {
@@ -283,6 +283,74 @@ func TestSeamResetStateRecordsCreateUnderLock(t *testing.T) {
 	}
 	if got := log.joined(); got != "lock:local-agent.db,unlock" {
 		t.Fatalf("failed-reset events = %q", got)
+	}
+}
+
+// TestResetStateDeletesConfiguredMemoryDir covers a project whose state.dir
+// is not the default ".local-agent": ResetState must delete the memory
+// projection at the resolved paths.MemoryDir, and must not create or touch
+// <root>/.local-agent/memory.
+func TestResetStateDeletesConfiguredMemoryDir(t *testing.T) {
+	root := t.TempDir()
+	configDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(configDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config.Default()
+	cfg.Orchestration.Knowledge.Enabled = true
+	cfg.State.Dir = "var/state"
+	cfg.State.DB = "var/state/local-agent.db"
+	if err := config.Save(filepath.Join(configDir, "config.yaml"), cfg); err != nil {
+		t.Fatal(err)
+	}
+	stateDir := filepath.Join(root, "var", "state")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	dbPath := filepath.Join(stateDir, "local-agent.db")
+	buildBehindFixture(t, dbPath)
+
+	configuredMemoryDir := filepath.Join(stateDir, "memory")
+	if err := os.MkdirAll(configuredMemoryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(configuredMemoryDir, "projection.json"), []byte("{}"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	// A sentinel at the default .local-agent/memory path: ResetState must
+	// leave it byte-for-byte alone. Without this file, "the path does not
+	// exist" would trivially hold whether or not ResetState ever touched it.
+	defaultMemoryDir := filepath.Join(configDir, "memory")
+	if err := os.MkdirAll(defaultMemoryDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	sentinelPath := filepath.Join(defaultMemoryDir, "sentinel.json")
+	sentinelContent := []byte(`{"untouched":true}`)
+	if err := os.WriteFile(sentinelPath, sentinelContent, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	log := &eventLog{}
+	application := &Application{
+		root:          root,
+		logOutput:     &bytes.Buffer{},
+		forceShutdown: make(chan struct{}),
+		schemaLocker:  seamLocker{log: log},
+		schemaTrace:   log.record,
+	}
+
+	if err := application.ResetState(context.Background()); err != nil {
+		t.Fatalf("ResetState: %v", err)
+	}
+	if _, err := os.Stat(configuredMemoryDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("configured memory dir stat = %v, want not-exist", err)
+	}
+	got, err := os.ReadFile(sentinelPath)
+	if err != nil {
+		t.Fatalf("default .local-agent/memory sentinel: %v, want untouched", err)
+	}
+	if string(got) != string(sentinelContent) {
+		t.Fatalf("default .local-agent/memory sentinel content = %q, want %q", got, sentinelContent)
 	}
 }
 

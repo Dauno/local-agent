@@ -22,11 +22,11 @@ const (
 	defaultAuxiliaryModelTimeoutSeconds = 120
 )
 
-// This release's v41 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
+// This release's v42 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
 // checkpoint 6). A database or connection outside this contract fails
 // doctor with actionable remediation rather than being silently accepted.
 const (
-	expectedSQLiteSchemaVersion      = 41
+	expectedSQLiteSchemaVersion      = 42
 	expectedSQLiteJournalMode        = "wal"
 	expectedSQLiteSynchronous        = 2 // PRAGMA synchronous FULL
 	expectedSQLiteBusyTimeoutMillis  = 5000
@@ -99,7 +99,6 @@ type LiveChecker interface {
 	CheckSlackContext(ctx context.Context, botToken string) error
 	CheckSlackCanvas(ctx context.Context, botToken string) error
 	CheckSlackExports(ctx context.Context, botToken string) error
-	CheckModel(ctx context.Context, model config.ModelConfig, apiKey string) error
 	CheckResolvedModel(ctx context.Context, resolved *agentdef.ResolvedModel, apiKey string) error
 	CheckKnowledgeEmbedding(ctx context.Context, cfg config.KnowledgeEmbeddingConfig, apiKey string) error
 }
@@ -411,16 +410,6 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 						defsErr = defs.ValidateWorkflowComposition(rootDef, blueprints, cfg.Sandbox.Enabled)
 					}
 				}
-				if defsErr == nil && cfg.Memory.Enabled {
-					curator, exists := defs.Agents["memory_curator"]
-					if !exists {
-						defsErr = errors.New("agent definition memory_curator is required when memory is enabled")
-					} else if curatorResolved, resolveErr := defs.ResolveModel(curator.Model); resolveErr != nil {
-						defsErr = fmt.Errorf("resolve memory_curator model: %w", resolveErr)
-					} else if !selectedModelAlreadyIncluded(selectedModels, "memory_curator") {
-						selectedModels = append(selectedModels, selectedModel{agent: "memory_curator", resolved: curatorResolved})
-					}
-				}
 				if defsErr == nil {
 					if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
 						attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model)
@@ -444,14 +433,10 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	}
 	transcriptionProfile := strings.TrimSpace(cfg.Slack.Files.TranscriptionProfile)
 	if transcriptionProfile != "" {
-		transcriptionDefs := defs
-		if transcriptionDefs == nil {
-			transcriptionDefs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody, cfg.Model.ResultHandles.MaxDirectInlineBytes)
-		}
-		if transcriptionDefs == nil {
-			transcriptionResolveErr = errors.New("no provider registry is available")
+		if defs == nil {
+			transcriptionResolveErr = errors.New("declarative provider registry is required")
 		} else {
-			transcriptionResolved, transcriptionResolveErr = transcriptionDefs.ResolveModel(transcriptionProfile)
+			transcriptionResolved, transcriptionResolveErr = defs.ResolveModel(transcriptionProfile)
 			if transcriptionResolveErr == nil {
 				transcriptionResolveErr = validateAudioTranscriptionProfile(transcriptionResolved)
 			}
@@ -465,7 +450,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			}
 		}
 	}
-	durableOpenAI := defs == nil || (resolvedModel != nil && resolvedModel.Type() == agentdef.ProviderTypeOpenAICompatible)
+	durableOpenAI := defs != nil && resolvedModel != nil && resolvedModel.Type() == agentdef.ProviderTypeOpenAICompatible
 	if err := config.ValidateADKCompaction(cfg, durableOpenAI, durableOpenAI); err != nil {
 		report.fail("ADK compaction", err.Error(), "Set context.adk_compaction.enabled=true with valid positive limits and keep summary composition compatible, then restart.", false)
 	} else if durableOpenAI {
@@ -475,7 +460,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		report.pass("ACP result delivery", fmt.Sprintf("complete results use up to %d Markdown parts or sanitized Markdown files", cfg.ACP.Delivery.MaxMarkdownParts))
 	}
 
-	modelAPIKeyEnv := cfg.Model.APIKeyEnv
+	modelAPIKeyEnv := ""
 	rootCLIProvider := resolvedModel != nil && resolvedModel.IsAgentCLI()
 	if resolvedModel != nil && !rootCLIProvider {
 		modelAPIKeyEnv = resolvedModel.APIKeyEnv
@@ -519,10 +504,15 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		report.pass(name, fmt.Sprintf("%s is configured (%s)", key, secure.Mask(value)))
 	}
 	checkedModelAPIKeys := make(map[string]bool)
-	if rootCLIProvider {
+	switch {
+	case resolvedModel == nil:
+		report.skip("model API key", "no declarative root model resolved")
+	case rootCLIProvider:
 		// agent_cli providers require no model API key.
 		report.pass("model API key", "agent CLI provider requires no model API key")
-	} else {
+	case resolvedModel.IsACP():
+		report.pass("model API key", "ACP provider requires no model API key")
+	default:
 		checkSecret("model API key", modelAPIKeyEnv, "", "Set "+modelAPIKeyEnv+" in the process environment or .env.")
 		checkedModelAPIKeys[modelAPIKeyEnv] = true
 	}
@@ -598,7 +588,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		default:
 			if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
 				report.fail("SQLite connection model", strings.Join(problems, "; "),
-					"Restore the v41 connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
+					"Restore the v42 connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
 			} else {
 				report.pass("SQLite connection model", fmt.Sprintf(
 					"schema_version=%d journal_mode=%s synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
@@ -953,12 +943,10 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			var err error
 			if resolvedModel != nil {
 				err = s.deps.Live.CheckResolvedModel(liveCtx, resolvedModel, apiKey)
-			} else if defs == nil {
-				err = s.deps.Live.CheckModel(liveCtx, cfg.Model, apiKey)
 			}
 			cancel()
 			if err != nil {
-				report.fail("model endpoint", redactor.String(err.Error()), "Verify model.base_url, model.name, request options, and the configured API key.", false)
+				report.fail("model endpoint", redactor.String(err.Error()), "Verify the declarative root provider profile and its configured API key.", false)
 			} else {
 				report.pass("model endpoint", "minimal non-streaming Chat Completions request passed")
 			}
@@ -1056,7 +1044,7 @@ func validateConnectionPragmas(health domain.SQLiteRuntimeHealth) []string {
 }
 
 // validateSQLiteRuntimeContract compares an observed connection model
-// against this release's full v41 contract and returns one problem string
+// against this release's full v42 contract and returns one problem string
 // per mismatch, or nil when the connection model is healthy.
 func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
 	var problems []string

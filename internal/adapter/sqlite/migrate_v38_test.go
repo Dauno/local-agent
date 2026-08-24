@@ -9,7 +9,7 @@ import (
 	"time"
 )
 
-func TestMigrationV38FreshAndUpgradePreserveState(t *testing.T) {
+func TestMigrationV38FreshAndUpgradeRetireLegacyMemoryState(t *testing.T) {
 	store, err := Initialize(t.Context(), t.TempDir()+"/fresh-knowledge.db")
 	if err != nil {
 		t.Fatal(err)
@@ -45,9 +45,9 @@ func TestMigrationV38FreshAndUpgradePreserveState(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer upgraded.Close()
-	var count int
-	if err := upgraded.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_topics`).Scan(&count); err != nil || count != 1 {
-		t.Fatalf("preserved legacy topics = %d, %v", count, err)
+	var legacyTopics int
+	if err := upgraded.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_schema WHERE name = 'memory_topics'`).Scan(&legacyTopics); err != nil || legacyTopics != 0 {
+		t.Fatalf("legacy memory topics table present = %d, %v", legacyTopics, err)
 	}
 	var version int
 	if err := upgraded.DB().QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {

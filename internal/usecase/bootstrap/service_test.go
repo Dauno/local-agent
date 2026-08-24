@@ -39,7 +39,6 @@ func TestEnsureBaseArtifactsFirstRun(t *testing.T) {
 		filepath.Join(snapshot.Paths.StateDir, "providers", "deepseek.yaml"),
 		filepath.Join(snapshot.Paths.StateDir, "agents", "root_agent.yaml"),
 		filepath.Join(snapshot.Paths.StateDir, "agents", "explore.yaml"),
-		filepath.Join(snapshot.Paths.StateDir, "agents", "memory_curator.yaml"),
 		filepath.Join(snapshot.Paths.StateDir, "agents", "attachment_analyzer.yaml.example"),
 	} {
 		if info, err := os.Stat(path); err != nil || !info.Mode().IsRegular() {
@@ -106,10 +105,8 @@ func TestEnsureBaseArtifactsRespectsExistingConfigAndNeverOverwritesOrResets(t *
 		t.Fatal(err)
 	}
 	cfg := config.Default()
-	cfg.Agent.Name = "Configured Agent"
 	cfg.Slack.AppName = "Configured Slack App"
 	cfg.Slack.BotDisplayName = "Configured Bot"
-	cfg.Model.APIKeyEnv = "CUSTOM_MODEL_KEY"
 	cfg.State.Dir = "custom-state"
 	cfg.State.DB = "custom-state/context.db"
 	configData, err := config.Marshal(cfg)
@@ -132,8 +129,8 @@ func TestEnsureBaseArtifactsRespectsExistingConfigAndNeverOverwritesOrResets(t *
 	wantManifest, _ := manifest.Render(manifest.Identity{AppName: cfg.Slack.AppName, BotDisplayName: cfg.Slack.BotDisplayName})
 	assertFileEquals(t, snapshot.Paths.ManifestFile, wantManifest)
 	example, _ := os.ReadFile(snapshot.Paths.EnvExampleFile)
-	if !strings.Contains(string(example), "CUSTOM_MODEL_KEY=...") || strings.Contains(string(example), "DEEPSEEK_API_KEY") {
-		t.Fatalf("env example does not use configured key:\n%s", example)
+	if !strings.Contains(string(example), DefaultModelAPIKeyEnv+"=...") {
+		t.Fatalf("env example does not use the seeded provider key:\n%s", example)
 	}
 
 	store, err := adaptersqlite.OpenExisting(t.Context(), snapshot.Paths.DatabaseFile)
@@ -241,13 +238,8 @@ func TestApplyConfirmedUpdatesPreservesExtensionsAndUnrelatedFiles(t *testing.T)
 	}
 
 	configSource := `# operator note
-agent:
-  name: Before # preserve comment
-  extension: retained
 plugin_extension:
   enabled: true
-model:
-  api_key_env: CUSTOM_MODEL_KEY
 slack:
   app_name: Before App
   bot_display_name: Before Bot
@@ -264,7 +256,7 @@ slack:
 	if err := os.Chmod(snapshot.Paths.ManifestFile, 0o640); err != nil {
 		t.Fatal(err)
 	}
-	envSource := "# secret note\nUNRELATED=keep\nCUSTOM_MODEL_KEY=old-model\nDEEPSEEK_API_KEY=preserve-old-provider-key\nSLACK_BOT_TOKEN=old-bot\nEXTRA_SECRET=preserve\n"
+	envSource := "# secret note\nUNRELATED=keep\nDEEPSEEK_API_KEY=preserve-old-provider-key\nSLACK_BOT_TOKEN=old-bot\nEXTRA_SECRET=preserve\n"
 	if err := os.WriteFile(snapshot.Paths.EnvFile, []byte(envSource), 0o644); err != nil {
 		t.Fatal(err)
 	}
@@ -293,7 +285,7 @@ slack:
 		t.Fatal(err)
 	}
 	for _, fragment := range []string{
-		"# operator note", "name: Confirmed Agent # preserve comment", "extension: retained",
+		"# operator note",
 		"plugin_extension:", "enabled: true",
 	} {
 		if !strings.Contains(string(configOutput), fragment) {
@@ -309,8 +301,8 @@ slack:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if loaded.Agent.Name != identity.AgentName || loaded.Slack.AppName != identity.SlackAppName || loaded.Slack.BotDisplayName != identity.SlackBotDisplayName {
-		t.Fatalf("identity not applied: %#v %#v", loaded.Agent, loaded.Slack)
+	if loaded.Slack.AppName != identity.SlackAppName || loaded.Slack.BotDisplayName != identity.SlackBotDisplayName {
+		t.Fatalf("identity not applied: %#v", loaded.Slack)
 	}
 	if strings.Join(loaded.Slack.AllowedUserIDs, ",") != "U12345678" || strings.Join(loaded.Slack.AllowedTeamIDs, ",") != "T12345678" || strings.Join(loaded.Slack.AllowedChannelIDs, ",") != "C12345678" {
 		t.Fatalf("access control not applied: %#v", loaded.Slack)
@@ -325,10 +317,10 @@ slack:
 	if err != nil {
 		t.Fatal(err)
 	}
-	if values["CUSTOM_MODEL_KEY"] != secrets.ModelAPIKey || values[SlackBotTokenEnv] != secrets.SlackBotToken || values[SlackAppTokenEnv] != secrets.SlackAppToken {
+	if values[DefaultModelAPIKeyEnv] != secrets.ModelAPIKey || values[SlackBotTokenEnv] != secrets.SlackBotToken || values[SlackAppTokenEnv] != secrets.SlackAppToken {
 		t.Fatalf("known secrets not updated: %#v", values)
 	}
-	if values["UNRELATED"] != "keep" || values["EXTRA_SECRET"] != "preserve" || values["DEEPSEEK_API_KEY"] != "preserve-old-provider-key" {
+	if values["UNRELATED"] != "keep" || values["EXTRA_SECRET"] != "preserve" {
 		t.Fatalf("unrelated env content changed: %#v", values)
 	}
 	assertMode(t, updated.Paths.EnvFile, 0o600)

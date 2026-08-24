@@ -348,9 +348,8 @@ func TestRetrieverDocumentFailuresNeverFallBack(t *testing.T) {
 	document := func(id, subject string) port.KnowledgeAuthoritativeItem {
 		return port.KnowledgeAuthoritativeItem{Kind: domain.KnowledgeRetrievalDocument, ID: id, Document: &domain.KnowledgeDocument{
 			ID: domain.KnowledgeDocumentID(id), Subject: subject, ScopeKind: domain.KnowledgeScopeGlobal,
-			Provenance: domain.KnowledgeProvenanceLegacyCurated, Status: domain.KnowledgeDocumentActive,
-			ContentDigest: strings.Repeat("a", 64), ContentHandle: "memory_topics:t:revision:1",
-			SourceID: "t", SourceRev: 1, Revision: 1,
+			Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
+			ContentDigest: strings.Repeat("a", 64), ContentHandle: "result:doc-1", Revision: 1,
 		}}
 	}
 	reader.items[reader.key(domain.KnowledgeRetrievalDocument, "kdoc_000000000000000000000001")] = document("kdoc_000000000000000000000001", "bad doc")
@@ -466,9 +465,8 @@ func TestRetrieverRedactsQueryAndDocumentContent(t *testing.T) {
 		Kind: domain.KnowledgeRetrievalDocument, ID: "kdoc_000000000000000000000004",
 		Document: &domain.KnowledgeDocument{
 			ID: "kdoc_000000000000000000000004", Subject: "secret doc", ScopeKind: domain.KnowledgeScopeGlobal,
-			Provenance: domain.KnowledgeProvenanceLegacyCurated, Status: domain.KnowledgeDocumentActive,
-			ContentDigest: strings.Repeat("b", 64), ContentHandle: "memory_topics:t:revision:1",
-			SourceID: "t", SourceRev: 1, Revision: 1,
+			Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
+			ContentDigest: strings.Repeat("b", 64), ContentHandle: "result:doc-2", Revision: 1,
 		},
 	}
 	resolver := &retrievalFakeResolver{
@@ -619,9 +617,9 @@ func TestRetrieverOmitsInvalidCardsBeforeSelection(t *testing.T) {
 		Kind: domain.KnowledgeRetrievalDocument, ID: identity,
 		Document: &domain.KnowledgeDocument{
 			ID: domain.KnowledgeDocumentID(identity), Subject: "redacts empty", ScopeKind: domain.KnowledgeScopeGlobal,
-			ContentDigest: strings.Repeat("c", 64), ContentHandle: "memory_topics:t:revision:1",
+			ContentDigest: strings.Repeat("c", 64), ContentHandle: "result:doc-3",
 			SourceID: "t", SourceRev: 1,
-			Provenance: domain.KnowledgeProvenanceLegacyCurated, Status: domain.KnowledgeDocumentActive, Revision: 1,
+			Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive, Revision: 1,
 		},
 	}
 	resolver := &retrievalFakeResolver{

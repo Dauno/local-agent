@@ -75,7 +75,6 @@ type Dependencies struct {
 	ModelCalls       port.ModelCallLimiter
 
 	SanitizeContent       func(string) string
-	Memory                port.MemoryRetriever
 	Exchange              port.AssistantExchangeWriter
 	Enricher              port.ContextEnricher
 	ConfirmationStore     port.ConfirmationDeliveryStore
@@ -144,10 +143,7 @@ type Service struct {
 	limiter               port.ConversationCoordinator
 	modelCalls            port.ModelCallLimiter
 	sanitize              func(string) string
-	recall                port.MemoryRetriever
 	exchange              port.AssistantExchangeWriter
-	memoryEnabled         bool
-	memoryWake            func()
 	knowledge             port.KnowledgeCommands
 	knowledgeBindings     port.KnowledgeBindingResolver
 	knowledgeRetriever    port.KnowledgeRetriever
@@ -272,7 +268,7 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		completionReader: deps.CompletionReader,
 		history:          deps.History, publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
 		limiter: deps.Coordinator, modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
-		recall: deps.Memory, exchange: deps.Exchange, enricher: deps.Enricher,
+		exchange: deps.Exchange, enricher: deps.Enricher,
 		confirmationStore:     deps.ConfirmationStore,
 		confirmationPublisher: deps.ConfirmationPublisher,
 		structuredPublisher:   deps.StructuredPublisher,
@@ -467,18 +463,6 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 
 	modelContext := domain.LimitMessages(append(prior, userMessage), s.cfg.ContextLimits)
 
-	var memory []domain.MemorySnippet
-	// Legacy scope-blind recall is retired once the knowledge gate is
-	// active: hallazgo 10 of the 2026-08-17 audit closes the coexistence
-	// TRD 05 left open pending TRD 06, which is now verified.
-	if s.recall != nil && !s.cfg.KnowledgeGateEnabled {
-		snippets, err := s.recall.Recall(ctx, invocation.Text, domain.SlackOwnerKey(key, invocation.UserID))
-		if err != nil {
-			s.logger.Warn("memory recall failed", "event_id", invocation.EventID, "error", err)
-		} else {
-			memory = domain.FitMemorySnippets(snippets, s.cfg.ContextLimits.MaxChars-messageChars(modelContext))
-		}
-	}
 	agentContext := s.enrich(ctx, invocation)
 
 	// Retrieval runs exactly once per authorized human turn, after the user
@@ -506,10 +490,10 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	s.logger.Info("model call started", "conversation_key", key, "event_id", invocation.EventID)
 	progress := s.beginProgress(ctx, invocation, key)
 	if s.cfg.StreamingEnabled {
-		return s.handleStreamingTurn(ctx, modelCtx, cancel, invocation, key, modelContext, memory, agentContext, metadata, modelRelease, progress, knowledge, workstreamRevision, workstreamSnapshot)
+		return s.handleStreamingTurn(ctx, modelCtx, cancel, invocation, key, modelContext, agentContext, metadata, modelRelease, progress, knowledge, workstreamRevision, workstreamSnapshot)
 	}
 
-	return s.handleRuntimeTurn(ctx, modelCtx, cancel, invocation, key, modelContext, memory, agentContext, metadata, modelRelease, progress, knowledge, workstreamRevision, workstreamSnapshot)
+	return s.handleRuntimeTurn(ctx, modelCtx, cancel, invocation, key, modelContext, agentContext, metadata, modelRelease, progress, knowledge, workstreamRevision, workstreamSnapshot)
 }
 
 // retrieveKnowledge resolves the trusted binding once per turn and runs the
@@ -616,13 +600,12 @@ func (s *Service) logKnowledgeRetrievalDiagnostics(diag domain.KnowledgeRetrieva
 	)
 }
 
-func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Context, cancel func(), invocation domain.Invocation, key domain.ConversationKey, modelContext []domain.Message, memory []domain.MemorySnippet, agentContext domain.AgentContext, metadata domain.ConversationMetadata, modelRelease func(), progress *domain.ProgressOperation, knowledge []domain.KnowledgeFrameCard, workstreamRevision int64, workstreamSnapshot *domain.WorkstreamSnapshot) (Outcome, error) {
+func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Context, cancel func(), invocation domain.Invocation, key domain.ConversationKey, modelContext []domain.Message, agentContext domain.AgentContext, metadata domain.ConversationMetadata, modelRelease func(), progress *domain.ProgressOperation, knowledge []domain.KnowledgeFrameCard, workstreamRevision int64, workstreamSnapshot *domain.WorkstreamSnapshot) (Outcome, error) {
 	turn, modelErr := func() (port.AgentTurn, error) {
 		defer modelRelease()
 		return s.runtime.Run(modelCtx, port.AgentRequest{
 			ConversationKey:    key,
 			Messages:           modelContext,
-			Memory:             memory,
 			Context:            agentContext,
 			Knowledge:          append([]domain.KnowledgeFrameCard(nil), knowledge...),
 			WorkstreamRevision: workstreamRevision,
@@ -985,9 +968,6 @@ func (s *Service) persistAssistantTurn(ctx context.Context, metadata domain.Conv
 			s.logger.Error("assistant exchange persistence failed", "conversation_key", metadata.Key, "error", err)
 			return fmt.Errorf("persist assistant exchange: %w", err)
 		}
-		if s.memoryWake != nil {
-			s.memoryWake()
-		}
 		return nil
 	}
 
@@ -1042,7 +1022,7 @@ func (s *Service) finalizeStructuredTurn(ctx context.Context, invocation domain.
 			CreatedAt: s.clock.Now().UTC(),
 		}
 		var prepareErr error
-		prepared, prepareErr = s.exchange.PrepareStructuredAssistantExchange(ctx, metadata, intentMessage, presentationJSON, s.cfg.RetainMessages, s.memoryEnabled && len(invocation.Attachments) == 0)
+		prepared, prepareErr = s.exchange.PrepareStructuredAssistantExchange(ctx, metadata, intentMessage, presentationJSON, s.cfg.RetainMessages)
 		if prepareErr != nil {
 			s.logger.Error("structured assistant exchange preparation failed", "conversation_key", key, "error", prepareErr)
 			return "", fmt.Errorf("prepare structured assistant exchange: %w", prepareErr)
@@ -1115,7 +1095,7 @@ func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation
 			CreatedAt: s.clock.Now().UTC(),
 		}
 		var prepareErr error
-		prepared, prepareErr = s.exchange.PrepareAssistantExchange(ctx, metadata, intentMessage, s.cfg.RetainMessages, s.memoryEnabled && len(invocation.Attachments) == 0)
+		prepared, prepareErr = s.exchange.PrepareAssistantExchange(ctx, metadata, intentMessage, s.cfg.RetainMessages)
 		if prepareErr != nil {
 			s.logger.Error("assistant exchange preparation failed", "conversation_key", key, "error", prepareErr)
 			return "", fmt.Errorf("prepare assistant exchange: %w", prepareErr)
@@ -1140,21 +1120,10 @@ func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation
 	return OutcomeResponded, nil
 }
 
-func messageChars(messages []domain.Message) int {
-	total := 0
-	for _, message := range messages {
-		total += utf8.RuneCountInString(message.Content)
-	}
-	return total
-}
-
-func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.AssistantExchangeWriter, wake ...func()) {
-	s.recall = recall
+// SetExchange configures durable assistant exchange publication for tests and
+// embedders that construct the service without composition.
+func (s *Service) SetExchange(exchange port.AssistantExchangeWriter) {
 	s.exchange = exchange
-	s.memoryEnabled = true
-	if len(wake) > 0 {
-		s.memoryWake = wake[0]
-	}
 }
 
 func (s *Service) processAttachments(ctx context.Context, invocation domain.Invocation, maxChars int) (string, error) {

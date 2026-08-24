@@ -69,7 +69,7 @@ func (c KnowledgePreferenceCard) Validate() error {
 	if utf8.RuneCountInString(c.Key) > limits.MaxPreferenceKeyRunes {
 		return fmt.Errorf("%w: preference card key exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxPreferenceKeyRunes)
 	}
-	if err := ValidateMemoryReferenceText(c.Key); err != nil {
+	if err := ValidateKnowledgeText(c.Key); err != nil {
 		return fmt.Errorf("%w: preference card key: %v", ErrKnowledgeInvalidValue, err)
 	}
 	if c.Value.Kind == KnowledgeValueReference {
@@ -136,20 +136,9 @@ func (c KnowledgeDocumentCard) Validate() error {
 	if !validKnowledgeProvenance(c.Provenance) {
 		return fmt.Errorf("%w: document card has unknown provenance %q", ErrKnowledgeInvalidValue, c.Provenance)
 	}
-	switch c.Provenance {
-	case KnowledgeProvenanceLegacyCurated:
-		if strings.TrimSpace(c.SourceID) == "" || c.SourceRev < 1 {
-			return fmt.Errorf("%w: legacy document cards require source identity and revision", ErrKnowledgeInvalidValue)
-		}
-		if utf8.RuneCountInString(c.SourceID) > limits.MaxSourceRefRunes {
-			return fmt.Errorf("%w: legacy document card source identity exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxSourceRefRunes)
-		}
-		if err := ValidateMemoryReferenceText(c.SourceID); err != nil {
-			return fmt.Errorf("%w: legacy document card source identity: %v", ErrKnowledgeInvalidValue, err)
-		}
-	case KnowledgeProvenanceCurated:
+	if c.Provenance == KnowledgeProvenanceCurated {
 		if c.SourceID != "" || c.SourceRev != 0 {
-			return fmt.Errorf("%w: curated document cards must not carry legacy source identity", ErrKnowledgeInvalidValue)
+			return fmt.Errorf("%w: curated document cards must not carry source identity", ErrKnowledgeInvalidValue)
 		}
 	}
 	if c.Status != KnowledgeDocumentActive {
@@ -186,7 +175,7 @@ func validateBoundedSourceRef(sourceRef string, limits KnowledgeLimits) error {
 	if utf8.RuneCountInString(sourceRef) > limits.MaxSourceRefRunes {
 		return fmt.Errorf("source reference exceeds maximum of %d characters", limits.MaxSourceRefRunes)
 	}
-	if err := ValidateMemoryReferenceText(sourceRef); err != nil {
+	if err := ValidateKnowledgeText(sourceRef); err != nil {
 		return fmt.Errorf("source reference: %v", err)
 	}
 	return nil
@@ -209,12 +198,6 @@ func (c KnowledgeDocumentCard) Render() string {
 	b.WriteString("; provenance=")
 	b.WriteString(string(c.Provenance))
 	b.WriteString("; status=active")
-	if c.Provenance == KnowledgeProvenanceLegacyCurated {
-		b.WriteString("; source=")
-		b.WriteString(c.SourceID)
-		b.WriteString("; revision=")
-		b.WriteString(strconv.Itoa(c.SourceRev))
-	}
 	b.WriteString("; reason=")
 	b.WriteString(c.RetrievalReason)
 	b.WriteString("]\n")
@@ -311,7 +294,7 @@ func (c KnowledgeCard) validateFramePayload() error {
 	if utf8.RuneCountInString(c.Subject) > limits.MaxSubjectRunes {
 		return fmt.Errorf("%w: claim card subject exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxSubjectRunes)
 	}
-	if err := ValidateMemoryReferenceText(c.Subject); err != nil {
+	if err := ValidateKnowledgeText(c.Subject); err != nil {
 		return fmt.Errorf("%w: claim card subject: %v", ErrKnowledgeInvalidValue, err)
 	}
 	if !validKnowledgePredicate(c.Predicate) {
@@ -323,7 +306,7 @@ func (c KnowledgeCard) validateFramePayload() error {
 	if err := ValidateKnowledgeScope(c.ScopeKind, c.ScopeID, limits); err != nil {
 		return err
 	}
-	if err := ValidateMemoryReferenceText(c.ScopeID); err != nil {
+	if err := ValidateKnowledgeText(c.ScopeID); err != nil {
 		return fmt.Errorf("%w: claim card scope identity: %v", ErrKnowledgeInvalidScope, err)
 	}
 	if !c.ValidFrom.IsZero() && !c.ValidUntil.IsZero() && c.ValidUntil.Before(c.ValidFrom) {

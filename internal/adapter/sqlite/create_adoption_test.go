@@ -32,7 +32,7 @@ func TestCreateRecordsAdoptionAtCreationState(t *testing.T) {
 		t.Fatalf("postflight status = %q, want passed", state.PostflightStatus)
 	}
 	if !state.PostflightDetailPresent || state.PostflightDetail != createAdoptionPostflightDetail {
-		t.Fatalf("detail = %q, want the fixed created-at-v41 string", state.PostflightDetail)
+		t.Fatalf("detail = %q, want the fixed created-at-v42 string", state.PostflightDetail)
 	}
 	if !state.BackupNotRequiredAtPresent || !state.BackupNotRequiredAtValid {
 		t.Fatalf("not-required marker present=%v valid=%v, want a valid RFC 3339 marker",
@@ -42,7 +42,7 @@ func TestCreateRecordsAdoptionAtCreationState(t *testing.T) {
 	if err != nil || shape != rollout.BackupIdentityNotRequired {
 		t.Fatalf("backup identity shape=%d err=%v, want NotRequired (FIND-166)", shape, err)
 	}
-	row, classifyErr := rollout.ClassifyRollout(41, state)
+	row, classifyErr := rollout.ClassifyRollout(rollout.TargetVersion, state)
 	if classifyErr != nil || row != rollout.RolloutRowAlreadyComplete {
 		t.Fatalf("row=%d err=%v, want AlreadyComplete for a fresh Create file", row, classifyErr)
 	}
@@ -59,11 +59,11 @@ func TestCreateRecordsAdoptionAtCreationState(t *testing.T) {
 
 // TestCrashWindowBetweenCreateTransactionsClassifiesAdoption proves the two
 // transactions are distinct durable steps: a file stopped after transaction
-// 1 (bare v41, zero rollout keys) classifies exactly as Recovery Table
+// 1 (bare v42, zero rollout keys) classifies exactly as Recovery Table
 // row 3, with no special-cased recovery code.
 func TestCrashWindowBetweenCreateTransactionsClassifiesAdoption(t *testing.T) {
 	ctx := context.Background()
-	path, raw := createSchemaAtVersion(t, 41)
+	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
 	defer raw.Close()
 
 	state, err := FileSchemaProbe{}.ReadRolloutState(ctx, path)
@@ -74,7 +74,7 @@ func TestCrashWindowBetweenCreateTransactionsClassifiesAdoption(t *testing.T) {
 	if err != nil || shape != rollout.BackupIdentityAbsent {
 		t.Fatalf("shape=%d err=%v, want Absent in the crash window", shape, err)
 	}
-	row, classifyErr := rollout.ClassifyRollout(41, state)
+	row, classifyErr := rollout.ClassifyRollout(rollout.TargetVersion, state)
 	if classifyErr != nil || row != rollout.RolloutRowAdoption {
 		t.Fatalf("row=%d err=%v, want Adoption in the crash window", row, classifyErr)
 	}

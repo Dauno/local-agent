@@ -406,47 +406,18 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 	}
 
-	stmtTopic, err := tx.PrepareContext(ctx, `
-		INSERT INTO memory_topics (id, slug, title, description, status, tags, content, current_rev, created_at, updated_at)
-		VALUES (?, ?, ?, '', 'active', '[]', '', 1, ?, ?)`)
-	if err != nil {
-		store.Close()
-		return fail(err)
-	}
-	stmtRevision, err := tx.PrepareContext(ctx, `
-		INSERT INTO memory_topic_revisions (topic_id, revision_number, content, change_reason, created_at)
-		VALUES (?, 1, ?, 'bench', ?)`)
-	if err != nil {
-		store.Close()
-		return fail(err)
-	}
 	stmtDoc, err := tx.PrepareContext(ctx, `
 		INSERT INTO knowledge_documents (id, subject, scope_kind, scope_id, content_digest, content_handle, source_id, source_rev, provenance, status, current_rev, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, 1, 'legacy_curated_document', ?, 1, ?, ?)`)
+		VALUES (?, ?, ?, ?, ?, ?, '', 0, 'curated', ?, 1, ?, ?)`)
 	if err != nil {
 		store.Close()
 		return fail(err)
 	}
+	documentContent := make(map[string][]byte, knowledgeBenchDocsTotal)
 	// Documents: 250 authorized (project scope, active), 750 unauthorized
-	// (other-team active or archived), each backed by one memory topic
-	// revision so the strict legacy resolver can reconstruct content.
+	// (other-team active or archived), each with a bounded result handle.
 	for k := 0; k < knowledgeBenchDocsTotal; k++ {
-		topicID := fmt.Sprintf("bench-mem-%05d", k)
-		if _, err := stmtTopic.ExecContext(ctx, topicID, topicID, topicID, nowUnix, nowUnix); err != nil {
-			store.Close()
-			return fail(fmt.Errorf("memory topic %d: %w", k, err))
-		}
 		content := fmt.Sprintf("curated note %s %05d", knowledgeBenchLexicalToken, k)
-		revisionResult, err := stmtRevision.ExecContext(ctx, topicID, content, nowUnix)
-		if err != nil {
-			store.Close()
-			return fail(fmt.Errorf("memory revision %d: %w", k, err))
-		}
-		revisionRowID, err := revisionResult.LastInsertId()
-		if err != nil {
-			store.Close()
-			return fail(fmt.Errorf("memory revision %d row id: %w", k, err))
-		}
 		authorized := k < knowledgeBenchDocsAuth
 		scopeKind, scopeID, status := domain.KnowledgeScopeProject, knowledgeBenchProject, domain.KnowledgeDocumentActive
 		if !authorized {
@@ -458,10 +429,11 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		sum := sha256.Sum256([]byte(content))
 		digest := hex.EncodeToString(sum[:])
-		handle := fmt.Sprintf("memory_topics:%s:revision:%d", topicID, revisionRowID)
 		id := fmt.Sprintf("kdoc_%024x", k)
+		handle := fmt.Sprintf("result:%s", id)
 		subject := fmt.Sprintf("bench doc %05d", k)
-		if _, err := stmtDoc.ExecContext(ctx, id, subject, string(scopeKind), scopeID, digest, handle, topicID, string(status), nowUnix, nowUnix); err != nil {
+		documentContent[id] = []byte(content)
+		if _, err := stmtDoc.ExecContext(ctx, id, subject, string(scopeKind), scopeID, digest, handle, string(status), nowUnix, nowUnix); err != nil {
 			store.Close()
 			return fail(fmt.Errorf("document %d: %w", k, err))
 		}
@@ -469,8 +441,8 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 			Kind: domain.KnowledgeRetrievalDocument, ID: id,
 			Document: &domain.KnowledgeDocument{
 				ID: domain.KnowledgeDocumentID(id), Subject: subject, ScopeKind: scopeKind, ScopeID: scopeID,
-				ContentDigest: digest, ContentHandle: handle, SourceID: topicID, SourceRev: 1,
-				Provenance: domain.KnowledgeProvenanceLegacyCurated, Status: status, Revision: 1,
+				ContentDigest: digest, ContentHandle: handle,
+				Provenance: domain.KnowledgeProvenanceCurated, Status: status, Revision: 1,
 			},
 		}
 		text, err := knowledgeusecase.BuildKnowledgeIndexText(domain.KnowledgeRetrievalDocument, item, content, nil)
@@ -527,7 +499,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 	retriever, err := knowledgeusecase.NewRetriever(knowledgeusecase.RetrieverDependencies{
 		Reader:   adaptersqlite.NewKnowledgeCandidateReader(store),
 		Index:    index,
-		Resolver: adaptersqlite.NewKnowledgeDocumentResolver(store),
+		Resolver: knowledgeEvalDocumentResolver{contents: documentContent},
 		Queue:    adaptersqlite.NewKnowledgeLexicalQueueStore(store),
 		Provider: provider,
 		Clock:    port.SystemClock{},

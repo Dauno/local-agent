@@ -8,27 +8,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	knowledgeusecase "github.com/Dauno/slack-local-agent/internal/usecase/knowledge"
-
-	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 )
-
-// runLegacyKnowledgeImport performs the deterministic legacy topic backfill
-// behind the knowledge gate, before the projection worker starts. While the
-// gate is disabled the backfill is skipped entirely and the store is never
-// touched. A failure fails startup closed: without the backfill the
-// knowledge catalog would be silently incomplete and retrieval would run
-// against a partial state; restarting retries the idempotent import.
-func runLegacyKnowledgeImport(ctx context.Context, enabled bool, store *adaptersqlite.KnowledgeStore, logger port.Logger) error {
-	if !enabled {
-		return nil
-	}
-	result, err := store.ImportLegacyTopics(ctx)
-	if err != nil {
-		return fmt.Errorf("knowledge legacy topic import: %w", err)
-	}
-	logger.Debug("knowledge legacy import complete", "imported", result.Imported, "archived", result.Archived, "skipped", result.Skipped)
-	return nil
-}
 
 // composeKnowledgeService builds the knowledge executor behind the
 // orchestration.knowledge.enabled gate. The caller must pass the same

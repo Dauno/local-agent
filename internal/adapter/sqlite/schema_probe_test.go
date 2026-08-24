@@ -72,7 +72,7 @@ func TestSchemaProbeCurrentVersionReadsHeader(t *testing.T) {
 }
 
 func TestSchemaProbeReadRolloutStateRoundTrip(t *testing.T) {
-	path, raw := createSchemaAtVersion(t, 41)
+	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
 	defer raw.Close()
 	seedRolloutKey(t, raw, rollout.KeyBaseline, "jobs=3;activations=5")
 	seedRolloutKey(t, raw, rollout.KeyCutoff, "12345")
@@ -119,7 +119,7 @@ func TestSchemaProbeReadRolloutStateRoundTrip(t *testing.T) {
 	if state.BackupNotRequiredAtPresent {
 		t.Fatal("absent marker must not be reported present")
 	}
-	row, classifyErr := rollout.ClassifyRollout(41, state)
+	row, classifyErr := rollout.ClassifyRollout(rollout.TargetVersion, state)
 	if classifyErr != nil || row != rollout.RolloutRowAlreadyComplete {
 		t.Fatalf("row=%d err=%v, want AlreadyComplete", row, classifyErr)
 	}
@@ -136,7 +136,7 @@ func TestSchemaProbeReadRolloutStateMalformedValuesStayInvalid(t *testing.T) {
 		{rollout.KeyBackupPath, "relative/path.db", func(s rollout.RolloutState) bool { return s.BackupPathPresent && !s.BackupPathValid }},
 		{rollout.KeyBackupBytes, "big", func(s rollout.RolloutState) bool { return s.BackupBytesPresent && !s.BackupBytesValid }},
 		{rollout.KeyBackupSHA256, strings.ToUpper(probeSHA256), func(s rollout.RolloutState) bool { return s.BackupSHA256Present && !s.BackupSHA256Valid }},
-		{rollout.KeyBackupSourceVersion, "42", func(s rollout.RolloutState) bool { return s.BackupSourceVersionPresent && !s.BackupSourceVersionValid }},
+		{rollout.KeyBackupSourceVersion, "43", func(s rollout.RolloutState) bool { return s.BackupSourceVersionPresent && !s.BackupSourceVersionValid }},
 		{rollout.KeyBackupVerifiedAt, "yesterday", func(s rollout.RolloutState) bool { return s.BackupVerifiedAtPresent && !s.BackupVerifiedAtValid }},
 		{rollout.KeyPostflightStatus, "weird", func(s rollout.RolloutState) bool { return s.PostflightPresent && !s.PostflightValid }},
 	}

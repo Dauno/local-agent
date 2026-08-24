@@ -5,8 +5,10 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"time"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/config"
@@ -72,7 +74,11 @@ func (a *Application) RebuildKnowledgeIndexes(ctx context.Context) (domain.Knowl
 
 	queueStore := adaptersqlite.NewKnowledgeLexicalQueueStore(store)
 	sourceStore := adaptersqlite.NewKnowledgeIndexSourceStore(store)
-	resolver := adaptersqlite.NewKnowledgeDocumentResolver(store)
+	payload, err := fsartifact.NewTypedStore(filepath.Join(paths.ArtifactDir, "v2-results"), int64(cfg.ACP.MaxResultArtifactBytes))
+	if err != nil {
+		return domain.KnowledgeIndexRebuildResult{}, fmt.Errorf("initialize typed result payload store: %w", err)
+	}
+	resolver := adaptersqlite.NewKnowledgeDocumentResolver(store, payload)
 	indexStore := adaptersqlite.NewKnowledgeLexicalIndexStore(store, "")
 	if queueStore == nil || sourceStore == nil || resolver == nil || indexStore == nil {
 		return domain.KnowledgeIndexRebuildResult{}, errors.New("knowledge index adapters are not configured")

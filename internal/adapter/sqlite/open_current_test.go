@@ -9,6 +9,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -170,7 +171,8 @@ func TestOpenCurrentFutureSchemaIsRejectedWithoutSideEffects(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := plain.Exec("PRAGMA user_version = 42"); err != nil {
+	futureVersion := SchemaVersion + 1
+	if _, err := plain.Exec("PRAGMA user_version = " + strconv.Itoa(futureVersion)); err != nil {
 		t.Fatal(err)
 	}
 	if err := plain.Close(); err != nil {
@@ -183,8 +185,8 @@ func TestOpenCurrentFutureSchemaIsRejectedWithoutSideEffects(t *testing.T) {
 		t.Fatal("OpenCurrent returned a store for a future schema")
 	} else {
 		var future *FutureSchemaError
-		if !errors.As(err, &future) || future.Found != 42 || future.Supported != SchemaVersion {
-			t.Fatalf("err = %v, want FutureSchemaError{42, %d}", err, SchemaVersion)
+		if !errors.As(err, &future) || future.Found != futureVersion || future.Supported != SchemaVersion {
+			t.Fatalf("err = %v, want FutureSchemaError{%d, %d}", err, futureVersion, SchemaVersion)
 		}
 	}
 	if after := fixtureDigest(t, path); after != before {

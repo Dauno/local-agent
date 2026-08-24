@@ -3,6 +3,7 @@ package sqlite
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,12 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
+
+// knowledgeDocumentResultOwnerKind identifies result_references rows kept
+// live by a curated knowledge document's "result:<id>" content handle. The
+// reference keeps the referenced result out of retention candidacy for as
+// long as the document stays active.
+const knowledgeDocumentResultOwnerKind = "knowledge_document"
 
 var _ port.KnowledgeStore = (*KnowledgeStore)(nil)
 
@@ -637,7 +644,7 @@ func (s *KnowledgeStore) ForgetSubject(ctx context.Context, subject string, scop
 	if utf8.RuneCountInString(subject) > domain.HardMaxKnowledgeSubjectRunes {
 		return false, fmt.Errorf("%w: subject exceeds hard maximum of %d characters", port.ErrKnowledgeValidation, domain.HardMaxKnowledgeSubjectRunes)
 	}
-	if err := domain.ValidateMemoryReferenceText(subject); err != nil {
+	if err := domain.ValidateKnowledgeText(subject); err != nil {
 		return false, fmt.Errorf("%w: subject: %v", port.ErrKnowledgeValidation, err)
 	}
 	if err := domain.ValidateKnowledgeSourceRef(sourceRef); err != nil {
@@ -666,6 +673,31 @@ func (s *KnowledgeStore) ForgetSubject(ctx context.Context, subject string, scop
 		DELETE FROM knowledge_claims WHERE subject = ? AND scope_kind = ? AND scope_id = ?`,
 		subject, string(scopeKind), scopeID); err != nil {
 		return false, fmt.Errorf("%w: delete forgotten claims: %v", port.ErrKnowledgeUnavailable, err)
+	}
+	forgottenDocIDs, err := tx.QueryContext(ctx, `
+		SELECT id FROM knowledge_documents WHERE subject = ? AND scope_kind = ? AND scope_id = ?`,
+		subject, string(scopeKind), scopeID)
+	if err != nil {
+		return false, fmt.Errorf("%w: list forgotten documents: %v", port.ErrKnowledgeUnavailable, err)
+	}
+	var docIDs []string
+	for forgottenDocIDs.Next() {
+		var docID string
+		if scanErr := forgottenDocIDs.Scan(&docID); scanErr != nil {
+			forgottenDocIDs.Close()
+			return false, fmt.Errorf("%w: scan forgotten document: %v", port.ErrKnowledgeUnavailable, scanErr)
+		}
+		docIDs = append(docIDs, docID)
+	}
+	if err := forgottenDocIDs.Err(); err != nil {
+		forgottenDocIDs.Close()
+		return false, fmt.Errorf("%w: list forgotten documents: %v", port.ErrKnowledgeUnavailable, err)
+	}
+	forgottenDocIDs.Close()
+	for _, docID := range docIDs {
+		if err := releaseCuratedDocumentResult(ctx, tx, docID, now); err != nil {
+			return false, err
+		}
 	}
 	if _, err := tx.ExecContext(ctx, `
 		DELETE FROM knowledge_documents WHERE subject = ? AND scope_kind = ? AND scope_id = ?`,
@@ -1017,206 +1049,73 @@ func (s *KnowledgeStore) ArchivePreference(ctx context.Context, ownerKey, key st
 	return s.GetPreference(ctx, ownerKey, key)
 }
 
-// ImportLegacyTopics deterministically imports every existing legacy memory
-// topic as a knowledge document in one transaction: exactly one document
-// per topic, replay-safe and fail-closed. People topics import at user
-// scope bound to their canonical owner key; every other topic imports at
-// global scope. Identity is deterministic per topic ID and the subject is
-// a pure function of the topic (title plus an opaque topic-derived
-// suffix), so subject assignment never depends on import history and
-// duplicate valid titles can always be imported. Replay is anchored on the
-// identity but validates the occupant: provenance and source identity must
-// match the topic and the immutable receipt must exist, anything else
-// fails closed instead of being skipped or mutated. A normal post-import
-// legacy revision never conflicts: the imported document keeps its
-// import-time state, and its content handle references the append-only
-// memory_topic_revisions row the digest was computed from, so the
-// referenced bytes always match the digest. Archived legacy topics import
-// as archived documents, and an existing active document whose legacy
-// topic was archived afterwards is mirrored to archived, so legacy
-// visibility is never widened and never left stale. Documents are
-// validated against the hard storage limits (the curated document budget
-// never blocks the backfill), tombstoned subjects are skipped (forget is
-// authoritative), archived documents are never resurrected, legacy rows
-// are never modified, a durable projection trigger is enqueued in the
-// same transaction only when state changed, one immutable receipt per
-// document, and any row that cannot build a valid document fails the
-// import closed. Restarts and concurrent runs never produce duplicates or
-// partial states.
-func (s *KnowledgeStore) ImportLegacyTopics(ctx context.Context) (domain.KnowledgeLegacyImportResult, error) {
-	result := domain.KnowledgeLegacyImportResult{}
-	if err := s.available(); err != nil {
-		return result, err
-	}
-	limits := domain.HardKnowledgeLimits()
-	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+// verifyCuratedDocumentResult checks a "result:<id>" content handle against
+// the referenced result_records row before the document is allowed to bind
+// to it: the result must exist, be available, match the document's declared
+// digest, carry structurally valid storage, and its scope must be one the
+// document's KnowledgeScopeKind/ScopeID unambiguously authorizes. Curated is
+// the only provenance knowledge documents carry, and the SQLite resolver is
+// the only production resolver, so a document whose ContentHandle is not
+// "result:<64 hex>" can never be resolved: CreateDocument rejects it rather
+// than persist a document nothing can ever read back.
+func verifyCuratedDocumentResult(ctx context.Context, tx *sql.Tx, document domain.KnowledgeDocument) (string, error) {
+	resultID, err := parseCuratedDocumentHandle(document.ContentHandle)
 	if err != nil {
-		return result, fmt.Errorf("%w: begin legacy topic import: %v", port.ErrKnowledgeUnavailable, err)
+		return "", fmt.Errorf("%w: invalid curated document handle", port.ErrKnowledgeValidation)
 	}
-	defer func() { _ = tx.Rollback() }()
-
-	rows, err := tx.QueryContext(ctx, `
-		SELECT id, title, content, current_rev, bundle_path, owner_key, status
-		FROM memory_topics ORDER BY id`)
+	var storageKind, storageKey, digest, state, actor, teamID, conversationKey, project string
+	var resultBytes int64
+	err = tx.QueryRowContext(ctx, `
+		SELECT storage_kind, storage_key, sha256, bytes, state, actor, team_id, conversation_key, project
+		FROM result_records WHERE result_id = ?`, resultID).Scan(
+		&storageKind, &storageKey, &digest, &resultBytes, &state, &actor, &teamID, &conversationKey, &project)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: referenced result does not exist", port.ErrKnowledgeValidation)
+	}
 	if err != nil {
-		return result, fmt.Errorf("%w: list legacy topics for import: %v", port.ErrKnowledgeUnavailable, err)
+		return "", fmt.Errorf("%w: read curated result identity: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	var topics []domain.Topic
-	for rows.Next() {
-		var (
-			id         string
-			title      string
-			content    string
-			currentRev int
-			bundlePath string
-			ownerKey   string
-			status     string
-		)
-		if err := rows.Scan(&id, &title, &content, &currentRev, &bundlePath, &ownerKey, &status); err != nil {
-			_ = rows.Close()
-			return result, fmt.Errorf("%w: scan legacy topic for import: %v", port.ErrKnowledgeUnavailable, err)
-		}
-		topics = append(topics, domain.Topic{
-			ID: domain.TopicID(id), Title: title, Content: content,
-			CurrentRev: currentRev, BundlePath: bundlePath, OwnerKey: ownerKey,
-			Status: domain.TopicStatus(status),
-		})
+	if state != string(domain.ResultAvailable) || digest != document.ContentDigest || resultBytes <= 0 {
+		return "", fmt.Errorf("%w: curated result identity does not match the document", port.ErrKnowledgeValidation)
 	}
-	if err := rows.Err(); err != nil {
-		_ = rows.Close()
-		return result, fmt.Errorf("%w: iterate legacy topics for import: %v", port.ErrKnowledgeUnavailable, err)
+	storage := domain.ResultStorage{Kind: domain.ResultStorageKind(storageKind), Key: storageKey}
+	if err := storage.Validate(); err != nil {
+		return "", fmt.Errorf("%w: curated result storage is invalid", port.ErrKnowledgeValidation)
 	}
-	if err := rows.Close(); err != nil {
-		return result, fmt.Errorf("%w: close legacy topic rows: %v", port.ErrKnowledgeUnavailable, err)
+	resultScope := domain.ResultScope{Actor: actor, TeamID: teamID, ConversationKey: conversationKey, Project: project}
+	if !domain.KnowledgeDocumentAuthorizesResult(document.ScopeKind, document.ScopeID, resultScope) {
+		return "", fmt.Errorf("%w: document scope does not authorize the referenced result", port.ErrKnowledgeValidation)
 	}
+	return resultID, nil
+}
 
-	now := time.Now().UTC()
-	changed := false
-	for _, topic := range topics {
-		document, err := domain.KnowledgeDocumentFromLegacyTopic(topic)
-		if err != nil {
-			return result, fmt.Errorf("%w: %v", port.ErrKnowledgeValidation, err)
-		}
-		existing, scanErr := scanKnowledgeDocument(tx.QueryRowContext(ctx, `
-			SELECT `+knowledgeDocumentColumns+` FROM knowledge_documents WHERE id = ?`,
-			string(document.ID)))
-		if scanErr == nil {
-			// The occupant must be this topic's own import: provenance and
-			// source identity must match and the immutable receipt must
-			// exist. A foreign occupant or corrupt persisted state fails
-			// closed instead of being skipped or mutated.
-			if existing.Provenance != domain.KnowledgeProvenanceLegacyCurated || existing.SourceID != string(topic.ID) {
-				return result, fmt.Errorf("%w: legacy topic %q document identity is occupied by a foreign document", port.ErrKnowledgeCASConflict, topic.ID)
-			}
-			var receiptID int
-			if err := tx.QueryRowContext(ctx, `
-				SELECT 1 FROM knowledge_document_receipts WHERE document_id = ?`,
-				string(existing.ID)).Scan(&receiptID); errors.Is(err, sql.ErrNoRows) {
-				return result, fmt.Errorf("%w: legacy topic %q document receipt missing", port.ErrKnowledgeCASConflict, topic.ID)
-			} else if err != nil {
-				return result, fmt.Errorf("%w: legacy document receipt lookup: %v", port.ErrKnowledgeUnavailable, err)
-			}
-			if existing.Status == domain.KnowledgeDocumentActive && document.Status == domain.KnowledgeDocumentArchived {
-				// The legacy topic was archived after its import: mirror
-				// the archive so the knowledge catalog never keeps stale
-				// active content. The import revision source is
-				// deterministic, so replays are idempotent.
-				if _, err := tx.ExecContext(ctx, `
-					UPDATE knowledge_documents SET status = 'archived', current_rev = current_rev + 1, updated_at = ?
-					WHERE id = ? AND status = 'active'`, now.UnixNano(), string(existing.ID)); err != nil {
-					return result, fmt.Errorf("%w: mirror legacy archive: %v", port.ErrKnowledgeUnavailable, err)
-				}
-				if _, err := tx.ExecContext(ctx, `
-					INSERT INTO knowledge_document_revisions (document_id, revision_number, status, source_ref, created_at)
-					VALUES (?, ?, 'archived', ?, ?)`,
-					string(existing.ID), existing.Revision+1, "legacy_import:"+string(topic.ID), now.UnixNano()); err != nil {
-					return result, fmt.Errorf("%w: mirror legacy archive revision: %v", port.ErrKnowledgeUnavailable, err)
-				}
-				result.Archived++
-				changed = true
-				continue
-			}
-			// Already imported (active or archived): never rewritten and
-			// never resurrected, regardless of later content or revision
-			// changes in the legacy row.
-			result.Skipped++
-			continue
-		} else if !errors.Is(scanErr, sql.ErrNoRows) {
-			return result, fmt.Errorf("%w: legacy document replay lookup: %v", port.ErrKnowledgeUnavailable, scanErr)
-		}
-		var blocked int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT 1 FROM knowledge_tombstones WHERE subject_digest = ?`,
-			domain.KnowledgeSubjectDigest(document.Subject, document.ScopeKind, document.ScopeID)).Scan(&blocked); err == nil {
-			// Forget is authoritative: a forgotten subject is never
-			// re-imported.
-			result.Skipped++
-			continue
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return result, fmt.Errorf("%w: inspect tombstone for import: %v", port.ErrKnowledgeUnavailable, err)
-		}
-		var slotTaken int
-		if err := tx.QueryRowContext(ctx, `
-			SELECT 1 FROM knowledge_documents
-			WHERE subject = ? AND scope_kind = ? AND scope_id = ? LIMIT 1`,
-			document.Subject, string(document.ScopeKind), document.ScopeID).Scan(&slotTaken); err == nil {
-			return result, fmt.Errorf("%w: legacy topic %q document identity is occupied", port.ErrKnowledgeCASConflict, topic.ID)
-		} else if !errors.Is(err, sql.ErrNoRows) {
-			return result, fmt.Errorf("%w: inspect document identity for import: %v", port.ErrKnowledgeUnavailable, err)
-		}
-		// The content handle references the append-only legacy revision
-		// row the digest was computed from, never the mutable topic row.
-		var (
-			revisionID      int64
-			revisionContent string
-		)
-		if err := tx.QueryRowContext(ctx, `
-			SELECT id, content FROM memory_topic_revisions
-			WHERE topic_id = ? AND revision_number = ?`, string(topic.ID), topic.CurrentRev).
-			Scan(&revisionID, &revisionContent); errors.Is(err, sql.ErrNoRows) {
-			return result, fmt.Errorf("%w: legacy topic %q has no revision row for revision %d", port.ErrKnowledgeValidation, topic.ID, topic.CurrentRev)
-		} else if err != nil {
-			return result, fmt.Errorf("%w: resolve legacy topic revision: %v", port.ErrKnowledgeUnavailable, err)
-		}
-		if revisionContent != topic.Content {
-			return result, fmt.Errorf("%w: legacy topic %q revision %d content diverged from the topic row", port.ErrKnowledgeValidation, topic.ID, topic.CurrentRev)
-		}
-		document.ContentHandle = domain.LegacyTopicRevisionHandle(topic.ID, revisionID)
-		if err := document.ValidateWithLimits(limits); err != nil {
-			return result, fmt.Errorf("%w: legacy topic %q: %v", port.ErrKnowledgeValidation, topic.ID, err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO knowledge_documents (`+knowledgeDocumentColumns+`)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)`,
-			string(document.ID), document.Subject, string(document.ScopeKind), document.ScopeID,
-			document.ContentDigest, document.ContentHandle, document.SourceID, document.SourceRev,
-			string(document.Provenance), string(document.Status), now.UnixNano(), now.UnixNano()); err != nil {
-			if isUniqueConstraint(err) {
-				return result, fmt.Errorf("%w: legacy topic %q document identity is occupied", port.ErrKnowledgeCASConflict, topic.ID)
-			}
-			return result, fmt.Errorf("%w: insert imported document: %v", port.ErrKnowledgeUnavailable, err)
-		}
-		if _, err := tx.ExecContext(ctx, `
-			INSERT INTO knowledge_document_receipts
-				(document_id, subject, scope_kind, scope_id, content_digest, content_handle, source_id, source_rev, provenance, status, created_at)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-			string(document.ID), document.Subject, string(document.ScopeKind), document.ScopeID,
-			document.ContentDigest, document.ContentHandle, document.SourceID, document.SourceRev,
-			string(document.Provenance), string(document.Status), now.UnixNano()); err != nil {
-			return result, fmt.Errorf("%w: insert imported document receipt: %v", port.ErrKnowledgeUnavailable, err)
-		}
-		result.Imported++
-		changed = true
+// retainCuratedDocumentResult inserts the live result_references row that
+// keeps resultID out of retention candidacy for as long as documentID stays
+// active. The reference identity is deterministic, so a replayed create is a
+// harmless no-op via INSERT OR IGNORE.
+func retainCuratedDocumentResult(ctx context.Context, tx *sql.Tx, documentID, resultID string, now time.Time) error {
+	referenceDigest := sha256.Sum256([]byte(knowledgeDocumentResultOwnerKind + "\x00" + documentID + "\x00" + resultID))
+	_, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO result_references (
+		reference_id, result_id, owner_kind, owner_id, state, created_at)
+		VALUES (?, ?, ?, ?, 'live', ?)`, fmt.Sprintf("%x", referenceDigest), resultID,
+		knowledgeDocumentResultOwnerKind, documentID, now.UnixNano())
+	if err != nil {
+		return fmt.Errorf("%w: retain curated result reference: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	if changed {
-		if err := insertKnowledgeProjection(ctx, tx, now); err != nil {
-			return result, fmt.Errorf("%w: %v", port.ErrKnowledgeUnavailable, err)
-		}
+	return nil
+}
+
+// releaseCuratedDocumentResult releases any live result_references row owned
+// by documentID. It is a harmless no-op for a document that never bound to a
+// result.
+func releaseCuratedDocumentResult(ctx context.Context, tx *sql.Tx, documentID string, now time.Time) error {
+	_, err := tx.ExecContext(ctx, `UPDATE result_references SET state = 'released', released_at = ?
+		WHERE owner_kind = ? AND owner_id = ? AND state = 'live'`,
+		now.UnixNano(), knowledgeDocumentResultOwnerKind, documentID)
+	if err != nil {
+		return fmt.Errorf("%w: release curated result reference: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	if err := tx.Commit(); err != nil {
-		return result, fmt.Errorf("%w: commit legacy topic import: %v", port.ErrKnowledgeUnavailable, err)
-	}
-	return result, nil
+	return nil
 }
 
 func (s *KnowledgeStore) CreateDocument(ctx context.Context, document domain.KnowledgeDocument, limits domain.KnowledgeLimits) (domain.KnowledgeDocument, error) {
@@ -1271,6 +1170,10 @@ func (s *KnowledgeStore) CreateDocument(ctx context.Context, document domain.Kno
 	if count >= limits.WithDefaults().MaxDocuments {
 		return domain.KnowledgeDocument{}, fmt.Errorf("%w: max documents reached", domain.ErrKnowledgeLimitExceeded)
 	}
+	curatedResultID, err := verifyCuratedDocumentResult(ctx, tx, document)
+	if err != nil {
+		return domain.KnowledgeDocument{}, err
+	}
 	now := time.Now().UTC()
 	document.ID = domain.KnowledgeDocumentID(generateKnowledgeID("kdoc_"))
 	if _, err := tx.ExecContext(ctx, `
@@ -1292,6 +1195,11 @@ func (s *KnowledgeStore) CreateDocument(ctx context.Context, document domain.Kno
 		document.ContentDigest, document.ContentHandle, document.SourceID, document.SourceRev,
 		string(document.Provenance), string(document.Status), now.UnixNano()); err != nil {
 		return domain.KnowledgeDocument{}, fmt.Errorf("%w: insert document receipt: %v", port.ErrKnowledgeUnavailable, err)
+	}
+	if curatedResultID != "" {
+		if err := retainCuratedDocumentResult(ctx, tx, string(document.ID), curatedResultID, now); err != nil {
+			return domain.KnowledgeDocument{}, err
+		}
 	}
 	if err := insertKnowledgeProjection(ctx, tx, now); err != nil {
 		return domain.KnowledgeDocument{}, fmt.Errorf("%w: %v", port.ErrKnowledgeUnavailable, err)
@@ -1444,6 +1352,9 @@ func (s *KnowledgeStore) ArchiveDocument(ctx context.Context, id domain.Knowledg
 		INSERT INTO knowledge_document_revisions (document_id, revision_number, status, source_ref, created_at)
 		VALUES (?, ?, 'archived', ?, ?)`, string(id), expectedRev+1, sourceRef, now.UnixNano()); err != nil {
 		return domain.KnowledgeDocument{}, fmt.Errorf("%w: insert document revision: %v", port.ErrKnowledgeUnavailable, err)
+	}
+	if err := releaseCuratedDocumentResult(ctx, tx, string(id), now); err != nil {
+		return domain.KnowledgeDocument{}, err
 	}
 	if err := insertKnowledgeProjection(ctx, tx, now); err != nil {
 		return domain.KnowledgeDocument{}, fmt.Errorf("%w: %v", port.ErrKnowledgeUnavailable, err)

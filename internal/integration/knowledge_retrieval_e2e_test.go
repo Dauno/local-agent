@@ -117,7 +117,7 @@ func TestKnowledgeRetrievalEndToEndEphemeralBoundary(t *testing.T) {
 		// This e2e test is lexical-focused: no fingerprint is bound, so
 		// semantic search stays disabled and no provider is wired.
 		Index:    adaptersqlite.NewKnowledgeLexicalIndexStore(store, ""),
-		Resolver: adaptersqlite.NewKnowledgeDocumentResolver(store),
+		Resolver: knowledgeusecase.UnavailableDocumentResolver{},
 		Queue:    adaptersqlite.NewKnowledgeLexicalQueueStore(store),
 		Clock:    port.SystemClock{},
 		Redact:   func(value string) string { return value },

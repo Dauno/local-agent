@@ -64,7 +64,7 @@ func TestCheckSQLiteRuntimeReadOnlyDoesNotChangeJournalMode(t *testing.T) {
 }
 
 // TestCheckSQLiteRuntimeReportsPoolAndPragmas confirms the checker reports
-// the release's actual v41 contract values on a normally created database.
+// the release's actual v42 contract values on a normally created database.
 func TestCheckSQLiteRuntimeReportsPoolAndPragmas(t *testing.T) {
 	ctx := t.Context()
 	path := filepath.Join(t.TempDir(), "state.db")

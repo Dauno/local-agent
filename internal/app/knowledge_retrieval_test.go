@@ -556,7 +556,7 @@ func TestKnowledgeRetrievalRestartRollbackSequence(t *testing.T) {
 		Source:   adaptersqlite.NewKnowledgeIndexSourceStore(storeD),
 		Index:    adaptersqlite.NewKnowledgeVectorIndexStore(storeD),
 		Provider: provider,
-		Resolver: adaptersqlite.NewKnowledgeDocumentResolver(storeD),
+		Resolver: knowledgeusecase.UnavailableDocumentResolver{},
 		Lister:   adaptersqlite.NewKnowledgeIndexSourceStore(storeD),
 		Logger:   logging.New(io.Discard, "error", secure.NewRedactor("sk-embedding-secret-value")),
 		Sanitize: func(value string) string { return value },

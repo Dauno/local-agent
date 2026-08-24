@@ -79,13 +79,12 @@ func AgentTurnContextFromContext(ctx context.Context) (AgentTurnContext, bool) {
 	return turn, ok
 }
 
-// AgentRequest bundles conversation history, recalled memory, and enriched
-// context into one model call. Future facts stay out of the bot use case.
+// AgentRequest bundles conversation history and ephemeral context into one
+// model call. Future facts stay out of the bot use case.
 type AgentRequest struct {
 	ConversationKey domain.ConversationKey
 	Origin          AgentTurnOrigin
 	Messages        []domain.Message
-	Memory          []domain.MemorySnippet
 	Context         domain.AgentContext
 	// Activation is host-owned durable identity used only to build the
 	// activation tool scope. It is not rendered into the model prompt.

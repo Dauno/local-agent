@@ -24,9 +24,6 @@ type schemaField struct {
 }
 
 var configSchema = []schemaField{
-	{name: "agent", children: []schemaField{
-		{name: "name"},
-	}},
 	{name: "state", children: []schemaField{
 		{name: "dir"},
 		{name: "db"},
@@ -67,17 +64,6 @@ var configSchema = []schemaField{
 		{name: "busy_message"},
 		{name: "model_error_message"},
 	}},
-	{name: "model", children: []schemaField{
-		{name: "name"},
-		{name: "base_url"},
-		{name: "api_key_env"},
-		{name: "headers"},
-		{name: "reasoning_effort"},
-		{name: "extra_body"},
-		{name: "result_handles", children: []schemaField{
-			{name: "max_direct_inline_bytes"},
-		}},
-	}},
 	{name: "slack", children: []schemaField{
 		{name: "app_name"},
 		{name: "bot_display_name"},
@@ -109,21 +95,6 @@ var configSchema = []schemaField{
 			{name: "transcription_profile"},
 			{name: "transcription_timeout_seconds"},
 		}},
-	}},
-	{name: "memory", children: []schemaField{
-		{name: "enabled"},
-		{name: "directory"},
-		{name: "max_topics_recall"},
-		{name: "max_chars_recall"},
-		{name: "recall_timeout_seconds"},
-		{name: "curator_timeout_seconds"},
-		{name: "curator_max_retries"},
-		{name: "worker_interval_seconds"},
-		{name: "retention_days"},
-		{name: "max_topics"},
-		{name: "max_links"},
-		{name: "max_topic_chars"},
-		{name: "max_patch_ops"},
 	}},
 	{name: "sandbox", children: []schemaField{
 		{name: "enabled"},
@@ -276,6 +247,7 @@ func Parse(data []byte) (Config, error) {
 	if err := document.Decode(&syntax); err != nil {
 		return Config{}, fmt.Errorf("decode configuration YAML: %w", err)
 	}
+	removeMappingEntries(root, "agent", "model", "memory")
 
 	effective, err := configNode(Default())
 	if err != nil {
@@ -540,6 +512,28 @@ func mappingEntry(mapping *yaml.Node, name string) (key, value *yaml.Node, found
 		}
 	}
 	return nil, nil, false
+}
+
+func removeMappingEntries(mapping *yaml.Node, keys ...string) {
+	if mapping == nil || mapping.Kind != yaml.MappingNode {
+		return
+	}
+	keep := mapping.Content[:0]
+	for index := 0; index+1 < len(mapping.Content); index += 2 {
+		key := mapping.Content[index]
+		remove := false
+		for _, candidate := range keys {
+			if key.Value == candidate {
+				remove = true
+				break
+			}
+		}
+		if remove {
+			continue
+		}
+		keep = append(keep, mapping.Content[index], mapping.Content[index+1])
+	}
+	mapping.Content = keep
 }
 
 func replaceMappingValue(mapping *yaml.Node, name string, value *yaml.Node) {

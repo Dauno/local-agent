@@ -80,11 +80,6 @@ func (f *fakeLive) CheckSlackApp(context.Context, string, string) error { f.app+
 func (f *fakeLive) CheckSlackContext(context.Context, string) error     { f.context++; return nil }
 func (f *fakeLive) CheckSlackCanvas(context.Context, string) error      { f.canvas++; return nil }
 func (f *fakeLive) CheckSlackExports(context.Context, string) error     { f.exports++; return nil }
-func (f *fakeLive) CheckModel(context.Context, config.ModelConfig, string) error {
-	f.model++
-	return nil
-}
-
 func (f *fakeLive) CheckResolvedModel(_ context.Context, _ *agentdef.ResolvedModel, apiKey string) error {
 	f.model++
 	f.modelAPIKey = apiKey
@@ -253,6 +248,10 @@ func TestDoctorValidatesADKCompactionModesAndLimits(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			deps, _, _ := validDependencies()
+			root := t.TempDir()
+			stateDir := filepath.Join(root, ".local-agent")
+			writeDoctorOpenAIDefinitions(t, stateDir)
+			deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 			deps.LoadConfig = func(string) (config.Config, error) {
 				cfg := config.Default()
 				test.mutate(&cfg)
@@ -278,6 +277,10 @@ func TestDoctorValidatesADKCompactionModesAndLimits(t *testing.T) {
 
 func TestLiveDoctorCallsEveryLiveCheck(t *testing.T) {
 	deps, _, live := validDependencies()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorOpenAIDefinitions(t, stateDir)
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	service, _ := New(deps)
 	report := service.Run(t.Context(), true)
 	if report.ExitCode() != 0 || live.bot != 1 || live.app != 1 || live.context != 0 || live.model != 1 {
@@ -328,9 +331,42 @@ func TestLiveDoctorChecksGeneratedFileCapabilityWhenEnabled(t *testing.T) {
 
 func TestDoctorValidatesAndChecksDedicatedAudioTranscriptionProfile(t *testing.T) {
 	deps, _, live := validDependencies()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "provider.yaml"), []byte(`
+name: test
+type: openai_compatible
+base_url: https://example.test
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  default:
+    model: test-model
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(`
+agent_class: LlmAgent
+name: root_agent
+model: test/default
+global_instruction: policy here
+instruction: test
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Slack.Files.TranscriptionProfile = "legacy/default"
+		cfg.Slack.Files.TranscriptionProfile = "test/default"
 		return cfg, nil
 	}
 	service, err := New(deps)
@@ -525,7 +561,6 @@ func TestDoctorValidatesEverySelectedCLIProfileAndDescribesProviderOnce(t *testi
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = true
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -539,7 +574,7 @@ func TestDoctorValidatesEverySelectedCLIProfileAndDescribesProviderOnce(t *testi
 	if report.ExitCode() != 0 {
 		t.Fatalf("doctor failed: %#v", report.Results)
 	}
-	if len(cli.models) != 2 || cli.models[0] != "anthropic/root" || cli.models[1] != "anthropic/curator" {
+	if len(cli.models) != 2 || cli.models[0] != "anthropic/root" || cli.models[1] != "anthropic/worker" {
 		t.Fatalf("selected CLI profiles not all validated: %v", cli.models)
 	}
 	if cli.describeCalls != 1 {
@@ -557,7 +592,6 @@ func TestLiveDoctorAuthenticatesWithRetainedShimIdentity(t *testing.T) {
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = true
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -694,7 +728,6 @@ func TestLiveDoctorSkipsAuthenticationWhenProviderDescribeFails(t *testing.T) {
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = true
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -806,7 +839,6 @@ include_contents: none
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = false
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -890,7 +922,6 @@ tool_scope: invocation_scoped
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = false
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -1000,8 +1031,8 @@ shim:
 profiles:
   root:
     model: anthropic/root
-  curator:
-    model: anthropic/curator
+  worker:
+    model: anthropic/worker
   attachment:
     model: anthropic/attachment
 `
@@ -1012,16 +1043,17 @@ model: opencode/root
 global_instruction: policy
 instruction: root
 `
-	curator := `
+	worker := `
 agent_class: LlmAgent
-name: memory_curator
-model: opencode/curator
-instruction: curate
+name: worker
+description: Handles worker tasks.
+model: opencode/worker
+instruction: work
 `
 	files := map[string]string{
-		filepath.Join(stateDir, "providers", "opencode.yaml"):    provider,
-		filepath.Join(stateDir, "agents", "root_agent.yaml"):     rootAgent,
-		filepath.Join(stateDir, "agents", "memory_curator.yaml"): curator,
+		filepath.Join(stateDir, "providers", "opencode.yaml"): provider,
+		filepath.Join(stateDir, "agents", "root_agent.yaml"):  rootAgent,
+		filepath.Join(stateDir, "agents", "worker.yaml"):      worker,
 	}
 	if includeAttachment {
 		files[filepath.Join(stateDir, "agents", "attachment_analyzer.yaml")] = `
@@ -1035,5 +1067,39 @@ instruction: inspect image
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func writeDoctorOpenAIDefinitions(t *testing.T, stateDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "provider.yaml"), []byte(`
+name: test
+type: openai_compatible
+base_url: https://example.test
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  default:
+    model: test-model
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(`
+agent_class: LlmAgent
+name: root_agent
+model: test/default
+global_instruction: policy here
+instruction: test
+`), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

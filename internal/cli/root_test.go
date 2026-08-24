@@ -106,7 +106,7 @@ func TestInitWizardCompletesNineStepsWithoutLeakingSecrets(t *testing.T) {
 	if backend.prepared != 1 || backend.applyCalls != 1 || !privacyVisibleAtApply {
 		t.Fatalf("prepare=%d apply=%d privacy-before-apply=%v", backend.prepared, backend.applyCalls, privacyVisibleAtApply)
 	}
-	if backend.identity.AgentName != "Dev Agent" || len(backend.access.AllowedUserIDs) != 1 || backend.access.AllowedUserIDs[0] != "U12345678" {
+	if backend.identity.AgentName != "root_agent" || len(backend.access.AllowedUserIDs) != 1 || backend.access.AllowedUserIDs[0] != "U12345678" {
 		t.Fatalf("unexpected confirmed setup: identity=%#v access=%#v", backend.identity, backend.access)
 	}
 	if backend.access.ContextEnabled {

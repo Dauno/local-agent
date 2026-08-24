@@ -77,7 +77,7 @@ func TestRecordBaselineAndCutoffConflictSemantics(t *testing.T) {
 	}
 }
 
-func TestFileSchemaWriterMigrateRunsChainToV41(t *testing.T) {
+func TestFileSchemaWriterMigrateRunsChainToCurrent(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 33)
 	defer raw.Close()
@@ -86,8 +86,8 @@ func TestFileSchemaWriterMigrateRunsChainToV41(t *testing.T) {
 		t.Fatalf("Migrate: %v", migrateErr)
 	}
 	var version int
-	if err := raw.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != 41 {
-		t.Fatalf("user_version=%d err=%v, want 41", version, err)
+	if err := raw.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil || version != SchemaVersion {
+		t.Fatalf("user_version=%d err=%v, want %d", version, err, SchemaVersion)
 	}
 }
 
@@ -110,7 +110,7 @@ func installPostflightFaultTrigger(t *testing.T, db interface {
 
 func TestRecordPostflightAtomicityUnderInjectedFailure(t *testing.T) {
 	ctx := context.Background()
-	path, raw := createSchemaAtVersion(t, 41)
+	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
 	defer raw.Close()
 	writer := FileSchemaWriter{}
 	baseline := rollout.IdentityBaseline{JobsCompletedWithoutResultIdentity: 2, ActivationsWithoutContent: 3}
@@ -145,7 +145,7 @@ func TestRecordPostflightAtomicityUnderInjectedFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	row, classifyErr := rollout.ClassifyRollout(41, state)
+	row, classifyErr := rollout.ClassifyRollout(rollout.TargetVersion, state)
 	if classifyErr != nil || row != rollout.RolloutRowAlreadyComplete {
 		t.Fatalf("row=%d err=%v, want AlreadyComplete after recovery", row, classifyErr)
 	}
@@ -153,7 +153,7 @@ func TestRecordPostflightAtomicityUnderInjectedFailure(t *testing.T) {
 
 func TestRecordPostflightAtomicityFromAbsentKeys(t *testing.T) {
 	ctx := context.Background()
-	path, raw := createSchemaAtVersion(t, 41)
+	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
 	defer raw.Close()
 	writer := FileSchemaWriter{}
 

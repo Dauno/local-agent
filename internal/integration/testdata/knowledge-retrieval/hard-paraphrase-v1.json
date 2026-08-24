@@ -13,9 +13,9 @@
     ],
     "preferences": [],
     "documents": [
-      {"id": "kdoc_0000000000000000000000f1", "subject": "welcome guide", "scope_kind": "global", "status": "active", "topic": "topic-hardguide", "source_rev": 1, "vector": [0, 0, 0, 0, 0, 1, 0, 0]}
+      {"id": "kdoc_0000000000000000000000f1", "subject": "welcome guide", "scope_kind": "global", "status": "active", "source_id": "topic-hardguide", "source_rev": 1, "vector": [0, 0, 0, 0, 0, 1, 0, 0]}
     ],
-    "memory_topics": [
+    "document_sources": [
       {"id": "topic-hardguide", "revisions": [{"number": 1, "content": "new members complete setup tasks the first day"}]}
     ]
   },

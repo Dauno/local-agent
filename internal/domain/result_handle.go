@@ -143,6 +143,31 @@ func (s ResultScope) Matches(required ResultScope) error {
 	return nil
 }
 
+// KnowledgeDocumentAuthorizesResult reports whether a curated knowledge
+// document's scope authorizes access to a result carrying the given
+// ResultScope. Only scope kinds with an unambiguous identity mapped onto
+// ResultScope are authorized: global and workstream scope carry no
+// comparable identity on a result, so they never authorize access even
+// though the scope kind itself is otherwise valid for knowledge.
+func KnowledgeDocumentAuthorizesResult(kind KnowledgeScopeKind, scopeID string, result ResultScope) bool {
+	if result.Validate() != nil || strings.TrimSpace(scopeID) == "" {
+		return false
+	}
+	switch kind {
+	case KnowledgeScopeTeam:
+		return scopeID == result.TeamID
+	case KnowledgeScopeUser:
+		owner := SlackOwnerKey(ConversationKey(result.ConversationKey), result.Actor)
+		return owner != "" && scopeID == owner
+	case KnowledgeScopeProject:
+		return scopeID == result.Project
+	case KnowledgeScopeConversation:
+		return scopeID == result.ConversationKey
+	default:
+		return false
+	}
+}
+
 // ResultProducer is host-created lineage. Different revisions intentionally
 // identify different result records even when their payload digest is equal.
 type ResultProducer struct {

@@ -703,14 +703,6 @@ func TestOpenExistingUpgradesV7TopicsWithDefaultBundlePath(t *testing.T) {
 		return
 	}
 
-	topic, err := store.GetTopic(ctx, "existing")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if topic.BundlePath != "topics" {
-		t.Fatalf("migrated topic bundle_path = %q, want topics", topic.BundlePath)
-	}
-
 	var defaultPath string
 	if err := store.db.QueryRowContext(ctx,
 		`SELECT dflt_value FROM pragma_table_info('memory_topics') WHERE name = 'bundle_path'`,

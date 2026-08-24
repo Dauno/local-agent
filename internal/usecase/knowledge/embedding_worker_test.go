@@ -362,9 +362,9 @@ func TestEmbeddingWorkerUnverifiableDocumentFailsSourceInvalid(t *testing.T) {
 		Document: &domain.KnowledgeDocument{
 			ID: "kdoc_bad_e", Subject: "bad doc", ScopeKind: domain.KnowledgeScopeGlobal,
 			ContentDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			ContentHandle: "memory_topics:t:revision:1",
+			ContentHandle: "result:doc-1",
 			SourceID:      "t", SourceRev: 1,
-			Provenance: domain.KnowledgeProvenanceLegacyCurated, Status: domain.KnowledgeDocumentActive, Revision: 1,
+			Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive, Revision: 1,
 		},
 	}
 	index := newWorkerFakeVectorIndex([]port.KnowledgeVectorIndexRow{{Kind: domain.KnowledgeRetrievalDocument, ID: "kdoc_bad_e", Revision: 1, SourceDigest: validDigest, Fingerprint: embeddingWorkerFingerprint()}})

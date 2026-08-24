@@ -580,7 +580,7 @@ func TestHandleJobCompletionUsesDurableBindingAndDisablesMemory(t *testing.T) {
 	publisher := &fakePublisher{}
 	service := completionService(t, activationStore, runtime, publisher)
 	exchange := &fakeExchangeWriter{}
-	service.AddMemory(fakeRecall{}, exchange)
+	service.SetExchange(exchange)
 	service.clock = fakeClock{now: now}
 
 	if err := service.HandleJobCompletion(t.Context(), activation); err != nil {
@@ -593,10 +593,10 @@ func TestHandleJobCompletionUsesDurableBindingAndDisablesMemory(t *testing.T) {
 	if message.Role != domain.RoleUser || message.Source != domain.MessageSourceJobCompletion || message.UserID != activation.Actor || message.ExternalTS != activation.ActivationID {
 		t.Fatalf("job completion message = %#v", message)
 	}
-	if runtime.runRequest.ConversationKey != activation.ConversationKey || len(runtime.runRequest.Memory) != 0 {
+	if runtime.runRequest.ConversationKey != activation.ConversationKey {
 		t.Fatalf("runtime binding/context = %#v", runtime.runRequest)
 	}
-	if exchange.prepares != 1 || exchange.memoryEligible {
+	if exchange.prepares != 1 {
 		t.Fatalf("exchange preparation = %#v", exchange)
 	}
 	if activationStore.prepareCalls != 1 || activationStore.completeCalls != 1 || activationStore.activation.State != domain.ActivationCompleted {
@@ -628,7 +628,7 @@ func TestHandleJobCompletionDoesNotLoadAmbientConversation(t *testing.T) {
 	service := newTestService(t, store, runtime, &fakeHistory{}, &fakePublisher{}, nil)
 	service.activationStore = activationStore
 	service.clock = fakeClock{now: now}
-	service.AddMemory(fakeRecall{}, &fakeExchangeWriter{})
+	service.SetExchange(&fakeExchangeWriter{})
 	const resultText = "verified completion result"
 	service.completionReader = &fakeActivationResultReader{result: domain.ExternalAgentJobResult{
 		JobID: activation.JobID, StatusRevision: activation.StatusRevision, Text: resultText,

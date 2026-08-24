@@ -313,14 +313,15 @@ func TestKnowledgeStoreTransitionsAndEvidenceEnqueueProjection(t *testing.T) {
 }
 
 func TestKnowledgeStoreForgetRemovesContentAndBlocksReplay(t *testing.T) {
-	store, _ := newKnowledgeTestStore(t)
+	store, raw := newKnowledgeTestStore(t)
 	claim, err := store.CreateClaim(t.Context(), testKnowledgeStoreClaim(), domain.DefaultKnowledgeLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
+	resultID, digest := insertKnowledgeTestResult(t, raw, "U12345678", "T12345678", "slack:T12345678:dm:D12345678", "local-agent", time.Now().UTC())
 	document, err := store.CreateDocument(t.Context(), domain.KnowledgeDocument{
 		Subject: "api", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "local-agent",
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_1",
+		ContentDigest: digest, ContentHandle: "result:" + resultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}, domain.DefaultKnowledgeLimits())
 	if err != nil {
@@ -569,44 +570,45 @@ func TestKnowledgeStorePreferencesOwnerIsolation(t *testing.T) {
 }
 
 func TestKnowledgeStoreDocumentsAndArchive(t *testing.T) {
-	store, _ := newKnowledgeTestStore(t)
-	legacy := domain.KnowledgeDocument{
-		Subject: "architecture", ScopeKind: domain.KnowledgeScopeGlobal,
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_abc",
-		SourceID: "mem_abc123", SourceRev: 3,
-		Provenance: domain.KnowledgeProvenanceLegacyCurated, Status: domain.KnowledgeDocumentActive,
+	store, raw := newKnowledgeTestStore(t)
+	documentScopes := []domain.KnowledgeScopeRef{{Kind: domain.KnowledgeScopeTeam, ID: "T12345678"}}
+	resultID, digest := insertKnowledgeTestResult(t, raw, "U12345678", "T12345678", "slack:T12345678:dm:D12345678", "project-a", time.Now().UTC())
+	document := domain.KnowledgeDocument{
+		Subject: "architecture", ScopeKind: domain.KnowledgeScopeTeam, ScopeID: "T12345678",
+		ContentDigest: digest, ContentHandle: "result:" + resultID,
+		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}
-	created, err := store.CreateDocument(t.Context(), legacy, domain.DefaultKnowledgeLimits())
+	created, err := store.CreateDocument(t.Context(), document, domain.DefaultKnowledgeLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
-	replayedDocument, err := store.CreateDocument(t.Context(), legacy, domain.DefaultKnowledgeLimits())
+	replayedDocument, err := store.CreateDocument(t.Context(), document, domain.DefaultKnowledgeLimits())
 	if err != nil {
 		t.Fatalf("document replay rejected: %v", err)
 	}
 	if replayedDocument.ID != created.ID {
 		t.Fatalf("document replay created %q; want %q", replayedDocument.ID, created.ID)
 	}
-	conflicting := legacy
+	conflicting := document
 	conflicting.ContentDigest = strings.Repeat("b", 64)
 	if _, err := store.CreateDocument(t.Context(), conflicting, domain.DefaultKnowledgeLimits()); !errors.Is(err, port.ErrKnowledgeCASConflict) {
 		t.Fatalf("conflicting document error = %v, want ErrKnowledgeCASConflict", err)
 	}
-	invalid := legacy
-	invalid.SourceRev = 0
+	invalid := document
+	invalid.SourceID = "source-1"
 	if _, err := store.CreateDocument(t.Context(), invalid, domain.DefaultKnowledgeLimits()); !errors.Is(err, port.ErrKnowledgeValidation) {
-		t.Fatalf("legacy without revision error = %v, want ErrKnowledgeValidation", err)
+		t.Fatalf("curated with source identity error = %v, want ErrKnowledgeValidation", err)
 	}
-	got, err := store.GetDocument(t.Context(), created.ID, knowledgeTestGlobalScopes())
+	got, err := store.GetDocument(t.Context(), created.ID, documentScopes)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Provenance != domain.KnowledgeProvenanceLegacyCurated || got.SourceRev != 3 {
+	if got.Provenance != domain.KnowledgeProvenanceCurated || got.SourceRev != 0 {
 		t.Fatalf("stored document = %#v", got)
 	}
-	listed, err := store.ListDocumentsInScopes(t.Context(), knowledgeTestGlobalScopes(), domain.DefaultKnowledgeLimits())
+	listed, err := store.ListDocumentsInScopes(t.Context(), documentScopes, domain.DefaultKnowledgeLimits())
 	if err != nil || len(listed) != 1 {
-		t.Fatalf("global documents = %v, %v", listed, err)
+		t.Fatalf("team documents = %v, %v", listed, err)
 	}
 	if _, err := store.ArchiveDocument(t.Context(), "kdoc_missing", 1, "slack-human:evt-missing"); !errors.Is(err, port.ErrKnowledgeNotFound) {
 		t.Fatalf("archive missing error = %v, want ErrKnowledgeNotFound", err)
@@ -676,7 +678,7 @@ func TestKnowledgeStoreUnavailableWithoutConfig(t *testing.T) {
 }
 
 func TestKnowledgeStoreReplayRejectsDifferentStatus(t *testing.T) {
-	store, _ := newKnowledgeTestStore(t)
+	store, raw := newKnowledgeTestStore(t)
 	claim, err := store.CreateClaim(t.Context(), testKnowledgeStoreClaim(), domain.DefaultKnowledgeLimits())
 	if err != nil {
 		t.Fatal(err)
@@ -701,9 +703,10 @@ func TestKnowledgeStoreReplayRejectsDifferentStatus(t *testing.T) {
 		t.Fatalf("archived replay of active preference error = %v, want ErrKnowledgeCASConflict", err)
 	}
 
+	documentResultID, documentDigest := insertKnowledgeTestResult(t, raw, "U12345678", "T12345678", "slack:T12345678:dm:D12345678", "local-agent", time.Now().UTC())
 	document := domain.KnowledgeDocument{
 		Subject: "api", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "local-agent",
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_1",
+		ContentDigest: documentDigest, ContentHandle: "result:" + documentResultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}
 	if _, err := store.CreateDocument(t.Context(), document, domain.DefaultKnowledgeLimits()); err != nil {
@@ -875,7 +878,7 @@ func TestKnowledgeStoreArchivePreferenceAdvancesRevision(t *testing.T) {
 }
 
 func TestKnowledgeStoreCreateReplaySurvivesLaterMutations(t *testing.T) {
-	store, _ := newKnowledgeTestStore(t)
+	store, raw := newKnowledgeTestStore(t)
 	claim, err := store.CreateClaim(t.Context(), testKnowledgeStoreClaim(), domain.DefaultKnowledgeLimits())
 	if err != nil {
 		t.Fatal(err)
@@ -917,9 +920,10 @@ func TestKnowledgeStoreCreateReplaySurvivesLaterMutations(t *testing.T) {
 		t.Fatalf("preference replay after archive = %#v; want current archived state", replayedPreference)
 	}
 
+	documentResultID, documentDigest := insertKnowledgeTestResult(t, raw, "U12345678", "T12345678", "slack:T12345678:dm:D12345678", "project-a", time.Now().UTC())
 	document := domain.KnowledgeDocument{
-		Subject: "architecture", ScopeKind: domain.KnowledgeScopeGlobal,
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_abc",
+		Subject: "architecture", ScopeKind: domain.KnowledgeScopeTeam, ScopeID: "T12345678",
+		ContentDigest: documentDigest, ContentHandle: "result:" + documentResultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}
 	createdDocument, err := store.CreateDocument(t.Context(), document, domain.DefaultKnowledgeLimits())
@@ -1202,14 +1206,16 @@ func TestKnowledgeStoreCommandReceiptsAreGlobalAndImmutable(t *testing.T) {
 }
 
 func TestKnowledgeStoreReadsFilterByReadableScopes(t *testing.T) {
-	store, _ := newKnowledgeTestStore(t)
+	store, raw := newKnowledgeTestStore(t)
 	claim, err := store.CreateClaim(t.Context(), testKnowledgeStoreClaim(), domain.DefaultKnowledgeLimits())
 	if err != nil {
 		t.Fatal(err)
 	}
+	documentScopes := []domain.KnowledgeScopeRef{{Kind: domain.KnowledgeScopeTeam, ID: "T12345678"}}
+	documentResultID, documentDigest := insertKnowledgeTestResult(t, raw, "U12345678", "T12345678", "slack:T12345678:dm:D12345678", "project-a", time.Now().UTC())
 	document, err := store.CreateDocument(t.Context(), domain.KnowledgeDocument{
-		Subject: "runbook", ScopeKind: domain.KnowledgeScopeGlobal,
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_1",
+		Subject: "runbook", ScopeKind: domain.KnowledgeScopeTeam, ScopeID: "T12345678",
+		ContentDigest: documentDigest, ContentHandle: "result:" + documentResultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}, domain.DefaultKnowledgeLimits())
 	if err != nil {
@@ -1225,10 +1231,10 @@ func TestKnowledgeStoreReadsFilterByReadableScopes(t *testing.T) {
 		t.Fatalf("claim read under its own scope rejected: %v", err)
 	}
 	if _, err := store.GetDocument(t.Context(), document.ID, knowledgeTestScopes()); !errors.Is(err, port.ErrKnowledgeNotFound) {
-		t.Fatalf("global document read under project scopes error = %v, want ErrKnowledgeNotFound", err)
+		t.Fatalf("team document read under project scopes error = %v, want ErrKnowledgeNotFound", err)
 	}
-	if _, err := store.GetDocument(t.Context(), document.ID, knowledgeTestGlobalScopes()); err != nil {
-		t.Fatalf("global document read under global scopes rejected: %v", err)
+	if _, err := store.GetDocument(t.Context(), document.ID, documentScopes); err != nil {
+		t.Fatalf("team document read under its own scope rejected: %v", err)
 	}
 	claims, err := store.ListClaimsInScopes(t.Context(), knowledgeTestScopes(), "", domain.DefaultKnowledgeLimits())
 	if err != nil || len(claims) != 1 || claims[0].ID != claim.ID {
@@ -1238,17 +1244,18 @@ func TestKnowledgeStoreReadsFilterByReadableScopes(t *testing.T) {
 	if err != nil || len(claims) != 0 {
 		t.Fatalf("claims under global-only scopes = %v, %v", claims, err)
 	}
-	documents, err := store.ListDocumentsInScopes(t.Context(), knowledgeTestGlobalScopes(), domain.DefaultKnowledgeLimits())
+	documents, err := store.ListDocumentsInScopes(t.Context(), documentScopes, domain.DefaultKnowledgeLimits())
 	if err != nil || len(documents) != 1 || documents[0].ID != document.ID {
 		t.Fatalf("documents in scopes = %v, %v", documents, err)
 	}
 }
 
 func TestKnowledgeStoreArchiveDocumentStaleRevisionConflicts(t *testing.T) {
-	store, _ := newKnowledgeTestStore(t)
+	store, raw := newKnowledgeTestStore(t)
+	resultID, digest := insertKnowledgeTestResult(t, raw, "U12345678", "T12345678", "slack:T12345678:dm:D12345678", "project-a", time.Now().UTC())
 	created, err := store.CreateDocument(t.Context(), domain.KnowledgeDocument{
-		Subject: "runbook", ScopeKind: domain.KnowledgeScopeGlobal,
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_1",
+		Subject: "runbook", ScopeKind: domain.KnowledgeScopeTeam, ScopeID: "T12345678",
+		ContentDigest: digest, ContentHandle: "result:" + resultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}, domain.DefaultKnowledgeLimits())
 	if err != nil {
@@ -1263,7 +1270,7 @@ func TestKnowledgeStoreArchiveDocumentStaleRevisionConflicts(t *testing.T) {
 }
 
 func TestKnowledgeStoreListingsApplyStatusFilterToAllScopes(t *testing.T) {
-	store, _ := newKnowledgeTestStore(t)
+	store, raw := newKnowledgeTestStore(t)
 	claim, err := store.CreateClaim(t.Context(), testKnowledgeStoreClaim(), domain.DefaultKnowledgeLimits())
 	if err != nil {
 		t.Fatal(err)
@@ -1290,9 +1297,10 @@ func TestKnowledgeStoreListingsApplyStatusFilterToAllScopes(t *testing.T) {
 	if _, err := store.TransitionClaimStatus(t.Context(), archivedClaim.ID, archivedClaim.Revision, domain.KnowledgeClaimArchived, domain.KnowledgeSourceHuman, "slack-human:evt-4"); err != nil {
 		t.Fatal(err)
 	}
+	documentResultID, documentDigest := insertKnowledgeTestResult(t, raw, "U12345678", "T12345678", "slack:T12345678:dm:D12345678", "project-a", time.Now().UTC())
 	document, err := store.CreateDocument(t.Context(), domain.KnowledgeDocument{
-		Subject: "runbook", ScopeKind: domain.KnowledgeScopeGlobal,
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_1",
+		Subject: "runbook", ScopeKind: domain.KnowledgeScopeTeam, ScopeID: "T12345678",
+		ContentDigest: documentDigest, ContentHandle: "result:" + documentResultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}, domain.DefaultKnowledgeLimits())
 	if err != nil {
@@ -1307,7 +1315,7 @@ func TestKnowledgeStoreListingsApplyStatusFilterToAllScopes(t *testing.T) {
 	// superseded, archived, and archived-document rows would leak.
 	scopes := []domain.KnowledgeScopeRef{
 		{Kind: domain.KnowledgeScopeProject, ID: "local-agent"},
-		{Kind: domain.KnowledgeScopeGlobal},
+		{Kind: domain.KnowledgeScopeTeam, ID: "T12345678"},
 	}
 	claims, err := store.ListClaimsInScopes(t.Context(), scopes, "", domain.DefaultKnowledgeLimits())
 	if err != nil {

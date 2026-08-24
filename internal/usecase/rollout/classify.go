@@ -52,11 +52,10 @@ func ParseSHA256Hex(raw string) (string, bool) {
 	return raw, true
 }
 
-// ParseBackupSourceVersion requires an integer in [1, 41]: a version some
-// migration chain actually produced.
+// ParseBackupSourceVersion requires a schema version this binary can read.
 func ParseBackupSourceVersion(raw string) (int, bool) {
 	value, err := strconv.Atoi(raw)
-	if err != nil || value < 1 || value > TargetVersion {
+	if err != nil || value < 1 || value > MaxSourceVersion {
 		return 0, false
 	}
 	return value, true
@@ -239,7 +238,7 @@ func classifyFormatFailures(state RolloutState) error {
 		{state.BackupPathPresent, state.BackupPathValid, fmt.Sprintf("%s is present but is not an absolute path", KeyBackupPath)},
 		{state.BackupBytesPresent, state.BackupBytesValid, fmt.Sprintf("%s is present but is not a non-negative decimal integer", KeyBackupBytes)},
 		{state.BackupSHA256Present, state.BackupSHA256Valid, fmt.Sprintf("%s is present but is not 64 lowercase hex characters", KeyBackupSHA256)},
-		{state.BackupSourceVersionPresent, state.BackupSourceVersionValid, fmt.Sprintf("%s is present but is not an integer in [1, %d]", KeyBackupSourceVersion, TargetVersion)},
+		{state.BackupSourceVersionPresent, state.BackupSourceVersionValid, fmt.Sprintf("%s is present but is not an integer in [%d, %d]", KeyBackupSourceVersion, MinSourceVersion, MaxSourceVersion)},
 		{state.BackupVerifiedAtPresent, state.BackupVerifiedAtValid, fmt.Sprintf("%s is present but is not a valid RFC 3339 timestamp", KeyBackupVerifiedAt)},
 		{state.BackupNotRequiredAtPresent, state.BackupNotRequiredAtValid, fmt.Sprintf("%s is present but is not a valid RFC 3339 timestamp", KeyBackupNotRequiredAt)},
 		{state.PostflightPresent, state.PostflightValid, fmt.Sprintf("%s is present but its value is neither %q nor %q", KeyPostflightStatus, PostflightPassed, PostflightFailed)},

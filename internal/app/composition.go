@@ -28,7 +28,6 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/logging"
 	"github.com/Dauno/slack-local-agent/internal/adapter/lspclient"
 	"github.com/Dauno/slack-local-agent/internal/adapter/lspdiscovery"
-	"github.com/Dauno/slack-local-agent/internal/adapter/memorycurator"
 	"github.com/Dauno/slack-local-agent/internal/adapter/memoryprojector"
 	metricsadapter "github.com/Dauno/slack-local-agent/internal/adapter/metrics"
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
@@ -57,22 +56,19 @@ import (
 	externalagentusecase "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
 	knowledgeusecase "github.com/Dauno/slack-local-agent/internal/usecase/knowledge"
-	memoryusecase "github.com/Dauno/slack-local-agent/internal/usecase/memory"
 	opencodeusecase "github.com/Dauno/slack-local-agent/internal/usecase/opencode"
 	resultanalysisusecase "github.com/Dauno/slack-local-agent/internal/usecase/resultanalysis"
 	resultsusecase "github.com/Dauno/slack-local-agent/internal/usecase/results"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
-	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
 const defaultAttachmentTimeout = 120 * time.Second
 
 type runtimeSetup struct {
-	cfg    config.Config
-	paths  config.Paths
-	defs   *agentdef.Definitions
-	legacy bool
+	cfg   config.Config
+	paths config.Paths
+	defs  *agentdef.Definitions
 }
 
 type runtimeModels struct {
@@ -81,11 +77,12 @@ type runtimeModels struct {
 	rootIsAgentCLI        bool
 	preparedAgentTools    []preparedAgentTool
 	preparedWorkflows     []preparedWorkflowTool
-	curatorLLM            memorycurator.LLM
 	agentName             string
 	rootDef               *agentdef.AgentDef
-	curatorDef            *agentdef.AgentDef
 	attachmentDef         *agentdef.AgentDef
+	rootProviderID        string
+	rootModelName         string
+	rootReasoningEffort   string
 	attachmentModel       model.LLM
 	transcriber           port.AudioTranscriber
 	apiKey                string
@@ -178,11 +175,10 @@ func (a *Application) loadRuntimeSetup() (runtimeSetup, error) {
 	if err != nil {
 		return runtimeSetup{}, fmt.Errorf("load agent definitions: %w", err)
 	}
-	legacy := defs == nil
-	if legacy {
-		defs = agentdef.NormalizeLegacy(cfg.Agent.Name, cfg.Model.Name, cfg.Model.BaseURL, cfg.Model.APIKeyEnv, cfg.Model.ReasoningEffort, cfg.Model.Headers, cfg.Model.ExtraBody, cfg.Model.ResultHandles.MaxDirectInlineBytes)
+	if defs == nil {
+		return runtimeSetup{}, errors.New("declarative agent definitions are required; check " + filepath.Join(paths.StateDir, "agents") + " and " + filepath.Join(paths.StateDir, "providers"))
 	}
-	return runtimeSetup{cfg: cfg, paths: paths, defs: defs, legacy: legacy}, nil
+	return runtimeSetup{cfg: cfg, paths: paths, defs: defs}, nil
 }
 
 func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSetup) (runtimeModels, error) {
@@ -194,9 +190,6 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		return runtimeModels{}, errors.New("agent definition root_agent is required when declarative agents are configured")
 	}
 	prepared.rootDef = &rootDefCandidate
-	if cur, ok := defs.Agents["memory_curator"]; ok {
-		prepared.curatorDef = &cur
-	}
 	if attachment, ok := defs.Agents["attachment_analyzer"]; ok {
 		prepared.attachmentDef = &attachment
 	}
@@ -231,9 +224,6 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	prepared.appToken = values[bootstrap.SlackAppTokenEnv]
 	prepared.embeddingAPIKey = values[embeddingKeyEnv]
 	prepared.resultAnalysisAPIKey = values[resultAnalysisKeyEnv]
-	if setup.legacy && strings.TrimSpace(values[cfg.Model.APIKeyEnv]) == "" {
-		return runtimeModels{}, fmt.Errorf("%s is not configured. Run: local-agent init", cfg.Model.APIKeyEnv)
-	}
 	if err := requiredSlackTokens(prepared.botToken, prepared.appToken); err != nil {
 		return runtimeModels{}, err
 	}
@@ -275,11 +265,11 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	if err := config.ValidateADKCompaction(cfg, resolved.Type() == agentdef.ProviderTypeOpenAICompatible, resolved.Type() == agentdef.ProviderTypeOpenAICompatible); err != nil {
 		return runtimeModels{}, err
 	}
+	prepared.rootProviderID = resolved.Provider.Name
+	prepared.rootModelName = resolved.Model
+	prepared.rootReasoningEffort = resolved.ReasoningEffort
 	builtRoot, rootSecret, err := newModelForResolved(ctx, resolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
 	if err != nil {
-		if setup.legacy {
-			return runtimeModels{}, fmt.Errorf("build model client: %w", err)
-		}
 		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build root model client: %w", err))
 	}
 	if httpModel, ok := builtRoot.(*openaillm.OpenAICompatibleLLM); ok {
@@ -322,23 +312,6 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		return runtimeModels{}, prepared.redactor.Error(err)
 	}
 
-	if cfg.Memory.Enabled && prepared.curatorDef == nil && !setup.legacy {
-		return runtimeModels{}, errors.New("agent definition memory_curator is required when memory is enabled")
-	}
-	if cfg.Memory.Enabled && prepared.curatorDef != nil {
-		curatorResolved, err := defs.ResolveModel(prepared.curatorDef.Model)
-		if err != nil {
-			return runtimeModels{}, fmt.Errorf("resolve curator model: %w", err)
-		}
-		curatorModel, _, err := newModelForResolved(ctx, curatorResolved, values, cfg, paths, prepared.logger, prepared.redactor.String)
-		if err != nil {
-			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("build curator model client: %w", err))
-		}
-		if err := handshakeSelectedAgentCLI(ctx, curatorResolved, curatorModel, describedCLIProviders); err != nil {
-			return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("validate curator model: %w", err))
-		}
-		prepared.curatorLLM = &memoryCuratorLLM{llm: curatorModel, generateContentConfig: curatorResolved.GenerateContentConfig, logger: prepared.logger, sanitize: prepared.redactor.String}
-	}
 	if prepared.attachmentDef != nil {
 		attachmentResolved, err := defs.ResolveModel(prepared.attachmentDef.Model)
 		if err != nil {
@@ -463,11 +436,6 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 			return nil, models.redactor.Error(fmt.Errorf("%w. Back up local state, then run: local-agent init --reset-state", err))
 		}
 		return nil, models.redactor.Error(fmt.Errorf("validate durable DM identity mode: %w", err))
-	}
-	if cfg.Memory.Enabled {
-		if err := store.CleanupOutbox(ctx, time.Now().UTC().AddDate(0, 0, -cfg.Memory.RetentionDays)); err != nil {
-			return nil, models.redactor.Error(err)
-		}
 	}
 	if retention, ok := models.artifactStore.(interface {
 		Cleanup(context.Context, time.Time) (int, error)
@@ -1007,9 +975,8 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	// model.
 	coordinator := botusecase.NewLimiter(cfg.Runtime.MaxConcurrentModelCalls)
 	// The OKF projector is a single shared, serialized instance used by the
-	// legacy memory runner (when memory.enabled) and the knowledge projection
-	// worker, so concurrent promotions never corrupt staging, backup, or the
-	// live bundle and each worker preserves the other's file ownership.
+	// knowledge projection worker, so concurrent promotions never corrupt
+	// staging, backup, or the live bundle.
 	okfProjector := memoryprojector.New()
 	knowledgeStore := adaptersqlite.NewKnowledgeStore(infra.store)
 	knowledgeSchedules, knowledgeWakes, err := newKnowledgeWakeSchedules(cfg)
@@ -1022,23 +989,10 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize knowledge service: %w", err))
 	}
-	// The legacy topic backfill is mandatory when the knowledge gate is on:
-	// a failure fails startup closed instead of leaving the catalog
-	// silently incomplete.
-	if err := runLegacyKnowledgeImport(ctx, cfg.Orchestration.Knowledge.Enabled, knowledgeStore, models.logger); err != nil {
-		return nil, models.redactor.Error(err)
-	}
-	// The knowledge projection worker is independent of memory.enabled and
-	// starts only when the knowledge gate is on. While disabled it never
+	// The knowledge projection worker starts only when the knowledge gate is on. While disabled it never
 	// claims outbox rows or writes files; pending triggers survive and drain
 	// immediately when the gate is re-enabled.
 	if cfg.Orchestration.Knowledge.Enabled {
-		// Deterministic legacy topic import: exactly one knowledge document
-		// per existing legacy topic, idempotent and replay-safe, with the
-		// durable projection trigger enqueued in the same transaction. It
-		// runs before the worker so imported rows drain in the first tick.
-		// A failure fails startup closed: the catalog must never be
-		// silently incomplete.
 		projectionWorker, workerErr := knowledgeusecase.NewProjectionWorker(knowledgeusecase.ProjectionWorkerConfig{
 			Interval:      time.Duration(cfg.Orchestration.Knowledge.ProjectionIntervalSeconds) * time.Second,
 			MaxRetries:    cfg.Orchestration.Knowledge.ProjectionMaxRetries,
@@ -1094,8 +1048,8 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	knowledgeBindings = bindingsResolver
 	// The consuming root profile must declare a positive
 	// result_handles.max_direct_inline_bytes to opt in to direct-inline
-	// completion frames. The resolved root profile (declarative or legacy)
-	// is authoritative; absence is zero and never transformed into a default.
+	// completion frames. The resolved declarative root profile is authoritative;
+	// absence is zero and never transformed into a default.
 	service, err := botusecase.New(botusecase.Config{
 		AccessPolicy:   domain.AccessPolicy{AllowAllUsers: cfg.Slack.AllowAllUsers, AllowedUserIDs: cfg.Slack.AllowedUserIDs, AllowedTeamIDs: cfg.Slack.AllowedTeamIDs, AllowedChannelIDs: cfg.Slack.AllowedChannelIDs},
 		ContextLimits:  domain.ContextLimits{MaxMessages: cfg.Context.MaxMessages, MaxChars: cfg.Context.MaxChars},
@@ -1121,11 +1075,6 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		return nil, models.redactor.Error(fmt.Errorf("reconcile standard incremental delivery: %w", err))
 	}
 	models.logger.Info("ADK durable runtime enabled", "session_service", "sqlite")
-	if cfg.Memory.Enabled {
-		if err := a.startMemoryCurator(ctx, setup, models, infra, service, okfProjector); err != nil {
-			return nil, err
-		}
-	}
 	if externalJobService != nil {
 		activationWorker, err = newExternalAgentActivationWorker(activationStore, service, models.logger, models.metrics, externalSchedules)
 		if err != nil {
@@ -1145,56 +1094,6 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		go activationWorker.Run(ctx)
 	}
 	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, knowledgeRetriever: knowledgeRetriever, lexicalWorker: knowledgeLexicalWorker, embeddingWorker: knowledgeEmbeddingWorker, resultAnalysisWorker: resultAnalysisWorker, notificationDone: notificationDone}, nil
-}
-
-func (a *Application) startMemoryCurator(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, service *botusecase.Service, projector port.OKFProjector, supplied ...*workpoll.Scheduler) error {
-	cfg, paths := setup.cfg, setup.paths
-	memorySvc, memErr := memoryusecase.New(memoryusecase.Config{Recall: domain.MemoryRecallConfig{Enabled: true, MaxTopics: cfg.Memory.MaxTopicsRecall, MaxChars: cfg.Memory.MaxCharsRecall, Timeout: time.Duration(cfg.Memory.RecallTimeoutSeconds) * time.Second}, Limits: domain.MemoryLimits{MaxTopics: cfg.Memory.MaxTopics, MaxLinks: cfg.Memory.MaxLinks, MaxTopicChars: cfg.Memory.MaxTopicChars}, MaxPatchOps: cfg.Memory.MaxPatchOps}, memoryusecase.Dependencies{Store: infra.store, Logger: models.logger, SanitizeContent: models.redactor.String})
-	if memErr != nil {
-		return models.redactor.Error(fmt.Errorf("initialize memory service: %w", memErr))
-	}
-	curTimeout := time.Duration(cfg.Memory.CuratorTimeoutSeconds) * time.Second
-	curatorInstruction := ""
-	if models.curatorDef != nil {
-		curatorInstruction = models.curatorDef.Instruction
-		if models.curatorDef.TimeoutSeconds > 0 {
-			curTimeout = time.Duration(models.curatorDef.TimeoutSeconds) * time.Second
-		}
-	}
-	if models.curatorLLM == nil {
-		models.curatorLLM = &memoryCuratorLLM{llm: models.rootModel, logger: models.logger, sanitize: models.redactor.String}
-	}
-	curator, curErr := memorycurator.New(models.curatorLLM, memorycurator.Config{Timeout: curTimeout, ModelCalls: infra.modelCalls, Instruction: curatorInstruction})
-	if curErr != nil {
-		return models.redactor.Error(fmt.Errorf("initialize memory curator: %w", curErr))
-	}
-	var memoryScheduler *workpoll.Scheduler
-	if len(supplied) > 0 {
-		memoryScheduler = supplied[0]
-	} else {
-		var schedulerErr error
-		memoryScheduler, schedulerErr = workpoll.New(time.Duration(cfg.Memory.WorkerIntervalSeconds)*time.Second, workpoll.Options{})
-		if schedulerErr != nil {
-			return models.redactor.Error(fmt.Errorf("initialize memory worker scheduler: %w", schedulerErr))
-		}
-	}
-	runner, runnerErr := memoryusecase.NewRunner(memoryusecase.RunnerConfig{
-		Interval:      time.Duration(cfg.Memory.WorkerIntervalSeconds) * time.Second,
-		MaxRetries:    cfg.Memory.CuratorMaxRetries,
-		RetentionDays: cfg.Memory.RetentionDays,
-		MemoryDir:     paths.MemoryDir,
-	}, memoryusecase.RunnerDependencies{
-		Store: infra.store, ExchangeFinder: infra.history, Curator: curator, Memory: memorySvc,
-		Projector: projector, ProjectionReader: infra.store,
-		Logger: models.logger, Sanitize: models.redactor.String, Scheduler: memoryScheduler,
-	})
-	if runnerErr != nil {
-		return models.redactor.Error(fmt.Errorf("initialize memory runner: %w", runnerErr))
-	}
-	go runner.Run(ctx)
-	service.AddMemory(memorySvc, infra.store, memoryScheduler.Wake)
-	models.logger.Info("memory service enabled", "directory", paths.MemoryDir, "max_topics_recall", cfg.Memory.MaxTopicsRecall, "max_chars_recall", cfg.Memory.MaxCharsRecall)
-	return nil
 }
 
 func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, composition *runtimeComposition) error {
@@ -1244,19 +1143,9 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 	if err := listener.ValidateTemplateCatalog(catalog); err != nil {
 		return models.redactor.Error(fmt.Errorf("validate Slack interactive dispatcher: %w", err))
 	}
-	modelName := cfg.Model.Name
-	if models.rootDef != nil {
-		resolved, _ := setup.defs.ResolveModel(models.rootDef.Model)
-		if resolved != nil {
-			modelName = resolved.Model
-		}
-	}
+	modelName := models.rootModelName
 	models.logger.Info("local-agent starting", "agent", models.agentName, "model", modelName, "model_base_url", models.modelBaseURL, "database", setup.paths.DatabaseFile, "allowed_users", len(cfg.Slack.AllowedUserIDs), "allow_all_users", cfg.Slack.AllowAllUsers, "max_concurrent_model_calls", cfg.Runtime.MaxConcurrentModelCalls)
-	if setup.legacy {
-		models.logger.Info("using legacy config.Model; migrate to .local-agent/providers/ and .local-agent/agents/ for declarative model configuration")
-	} else {
-		models.logger.Info("declarative agent definitions loaded", "providers", len(setup.defs.Providers), "agents", len(setup.defs.Agents))
-	}
+	models.logger.Info("declarative agent definitions loaded", "providers", len(setup.defs.Providers), "agents", len(setup.defs.Agents))
 	listener = listener.WithResponsePublisher(infra.publisher)
 	listener.SetInteractiveHandler(func(ictx context.Context, action domain.ConfirmationInteractiveAction) error {
 		return composition.service.HandleConfirmationInteractive(ictx, action)

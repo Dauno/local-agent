@@ -40,16 +40,8 @@ func TestFIND099AnalysisReasoningEffortRejectsUnknownValue(t *testing.T) {
 	cfg.Orchestration.ResultAnalysis.Model.ReasoningEffort = "banana"
 	errAnalysis := config.Validate(cfg)
 
-	cfg2 := config.Default()
-	cfg2.Model.ReasoningEffort = "banana"
-	errMain := config.Validate(cfg2)
-
 	t.Logf("analysis.model.reasoning_effort='banana' -> %v", errAnalysis)
-	t.Logf("model.reasoning_effort='banana'          -> %v", errMain)
 	if errAnalysis == nil {
 		t.Fatal("FIND-099: analysis profile did not reject an unknown reasoning_effort value")
-	}
-	if errMain == nil {
-		t.Fatal("fixture assumption broken: the main model profile must still reject an unknown reasoning_effort value")
 	}
 }

@@ -308,7 +308,7 @@ func (s *ExternalAgentJobStore) PrepareActivationResponseWithExchange(
 		return port.PreparedAssistantExchange{}, err
 	}
 	source = append(source, message)
-	payload, err := json.Marshal(sourceMessagesWrapper{MemoryEligible: false, Messages: marshalMessages(source)})
+	payload, err := json.Marshal(sourceMessagesWrapper{Messages: marshalMessages(source)})
 	if err != nil {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("encode external-agent assistant exchange source: %w", err)
 	}
@@ -356,7 +356,7 @@ func activationExchangeIDs(activationID string) (string, string) {
 
 func activationExchangeMemoryIneligible(sourceJSON string) bool {
 	var wrapper sourceMessagesWrapper
-	return json.Unmarshal([]byte(sourceJSON), &wrapper) == nil && !wrapper.MemoryEligible
+	return json.Unmarshal([]byte(sourceJSON), &wrapper) == nil
 }
 
 func sameActivationIdentity(left, right *domain.ExternalAgentJobActivation) bool {
@@ -686,7 +686,7 @@ func (s *ExternalAgentJobStore) PrepareActivationFallbackExchange(
 		return port.PreparedAssistantExchange{}, err
 	}
 	source = append(source, message)
-	payload, err := json.Marshal(sourceMessagesWrapper{MemoryEligible: false, Messages: marshalMessages(source)})
+	payload, err := json.Marshal(sourceMessagesWrapper{Messages: marshalMessages(source)})
 	if err != nil {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("encode external-agent assistant fallback source: %w", err)
 	}

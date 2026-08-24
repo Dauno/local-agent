@@ -211,6 +211,11 @@ func TestRunningJobCancellationIsIdempotentBeforeSideEffects(t *testing.T) {
 	}
 }
 
+// TestJobTotalTimeoutIsTerminalAndNeverRequeued exercises the total-timeout
+// path deterministically: it advances a fake clock past the job's TimeoutAt
+// and calls the unexported execute() directly instead of running the real
+// background scheduler, so the assertion never depends on goroutine
+// scheduling latency winning a race against a wall-clock poll deadline.
 func TestJobTotalTimeoutIsTerminalAndNeverRequeued(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {
@@ -219,11 +224,8 @@ func TestJobTotalTimeoutIsTerminalAndNeverRequeued(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
 	runtime := &fakeJobRuntime{block: make(chan struct{})}
-	// LeaseTTL must clearly outlast waitForJob's poll deadline (3s) plus
-	// normal stall from parallel packages in the suite, so a slow CI run
-	// never lets the lease expire and race the total-timeout path under
-	// test with a requeue.
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: 10 * time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	clock := &fakeClock{now: time.Now().UTC()}
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: 10 * time.Second, PollInterval: time.Hour, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime, Clock: clock})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -231,12 +233,23 @@ func TestJobTotalTimeoutIsTerminalAndNeverRequeued(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	go service.Run(ctx)
-	finished := waitForJob(t, jobStore, job.ID, domain.JobFailed)
-	if finished.ErrorCode != "acp_job_timeout" {
+	claimed, err := jobStore.ClaimNext(t.Context(), clock.Now(), "worker-test", time.Minute)
+	if err != nil || claimed == nil || claimed.ID != job.ID {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	clock.advance(31 * time.Millisecond)
+	service.execute(t.Context(), claimed)
+
+	finished, err := jobStore.GetJob(t.Context(), job.ID)
+	if err != nil || finished == nil {
+		t.Fatalf("finished job = %#v, err = %v", finished, err)
+	}
+	if finished.Status != domain.JobFailed || finished.ErrorCode != "acp_job_timeout" {
 		t.Fatalf("finished = %#v", finished)
+	}
+	requeued, err := jobStore.ClaimNext(t.Context(), clock.Now(), "worker-other", time.Minute)
+	if err != nil || requeued != nil {
+		t.Fatalf("requeued = %#v, err = %v; want no further claim after terminal timeout", requeued, err)
 	}
 }
 
@@ -268,26 +281,49 @@ func TestForegroundWaitDoesNotBlockOnExpiredJobCancellation(t *testing.T) {
 		started:               make(chan struct{}),
 		release:               make(chan struct{}),
 		finished:              make(chan struct{}),
+		polled:                make(chan struct{}),
 	}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+	clock := &fakeClock{now: time.Now().UTC()}
+	timeout := time.Hour
+	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: 24 * time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, Clock: clock})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	started := time.Now()
-	_, err = service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, 20*time.Millisecond))
-	if err == nil || time.Since(started) > time.Second || !strings.Contains(err.Error(), "acp_job_timeout") {
-		t.Fatalf("error = %v, elapsed = %s", err, time.Since(started))
+	waitErr := make(chan error, 1)
+	go func() {
+		_, err := service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, timeout))
+		waitErr <- err
+	}()
+
+	// Wait for the foreground wait loop to observe the job it just created,
+	// then push the fake clock past its deadline. This drives the timeout
+	// path deterministically instead of racing a real-time sleep against a
+	// real poll interval.
+	select {
+	case <-jobStore.polled:
+	case <-time.After(2 * time.Second):
+		t.Fatal("foreground wait loop did not poll the new job")
+	}
+	clock.advance(timeout + time.Second)
+
+	select {
+	case err := <-waitErr:
+		if err == nil || !strings.Contains(err.Error(), "acp_job_timeout") {
+			t.Fatalf("error = %v, want acp_job_timeout", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("foreground wait did not return after the fake clock passed the deadline")
 	}
 	select {
 	case <-jobStore.started:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("foreground timeout did not attempt durable cancellation")
 	}
 	close(jobStore.release)
 	select {
 	case <-jobStore.finished:
-	case <-time.After(time.Second):
+	case <-time.After(2 * time.Second):
 		t.Fatal("background cancellation did not finish")
 	}
 }
@@ -389,10 +425,15 @@ func TestNonRetryableACPErrorPreservesCode(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	go service.Run(ctx)
-	finished := waitForJob(t, jobStore, job.ID, domain.JobFailed)
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	service.execute(t.Context(), claimed)
+	finished, err := jobStore.GetJob(t.Context(), job.ID)
+	if err != nil || finished == nil || finished.Status != domain.JobFailed {
+		t.Fatalf("finished = %#v, err = %v; want failed", finished, err)
+	}
 	if runtime.calls != 1 || finished.ErrorCode != string(domain.ACPErrorConfigDrift) {
 		t.Fatalf("calls = %d, error code = %q", runtime.calls, finished.ErrorCode)
 	}
@@ -991,7 +1032,7 @@ func TestStartAndWaitReturnsVerifiedForegroundResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := testRequestWithTimeout(domain.JobForeground, time.Second)
+	request := testRequestWithTimeout(domain.JobForeground, time.Minute)
 	created, err := service.Start(t.Context(), request)
 	if err != nil || created == nil {
 		t.Fatalf("start = %#v, err = %v", created, err)
@@ -1105,10 +1146,13 @@ func TestStartAndWaitRejectsIncompleteForegroundIdentity(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			go service.Run(ctx)
-			if _, err := service.StartAndWait(t.Context(), testRequestWithTimeout(domain.JobForeground, 5*time.Second)); err == nil || !strings.Contains(err.Error(), testCase.wantCode) {
+			request := testRequestWithTimeout(domain.JobForeground, 5*time.Second)
+			job, err := service.Start(t.Context(), request)
+			if err != nil {
+				t.Fatal(err)
+			}
+			completeJobWithResult(t, jobStore, job, testCase.result)
+			if _, err := service.StartAndWait(t.Context(), request); err == nil || !strings.Contains(err.Error(), testCase.wantCode) {
 				t.Fatalf("error = %v, want code %s", err, testCase.wantCode)
 			}
 		})
@@ -1521,9 +1565,11 @@ type recordingJobStore struct {
 
 type blockingCancellationStore struct {
 	*sqlite.ExternalAgentJobStore
-	started  chan struct{}
-	release  chan struct{}
-	finished chan struct{}
+	started    chan struct{}
+	release    chan struct{}
+	finished   chan struct{}
+	polled     chan struct{}
+	pollSignal sync.Once
 }
 
 func (s *blockingCancellationStore) RequestCancellation(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error) {
@@ -1532,6 +1578,17 @@ func (s *blockingCancellationStore) RequestCancellation(ctx context.Context, job
 	result, err := s.ExternalAgentJobStore.RequestCancellation(ctx, jobID, actor)
 	close(s.finished)
 	return result, err
+}
+
+// GetJob signals polled the first time StartAndWait's wait loop observes the
+// job it just created. A test can wait on that signal instead of a real-time
+// sleep before advancing a fake clock past the job's deadline.
+func (s *blockingCancellationStore) GetJob(ctx context.Context, jobID string) (*domain.ExternalAgentJob, error) {
+	job, err := s.ExternalAgentJobStore.GetJob(ctx, jobID)
+	if s.polled != nil {
+		s.pollSignal.Do(func() { close(s.polled) })
+	}
+	return job, err
 }
 
 func (s *recordingJobStore) RenewLease(ctx context.Context, jobID, owner string, attempt int, now time.Time, ttl time.Duration) error {

@@ -299,6 +299,6 @@ func writeKnowledgeIndex(dir string) error {
 		}
 		b.WriteString(fmt.Sprintf("- [%s](%s)\n", strings.TrimSuffix(name, ".md"), name))
 	}
-	b.WriteString("\nSee the [root Change Log](../log.md) for topic revision history.\n")
+	b.WriteString("\nSee the [root index](../index.md) for the bundle entry point.\n")
 	return atomicWrite(filepath.Join(dir, "index.md"), b.String())
 }

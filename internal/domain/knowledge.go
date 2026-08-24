@@ -272,7 +272,7 @@ func (c KnowledgeClaim) ValidateWithLimits(limits KnowledgeLimits) error {
 	if utf8.RuneCountInString(c.Subject) > limits.MaxSubjectRunes {
 		return fmt.Errorf("%w: subject exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxSubjectRunes)
 	}
-	if err := ValidateMemoryReferenceText(c.Subject); err != nil {
+	if err := ValidateKnowledgeText(c.Subject); err != nil {
 		return fmt.Errorf("%w: subject: %v", ErrKnowledgeInvalidValue, err)
 	}
 	if !validKnowledgePredicate(c.Predicate) {
@@ -281,13 +281,13 @@ func (c KnowledgeClaim) ValidateWithLimits(limits KnowledgeLimits) error {
 	if err := c.Value.validate(c.Predicate, limits); err != nil {
 		return err
 	}
-	if err := ValidateMemoryReferenceText(c.ScopeID); err != nil {
+	if err := ValidateKnowledgeText(c.ScopeID); err != nil {
 		return fmt.Errorf("%w: scope identity: %v", ErrKnowledgeInvalidScope, err)
 	}
 	if strings.TrimSpace(c.SourceRef) == "" {
 		return fmt.Errorf("%w: source reference must not be empty", ErrKnowledgeInvalidSource)
 	}
-	if err := ValidateMemoryReferenceText(c.SourceRef); err != nil {
+	if err := ValidateKnowledgeText(c.SourceRef); err != nil {
 		return fmt.Errorf("%w: source reference: %v", ErrKnowledgeInvalidSource, err)
 	}
 	if utf8.RuneCountInString(c.SourceRef) > limits.MaxSourceRefRunes {
@@ -480,7 +480,7 @@ func (v KnowledgeValue) validate(predicate KnowledgePredicate, limits KnowledgeL
 		if utf8.RuneCountInString(v.Text) > limits.MaxValueRunes {
 			return fmt.Errorf("%w: value exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxValueRunes)
 		}
-		if err := ValidateMemoryReferenceText(v.Text); err != nil {
+		if err := ValidateKnowledgeText(v.Text); err != nil {
 			return fmt.Errorf("%w: value: %v", ErrKnowledgeInvalidValue, err)
 		}
 	case KnowledgeValueNumber:
@@ -499,7 +499,7 @@ func validateKnowledgeReference(reference string, limits KnowledgeLimits) error 
 	if utf8.RuneCountInString(reference) > limits.MaxReferenceRunes {
 		return fmt.Errorf("%w: reference exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxReferenceRunes)
 	}
-	if err := ValidateMemoryReferenceText(reference); err != nil {
+	if err := ValidateKnowledgeText(reference); err != nil {
 		return fmt.Errorf("%w: reference: %v", ErrKnowledgeInvalidValue, err)
 	}
 	return nil
@@ -531,7 +531,7 @@ func ValidateKnowledgeSourceRef(ref string) error {
 	if strings.TrimSpace(ref) == "" {
 		return fmt.Errorf("%w: source reference must not be empty", ErrKnowledgeInvalidSource)
 	}
-	if err := ValidateMemoryReferenceText(ref); err != nil {
+	if err := ValidateKnowledgeText(ref); err != nil {
 		return fmt.Errorf("%w: source reference: %v", ErrKnowledgeInvalidSource, err)
 	}
 	if utf8.RuneCountInString(ref) > DefaultMaxKnowledgeSourceRefRunes {
@@ -771,7 +771,7 @@ func (t KnowledgeTombstone) ValidateWithLimits(limits KnowledgeLimits) error {
 	if err := ValidateKnowledgeScope(t.ScopeKind, t.ScopeID, limits); err != nil {
 		return err
 	}
-	if err := ValidateMemoryReferenceText(t.ScopeID); err != nil {
+	if err := ValidateKnowledgeText(t.ScopeID); err != nil {
 		return fmt.Errorf("%w: scope identity: %v", ErrKnowledgeInvalidScope, err)
 	}
 	if t.ForgottenAt.IsZero() {
@@ -780,7 +780,7 @@ func (t KnowledgeTombstone) ValidateWithLimits(limits KnowledgeLimits) error {
 	if strings.TrimSpace(t.SourceRef) == "" {
 		return fmt.Errorf("%w: tombstone requires a source reference", ErrKnowledgeInvalidSource)
 	}
-	if err := ValidateMemoryReferenceText(t.SourceRef); err != nil {
+	if err := ValidateKnowledgeText(t.SourceRef); err != nil {
 		return fmt.Errorf("%w: source reference: %v", ErrKnowledgeInvalidSource, err)
 	}
 	if utf8.RuneCountInString(t.SourceRef) > limits.MaxSourceRefRunes {
@@ -832,7 +832,7 @@ func (p KnowledgePreference) ValidateWithLimits(limits KnowledgeLimits) error {
 	if strings.TrimSpace(p.OwnerKey) == "" {
 		return fmt.Errorf("%w: preference owner must not be empty", ErrKnowledgeInvalidValue)
 	}
-	if err := ValidateMemoryReferenceText(p.OwnerKey); err != nil {
+	if err := ValidateKnowledgeText(p.OwnerKey); err != nil {
 		return fmt.Errorf("%w: owner: %v", ErrKnowledgeInvalidValue, err)
 	}
 	if strings.TrimSpace(p.Key) == "" {
@@ -841,7 +841,7 @@ func (p KnowledgePreference) ValidateWithLimits(limits KnowledgeLimits) error {
 	if utf8.RuneCountInString(p.Key) > limits.MaxPreferenceKeyRunes {
 		return fmt.Errorf("%w: preference key exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxPreferenceKeyRunes)
 	}
-	if err := ValidateMemoryReferenceText(p.Key); err != nil {
+	if err := ValidateKnowledgeText(p.Key); err != nil {
 		return fmt.Errorf("%w: key: %v", ErrKnowledgeInvalidValue, err)
 	}
 	if p.Value.Kind == KnowledgeValueReference {
@@ -856,7 +856,7 @@ func (p KnowledgePreference) ValidateWithLimits(limits KnowledgeLimits) error {
 	if strings.TrimSpace(p.SourceRef) == "" {
 		return fmt.Errorf("%w: preference requires a source reference", ErrKnowledgeInvalidSource)
 	}
-	if err := ValidateMemoryReferenceText(p.SourceRef); err != nil {
+	if err := ValidateKnowledgeText(p.SourceRef); err != nil {
 		return fmt.Errorf("%w: source reference: %v", ErrKnowledgeInvalidSource, err)
 	}
 	if utf8.RuneCountInString(p.SourceRef) > limits.MaxSourceRefRunes {
@@ -893,12 +893,11 @@ func validKnowledgeDocumentStatus(status KnowledgeDocumentStatus) bool {
 type KnowledgeProvenance string
 
 const (
-	KnowledgeProvenanceLegacyCurated KnowledgeProvenance = "legacy_curated_document"
-	KnowledgeProvenanceCurated       KnowledgeProvenance = "curated"
+	KnowledgeProvenanceCurated KnowledgeProvenance = "curated"
 )
 
 func validKnowledgeProvenance(provenance KnowledgeProvenance) bool {
-	return provenance == KnowledgeProvenanceLegacyCurated || provenance == KnowledgeProvenanceCurated
+	return provenance == KnowledgeProvenanceCurated
 }
 
 type KnowledgeDocumentID string
@@ -951,29 +950,15 @@ func (d KnowledgeDocument) ValidateWithLimits(limits KnowledgeLimits) error {
 	if utf8.RuneCountInString(d.ContentHandle) > limits.MaxSourceRefRunes {
 		return fmt.Errorf("%w: content handle exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxSourceRefRunes)
 	}
-	if err := ValidateMemoryReferenceText(d.ContentHandle); err != nil {
+	if err := ValidateKnowledgeText(d.ContentHandle); err != nil {
 		return fmt.Errorf("%w: content handle: %v", ErrKnowledgeInvalidValue, err)
 	}
 	if !validKnowledgeProvenance(d.Provenance) {
 		return fmt.Errorf("%w: unknown provenance %q", ErrKnowledgeInvalidValue, d.Provenance)
 	}
-	switch d.Provenance {
-	case KnowledgeProvenanceLegacyCurated:
-		if strings.TrimSpace(d.SourceID) == "" {
-			return fmt.Errorf("%w: legacy documents require their original source identity", ErrKnowledgeInvalidValue)
-		}
-		if utf8.RuneCountInString(d.SourceID) > limits.MaxSourceRefRunes {
-			return fmt.Errorf("%w: source identity exceeds maximum of %d characters", ErrKnowledgeLimitExceeded, limits.MaxSourceRefRunes)
-		}
-		if err := ValidateMemoryReferenceText(d.SourceID); err != nil {
-			return fmt.Errorf("%w: source identity: %v", ErrKnowledgeInvalidValue, err)
-		}
-		if d.SourceRev < 1 {
-			return fmt.Errorf("%w: legacy documents require their original revision", ErrKnowledgeInvalidValue)
-		}
-	case KnowledgeProvenanceCurated:
+	if d.Provenance == KnowledgeProvenanceCurated {
 		if d.SourceID != "" || d.SourceRev != 0 {
-			return fmt.Errorf("%w: curated documents must not carry legacy source identity", ErrKnowledgeInvalidValue)
+			return fmt.Errorf("%w: curated documents must not carry source identity", ErrKnowledgeInvalidValue)
 		}
 	}
 	if !validKnowledgeDocumentStatus(d.Status) {
@@ -1306,86 +1291,6 @@ func ValidKnowledgeClaimID(id KnowledgeClaimID) bool {
 // document identifier shape.
 func ValidKnowledgeDocumentID(id KnowledgeDocumentID) bool {
 	return ValidKnowledgeOpaqueID(string(id), "kdoc_")
-}
-
-// KnowledgeLegacyImportResult reports one deterministic legacy import run.
-// Imported counts newly created documents; Archived counts existing active
-// documents mirrored to archived because their legacy topic was archived;
-// Skipped counts legacy topics whose identity already exists with matching
-// state (previous import, archived document) or whose subject was forgotten
-// (tombstone). Failed imports return an error and create nothing.
-type KnowledgeLegacyImportResult struct {
-	Imported int
-	Archived int
-	Skipped  int
-}
-
-// LegacyTopicDocumentID derives the deterministic knowledge document
-// identifier for an imported legacy topic. The identity is a pure function
-// of the opaque topic ID, so replays and concurrent runs converge on the
-// same document row.
-func LegacyTopicDocumentID(topicID TopicID) KnowledgeDocumentID {
-	sum := sha256.Sum256([]byte("legacy_topic\x00" + string(topicID)))
-	return KnowledgeDocumentID("kdoc_" + hex.EncodeToString(sum[:12]))
-}
-
-// LegacyTopicDocumentSubjectSuffix derives the opaque disambiguation suffix
-// for a legacy topic subject. It is a pure function of the opaque topic ID
-// and never leaks owner or content identity.
-func LegacyTopicDocumentSubjectSuffix(topicID TopicID) string {
-	sum := sha256.Sum256([]byte("legacy_subject\x00" + string(topicID)))
-	return "#" + hex.EncodeToString(sum[:4])
-}
-
-// LegacyTopicRevisionHandle builds the immutable revision reference for an
-// imported legacy topic document. The handle points at the append-only
-// memory_topic_revisions row the content digest was computed from, never at
-// the mutable topic row, so the referenced bytes always match the digest.
-func LegacyTopicRevisionHandle(topicID TopicID, revisionID int64) string {
-	return fmt.Sprintf("memory_topics:%s:revision:%d", topicID, revisionID)
-}
-
-// KnowledgeDocumentFromLegacyTopic maps one legacy topic to its imported
-// knowledge document. People topics bind the user scope to their canonical
-// owner key and fail closed without a valid owner; every other topic
-// imports at global scope, preserving existing visibility without
-// amplifying it. Archived legacy topics import as archived documents, so
-// legacy visibility is never widened. The subject is a pure function of the
-// topic (readable title plus an opaque topic-derived suffix), so subject
-// assignment never depends on import history and duplicate valid titles can
-// always be imported. The content handle is resolved by the store against
-// the immutable revision row. The mapping is deterministic: replaying the
-// same topic produces the same document. The caller validates the result
-// against its limits; scope construction failures return
-// ErrKnowledgeInvalidScope.
-func KnowledgeDocumentFromLegacyTopic(topic Topic) (KnowledgeDocument, error) {
-	scopeKind := KnowledgeScopeGlobal
-	scopeID := ""
-	if topic.BundlePath == "people" {
-		if !ValidSlackOwnerKey(topic.OwnerKey) {
-			return KnowledgeDocument{}, fmt.Errorf("%w: person topic %q has no valid owner", ErrKnowledgeInvalidScope, topic.ID)
-		}
-		scopeKind = KnowledgeScopeUser
-		scopeID = topic.OwnerKey
-	}
-	status := KnowledgeDocumentActive
-	if topic.Status == TopicStatusArchived {
-		status = KnowledgeDocumentArchived
-	} else if topic.Status != TopicStatusActive && topic.Status != "" {
-		return KnowledgeDocument{}, fmt.Errorf("%w: legacy topic %q has unknown status %q", ErrKnowledgeInvalidValue, topic.ID, topic.Status)
-	}
-	sum := sha256.Sum256([]byte(topic.Content))
-	return KnowledgeDocument{
-		ID:            LegacyTopicDocumentID(topic.ID),
-		Subject:       topic.Title + " " + LegacyTopicDocumentSubjectSuffix(topic.ID),
-		ScopeKind:     scopeKind,
-		ScopeID:       scopeID,
-		ContentDigest: hex.EncodeToString(sum[:]),
-		SourceID:      string(topic.ID),
-		SourceRev:     topic.CurrentRev,
-		Provenance:    KnowledgeProvenanceLegacyCurated,
-		Status:        status,
-	}, nil
 }
 
 func (l KnowledgeLimits) withDefaults() KnowledgeLimits {

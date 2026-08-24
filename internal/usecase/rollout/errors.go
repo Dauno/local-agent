@@ -11,7 +11,7 @@ var (
 
 	// ErrSchemaUpgradeRequired reports a schema in [33, 40] that db upgrade
 	// must process before ordinary commands may open the file.
-	ErrSchemaUpgradeRequired = errors.New("database schema is behind this binary's v41")
+	ErrSchemaUpgradeRequired = errors.New("database schema is behind this binary's v42")
 
 	// ErrBackupPrimitiveUnsupported reports platforms without the backup
 	// primitive. Distinct from ErrMutationLockUnsupported so a caller can

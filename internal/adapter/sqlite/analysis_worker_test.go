@@ -63,7 +63,7 @@ func setupWorkerFixture(t *testing.T, content string) (dbStore *Store, analysisI
 	return dbStore, record.AnalysisID, sourceID
 }
 
-func newTestWorker(t *testing.T, dbStore *Store, source port.TrustedResultStore, analyzer port.ResultAnalyzer) *resultanalysis.Worker {
+func newTestWorker(t *testing.T, dbStore *Store, source port.TrustedResultStore, analyzer port.ResultAnalyzer, clock port.Clock) *resultanalysis.Worker {
 	t.Helper()
 	analyses := NewAnalysisStore(dbStore)
 	steps := NewAnalysisStepStore(dbStore)
@@ -75,7 +75,7 @@ func newTestWorker(t *testing.T, dbStore *Store, source port.TrustedResultStore,
 	}, resultanalysis.WorkerDependencies{
 		Analyses: analyses, Active: analyses, Running: analyses, Steps: steps, Segments: segments,
 		Evidence: evidence, Payloads: steps, Completion: completion, Source: source, Analyzer: analyzer,
-		Clock: port.SystemClock{}, Logger: noopWorkerLogger{},
+		Clock: clock, Logger: noopWorkerLogger{},
 	})
 	if err != nil {
 		t.Fatalf("new worker: %v", err)
@@ -117,7 +117,7 @@ func TestWorkerDrainsAnalysisEndToEnd(t *testing.T) {
 	sum := sha256.Sum256([]byte(content))
 	source := &fakeTrustedResultSourceStore{identity: domain.ResultIdentity{ResultID: sourceID, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(content)), MediaType: "text/plain"}, content: content}
 	analyzer := &fixedAnalyzer{}
-	worker := newTestWorker(t, dbStore, source, analyzer)
+	worker := newTestWorker(t, dbStore, source, analyzer, port.SystemClock{})
 
 	ctx, cancel := context.WithCancel(t.Context())
 	go worker.Run(ctx)
@@ -153,6 +153,7 @@ type permitExhaustedThenFixedAnalyzer struct {
 	mu            sync.Mutex
 	leafCalls     int
 	exhaustedOnce bool
+	exhausted     chan struct{}
 	fixedAnalyzer
 }
 
@@ -163,9 +164,27 @@ func (a *permitExhaustedThenFixedAnalyzer) AnalyzeLeaf(ctx context.Context, inpu
 	a.exhaustedOnce = true
 	a.mu.Unlock()
 	if first {
+		close(a.exhausted)
 		return domain.AnalysisLeaf{}, port.ErrModelCallLimitReached
 	}
 	return a.fixedAnalyzer.AnalyzeLeaf(ctx, input)
+}
+
+type workerFakeClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *workerFakeClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *workerFakeClock) advance(value time.Duration) {
+	c.mu.Lock()
+	c.now = c.now.Add(value)
+	c.mu.Unlock()
 }
 
 // TestWorkerPermitExhaustionReturnsStepToPreparedWithoutConsumingAttempt is
@@ -178,11 +197,18 @@ func TestWorkerPermitExhaustionReturnsStepToPreparedWithoutConsumingAttempt(t *t
 	dbStore, analysisID, sourceID := setupWorkerFixture(t, content)
 	sum := sha256.Sum256([]byte(content))
 	source := &fakeTrustedResultSourceStore{identity: domain.ResultIdentity{ResultID: sourceID, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(content)), MediaType: "text/plain"}, content: content}
-	analyzer := &permitExhaustedThenFixedAnalyzer{}
-	worker := newTestWorker(t, dbStore, source, analyzer)
+	analyzer := &permitExhaustedThenFixedAnalyzer{exhausted: make(chan struct{})}
+	clock := &workerFakeClock{now: time.Now().UTC()}
+	worker := newTestWorker(t, dbStore, source, analyzer, clock)
 
 	ctx, cancel := context.WithCancel(t.Context())
 	go worker.Run(ctx)
+	select {
+	case <-analyzer.exhausted:
+	case <-time.After(30 * time.Second):
+		t.Fatal("worker did not reach the permit-exhausted leaf attempt")
+	}
+	clock.advance(resultanalysis.RunLeafRetryBackoff + time.Second)
 	waitForWorkerCondition(t, "analysis completes despite one permit-exhausted leaf attempt", func() bool {
 		state, _ := readAnalysisState(t, dbStore, analysisID)
 		return state == string(domain.AnalysisCompleted)
