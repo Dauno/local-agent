@@ -43,7 +43,7 @@ var validAgentNamePattern = regexp.MustCompile(AgentNamePattern)
 
 func IsReservedAgentName(name string) bool {
 	switch name {
-	case "root_agent", "user", "explore", "attachment_analyzer", "memory_curator":
+	case "root_agent", "user", "explore", "attachment_analyzer":
 		return true
 	default:
 		return false

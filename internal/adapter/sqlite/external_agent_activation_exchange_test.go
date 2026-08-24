@@ -9,7 +9,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
-func TestActivationResponsePreparationAtomicallyStagesMemoryIneligibleExchange(t *testing.T) {
+func TestActivationResponsePreparationAtomicallyStagesExchange(t *testing.T) {
 	store, jobs, now, activation := prepareActivationForExchangeTest(t)
 	metadata := domain.ConversationMetadata{
 		Key: activation.ConversationKey, TeamID: activation.TeamID, ChannelID: "D12345678",
@@ -43,18 +43,15 @@ func TestActivationResponsePreparationAtomicallyStagesMemoryIneligibleExchange(t
 	if err := json.Unmarshal([]byte(sourceJSON), &source); err != nil {
 		t.Fatal(err)
 	}
-	if source.MemoryEligible || len(source.Messages) != 2 {
-		t.Fatalf("activation exchange memory source = %#v", source)
+	if len(source.Messages) != 2 {
+		t.Fatalf("activation exchange source = %#v", source)
 	}
-	var messages, memoryOutbox int
+	var messages int
 	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages WHERE source = 'job_completion'`).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_outbox`).Scan(&memoryOutbox); err != nil {
-		t.Fatal(err)
-	}
-	if messages != 1 || memoryOutbox != 0 {
-		t.Fatalf("activation durable side effects = messages=%d memory_outbox=%d", messages, memoryOutbox)
+	if messages != 1 {
+		t.Fatalf("activation durable side effects = messages=%d", messages)
 	}
 
 	current, err := jobs.GetActivation(t.Context(), activation.ActivationID)
@@ -81,15 +78,12 @@ func TestActivationResponsePreparationAtomicallyStagesMemoryIneligibleExchange(t
 	if err := store.FinalizeAssistantExchange(t.Context(), prepared.ID); err != nil {
 		t.Fatal(err)
 	}
-	var assistantMessages, finalizedMemoryOutbox int
+	var assistantMessages int
 	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages WHERE role = 'assistant' AND source = 'assistant'`).Scan(&assistantMessages); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_outbox`).Scan(&finalizedMemoryOutbox); err != nil {
-		t.Fatal(err)
-	}
-	if assistantMessages != 1 || finalizedMemoryOutbox != 0 {
-		t.Fatalf("finalized activation exchange = assistant_messages=%d memory_outbox=%d", assistantMessages, finalizedMemoryOutbox)
+	if assistantMessages != 1 {
+		t.Fatalf("finalized activation exchange = assistant_messages=%d", assistantMessages)
 	}
 	current, err = jobs.GetActivation(t.Context(), activation.ActivationID)
 	if err != nil || current == nil {

@@ -71,6 +71,8 @@ func resultAnalysisTestModelsWithPayloads(t *testing.T) (runtimeModels, *fsartif
 	return runtimeModels{
 		rootModel:          fakeRootLLM{},
 		rootFamily:         domain.ProviderFamilyOpenAICompatible,
+		rootProviderID:     "main",
+		rootModelName:      "main-model-v1",
 		resultPayloadStore: payloads,
 		redactor:           secure.NewRedactor("sk-analysis-secret-value"),
 		logger:             logging.New(io.Discard, "error", secure.NewRedactor("sk-analysis-secret-value")),
@@ -174,7 +176,6 @@ func TestResultAnalysisModelFingerprintFallsBackToMainProfile(t *testing.T) {
 	// Case A: no dedicated model profile, falls back to the main profile.
 	cfgA := config.Default()
 	cfgA.Orchestration.ResultAnalysis.Enabled = true
-	cfgA.Model.Name = "main-model-v1"
 	storeA := resultAnalysisTestStore(t)
 	modelsA, payloadsA := resultAnalysisTestModelsWithPayloads(t)
 	resultIDA := materializeResultAnalysisSource(t, storeA, payloadsA, scope)
@@ -187,7 +188,7 @@ func TestResultAnalysisModelFingerprintFallsBackToMainProfile(t *testing.T) {
 		t.Fatalf("RequestAnalysis(fallback) error = %v", err)
 	}
 	fingerprintA := resultAnalysisFingerprintFromDB(t, storeA, resultA.AnalysisID)
-	wantFallback := domain.AnalysisModelFingerprint("main", cfgA.Model.Name)
+	wantFallback := domain.AnalysisModelFingerprint("main", "main-model-v1")
 	if fingerprintA != wantFallback {
 		t.Fatalf("fallback fingerprint = %q, want %q (derived from the main profile)", fingerprintA, wantFallback)
 	}

@@ -386,9 +386,9 @@ func TestLexicalWorkerUnverifiableDocumentFailsSourceInvalid(t *testing.T) {
 		Document: &domain.KnowledgeDocument{
 			ID: "kdoc_bad", Subject: "bad doc", ScopeKind: domain.KnowledgeScopeGlobal,
 			ContentDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-			ContentHandle: "memory_topics:t:revision:1",
+			ContentHandle: "result:doc-1",
 			SourceID:      "t", SourceRev: 1,
-			Provenance: domain.KnowledgeProvenanceLegacyCurated, Status: domain.KnowledgeDocumentActive, Revision: 1,
+			Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive, Revision: 1,
 		},
 	}
 	index := newWorkerFakeIndex([]port.KnowledgeLexicalIndexRow{{Kind: domain.KnowledgeRetrievalDocument, ID: "kdoc_bad", Revision: 1, SourceDigest: "aa"}})

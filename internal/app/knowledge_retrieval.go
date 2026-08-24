@@ -181,7 +181,7 @@ func composeLexicalRetrieval(cfg config.Config, models runtimeModels, modelCalls
 	queueStore := wakingKnowledgeQueue{KnowledgeQueueStore: sqlite.NewKnowledgeLexicalQueueStore(store), wake: schedules.lexical.Wake}
 	sourceStore := sqlite.NewKnowledgeIndexSourceStore(store)
 	candidateReader := sqlite.NewKnowledgeCandidateReader(store)
-	resolver := sqlite.NewKnowledgeDocumentResolver(store)
+	resolver := sqlite.NewKnowledgeDocumentResolver(store, models.resultPayloadStore)
 	if queueStore.KnowledgeQueueStore == nil || sourceStore == nil || candidateReader == nil || resolver == nil {
 		return nil, errors.New("knowledge retrieval adapters are not configured")
 	}

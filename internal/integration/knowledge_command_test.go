@@ -1,6 +1,9 @@
 package integration
 
 import (
+	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -14,6 +17,28 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/usecase/knowledge"
 )
+
+// insertKnowledgeCommandTestResult writes a minimal result_records row
+// matching knowledgeTestBinding's actor/team/conversation, so a curated
+// document created directly through the store can bind to it with
+// "result:<id>". Every call gets a distinct result identity via t.Name()
+// plus project, so tests in this file never collide.
+func insertKnowledgeCommandTestResult(t *testing.T, store *adaptersqlite.Store, project string) (resultID, digest string) {
+	t.Helper()
+	content := "curated content for " + t.Name() + ":" + project
+	sum := sha256.Sum256([]byte(content))
+	idSeed := sha256.Sum256([]byte("result-id:" + t.Name() + ":" + project))
+	resultID = hex.EncodeToString(idSeed[:])
+	digest = hex.EncodeToString(sum[:])
+	if _, err := store.DB().ExecContext(context.Background(), `
+		INSERT INTO result_records
+			(result_id, producer_kind, producer_id, producer_revision, storage_kind, storage_key, sha256, bytes, media_type, actor, team_id, conversation_key, project, retention_class, created_at, state)
+		VALUES (?, 'tool_operation', ?, 1, 'artifact', 'result-key', ?, ?, 'text/markdown', 'U12345678', 'T12345678', 'slack:T12345678:dm:D12345678', ?, 'conversation', 1, 'available')`,
+		resultID, resultID, digest, len(content), project); err != nil {
+		t.Fatal(err)
+	}
+	return resultID, digest
+}
 
 type knowledgeTestCoordinator struct {
 	mu      sync.Mutex
@@ -412,9 +437,10 @@ func TestKnowledgeDocumentArchiveCarriesReceiptAcrossRestart(t *testing.T) {
 	defer store.Close()
 	binding := knowledgeTestBinding("U12345678", "workspace")
 
+	resultID, digest := insertKnowledgeCommandTestResult(t, store, "workspace")
 	document, err := adaptersqlite.NewKnowledgeStore(store).CreateDocument(ctx, domain.KnowledgeDocument{
 		Subject: "runbook", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "workspace",
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_1",
+		ContentDigest: digest, ContentHandle: "result:" + resultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}, domain.DefaultKnowledgeLimits())
 	if err != nil {
@@ -473,16 +499,18 @@ func TestKnowledgeInspectRediscoveryAndReadableScopes(t *testing.T) {
 		knowledge.HumanCommandPrefix+`{"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"pg-01"}`); err != nil {
 		t.Fatal(err)
 	}
+	teamResultID, teamDigest := insertKnowledgeCommandTestResult(t, store, "workspace")
 	if _, err := knowledgeStore.CreateDocument(ctx, domain.KnowledgeDocument{
-		Subject: "team-runbook", ScopeKind: domain.KnowledgeScopeGlobal,
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_global",
+		Subject: "team-runbook", ScopeKind: domain.KnowledgeScopeTeam, ScopeID: "T12345678",
+		ContentDigest: teamDigest, ContentHandle: "result:" + teamResultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}, domain.DefaultKnowledgeLimits()); err != nil {
 		t.Fatal(err)
 	}
+	otherResultID, otherDigest := insertKnowledgeCommandTestResult(t, store, "elsewhere")
 	if _, err := knowledgeStore.CreateDocument(ctx, domain.KnowledgeDocument{
 		Subject: "other-runbook", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "elsewhere",
-		ContentDigest: strings.Repeat("b", 64), ContentHandle: "mem_topic_other",
+		ContentDigest: otherDigest, ContentHandle: "result:" + otherResultID,
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}, domain.DefaultKnowledgeLimits()); err != nil {
 		t.Fatal(err)
@@ -510,7 +538,7 @@ func TestKnowledgeInspectRediscoveryAndReadableScopes(t *testing.T) {
 		t.Fatalf("listing must rediscover claim identities after restart: %q", listing)
 	}
 	if !strings.Contains(listing, "team-runbook") {
-		t.Fatalf("listing must include readable global documents: %q", listing)
+		t.Fatalf("listing must include readable team documents: %q", listing)
 	}
 	if strings.Contains(listing, "other-runbook") {
 		t.Fatalf("listing leaked a foreign-project document: %q", listing)

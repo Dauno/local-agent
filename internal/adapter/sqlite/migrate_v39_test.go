@@ -164,11 +164,9 @@ func TestMigrationV39UpgradePreservesStateAndSeedsQueues(t *testing.T) {
 		t.Fatalf("upgraded version = %d, %v", version, err)
 	}
 	for table, want := range map[string]int{
-		"knowledge_claims":       2,
-		"knowledge_preferences":  2,
-		"knowledge_documents":    2,
-		"memory_topics":          1,
-		"memory_topic_revisions": 1,
+		"knowledge_claims":      2,
+		"knowledge_preferences": 2,
+		"knowledge_documents":   0,
 	} {
 		var count int
 		if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM `+table).Scan(&count); err != nil || count != want {
@@ -176,9 +174,8 @@ func TestMigrationV39UpgradePreservesStateAndSeedsQueues(t *testing.T) {
 		}
 	}
 
-	// Seed: both queues, exact identities, generation from current_rev,
-	// pending with zeroed lease/attempt/error state, including inactive
-	// items. No FTS or embedding content is copied.
+	// V39 seeds current claim and preference identities. V42 removes the
+	// document rows and their queue work with the retired legacy documents.
 	wantRows := []struct {
 		kind       string
 		itemID     string
@@ -188,8 +185,6 @@ func TestMigrationV39UpgradePreservesStateAndSeedsQueues(t *testing.T) {
 		{"claim", "claim-b", 3},
 		{"preference", "preference:1", 1},
 		{"preference", "preference:2", 2},
-		{"document", "doc-a", 1},
-		{"document", "doc-b", 4},
 	}
 	for _, queue := range []string{"knowledge_lexical_queue", "knowledge_embedding_queue"} {
 		var total int

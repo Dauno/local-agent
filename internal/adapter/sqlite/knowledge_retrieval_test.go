@@ -85,10 +85,7 @@ func seedRetrievalDocument(t *testing.T, store *Store, id, subject, scopeKind, s
 	if provenance == "" {
 		provenance = "curated"
 	}
-	handle := "memory_topics:" + sourceID + ":revision:" + "1"
-	if provenance == "curated" {
-		handle = "curated:" + id
-	}
+	handle := "result:" + id
 	if _, err := store.DB().ExecContext(t.Context(), `
 		INSERT INTO knowledge_documents (id, subject, scope_kind, scope_id, content_digest, content_handle,
 			source_id, source_rev, provenance, status, current_rev, created_at, updated_at)

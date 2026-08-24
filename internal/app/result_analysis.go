@@ -81,21 +81,24 @@ func composeResultAnalysis(cfg config.Config, models runtimeModels, modelCalls p
 	// fingerprint recorded on the analysis row is derived from whichever
 	// profile is effective, so the fallback is explicit in the identity.
 	llm := models.rootModel
-	providerID, modelName := "main", cfg.Model.Name
+	providerID, modelName := models.rootProviderID, models.rootModelName
 	if analysis.Model.Enabled {
 		if models.resultAnalysisAPIKey == "" {
 			return nil, errors.New("orchestration.result_analysis.model.enabled requires a resolved API key")
 		}
 		reasoningEffort := analysis.Model.ReasoningEffort
 		if reasoningEffort == "" {
-			reasoningEffort = cfg.Model.ReasoningEffort
+			reasoningEffort = models.rootReasoningEffort
 		}
-		built, buildErr := openaillm.New(
+		options := []openaillm.Option{
 			openaillm.WithAPIKey(models.resultAnalysisAPIKey),
 			openaillm.WithBaseURL(analysis.Model.BaseURL),
 			openaillm.WithModel(analysis.Model.Model),
-			openaillm.WithReasoningEffort(reasoningEffort),
-		)
+		}
+		if reasoningEffort != "" {
+			options = append(options, openaillm.WithReasoningEffort(reasoningEffort))
+		}
+		built, buildErr := openaillm.New(options...)
 		if buildErr != nil {
 			return nil, fmt.Errorf("initialize result analysis model: %w", buildErr)
 		}

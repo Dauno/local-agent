@@ -19,8 +19,11 @@ import (
 )
 
 const (
-	SlackBotTokenEnv = "SLACK_BOT_TOKEN"
-	SlackAppTokenEnv = "SLACK_APP_TOKEN"
+	SlackBotTokenEnv      = "SLACK_BOT_TOKEN"
+	SlackAppTokenEnv      = "SLACK_APP_TOKEN"
+	defaultModelName      = "deepseek-v4-flash"
+	defaultModelBaseURL   = "https://api.deepseek.com"
+	DefaultModelAPIKeyEnv = "DEEPSEEK_API_KEY"
 )
 
 type ProjectFiles interface {
@@ -72,9 +75,11 @@ func New(files ProjectFiles, database DatabaseInitializer, secrets SecretEditor)
 }
 
 type Snapshot struct {
-	ProjectRoot string
-	Config      config.Config
-	Paths       config.Paths
+	ProjectRoot            string
+	Config                 config.Config
+	Paths                  config.Paths
+	ModelAPIKeyEnv         string
+	ModelAPIKeyEnvResolved bool
 }
 
 type Identity struct {
@@ -138,7 +143,7 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	if _, err := s.files.CreateFile(ctx, paths.ManifestFile, []byte(renderedManifest), 0o644); err != nil {
 		return Snapshot{}, fmt.Errorf("create Slack manifest: %w", err)
 	}
-	if _, err := s.files.CreateFile(ctx, paths.EnvExampleFile, renderEnvExample(cfg.Model.APIKeyEnv), 0o644); err != nil {
+	if _, err := s.files.CreateFile(ctx, paths.EnvExampleFile, renderEnvExample(DefaultModelAPIKeyEnv), 0o644); err != nil {
 		return Snapshot{}, fmt.Errorf("create local environment example: %w", err)
 	}
 
@@ -156,12 +161,11 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	}
 
 	provider := agentdef.SeedDeepSeekProvider(agentdef.SeedModelConfig{
-		Name:            cfg.Model.Name,
-		BaseURL:         cfg.Model.BaseURL,
-		APIKeyEnv:       cfg.Model.APIKeyEnv,
-		Headers:         cfg.Model.Headers,
-		ReasoningEffort: cfg.Model.ReasoningEffort,
-		ExtraBody:       cfg.Model.ExtraBody,
+		Name:            defaultModelName,
+		BaseURL:         defaultModelBaseURL,
+		APIKeyEnv:       DefaultModelAPIKeyEnv,
+		ReasoningEffort: "high",
+		ExtraBody:       map[string]any{"thinking": map[string]any{"type": "enabled"}},
 	})
 	providerData, err := agentdef.MarshalProvider(provider)
 	if err != nil {
@@ -198,15 +202,6 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, fmt.Errorf("marshal seeded explore agent: %w", err)
 	}
 	if err := s.writeSeedFile(ctx, "explore agent definition", filepath.Join(agentsDir, "explore.yaml"), exploreData); err != nil {
-		return Snapshot{}, err
-	}
-
-	curator := agentdef.SeedMemoryCurator("deepseek/flash-json")
-	curatorData, err := agentdef.MarshalAgentDef(curator)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("marshal seeded curator: %w", err)
-	}
-	if err := s.writeSeedFile(ctx, "memory curator definition", filepath.Join(agentsDir, "memory_curator.yaml"), curatorData); err != nil {
 		return Snapshot{}, err
 	}
 
@@ -316,7 +311,11 @@ func (s *Service) ApplyConfirmedUpdates(
 	if err := validateIdentity(identity); err != nil {
 		return Snapshot{}, err
 	}
-	if err := validateSecrets(secrets); err != nil {
+	modelAPIKeyEnv := snapshot.ModelAPIKeyEnv
+	if !snapshot.ModelAPIKeyEnvResolved {
+		modelAPIKeyEnv = DefaultModelAPIKeyEnv
+	}
+	if err := validateSecrets(secrets, modelAPIKeyEnv); err != nil {
 		return Snapshot{}, err
 	}
 
@@ -333,7 +332,6 @@ func (s *Service) ApplyConfirmedUpdates(
 		return Snapshot{}, fmt.Errorf("parse configuration before confirmed update: %w", err)
 	}
 
-	cfg.Agent.Name = identity.AgentName
 	cfg.Slack.AppName = identity.SlackAppName
 	cfg.Slack.BotDisplayName = identity.SlackBotDisplayName
 	cfg.Slack.AllowAllUsers = access.AllowAllUsers
@@ -359,11 +357,14 @@ func (s *Service) ApplyConfirmedUpdates(
 	if err != nil {
 		return Snapshot{}, err
 	}
-	allowedSecretKeys := []string{cfg.Model.APIKeyEnv, SlackBotTokenEnv, SlackAppTokenEnv}
+	allowedSecretKeys := []string{SlackBotTokenEnv, SlackAppTokenEnv}
 	secretUpdates := map[string]string{
-		cfg.Model.APIKeyEnv: secrets.ModelAPIKey,
-		SlackBotTokenEnv:    secrets.SlackBotToken,
-		SlackAppTokenEnv:    secrets.SlackAppToken,
+		SlackBotTokenEnv: secrets.SlackBotToken,
+		SlackAppTokenEnv: secrets.SlackAppToken,
+	}
+	if modelAPIKeyEnv != "" {
+		allowedSecretKeys = append([]string{modelAPIKeyEnv}, allowedSecretKeys...)
+		secretUpdates[modelAPIKeyEnv] = secrets.ModelAPIKey
 	}
 	existingEnv, err := s.files.ReadFile(ctx, paths.EnvFile)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
@@ -401,11 +402,26 @@ func (s *Service) ApplyConfirmedUpdates(
 }
 
 func renderEnvExample(apiKeyEnv string) []byte {
-	return []byte(fmt.Sprintf(`# Sensitive values only. Copy these keys to the project .env and replace the placeholders.
-%s=...
-%s=xoxb-...
-%s=xapp-...
-`, apiKeyEnv, SlackBotTokenEnv, SlackAppTokenEnv))
+	header := "# Sensitive values only. Copy these keys to the project .env and replace the placeholders.\n"
+	if apiKeyEnv != "" {
+		header += fmt.Sprintf("%s=...\n", apiKeyEnv)
+	}
+	header += fmt.Sprintf("%s=xoxb-...\n%s=xapp-...\n", SlackBotTokenEnv, SlackAppTokenEnv)
+	return []byte(header)
+}
+
+// RewriteEnvExample replaces .env.example with the keys the resolved root
+// agent actually needs. An ACP or Agent CLI provider has no api_key_env, so
+// apiKeyEnv is empty and no model key placeholder is written: a fabricated
+// key line would mislead operators into thinking one is required.
+func (s *Service) RewriteEnvExample(ctx context.Context, paths config.Paths, apiKeyEnv string) error {
+	contents := map[string][]byte{paths.EnvExampleFile: renderEnvExample(apiKeyEnv)}
+	modes := map[string]fs.FileMode{paths.EnvExampleFile: 0o644}
+	forceModes := map[string]bool{paths.EnvExampleFile: true}
+	if err := s.files.WriteBatch(ctx, contents, modes, forceModes); err != nil {
+		return fmt.Errorf("rewrite local environment example: %w", err)
+	}
+	return nil
 }
 
 func validateIdentity(identity Identity) error {
@@ -417,11 +433,13 @@ func validateIdentity(identity Identity) error {
 	return validateRequiredSingleLine(values)
 }
 
-func validateSecrets(secrets Secrets) error {
+func validateSecrets(secrets Secrets, modelAPIKeyEnv string) error {
 	values := map[string]string{
-		"model API key":   secrets.ModelAPIKey,
 		"Slack bot token": secrets.SlackBotToken,
 		"Slack app token": secrets.SlackAppToken,
+	}
+	if modelAPIKeyEnv != "" {
+		values["model API key"] = secrets.ModelAPIKey
 	}
 	if err := validateRequiredSingleLine(values); err != nil {
 		return err

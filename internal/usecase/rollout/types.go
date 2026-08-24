@@ -5,25 +5,25 @@ import "time"
 // Schema versions of the TRD 09 rollout contract: db upgrade accepts sources
 // in [MinSourceVersion, MaxSourceVersion] and drives them to TargetVersion.
 const (
-	TargetVersion    = 41
+	TargetVersion    = 42
 	MinSourceVersion = 33
-	MaxSourceVersion = 40
+	MaxSourceVersion = 42
 )
 
 // Durable runtime_state keys owned by the rollout. The quarantine marker is
 // written only by Create's adoption transaction; its read belongs to
 // checkpoint 5.
 const (
-	KeyBaseline            = "v41_upgrade_baseline"
-	KeyCutoff              = "v41_rollout_cutoff_unix_nanos"
-	KeyPostflightStatus    = "v41_postflight_status"
-	KeyPostflightDetail    = "v41_postflight_detail"
-	KeyBackupPath          = "v41_upgrade_backup_path"
-	KeyBackupBytes         = "v41_upgrade_backup_bytes"
-	KeyBackupSHA256        = "v41_upgrade_backup_sha256"
-	KeyBackupSourceVersion = "v41_upgrade_backup_source_version"
-	KeyBackupVerifiedAt    = "v41_upgrade_backup_verified_at"
-	KeyBackupNotRequiredAt = "v41_upgrade_backup_not_required_at"
+	KeyBaseline            = "v42_upgrade_baseline"
+	KeyCutoff              = "v42_rollout_cutoff_unix_nanos"
+	KeyPostflightStatus    = "v42_postflight_status"
+	KeyPostflightDetail    = "v42_postflight_detail"
+	KeyBackupPath          = "v42_upgrade_backup_path"
+	KeyBackupBytes         = "v42_upgrade_backup_bytes"
+	KeyBackupSHA256        = "v42_upgrade_backup_sha256"
+	KeyBackupSourceVersion = "v42_upgrade_backup_source_version"
+	KeyBackupVerifiedAt    = "v42_upgrade_backup_verified_at"
+	KeyBackupNotRequiredAt = "v42_upgrade_backup_not_required_at"
 	KeyLegacyQuarantineAt  = "legacy_identity_quarantine_applied_at"
 )
 

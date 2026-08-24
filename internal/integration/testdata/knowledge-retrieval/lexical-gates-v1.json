@@ -295,7 +295,7 @@
         "subject": "on-call rotation policy",
         "scope_kind": "global",
         "status": "active",
-        "topic": "topic-oncall",
+        "source_id": "topic-oncall",
         "source_rev": 1
       },
       {
@@ -303,7 +303,7 @@
         "subject": "emergency contact list",
         "scope_kind": "global",
         "status": "archived",
-        "topic": "topic-oncall",
+        "source_id": "topic-oncall",
         "source_rev": 2,
         "fts": false
       },
@@ -312,16 +312,15 @@
         "subject": "vendor escalation path",
         "scope_kind": "global",
         "status": "active",
-        "topic": "topic-missing",
-        "source_rev": 1,
-        "revision_row_id": 99
+        "source_id": "topic-missing",
+        "source_rev": 1
       },
       {
         "id": "kdoc_0000000000000000000000d4",
         "subject": "certificate renewal guide",
         "scope_kind": "global",
         "status": "active",
-        "topic": "topic-mismatch",
+        "source_id": "topic-mismatch",
         "source_rev": 1,
         "content_digest": "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"
       },
@@ -330,7 +329,7 @@
         "subject": "handle identity guide",
         "scope_kind": "global",
         "status": "active",
-        "topic": "topic-oncall",
+        "source_id": "topic-oncall",
         "source_rev": 1,
         "source_id": "topic-other"
       },
@@ -339,11 +338,11 @@
         "subject": "runbook",
         "scope_kind": "global",
         "status": "active",
-        "topic": "topic-runbook",
+        "source_id": "topic-runbook",
         "source_rev": 1
       }
     ],
-    "memory_topics": [
+    "document_sources": [
       {
         "id": "topic-oncall",
         "revisions": [

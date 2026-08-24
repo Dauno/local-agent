@@ -54,7 +54,7 @@ func ResolvePaths(projectRoot string, cfg Config) (Paths, error) {
 		ManifestFile:        resolveAgainst(root, DefaultManifestFile),
 		EnvExampleFile:      resolveAgainst(root, DefaultEnvExampleFile),
 		EnvFile:             resolveAgainst(root, DefaultEnvFile),
-		MemoryDir:           resolveMemoryDir(root, cfg.State.Dir, cfg.Memory.Directory),
+		MemoryDir:           filepath.Join(resolveAgainst(root, cfg.State.Dir), "memory"),
 		SandboxProjectRoots: resolveSandboxRoots(root, cfg.Sandbox.Projects),
 		ArtifactDir:         filepath.Join(resolveAgainst(root, cfg.State.Dir), "artifacts"),
 		ToolsDir:            filepath.Join(resolveAgainst(root, cfg.State.Dir), "tools"),
@@ -98,11 +98,4 @@ func resolveAgainst(root, path string) string {
 		return filepath.Clean(path)
 	}
 	return filepath.Join(root, path)
-}
-
-func resolveMemoryDir(projectRoot, stateDir, memoryDir string) string {
-	if strings.TrimSpace(memoryDir) != "" {
-		return resolveAgainst(projectRoot, memoryDir)
-	}
-	return filepath.Join(resolveAgainst(projectRoot, stateDir), "memory")
 }

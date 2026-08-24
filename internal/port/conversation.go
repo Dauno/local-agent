@@ -41,8 +41,8 @@ type PreparedAssistantExchange struct {
 // published, then finalizes it and its curation work item after publishing.
 // A staged exchange can be reconciled if the post-publish database write fails.
 type AssistantExchangeWriter interface {
-	PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int, memoryEligible bool) (PreparedAssistantExchange, error)
-	PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int, memoryEligible bool) (PreparedAssistantExchange, error)
+	PrepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, retain int) (PreparedAssistantExchange, error)
+	PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int) (PreparedAssistantExchange, error)
 	MarkAssistantExchangePublished(ctx context.Context, intentID, assistantTS string) error
 	FinalizeAssistantExchange(ctx context.Context, intentID string) error
 	DiscardAssistantExchange(ctx context.Context, intentID string) error

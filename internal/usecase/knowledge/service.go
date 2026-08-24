@@ -330,7 +330,7 @@ func validateForgetSubject(subject string) error {
 	if utf8.RuneCountInString(subject) > domain.HardMaxKnowledgeSubjectRunes {
 		return fmt.Errorf("%w: subject exceeds hard maximum of %d characters", domain.ErrKnowledgeLimitExceeded, domain.HardMaxKnowledgeSubjectRunes)
 	}
-	if err := domain.ValidateMemoryReferenceText(subject); err != nil {
+	if err := domain.ValidateKnowledgeText(subject); err != nil {
 		return fmt.Errorf("%w: subject: %v", domain.ErrKnowledgeInvalidValue, err)
 	}
 	return nil

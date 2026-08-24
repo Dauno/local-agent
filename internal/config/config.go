@@ -21,16 +21,12 @@ const (
 const MaxSQLiteSummaryChars = domain.MaxPersistedSummaryChars
 
 // Config is the complete non-sensitive configuration stored in config.yaml.
-// Secrets are resolved separately through Model.APIKeyEnv and Slack's fixed
-// environment variable names.
+// Provider credentials are resolved from declarative definitions separately.
 type Config struct {
-	Agent            AgentConfig             `yaml:"agent"`
 	State            StateConfig             `yaml:"state"`
 	Context          ContextConfig           `yaml:"context"`
 	Runtime          RuntimeConfig           `yaml:"runtime"`
-	Model            ModelConfig             `yaml:"model"`
 	Slack            SlackConfig             `yaml:"slack"`
-	Memory           MemoryConfig            `yaml:"memory"`
 	Sandbox          SandboxConfig           `yaml:"sandbox"`
 	Canvases         CanvasesConfig          `yaml:"canvases"`
 	Exports          ExportsConfig           `yaml:"exports"`
@@ -91,10 +87,6 @@ type ACPDeliveryConfig struct {
 	MaxFileBytes     int `yaml:"max_file_bytes"`
 }
 
-type AgentConfig struct {
-	Name string `yaml:"name"`
-}
-
 type StateConfig struct {
 	Dir string `yaml:"dir"`
 	DB  string `yaml:"db"`
@@ -146,24 +138,6 @@ type RuntimeConfig struct {
 	ModelErrorMessage       string `yaml:"model_error_message"`
 }
 
-type ModelConfig struct {
-	Name            string                   `yaml:"name"`
-	BaseURL         string                   `yaml:"base_url"`
-	APIKeyEnv       string                   `yaml:"api_key_env"`
-	Headers         map[string]string        `yaml:"headers,omitempty"`
-	ReasoningEffort string                   `yaml:"reasoning_effort"`
-	ExtraBody       map[string]any           `yaml:"extra_body,omitempty"`
-	ResultHandles   ModelResultHandlesConfig `yaml:"result_handles"`
-}
-
-// ModelResultHandlesConfig is the per-profile direct-inline admission of the
-// consuming (root) model profile. A profile must declare a positive
-// max_direct_inline_bytes to opt in; no declaration means zero V2
-// direct-inline bytes.
-type ModelResultHandlesConfig struct {
-	MaxDirectInlineBytes int `yaml:"max_direct_inline_bytes"`
-}
-
 type SlackConfig struct {
 	AppName             string                   `yaml:"app_name"`
 	BotDisplayName      string                   `yaml:"bot_display_name"`
@@ -202,22 +176,6 @@ type SlackContextConfig struct {
 	TimeoutSeconds              int  `yaml:"timeout_seconds"`
 	ProfileCacheTTLMinutes      int  `yaml:"profile_cache_ttl_minutes"`
 	ConversationCacheTTLMinutes int  `yaml:"conversation_cache_ttl_minutes"`
-}
-
-type MemoryConfig struct {
-	Enabled               bool   `yaml:"enabled"`
-	Directory             string `yaml:"directory"`
-	MaxTopicsRecall       int    `yaml:"max_topics_recall"`
-	MaxCharsRecall        int    `yaml:"max_chars_recall"`
-	RecallTimeoutSeconds  int    `yaml:"recall_timeout_seconds"`
-	CuratorTimeoutSeconds int    `yaml:"curator_timeout_seconds"`
-	CuratorMaxRetries     int    `yaml:"curator_max_retries"`
-	WorkerIntervalSeconds int    `yaml:"worker_interval_seconds"`
-	RetentionDays         int    `yaml:"retention_days"`
-	MaxTopics             int    `yaml:"max_topics"`
-	MaxLinks              int    `yaml:"max_links"`
-	MaxTopicChars         int    `yaml:"max_topic_chars"`
-	MaxPatchOps           int    `yaml:"max_patch_ops"`
 }
 
 type SandboxConfig struct {
@@ -374,9 +332,6 @@ type ResultAnalysisModelConfig struct {
 // Default returns a new Config populated with the PRD defaults.
 func Default() Config {
 	return Config{
-		Agent: AgentConfig{
-			Name: "Dev Agent",
-		},
 		State: StateConfig{
 			Dir: DefaultProjectStateDir,
 			DB:  DefaultDatabaseFile,
@@ -407,17 +362,6 @@ func Default() Config {
 			BusyMessage:             DefaultBusyMessage,
 			ModelErrorMessage:       DefaultModelErrorMessage,
 		},
-		Model: ModelConfig{
-			Name:            "deepseek-v4-flash",
-			BaseURL:         "https://api.deepseek.com",
-			APIKeyEnv:       "DEEPSEEK_API_KEY",
-			ReasoningEffort: "high",
-			ExtraBody: map[string]any{
-				"thinking": map[string]any{
-					"type": "enabled",
-				},
-			},
-		},
 		Slack: SlackConfig{
 			AppName:             "Local Agent",
 			BotDisplayName:      "Dev Agent",
@@ -444,21 +388,6 @@ func Default() Config {
 				MaxProcessedChars:           20_000,
 				TranscriptionTimeoutSeconds: 120,
 			},
-		},
-		Memory: MemoryConfig{
-			Enabled:               false,
-			Directory:             "",
-			MaxTopicsRecall:       3,
-			MaxCharsRecall:        2000,
-			RecallTimeoutSeconds:  2,
-			CuratorTimeoutSeconds: 30,
-			CuratorMaxRetries:     3,
-			WorkerIntervalSeconds: 60,
-			RetentionDays:         90,
-			MaxTopics:             100,
-			MaxLinks:              50,
-			MaxTopicChars:         10000,
-			MaxPatchOps:           10,
 		},
 		Sandbox:  SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 64 * 1024},
 		Canvases: CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},

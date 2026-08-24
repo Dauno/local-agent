@@ -2,7 +2,6 @@ package config_test
 
 import (
 	"errors"
-	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -17,7 +16,6 @@ func TestDefaultMatchesPRD(t *testing.T) {
 	t.Parallel()
 
 	want := config.Config{
-		Agent: config.AgentConfig{Name: "Dev Agent"},
 		State: config.StateConfig{
 			Dir: ".local-agent",
 			DB:  ".local-agent/local-agent.db",
@@ -48,15 +46,6 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			BusyMessage:             "El bot está ocupado procesando otras solicitudes. Intenta de nuevo en unos minutos.",
 			ModelErrorMessage:       "No pude completar la respuesta por un error del modelo. Intenta de nuevo.",
 		},
-		Model: config.ModelConfig{
-			Name:            "deepseek-v4-flash",
-			BaseURL:         "https://api.deepseek.com",
-			APIKeyEnv:       "DEEPSEEK_API_KEY",
-			ReasoningEffort: "high",
-			ExtraBody: map[string]any{
-				"thinking": map[string]any{"type": "enabled"},
-			},
-		},
 		Slack: config.SlackConfig{
 			AppName:             "Local Agent",
 			BotDisplayName:      "Dev Agent",
@@ -81,21 +70,6 @@ func TestDefaultMatchesPRD(t *testing.T) {
 				MaxBytesPerFile: 5 * 1024 * 1024, MaxProcessedChars: 20_000,
 				TranscriptionTimeoutSeconds: 120,
 			},
-		},
-		Memory: config.MemoryConfig{
-			Enabled:               false,
-			Directory:             "",
-			MaxTopicsRecall:       3,
-			MaxCharsRecall:        2000,
-			RecallTimeoutSeconds:  2,
-			CuratorTimeoutSeconds: 30,
-			CuratorMaxRetries:     3,
-			WorkerIntervalSeconds: 60,
-			RetentionDays:         90,
-			MaxTopics:             100,
-			MaxLinks:              50,
-			MaxTopicChars:         10000,
-			MaxPatchOps:           10,
 		},
 		Sandbox:          config.SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
 		Canvases:         config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
@@ -161,19 +135,6 @@ func TestDefaultMatchesPRD(t *testing.T) {
 	}
 	if err := got.Validate(); err != nil {
 		t.Fatalf("default config must validate: %v", err)
-	}
-}
-
-func TestDefaultDoesNotShareExtraBody(t *testing.T) {
-	t.Parallel()
-
-	first := config.Default()
-	second := config.Default()
-	first.Model.ExtraBody["thinking"].(map[string]any)["type"] = "disabled"
-
-	got := second.Model.ExtraBody["thinking"].(map[string]any)["type"]
-	if got != "enabled" {
-		t.Fatalf("defaults share mutable extra_body state: got %v", got)
 	}
 }
 
@@ -248,9 +209,7 @@ func TestMarshalDefaultYAML(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Marshal() error: %v", err)
 	}
-	want := `agent:
-  name: Dev Agent
-state:
+	want := `state:
   dir: .local-agent
   db: .local-agent/local-agent.db
 context:
@@ -283,16 +242,6 @@ runtime:
   shutdown_grace_seconds: 30
   busy_message: El bot está ocupado procesando otras solicitudes. Intenta de nuevo en unos minutos.
   model_error_message: No pude completar la respuesta por un error del modelo. Intenta de nuevo.
-model:
-  name: deepseek-v4-flash
-  base_url: https://api.deepseek.com
-  api_key_env: DEEPSEEK_API_KEY
-  reasoning_effort: high
-  extra_body:
-    thinking:
-      type: enabled
-  result_handles:
-    max_direct_inline_bytes: 0
 slack:
   app_name: Local Agent
   bot_display_name: Dev Agent
@@ -324,20 +273,6 @@ slack:
     max_processed_chars: 20000
     transcription_profile: ""
     transcription_timeout_seconds: 120
-memory:
-  enabled: false
-  directory: ""
-  max_topics_recall: 3
-  max_chars_recall: 2000
-  recall_timeout_seconds: 2
-  curator_timeout_seconds: 30
-  curator_max_retries: 3
-  worker_interval_seconds: 60
-  retention_days: 90
-  max_topics: 100
-  max_links: 50
-  max_topic_chars: 10000
-  max_patch_ops: 10
 sandbox:
   enabled: true
   projects:
@@ -455,13 +390,7 @@ orchestration:
 func TestParseAppliesOnlyMissingDefaults(t *testing.T) {
 	t.Parallel()
 
-	cfg, err := config.Parse([]byte(`agent:
-  name: Release Agent
-model:
-  headers:
-    X-Client: local-agent
-  extra_body: {}
-slack:
+	cfg, err := config.Parse([]byte(`slack:
   allow_all_users: true
   allowed_user_ids: null
   files:
@@ -474,18 +403,6 @@ slack:
 		t.Fatalf("Parse() error: %v", err)
 	}
 
-	if cfg.Agent.Name != "Release Agent" {
-		t.Fatalf("agent.name = %q", cfg.Agent.Name)
-	}
-	if cfg.Model.Name != "deepseek-v4-flash" {
-		t.Fatalf("missing model.name did not receive default: %q", cfg.Model.Name)
-	}
-	if len(cfg.Model.ExtraBody) != 0 {
-		t.Fatalf("explicit empty extra_body was overwritten: %#v", cfg.Model.ExtraBody)
-	}
-	if cfg.Model.Headers["X-Client"] != "local-agent" {
-		t.Fatalf("model headers not decoded: %#v", cfg.Model.Headers)
-	}
 	if cfg.Slack.AllowedUserIDs == nil || len(cfg.Slack.AllowedUserIDs) != 0 {
 		t.Fatalf("allowed_user_ids should normalize to an empty slice: %#v", cfg.Slack.AllowedUserIDs)
 	}
@@ -522,11 +439,9 @@ func TestParseEmptyOrCommentOnlyUsesDefaults(t *testing.T) {
 			t.Fatalf("Parse(%q) error: %v", input, err)
 		}
 		want := config.Default()
-		if !reflect.DeepEqual(cfg.Agent, want.Agent) ||
-			!reflect.DeepEqual(cfg.State, want.State) ||
+		if !reflect.DeepEqual(cfg.State, want.State) ||
 			!reflect.DeepEqual(cfg.Context, want.Context) ||
 			!reflect.DeepEqual(cfg.Runtime, want.Runtime) ||
-			!reflect.DeepEqual(cfg.Model, want.Model) ||
 			!reflect.DeepEqual(cfg.Slack, want.Slack) {
 			t.Fatalf("Parse(%q) did not produce defaults: %#v", input, cfg)
 		}
@@ -547,21 +462,17 @@ func TestParseAndMarshalPreserveUnknownFieldsAndComments(t *testing.T) {
 	t.Parallel()
 
 	input := []byte(`# operator note
-agent:
-  name: Old Name # keep this comment
-  tone: terse
 plugin_extension:
   enabled: true
-model:
-  headers:
-    X-Trace: enabled
+slack:
+  app_name: Old Name # keep this comment
+  tone: terse
 `)
 	cfg, err := config.Parse(input)
 	if err != nil {
 		t.Fatalf("Parse() error: %v", err)
 	}
-	cfg.Agent.Name = "New Name"
-	cfg.Model.Headers = nil
+	cfg.Slack.AppName = "New Name"
 
 	output, err := config.Marshal(cfg)
 	if err != nil {
@@ -570,7 +481,7 @@ model:
 	text := string(output)
 	for _, fragment := range []string{
 		"# operator note",
-		"name: New Name # keep this comment",
+		"app_name: New Name # keep this comment",
 		"tone: terse",
 		"plugin_extension:",
 		"enabled: true",
@@ -578,9 +489,6 @@ model:
 		if !strings.Contains(text, fragment) {
 			t.Errorf("output lost %q:\n%s", fragment, text)
 		}
-	}
-	if strings.Contains(text, "headers:") || strings.Contains(text, "X-Trace") {
-		t.Fatalf("cleared known headers were retained:\n%s", text)
 	}
 }
 
@@ -608,7 +516,6 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Default()
-	cfg.Agent.Name = " "
 	cfg.State.DB = ""
 	cfg.Context.MaxMessages = 0
 	cfg.Runtime.LogLevel = "verbose"
@@ -616,12 +523,7 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 	cfg.Runtime.SlackAPITimeoutSeconds = -1
 	cfg.Runtime.MaxConcurrentModelCalls = 0
 	cfg.Runtime.ShutdownGraceSeconds = 0
-	cfg.Model.BaseURL = "https://example.com/v1/chat/completions"
 	cfg.ACP.ReconciliationTimeoutSeconds = 0
-	cfg.Model.APIKeyEnv = "NOT-AN-ENV"
-	cfg.Model.ReasoningEffort = "maximum"
-	cfg.Model.Headers = map[string]string{"Bad Header": "line\nbreak"}
-	cfg.Model.ExtraBody = map[string]any{"bad": math.NaN(), "stream": true}
 	cfg.Slack.AllowedUserIDs = []string{"not-a-user"}
 	cfg.Slack.AllowedTeamIDs = []string{"U12345678"}
 	cfg.Slack.AllowedChannelIDs = []string{"D12345678"}
@@ -636,7 +538,6 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 		t.Fatalf("Validate() error type = %T, want *config.ValidationError: %v", err, err)
 	}
 	for _, field := range []string{
-		"agent.name",
 		"state.db",
 		"context.max_messages",
 		"runtime.log_level",
@@ -644,13 +545,7 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 		"runtime.slack_api_timeout_seconds",
 		"runtime.max_concurrent_model_calls",
 		"runtime.shutdown_grace_seconds",
-		"model.base_url",
 		"acp.reconciliation_timeout_seconds",
-		"model.api_key_env",
-		"model.reasoning_effort",
-		`model.headers["Bad Header"]`,
-		"model.extra_body",
-		"model.extra_body.stream",
 		"slack.allowed_user_ids[0]",
 		"slack.allowed_team_ids[0]",
 		"slack.allowed_channel_ids[0]",
@@ -669,7 +564,6 @@ func TestValidateAcceptsConfiguredAccessListsAndHeaders(t *testing.T) {
 	t.Parallel()
 
 	cfg := config.Default()
-	cfg.Model.Headers = map[string]string{"X-Client-Version": "1", "X_Custom": "ok"}
 	cfg.Slack.AllowedUserIDs = []string{"U12345678", "W12345678"}
 	cfg.Slack.AllowedTeamIDs = []string{"T12345678"}
 	cfg.Slack.AllowedChannelIDs = []string{"C12345678", "G12345678"}
@@ -807,29 +701,6 @@ func TestValidateRejectsContextTimeoutAboveSlackAPITimeout(t *testing.T) {
 	err := cfg.Validate()
 	var validation *config.ValidationError
 	if !errors.As(err, &validation) || !validation.Has("slack.context.timeout_seconds") {
-		t.Fatalf("Validate() error = %v", err)
-	}
-}
-
-func TestValidateRejectsSensitiveModelHeaders(t *testing.T) {
-	t.Parallel()
-	cfg := config.Default()
-	cfg.Model.Headers = map[string]string{"Authorization": "Bearer secret"}
-	err := cfg.Validate()
-	var validation *config.ValidationError
-	if !errors.As(err, &validation) || !validation.Has(`model.headers["Authorization"]`) {
-		t.Fatalf("Validate() error = %v", err)
-	}
-}
-
-func TestValidateRejectsInvalidMemoryLimits(t *testing.T) {
-	t.Parallel()
-	cfg := config.Default()
-	cfg.Memory.RecallTimeoutSeconds = 0
-	cfg.Memory.MaxPatchOps = 0
-	err := cfg.Validate()
-	var validation *config.ValidationError
-	if !errors.As(err, &validation) || !validation.Has("memory.recall_timeout_seconds") || !validation.Has("memory.max_patch_ops") {
 		t.Fatalf("Validate() error = %v", err)
 	}
 }
@@ -1329,7 +1200,7 @@ func TestSaveAndLoadPreserveFileModeAndExtensions(t *testing.T) {
 	t.Parallel()
 
 	path := filepath.Join(t.TempDir(), "nested", "config.yaml")
-	input := []byte("agent:\n  name: Existing\nextension:\n  value: retained\n")
+	input := []byte("extension:\n  value: retained\n")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -1341,7 +1212,6 @@ func TestSaveAndLoadPreserveFileModeAndExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load() error: %v", err)
 	}
-	cfg.Agent.Name = "Updated"
 	if err := config.Save(path, cfg); err != nil {
 		t.Fatalf("Save() error: %v", err)
 	}
@@ -1357,17 +1227,10 @@ func TestSaveAndLoadPreserveFileModeAndExtensions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(string(data), "name: Updated") || !strings.Contains(string(data), "value: retained") {
-		t.Fatalf("saved data lost changes or extensions:\n%s", data)
+	if !strings.Contains(string(data), "value: retained") || strings.Contains("\n"+string(data), "\nagent:\n") {
+		t.Fatalf("saved data lost extensions or retained legacy agent config:\n%s", data)
 	}
 
-	reloaded, err := config.Load(path)
-	if err != nil {
-		t.Fatalf("re-Load() error: %v", err)
-	}
-	if reloaded.Agent.Name != "Updated" {
-		t.Fatalf("reloaded agent.name = %q", reloaded.Agent.Name)
-	}
 }
 
 func TestSaveCreatesParentAndUsesNonSensitiveMode(t *testing.T) {

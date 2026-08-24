@@ -1,10 +1,50 @@
 package domain
 
 import (
+	"errors"
+	"regexp"
 	"slices"
 	"strings"
 	"unicode"
 )
+
+var (
+	credentialValuePattern      = regexp.MustCompile(`(?i)\b(?:sk|xoxb|xapp|ghp|gho|glpat)[-_][a-z0-9_=-]{4,}\b`)
+	credentialAssignmentPattern = regexp.MustCompile(`(?i)\b(?:api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|client[_ -]?secret|secret|password|bearer|private[_ -]?key)\b\s*(?:=|:)\s*\S+`)
+	bearerCredentialPattern     = regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}\b`)
+	personalEmailPattern        = regexp.MustCompile(`(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b`)
+	personalPhonePattern        = regexp.MustCompile(`(?i)\b(?:phone|telephone|teléfono|telefono|móvil|movil|cell)\b[^\n]{0,20}\+?\d(?:[ -]?\d){7,}`)
+	paymentCardPattern          = regexp.MustCompile(`\b(?:\d[ -]?){13,19}\b`)
+)
+
+func SlackOwnerKey(key ConversationKey, userID string) string {
+	parts := strings.Split(string(key), ":")
+	if len(parts) < 4 || parts[0] != "slack" || strings.TrimSpace(parts[1]) == "" || strings.TrimSpace(userID) == "" {
+		return ""
+	}
+	return "slack:" + parts[1] + ":user:" + userID
+}
+
+func ValidSlackOwnerKey(ownerKey string) bool {
+	parts := strings.Split(ownerKey, ":")
+	if len(parts) != 4 || parts[0] != "slack" || parts[2] != "user" {
+		return false
+	}
+	return strings.TrimSpace(parts[1]) != "" && strings.TrimSpace(parts[3]) != ""
+}
+
+func ValidateKnowledgeText(value string) error {
+	if credentialValuePattern.MatchString(value) || credentialAssignmentPattern.MatchString(value) || bearerCredentialPattern.MatchString(value) {
+		return errors.New("knowledge text contains prohibited credential content")
+	}
+	if containsSensitivePersonalData(value) {
+		return errors.New("knowledge text contains prohibited sensitive personal data")
+	}
+	if isInstructionLikeMemoryText(value) {
+		return errors.New("knowledge text contains prohibited imperative content")
+	}
+	return nil
+}
 
 var (
 	sensitiveTerms = []string{

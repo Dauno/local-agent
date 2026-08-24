@@ -72,12 +72,12 @@ func rowFourFixture(t *testing.T, h *upgradeHarness, postflight map[string]strin
 	for key, value := range postflight {
 		seed[key] = value
 	}
-	replaceFixture(t, h.paths.DatabaseFile, 41, seed)
+	replaceFixture(t, h.paths.DatabaseFile, rollout.TargetVersion, seed)
 }
 
 func adoptionFixture(t *testing.T, h *upgradeHarness) {
 	t.Helper()
-	replaceFixture(t, h.paths.DatabaseFile, 41, nil)
+	replaceFixture(t, h.paths.DatabaseFile, rollout.TargetVersion, nil)
 }
 
 func seedRolloutKeys(t *testing.T, dbPath string, seed map[string]string) {
@@ -118,11 +118,11 @@ func TestApplyRowOneFullRunPinsFrozenOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if !report.RolloutAdvanced || report.ToVersion != 41 || !report.PostflightOK {
+	if !report.RolloutAdvanced || report.ToVersion != 42 || !report.PostflightOK {
 		t.Fatalf("report = %+v", report)
 	}
-	if got := queryUserVersion(t, dbPath); got != 41 {
-		t.Fatalf("user_version = %d, want 41", got)
+	if got := queryUserVersion(t, dbPath); got != 42 {
+		t.Fatalf("user_version = %d, want 42", got)
 	}
 
 	// Call-order gate: capture once, under the lock, strictly before the
@@ -266,7 +266,7 @@ func TestRowTwoIntactResumeSkipsCaptureBackupAndRecord(t *testing.T) {
 	if report.Backup.Path != identity.Path {
 		t.Fatalf("report backup = %+v, want the revalidated record", report.Backup)
 	}
-	if got := queryUserVersion(t, dbPath); got != 41 {
+	if got := queryUserVersion(t, dbPath); got != 42 {
 		t.Fatalf("user_version = %d", got)
 	}
 	plain, _ = sqlOpenPlain(dbPath)
@@ -362,7 +362,7 @@ func TestManipulatedSourceVersionFailsClosedEverywhere(t *testing.T) {
 	if !errors.Is(previewErr, rollout.ErrRolloutStateCorrupt) || !strings.Contains(previewErr.Error(), "30") || !strings.Contains(previewErr.Error(), "33") {
 		t.Fatalf("preview err = %v, want Corrupt naming recorded 30 and live 33", previewErr)
 	}
-	preview := rollout.UpgradePreview{Kind: rollout.UpgradeFreshUpgrade, FromVersion: 33, ToVersion: 41, DatabasePath: dbPath}
+	preview := rollout.UpgradePreview{Kind: rollout.UpgradeFreshUpgrade, FromVersion: 33, ToVersion: rollout.TargetVersion, DatabasePath: dbPath}
 	_, applyErr := h.application.ApplyDatabaseUpgrade(ctx(), rollout.UpgradeOptions{}, preview)
 	if !errors.Is(applyErr, rollout.ErrRolloutStateCorrupt) {
 		t.Fatalf("apply err = %v, want Corrupt from the re-read", applyErr)
@@ -426,7 +426,7 @@ func TestAdoptionWritesFixedZeroWithoutMeasuringOrMigrating(t *testing.T) {
 	if report.Backup.Path == "" {
 		t.Fatal("adoption must still produce a verified backup")
 	}
-	if got := queryUserVersion(t, h.paths.DatabaseFile); got != 41 {
+	if got := queryUserVersion(t, h.paths.DatabaseFile); got != 42 {
 		t.Fatalf("user_version moved to %d on adoption", got)
 	}
 
@@ -444,8 +444,8 @@ func TestAdoptionWritesFixedZeroWithoutMeasuringOrMigrating(t *testing.T) {
 	if state.BackupBytes != int64(len(data)) || state.BackupSHA256 != hex.EncodeToString(sum[:]) {
 		t.Fatal("adoption identity keys do not match the backup bytes")
 	}
-	if state.BackupSourceVersion != 41 {
-		t.Fatalf("adoption source version = %d, want 41", state.BackupSourceVersion)
+	if state.BackupSourceVersion != rollout.TargetVersion {
+		t.Fatalf("adoption source version = %d, want %d", state.BackupSourceVersion, rollout.TargetVersion)
 	}
 }
 

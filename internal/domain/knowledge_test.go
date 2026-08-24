@@ -816,13 +816,11 @@ func TestKnowledgeDocumentsRequireHandleDigestScopeAndProvenance(t *testing.T) {
 	document := domain.KnowledgeDocument{
 		ID: "doc_0001", Subject: "architecture-overview",
 		ScopeKind: domain.KnowledgeScopeGlobal, ContentDigest: strings.Repeat("a", 64),
-		ContentHandle: "mem_topic_12345",
-		SourceID:      "mem_abc123",
-		SourceRev:     3,
-		Provenance:    domain.KnowledgeProvenanceLegacyCurated, Status: domain.KnowledgeDocumentActive,
+		ContentHandle: "result:doc-1",
+		Provenance:    domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 	}
 	if err := document.Validate(); err != nil {
-		t.Fatalf("legacy document validation failed: %v", err)
+		t.Fatalf("curated document validation failed: %v", err)
 	}
 	document.ContentDigest = strings.Repeat("a", 63)
 	if err := document.Validate(); !errors.Is(err, domain.ErrKnowledgeInvalidDocumentDigest) {
@@ -837,20 +835,20 @@ func TestKnowledgeDocumentsRequireHandleDigestScopeAndProvenance(t *testing.T) {
 	if err := document.Validate(); !errors.Is(err, domain.ErrKnowledgeInvalidValue) {
 		t.Fatalf("unknown provenance error = %v, want ErrKnowledgeInvalidValue", err)
 	}
-	document.Provenance = domain.KnowledgeProvenanceLegacyCurated
+	document.Provenance = domain.KnowledgeProvenanceCurated
 	document.ScopeKind = domain.KnowledgeScopeUser
 	if err := document.Validate(); !errors.Is(err, domain.ErrKnowledgeScopeIdentityRequired) {
 		t.Fatalf("user scope without identity error = %v, want ErrKnowledgeScopeIdentityRequired", err)
 	}
 	document.ScopeKind = domain.KnowledgeScopeGlobal
-	document.SourceID = ""
+	document.SourceID = "source-1"
 	if err := document.Validate(); !errors.Is(err, domain.ErrKnowledgeInvalidValue) {
-		t.Fatalf("legacy without source identity error = %v, want ErrKnowledgeInvalidValue", err)
+		t.Fatalf("curated with source identity error = %v, want ErrKnowledgeInvalidValue", err)
 	}
-	document.SourceID = "mem_abc123"
-	document.SourceRev = 0
+	document.SourceID = ""
+	document.SourceRev = 3
 	if err := document.Validate(); !errors.Is(err, domain.ErrKnowledgeInvalidValue) {
-		t.Fatalf("legacy without source revision error = %v, want ErrKnowledgeInvalidValue", err)
+		t.Fatalf("curated with source revision error = %v, want ErrKnowledgeInvalidValue", err)
 	}
 	document.SourceRev = 3
 	document.ContentHandle = ""
@@ -1026,7 +1024,7 @@ func TestKnowledgeCommandReceiptValidatesIdentity(t *testing.T) {
 func TestKnowledgeDocumentCarriesStorageRevision(t *testing.T) {
 	document := domain.KnowledgeDocument{
 		Subject: "runbook", ScopeKind: domain.KnowledgeScopeGlobal,
-		ContentDigest: strings.Repeat("a", 64), ContentHandle: "mem_topic_1",
+		ContentDigest: strings.Repeat("a", 64), ContentHandle: "result:doc-1",
 		Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive,
 		Revision: 3,
 	}

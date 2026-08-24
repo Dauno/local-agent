@@ -32,11 +32,8 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 	}
 	cfg := snapshot.Config
 
-	fmt.Fprintln(output, "\n[2/9] Identidad del agente y de la app Slack")
-	agentName, err := prompt.Text("Nombre del agente", cfg.Agent.Name, true)
-	if err != nil {
-		return err
-	}
+	fmt.Fprintln(output, "\n[2/9] Identidad de la app Slack")
+	agentName := "root_agent"
 	appName, err := prompt.Text("Nombre de la app Slack", cfg.Slack.AppName, true)
 	if err != nil {
 		return err
@@ -98,7 +95,6 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 			return err
 		}
 		candidate := cfg
-		candidate.Agent.Name = agentName
 		candidate.Slack.AppName = appName
 		candidate.Slack.BotDisplayName = botName
 		candidate.Slack.AllowAllUsers = access.AllowAllUsers
@@ -114,9 +110,18 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 	}
 
 	fmt.Fprintln(output, "\n[7/9] Configurar la clave del modelo")
-	modelKey, err := prompt.Secret(cfg.Model.APIKeyEnv, existingSecrets.ModelAPIKey, "")
-	if err != nil {
-		return err
+	modelAPIKeyEnv := snapshot.ModelAPIKeyEnv
+	if !snapshot.ModelAPIKeyEnvResolved {
+		modelAPIKeyEnv = bootstrap.DefaultModelAPIKeyEnv
+	}
+	modelKey := ""
+	if modelAPIKeyEnv == "" {
+		fmt.Fprintln(output, "El proveedor raíz no requiere una clave de API de modelo.")
+	} else {
+		modelKey, err = prompt.Secret(modelAPIKeyEnv, existingSecrets.ModelAPIKey, "")
+		if err != nil {
+			return err
+		}
 	}
 	secrets := bootstrap.Secrets{ModelAPIKey: modelKey, SlackBotToken: botToken, SlackAppToken: appToken}
 
@@ -127,8 +132,10 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 	if access.ContextEnabled {
 		fmt.Fprintln(output, "Reinstala la app Slack para conceder users:read antes de ejecutar local-agent run.")
 	}
-	fmt.Fprintf(output, "%s: %s\nSLACK_BOT_TOKEN: %s\nSLACK_APP_TOKEN: %s\n",
-		cfg.Model.APIKeyEnv, secure.Mask(modelKey), secure.Mask(botToken), secure.Mask(appToken))
+	if modelAPIKeyEnv != "" {
+		fmt.Fprintf(output, "%s: %s\n", modelAPIKeyEnv, secure.Mask(modelKey))
+	}
+	fmt.Fprintf(output, "SLACK_BOT_TOKEN: %s\nSLACK_APP_TOKEN: %s\n", secure.Mask(botToken), secure.Mask(appToken))
 	fmt.Fprint(output, privacyNotice)
 	confirmed, err := prompt.Confirm("Escribir la configuración confirmada", false)
 	if err != nil {

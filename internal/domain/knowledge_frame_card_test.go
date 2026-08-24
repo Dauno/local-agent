@@ -35,8 +35,8 @@ func framePreferenceCard() domain.KnowledgePreferenceCard {
 func frameDocumentCard() domain.KnowledgeDocumentCard {
 	return domain.KnowledgeDocumentCard{
 		ID: "kdoc_" + strings.Repeat("b", 24), Subject: "architecture overview",
-		ScopeKind: domain.KnowledgeScopeGlobal, Provenance: domain.KnowledgeProvenanceLegacyCurated,
-		Status: domain.KnowledgeDocumentActive, SourceID: "mem_arch", SourceRev: 2,
+		ScopeKind: domain.KnowledgeScopeGlobal, Provenance: domain.KnowledgeProvenanceCurated,
+		Status:  domain.KnowledgeDocumentActive,
 		Content: "The system is composed of bounded adapters.", RetrievalReason: "lexical",
 	}
 }
@@ -217,11 +217,6 @@ func TestKnowledgeDocumentCardValidation(t *testing.T) {
 		{"empty subject", func(c *domain.KnowledgeDocumentCard) { c.Subject = "" }},
 		{"unknown provenance", func(c *domain.KnowledgeDocumentCard) { c.Provenance = "invented" }},
 		{"archived status", func(c *domain.KnowledgeDocumentCard) { c.Status = domain.KnowledgeDocumentArchived }},
-		{"legacy without source", func(c *domain.KnowledgeDocumentCard) { c.SourceID = "" }},
-		{"legacy unbounded source", func(c *domain.KnowledgeDocumentCard) {
-			c.SourceID = strings.Repeat("s", domain.HardMaxKnowledgeSourceRefRunes+1)
-		}},
-		{"legacy without revision", func(c *domain.KnowledgeDocumentCard) { c.SourceRev = 0 }},
 		{"empty content", func(c *domain.KnowledgeDocumentCard) { c.Content = "" }},
 		{"invalid utf-8 content", func(c *domain.KnowledgeDocumentCard) { c.Content = "content\xff\xfe" }},
 		{"oversized content", func(c *domain.KnowledgeDocumentCard) {

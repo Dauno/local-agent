@@ -1,7 +1,6 @@
 package config
 
 import (
-	"encoding/json"
 	"fmt"
 	"net/url"
 	"regexp"
@@ -72,7 +71,6 @@ func Validate(cfg Config) error {
 		}
 	}
 
-	requireText("agent.name", cfg.Agent.Name)
 	requirePath(&problems, "state.dir", cfg.State.Dir)
 	requirePath(&problems, "state.db", cfg.State.DB)
 
@@ -142,22 +140,6 @@ func Validate(cfg Config) error {
 	}
 	requireText("runtime.busy_message", cfg.Runtime.BusyMessage)
 	requireText("runtime.model_error_message", cfg.Runtime.ModelErrorMessage)
-
-	requireText("model.name", cfg.Model.Name)
-	validateBaseURL(&problems, cfg.Model.BaseURL)
-	if !environmentNamePattern.MatchString(cfg.Model.APIKeyEnv) {
-		add("model.api_key_env", "must be a valid environment variable name such as DEEPSEEK_API_KEY")
-	}
-	if !validReasoningEffort(cfg.Model.ReasoningEffort) {
-		add("model.reasoning_effort", "must be one of none, minimal, low, medium, high, or xhigh")
-	}
-	validateHeaders(&problems, cfg.Model.Headers)
-	if _, err := json.Marshal(cfg.Model.ExtraBody); err != nil {
-		add("model.extra_body", fmt.Sprintf("must contain JSON-compatible values: %v", err))
-	}
-	if _, present := cfg.Model.ExtraBody["stream"]; present {
-		add("model.extra_body.stream", "is reserved; streaming is not supported in the MVP")
-	}
 
 	requireText("slack.app_name", cfg.Slack.AppName)
 	requireText("slack.bot_display_name", cfg.Slack.BotDisplayName)
@@ -241,39 +223,6 @@ func Validate(cfg Config) error {
 		}
 	}
 
-	if cfg.Memory.MaxTopicsRecall <= 0 {
-		add("memory.max_topics_recall", "must be greater than zero")
-	}
-	if cfg.Memory.MaxCharsRecall <= 0 {
-		add("memory.max_chars_recall", "must be greater than zero")
-	}
-	if cfg.Memory.CuratorTimeoutSeconds <= 0 {
-		add("memory.curator_timeout_seconds", "must be greater than zero")
-	}
-	if cfg.Memory.RecallTimeoutSeconds <= 0 {
-		add("memory.recall_timeout_seconds", "must be greater than zero")
-	}
-	if cfg.Memory.CuratorMaxRetries <= 0 {
-		add("memory.curator_max_retries", "must be greater than zero")
-	}
-	if cfg.Memory.WorkerIntervalSeconds <= 0 {
-		add("memory.worker_interval_seconds", "must be greater than zero")
-	}
-	if cfg.Memory.RetentionDays <= 0 {
-		add("memory.retention_days", "must be greater than zero")
-	}
-	if cfg.Memory.MaxTopics <= 0 {
-		add("memory.max_topics", "must be greater than zero")
-	}
-	if cfg.Memory.MaxLinks < 0 {
-		add("memory.max_links", "must not be negative")
-	}
-	if cfg.Memory.MaxTopicChars <= 0 {
-		add("memory.max_topic_chars", "must be greater than zero")
-	}
-	if cfg.Memory.MaxPatchOps <= 0 {
-		add("memory.max_patch_ops", "must be greater than zero")
-	}
 	if cfg.Orchestration.Workstreams.MaxNonTerminalTasks <= 0 || cfg.Orchestration.Workstreams.MaxNonTerminalTasks > domain.HardMaxWorkstreamTasks {
 		add("orchestration.workstreams.max_non_terminal_tasks", fmt.Sprintf("must be between 1 and %d", domain.HardMaxWorkstreamTasks))
 	}
@@ -315,9 +264,6 @@ func Validate(cfg Config) error {
 	}
 	validateKnowledgeRetrieval(&problems, cfg)
 	validateResultAnalysis(&problems, cfg)
-	if cfg.Model.ResultHandles.MaxDirectInlineBytes < 0 || cfg.Model.ResultHandles.MaxDirectInlineBytes > domain.HardMaxDirectInlineResultBytes {
-		add("model.result_handles.max_direct_inline_bytes", fmt.Sprintf("must be between 0 and %d", domain.HardMaxDirectInlineResultBytes))
-	}
 	if cfg.Sandbox.Enabled {
 		if len(cfg.Sandbox.Projects) == 0 {
 			add("sandbox.projects", "must contain at least one registered project when enabled")

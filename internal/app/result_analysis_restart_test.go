@@ -43,7 +43,6 @@ func resultAnalysisRestartTestConfig(enabled bool) config.Config {
 	cfg.Orchestration.ResultAnalysis.MaxSegmentBytes = 12
 	cfg.Orchestration.ResultAnalysis.MaxLeaves = 8
 	cfg.Orchestration.ResultAnalysis.WorkerIntervalSeconds = 1
-	cfg.Model.Name = "main-model-v1"
 	return cfg
 }
 

@@ -21,7 +21,6 @@ func (s *Service) handleStreamingTurn(
 	invocation domain.Invocation,
 	key domain.ConversationKey,
 	modelContext []domain.Message,
-	memory []domain.MemorySnippet,
 	agentContext domain.AgentContext,
 	metadata domain.ConversationMetadata,
 	modelRelease func(),
@@ -54,7 +53,7 @@ func (s *Service) handleStreamingTurn(
 	func() {
 		defer modelRelease()
 		s.streamingRuntime.Stream(modelCtx, port.AgentRequest{
-			ConversationKey: key, Messages: modelContext, Memory: memory, Context: agentContext,
+			ConversationKey: key, Messages: modelContext, Context: agentContext,
 			Knowledge:          append([]domain.KnowledgeFrameCard(nil), knowledge...),
 			WorkstreamRevision: workstreamRevision,
 			WorkstreamSnapshot: workstreamSnapshot,
@@ -239,7 +238,7 @@ func (s *Service) finalizeIncrementalTurn(ctx context.Context, invocation domain
 		var err error
 		prepared, err = s.exchange.PrepareAssistantExchange(ctx, metadata, domain.Message{
 			Role: domain.RoleAssistant, Content: finalText, CreatedAt: s.clock.Now().UTC(),
-		}, s.cfg.RetainMessages, s.memoryEnabled && len(invocation.Attachments) == 0)
+		}, s.cfg.RetainMessages)
 		if err != nil {
 			s.interruptIncremental(ctx, operation, "", "_Interrupted._")
 			return "", fmt.Errorf("prepare streamed assistant exchange: %w", err)

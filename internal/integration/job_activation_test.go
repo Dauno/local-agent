@@ -258,14 +258,6 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if len(messages) != 1 || messages[0].Role != domain.RoleAssistant || messages[0].Source != domain.MessageSourceAssistant {
 		t.Fatalf("activation transcript = %#v", messages)
 	}
-	var memoryOutbox int
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_outbox`).Scan(&memoryOutbox); err != nil {
-		t.Fatal(err)
-	}
-	if memoryOutbox != 0 {
-		t.Fatalf("activation created memory work = %d", memoryOutbox)
-	}
-
 	loaded, err := sessionService.Get(t.Context(), &session.GetRequest{
 		AppName: "local-agent", UserID: "local_user", SessionID: "adk:activation:" + activationID,
 	})

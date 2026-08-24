@@ -270,7 +270,7 @@ func TestConnectionModelPreUpgradeIsInformational(t *testing.T) {
 	}
 	for _, want := range []string{
 		"schema v33",
-		"current binary requires v41",
+		"current binary requires v42",
 		"run local-agent db upgrade",
 		"journal_mode=delete",
 	} {
@@ -290,7 +290,7 @@ func TestConnectionModelFutureSchemaOrReadFailureIsFatal(t *testing.T) {
 		name    string
 		runtime *fakeSQLiteRuntimeChecker
 	}{
-		{name: "future schema", runtime: runtimeWithSchema(42)},
+		{name: "future schema", runtime: runtimeWithSchema(43)},
 		{name: "unreadable schema", runtime: &fakeSQLiteRuntimeChecker{err: errors.New("read schema version: I/O error")}},
 	}
 	for _, tc := range cases {
@@ -405,7 +405,7 @@ func TestConnectionModelV0Boundary(t *testing.T) {
 func TestSkipNeverChangesExitCode(t *testing.T) {
 	report := Report{Results: []Result{
 		{Name: "a", Status: StatusPass},
-		{Name: "b", Status: StatusSkipped, Detail: "requires schema v41, database is v33"},
+		{Name: "b", Status: StatusSkipped, Detail: "requires schema v42, database is v33"},
 	}}
 	if code := report.ExitCode(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)

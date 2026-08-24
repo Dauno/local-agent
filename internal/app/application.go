@@ -99,7 +99,7 @@ func (a *Application) schemaLock(databasePath string) (rollout.Lock, error) {
 }
 
 const (
-	schemaBehindMessage     = "database schema is behind this binary's v41; run local-agent db upgrade first"
+	schemaBehindMessage     = "database schema is behind this binary's v42; run local-agent db upgrade first"
 	mutationLockHeldMessage = "another local-agent process is using the database; wait for it to finish"
 )
 
@@ -127,7 +127,7 @@ func schemaLockFailure(err error) error {
 // schemaOpenFailure maps OpenCurrent rejections to the shared operator
 // texts; every other error keeps its own shape. A schema inside [33, 40]
 // keeps the upgrade-first message because db upgrade accepts it; a schema
-// outside [33, 41] maps to the terminal message that never recommends
+// outside [33, 42] maps to the terminal message that never recommends
 // db upgrade for a file db upgrade itself refuses (FIND-179).
 func schemaOpenFailure(err error) error {
 	var upgrade *adaptersqlite.SchemaUpgradeRequiredError
@@ -162,19 +162,27 @@ func (a *Application) PrepareSetup(ctx context.Context) (bootstrap.Snapshot, boo
 	if err != nil {
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
 	}
+	snapshot.ModelAPIKeyEnv, err = resolveSetupModelAPIKeyEnv(snapshot.Paths.StateDir)
+	if err != nil {
+		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
+	}
+	snapshot.ModelAPIKeyEnvResolved = true
+	if err := service.RewriteEnvExample(ctx, snapshot.Paths, snapshot.ModelAPIKeyEnv); err != nil {
+		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
+	}
 	if err := os.MkdirAll(snapshot.Paths.ArtifactDir, 0o700); err != nil {
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, fmt.Errorf("create ACP artifact directory: %w", err)
 	}
-	values, err := envfile.NewResolver(snapshot.Paths.EnvFile).Resolve(
-		snapshot.Config.Model.APIKeyEnv,
-		bootstrap.SlackBotTokenEnv,
-		bootstrap.SlackAppTokenEnv,
-	)
+	keys := []string{bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv}
+	if snapshot.ModelAPIKeyEnv != "" {
+		keys = append([]string{snapshot.ModelAPIKeyEnv}, keys...)
+	}
+	values, err := envfile.NewResolver(snapshot.Paths.EnvFile).Resolve(keys...)
 	if err != nil {
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
 	}
 	return snapshot, bootstrap.Secrets{
-		ModelAPIKey:   values[snapshot.Config.Model.APIKeyEnv],
+		ModelAPIKey:   values[snapshot.ModelAPIKeyEnv],
 		SlackBotToken: values[bootstrap.SlackBotTokenEnv],
 		SlackAppToken: values[bootstrap.SlackAppTokenEnv],
 	}, nil
@@ -191,8 +199,31 @@ func (a *Application) ApplySetup(
 	if err != nil {
 		return err
 	}
+	if !snapshot.ModelAPIKeyEnvResolved {
+		snapshot.ModelAPIKeyEnv, err = resolveSetupModelAPIKeyEnv(snapshot.Paths.StateDir)
+		if err != nil {
+			return err
+		}
+		snapshot.ModelAPIKeyEnvResolved = true
+	}
 	_, err = service.ApplyConfirmedUpdates(ctx, snapshot, identity, access, secrets)
 	return err
+}
+
+func resolveSetupModelAPIKeyEnv(stateDir string) (string, error) {
+	defs, err := agentdef.Load(stateDir)
+	if err != nil {
+		return "", fmt.Errorf("load declarative agent definitions: %w", err)
+	}
+	root, ok := defs.Agents["root_agent"]
+	if !ok {
+		return "", errors.New("root_agent definition is missing")
+	}
+	resolved, err := defs.ResolveModel(root.Model)
+	if err != nil {
+		return "", fmt.Errorf("resolve root agent model for setup: %w", err)
+	}
+	return resolved.APIKeyEnv, nil
 }
 
 func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Report, error) {
@@ -386,9 +417,16 @@ func (a *Application) ResetState(ctx context.Context) error {
 	if err := store.Close(); err != nil {
 		return fmt.Errorf("close fresh database: %w", err)
 	}
+	canonicalConfig, err := config.Marshal(cfg)
+	if err != nil {
+		return fmt.Errorf("render canonical configuration: %w", err)
+	}
+	if err := os.WriteFile(configPath, canonicalConfig, 0o644); err != nil {
+		return fmt.Errorf("rewrite canonical configuration: %w", err)
+	}
 
 	// Clean up memory projections if they exist.
-	memoryDir := filepath.Join(a.root, ".local-agent", "memory")
+	memoryDir := paths.MemoryDir
 	if _, statErr := os.Stat(memoryDir); statErr == nil {
 		if err := os.RemoveAll(memoryDir); err != nil {
 			return fmt.Errorf("delete memory projections: %w", err)

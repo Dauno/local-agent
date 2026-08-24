@@ -55,7 +55,7 @@ func knowledgeTestDocument() domain.KnowledgeDocument {
 		ScopeKind:     domain.KnowledgeScopeProject,
 		ScopeID:       "workspace",
 		ContentDigest: strings.Repeat("c", 64),
-		ContentHandle: "mem_topic_1",
+		ContentHandle: "result:doc-1",
 		Provenance:    domain.KnowledgeProvenanceCurated,
 		Status:        domain.KnowledgeDocumentActive,
 		Revision:      1,
@@ -153,7 +153,7 @@ func TestKnowledgeProjectionHidesPrivacyIdentity(t *testing.T) {
 		t.Fatalf("preferences.md leaks owner or source identity:\n%s", preferences)
 	}
 	documents := readBundleFile(t, bundle, "knowledge/documents.md")
-	if strings.Contains(documents, "mem_topic_1") {
+	if strings.Contains(documents, "result:doc-1") {
 		t.Fatalf("documents.md exposes content_handle:\n%s", documents)
 	}
 	evidence := readBundleFile(t, bundle, "knowledge/evidence.md")
@@ -382,42 +382,6 @@ func TestKnowledgeProjectionRejectsSymlinkStaging(t *testing.T) {
 	}
 }
 
-func TestKnowledgeProjectionLegacyAndKnowledgeCoexistBothOrders(t *testing.T) {
-	p := New()
-	legacy := port.ProjectionSnapshot{Topics: []domain.Topic{
-		{ID: "mem_1", Slug: "legacy", Title: "Legacy", BundlePath: "topics", CurrentRev: 1, UpdatedAt: time.Now().UTC()},
-	}}
-	dir := t.TempDir()
-	bundle := filepath.Join(dir, "memory")
-	// Legacy first, then knowledge: both trees survive.
-	if err := p.Project(t.Context(), &stubProjectionReader{snapshot: legacy}, bundle); err != nil {
-		t.Fatal(err)
-	}
-	combined := knowledgeTestSnapshot()
-	combined.Topics = legacy.Topics
-	if err := p.Project(t.Context(), &stubProjectionReader{snapshot: combined}, bundle); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(bundle, "topics", "legacy.md")); err != nil {
-		t.Fatalf("knowledge promotion deleted legacy topics: %v", err)
-	}
-	if _, err := os.Stat(filepath.Join(bundle, "knowledge", "claims.md")); err != nil {
-		t.Fatalf("knowledge tree missing after knowledge promotion: %v", err)
-	}
-	// Knowledge first, then legacy: both trees survive.
-	if err := p.Project(t.Context(), &stubProjectionReader{snapshot: legacy}, bundle); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := os.Stat(filepath.Join(bundle, "topics", "legacy.md")); err != nil {
-		t.Fatalf("legacy promotion deleted legacy topics: %v", err)
-	}
-	// With knowledge rows present the legacy worker re-renders them too; a
-	// legacy promotion with an empty knowledge snapshot removes them.
-	if _, err := os.Stat(filepath.Join(bundle, "knowledge", "claims.md")); err == nil {
-		t.Fatal("empty knowledge snapshot must remove stale knowledge files")
-	}
-}
-
 func TestKnowledgeProjectionConcurrentPromotionsDoNotCorrupt(t *testing.T) {
 	p := New()
 	alpha := knowledgeTestSnapshot()
@@ -469,36 +433,20 @@ func renderExpected(t *testing.T, p *Projector, snapshot port.ProjectionSnapshot
 	return string(data)
 }
 
-func TestKnowledgeProjectionEmptyKnowledgeKeepsLegacyByteIdentical(t *testing.T) {
-	legacy := port.ProjectionSnapshot{Topics: []domain.Topic{
-		{ID: "mem_1", Slug: "legacy", Title: "Legacy", BundlePath: "topics", CurrentRev: 1, UpdatedAt: time.Unix(1_700_000_000, 0).UTC()},
-	}}
-	p := New()
-	withKnowledgeField := legacy
-	withKnowledgeField.Knowledge = port.KnowledgeSnapshot{}
-	dirA, dirB := t.TempDir(), t.TempDir()
-	if err := p.renderBundle(dirA, legacy); err != nil {
-		t.Fatal(err)
-	}
-	if err := p.renderBundle(dirB, withKnowledgeField); err != nil {
-		t.Fatal(err)
-	}
-	before, err := collectBundleBytes(dirA)
-	if err != nil {
-		t.Fatal(err)
-	}
-	after, err := collectBundleBytes(dirB)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(before) != len(after) {
-		t.Fatalf("empty knowledge snapshot changed legacy layout: %d vs %d files", len(before), len(after))
-	}
-	for name, data := range before {
-		if string(after[name]) != string(data) {
-			t.Fatalf("empty knowledge snapshot changed legacy file %s", name)
-		}
-	}
+type stubProjectionReader struct {
+	snapshot port.ProjectionSnapshot
+}
+
+func (r *stubProjectionReader) ReadProjectionSnapshot(_ context.Context) (port.ProjectionSnapshot, error) {
+	return r.snapshot, nil
+}
+
+type errorProjectionReader struct {
+	err error
+}
+
+func (r *errorProjectionReader) ReadProjectionSnapshot(_ context.Context) (port.ProjectionSnapshot, error) {
+	return port.ProjectionSnapshot{}, r.err
 }
 
 func TestKnowledgeProjectionForgetRemovesProjectedContent(t *testing.T) {

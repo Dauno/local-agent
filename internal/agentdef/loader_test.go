@@ -67,9 +67,9 @@ include_contents: default
 durable_session: true
 tool_scope: invocation_scoped
 `)
-	writeFile(t, agentsDir, "memory_curator.yaml", `
+	writeFile(t, agentsDir, "worker.yaml", `
 agent_class: LlmAgent
-name: memory_curator
+name: worker
 model: deepseek/flash-json
 description: Extracts durable knowledge as JSON.
 instruction: |
@@ -78,7 +78,7 @@ instruction: |
   Example: {"operations":[]}
 include_contents: none
 timeout_seconds: 120
-role: memory_curator
+role: worker
 `)
 
 	defs, err := agentdef.LoadFromDirs(agentsDir, providersDir)
@@ -98,8 +98,8 @@ role: memory_curator
 	if _, ok := defs.Agents["root_agent"]; !ok {
 		t.Error("missing root_agent")
 	}
-	if _, ok := defs.Agents["memory_curator"]; !ok {
-		t.Error("missing memory_curator")
+	if _, ok := defs.Agents["worker"]; !ok {
+		t.Error("missing worker")
 	}
 }
 
@@ -976,9 +976,9 @@ model: deepseek/p1
 global_instruction: "policy here"
 instruction: "test"
 `)
-	writeFile(t, agentsDir, "memory_curator.yaml", `
+	writeFile(t, agentsDir, "worker.yaml", `
 agent_class: LlmAgent
-name: memory_curator
+name: worker
 model: deepseek/p1
 global_instruction: "should not be here"
 instruction: "test"
@@ -1045,9 +1045,9 @@ model: deepseek/p1
 global_instruction: "policy here"
 instruction: "test"
 `)
-	writeFile(t, agentsDir, "memory_curator.yaml", `
+	writeFile(t, agentsDir, "worker.yaml", `
 agent_class: LlmAgent
-name: memory_curator
+name: worker
 model: deepseek/p1
 global_instruction: "   "
 instruction: "test"
@@ -1089,7 +1089,7 @@ func TestTrackedDefinitionsLoad(t *testing.T) {
 	for _, name := range []string{
 		"attachment_analyzer", "bug_worker", "code_review_worker", "deepseek-advisor",
 		"deepseek_worker", "explore", "git_worker", "improve_agent", "luna_worker",
-		"memory_curator", "root_agent", "sol-advisor", "trd_creator",
+		"root_agent", "sol-advisor", "trd_creator",
 	} {
 		if _, exists := defs.Agents[name]; !exists {
 			t.Fatalf("tracked agent %q is missing", name)
@@ -1242,7 +1242,7 @@ func TestValidateAgentName(t *testing.T) {
 func TestIsReservedAgentName(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"root_agent", "user", "explore", "attachment_analyzer", "memory_curator"} {
+	for _, name := range []string{"root_agent", "user", "explore", "attachment_analyzer"} {
 		if !agentdef.IsReservedAgentName(name) {
 			t.Errorf("IsReservedAgentName(%q) = false", name)
 		}

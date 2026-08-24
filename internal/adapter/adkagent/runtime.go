@@ -1240,7 +1240,6 @@ func usableConfirmationHint(hint string) string {
 // --- ephemeral context (before-model callback) ---
 
 type beforeModelData struct {
-	memory             []domain.MemorySnippet
 	context            domain.AgentContext
 	actor              string
 	origin             port.AgentTurnOrigin
@@ -1252,7 +1251,6 @@ type beforeModelData struct {
 
 func buildBeforeModelContext(req port.AgentRequest) beforeModelData {
 	return beforeModelData{
-		memory:      req.Memory,
 		context:     req.Context,
 		actor:       latestActor(req),
 		beforeModel: req.BeforeModel,
@@ -1291,13 +1289,6 @@ func (d beforeModelData) reference() string {
 	if contextRef != "" {
 		parts = append(parts, contextRef)
 	}
-	if len(d.memory) > 0 {
-		memRef := domain.RenderMemoryReference(d.memory)
-		if memRef != "" {
-			parts = append(parts, memRef)
-		}
-	}
-
 	return strings.Join(parts, "\n\n")
 }
 

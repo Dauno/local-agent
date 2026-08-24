@@ -21,7 +21,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/rollout"
 )
 
-const schemaBehindText = "database schema is behind this binary's v41; run local-agent db upgrade first"
+const schemaBehindText = "database schema is behind this binary's v42; run local-agent db upgrade first"
 
 const mutationHeldText = "another local-agent process is using the database; wait for it to finish"
 
@@ -224,8 +224,8 @@ func TestResetStateConfirmedReplacesBehindDatabase(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer plain.Close()
-	if err := plain.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 41 {
-		t.Fatalf("post-reset user_version=%d err=%v, want 41", version, err)
+	if err := plain.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 42 {
+		t.Fatalf("post-reset user_version=%d err=%v, want 42", version, err)
 	}
 }
 

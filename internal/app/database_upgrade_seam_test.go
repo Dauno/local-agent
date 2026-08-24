@@ -208,7 +208,7 @@ func (w *recordingWriter) Migrate(ctx context.Context, path string) error {
 		return err
 	}
 	defer plain.Close()
-	_, err = plain.ExecContext(ctx, "PRAGMA user_version = 41")
+	_, err = plain.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", rollout.TargetVersion))
 	return err
 }
 
@@ -247,7 +247,7 @@ func replaceFixture(t *testing.T, dbPath string, version int, seed map[string]st
 	if _, err := plain.Exec("PRAGMA journal_mode = delete"); err != nil {
 		t.Fatal(err)
 	}
-	if version != 41 {
+	if version != adaptersqlite.SchemaVersion {
 		if _, err := plain.Exec(fmt.Sprintf("PRAGMA user_version = %d", version)); err != nil {
 			t.Fatal(err)
 		}
