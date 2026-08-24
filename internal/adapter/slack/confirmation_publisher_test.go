@@ -229,6 +229,57 @@ func TestConfirmationContentDigestDeterministic(t *testing.T) {
 	}
 }
 
+func TestConfirmationContentDigestPreservesLegacyV1(t *testing.T) {
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Actor: "U12345678",
+		TeamID: "T12345678", ChannelID: "D12345678", ThreadTS: "1710000000.000000",
+		Summary: "Write file", ParameterHash: "abc123",
+		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	const legacyV1 = "2f36fd991b846946e691510ec93c1356e769b5088f7f97731c25d5102d39c2b7"
+	if got := confirmationContentDigest(delivery); got != legacyV1 {
+		t.Fatalf("legacy digest = %q, want %q", got, legacyV1)
+	}
+	delivery.Payload = `{"action":"cancel_workstream"}`
+	if got := confirmationContentDigest(delivery); got == legacyV1 {
+		t.Fatal("payload-bearing confirmation reused legacy digest")
+	}
+}
+
+func TestConfirmationPayloadPrecedesActionsAndAppearsInFallback(t *testing.T) {
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Cancel workstream",
+		Payload: strings.Repeat("x", 3000), Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	renderer, err := NewEmbeddedTemplateRenderer()
+	if err != nil {
+		t.Fatal(err)
+	}
+	fallback, blocks, err := compileConfirmationMessage(renderer, delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(fallback, "complete proposed payload is shown") {
+		t.Fatalf("oversized fallback did not identify complete payload blocks: %q", fallback)
+	}
+	if len(blocks) != 5 {
+		t.Fatalf("blocks = %d, want two payload blocks plus confirmation blocks", len(blocks))
+	}
+	for index := range 2 {
+		section, ok := blocks[index].(*slackapi.SectionBlock)
+		if !ok || section.Text == nil || section.Text.Type != slackapi.PlainTextType || !strings.HasPrefix(section.Text.Text, "Proposed payload:\n") {
+			t.Fatalf("payload block %d = %#v", index, blocks[index])
+		}
+	}
+	if _, ok := blocks[len(blocks)-1].(*slackapi.ActionBlock); !ok {
+		t.Fatalf("last block = %#v, want actions after payload", blocks[len(blocks)-1])
+	}
+	delivery.Payload = `{"action":"cancel_workstream"}`
+	if fallback := confirmationFallbackText(delivery); !strings.Contains(fallback, delivery.Payload) {
+		t.Fatal("bounded accessible fallback omitted confirmation payload")
+	}
+}
+
 func TestListenerIgnoresInteractiveWhenNoHandlerSet(t *testing.T) {
 	t.Parallel()
 	client := newFakeSocketClient()

@@ -63,6 +63,12 @@ type ExternalAgentJobStore interface {
 	ListExpiredRunning(ctx context.Context, now time.Time) ([]domain.ExternalAgentJob, error)
 }
 
+// ExternalAgentJobNativeResultStore resolves the normalized V2 result bound to
+// one exact terminal job revision. Missing bindings fail closed.
+type ExternalAgentJobNativeResultStore interface {
+	NativeResultIDForJob(ctx context.Context, jobID string, statusRevision int) (string, error)
+}
+
 type ExternalAgentJobNotificationStore interface {
 	ClaimNextNotification(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobNotification, error)
 	MarkNotificationPublished(ctx context.Context, notification *domain.ExternalAgentJobNotification, slackTS string, now time.Time) error
@@ -73,6 +79,19 @@ type ExternalAgentJobNotificationStore interface {
 // are ordered by conversation and compare-and-set against lease state.
 type ExternalAgentJobActivationClaimStore interface {
 	ClaimNextActivation(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error)
+}
+
+// ExternalAgentJobActivationFallbackStore owns the bounded host fallback that
+// closes a terminal activation whose integrated response could not be
+// published. Fallback rows are claimable and reconcilable like any other
+// activation outbox work. The fallback exchange intent is prepared durably
+// with a deterministic identity before Slack is contacted, and completion is
+// one transaction: persisting the assistant message, consuming the intent,
+// and committing fallback_slack_ts by CAS.
+type ExternalAgentJobActivationFallbackStore interface {
+	ClaimNextActivationFallback(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error)
+	PrepareActivationFallbackExchange(ctx context.Context, activation *domain.ExternalAgentJobActivation, metadata domain.ConversationMetadata, message domain.Message, retain int, now time.Time) (PreparedAssistantExchange, error)
+	CompleteActivationFallback(ctx context.Context, activation *domain.ExternalAgentJobActivation, exchangeIntentID, slackTS string, now time.Time) error
 }
 
 type ExternalAgentJobActivationRetryStore interface {
@@ -123,6 +142,13 @@ type ExternalAgentJobActivationReconciler interface {
 type ExternalAgentJobCompletionHandler interface {
 	HandleJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error
 	ReconcileJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error
+}
+
+// ActivationFallbackPublisher publishes the host-owned terminal fallback for
+// an activation whose integrated response failed. It is optional; a handler
+// that does not implement it never claims fallback rows.
+type ActivationFallbackPublisher interface {
+	PublishActivationFallback(ctx context.Context, activation domain.ExternalAgentJobActivation) error
 }
 
 // ExternalAgentJobNotificationRetryStore persists a definitive, retryable
@@ -260,6 +286,12 @@ type ExternalAgentJobReader interface {
 	Status(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error)
 	ReadResult(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.ExternalAgentJobResult, error)
 	ReadResultChunk(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, offsetBytes, maxBytes int64) (domain.ResultChunk, error)
+}
+
+// ExternalAgentJobNativeResultReader returns bounded V2 metadata when native
+// results are enabled. found=false identifies a legacy-only runtime.
+type ExternalAgentJobNativeResultReader interface {
+	NativeResultHandleForJob(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (handle domain.ResultHandle, found bool, err error)
 }
 
 // ExternalAgentJobActivationReader reads a job only when its durable revision

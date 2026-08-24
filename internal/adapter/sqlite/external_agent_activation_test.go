@@ -42,6 +42,21 @@ func TestPublishedTerminalNotificationAtomicallyCreatesOneActivation(t *testing.
 	}
 }
 
+func TestPublishedUnboundDetachedNotificationDoesNotCreateActivation(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-unbound", now)
+	job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision = "", "", "", 0
+	terminalizeActivationTestJob(t, jobs, job, now)
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000002", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if count := activationCountForJob(t, store, job.ID); count != 0 {
+		t.Fatalf("unbound detached activation count = %d, want 0", count)
+	}
+}
+
 func TestPublishedNotificationRollsBackWhenActivationInsertFails(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
 	job := activationTestJob("activation-rollback", now)
@@ -287,6 +302,236 @@ func TestActivationReconciliationBindsActorTeamAndConversation(t *testing.T) {
 	}
 }
 
+func TestActivationFallbackClaimAndPublicationCAS(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-fallback", now)
+	terminalizeActivationTestJob(t, jobs, job, now)
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000011", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobs.ClaimNextActivation(t.Context(), now.Add(4*time.Second), "activation-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("activation claim = %#v, err=%v", claimed, err)
+	}
+	if err := jobs.FailActivation(t.Context(), claimed, "activation_result_unavailable", now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := jobs.GetActivation(t.Context(), claimed.ActivationID)
+	if err != nil || failed == nil {
+		t.Fatalf("failed activation = %#v, err=%v", failed, err)
+	}
+	if failed.State != domain.ActivationFailed || failed.LastErrorCode != "activation_result_unavailable" || !failed.FallbackRequired || failed.FallbackSlackTS != "" {
+		t.Fatalf("failed activation fallback state = %#v", failed)
+	}
+
+	fallbackClaim, err := jobs.ClaimNextActivationFallback(t.Context(), now.Add(6*time.Second), "fallback-worker", time.Minute)
+	if err != nil || fallbackClaim == nil || fallbackClaim.ActivationID != claimed.ActivationID {
+		t.Fatalf("fallback claim = %#v, err=%v", fallbackClaim, err)
+	}
+	if again, err := jobs.ClaimNextActivationFallback(t.Context(), now.Add(6*time.Second), "second-worker", time.Minute); err != nil || again != nil {
+		t.Fatalf("leased fallback row was claimed twice: %#v, err=%v", again, err)
+	}
+	metadata := domain.ConversationMetadata{Key: fallbackClaim.ConversationKey, TeamID: fallbackClaim.TeamID, ChannelID: "D12345678", ChannelKind: domain.ChannelDM}
+	fallbackMessage := domain.Message{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant, Content: "fallback closing update", CreatedAt: now.Add(7 * time.Second)}
+	intent, err := jobs.PrepareActivationFallbackExchange(t.Context(), fallbackClaim, metadata, fallbackMessage, 50, now.Add(7*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkAssistantExchangePublished(t.Context(), intent.ID, "1710000000.000012"); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.CompleteActivationFallback(t.Context(), fallbackClaim, intent.ID, "1710000000.000012", now.Add(8*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.CompleteActivationFallback(t.Context(), fallbackClaim, intent.ID, "1710000000.000012", now.Add(8*time.Second)); err != nil {
+		t.Fatalf("fallback completion replay error = %v", err)
+	}
+	if again, err := jobs.ClaimNextActivationFallback(t.Context(), now.Add(9*time.Second), "third-worker", time.Minute); err != nil || again != nil {
+		t.Fatalf("published fallback was claimed again: %#v, err=%v", again, err)
+	}
+	completed, err := jobs.GetActivation(t.Context(), fallbackClaim.ActivationID)
+	if err != nil || completed == nil || completed.FallbackSlackTS != "1710000000.000012" {
+		t.Fatalf("completed fallback = %#v, err=%v", completed, err)
+	}
+	// The message persisted exactly once and the intent was consumed.
+	var messageCount, intentCount int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages WHERE conversation_key = ? AND role = 'assistant' AND content = 'fallback closing update'`, string(fallbackClaim.ConversationKey)).Scan(&messageCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_exchange_intents WHERE id = ?`, intent.ID).Scan(&intentCount); err != nil {
+		t.Fatal(err)
+	}
+	if messageCount != 1 || intentCount != 0 {
+		t.Fatalf("fallback completion side effects = messages:%d intents:%d", messageCount, intentCount)
+	}
+}
+
+func TestActivationFallbackExchangeIsDeterministicAndDurable(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-fallback-exchange", now)
+	terminalizeActivationTestJob(t, jobs, job, now)
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000015", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobs.ClaimNextActivation(t.Context(), now.Add(4*time.Second), "activation-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("activation claim = %#v, err=%v", claimed, err)
+	}
+	if err := jobs.FailActivation(t.Context(), claimed, "activation_result_unavailable", now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	fallbackClaim, err := jobs.ClaimNextActivationFallback(t.Context(), now.Add(6*time.Second), "fallback-worker", time.Minute)
+	if err != nil || fallbackClaim == nil {
+		t.Fatalf("fallback claim = %#v, err=%v", fallbackClaim, err)
+	}
+	metadata := domain.ConversationMetadata{
+		Key: fallbackClaim.ConversationKey, TeamID: fallbackClaim.TeamID,
+		ChannelID: "D12345678", ChannelKind: domain.ChannelDM,
+	}
+	message := domain.Message{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant, Content: "fallback closing update", CreatedAt: now.Add(6 * time.Second)}
+	first, err := jobs.PrepareActivationFallbackExchange(t.Context(), fallbackClaim, metadata, message, 50, now.Add(7*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := jobs.PrepareActivationFallbackExchange(t.Context(), fallbackClaim, metadata, message, 50, now.Add(7*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID || first.CorrelationID != second.CorrelationID || first.ID == "" {
+		t.Fatalf("fallback exchange identity is not deterministic: %#v vs %#v", first, second)
+	}
+
+	// The staged intent exists durably before any Slack contact and is
+	// memory-ineligible.
+	var intentCount, publishStatus string
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*), MIN(publish_status) FROM memory_exchange_intents WHERE id = ?`, first.ID).Scan(&intentCount, &publishStatus); err != nil {
+		t.Fatal(err)
+	}
+	if intentCount != "1" || publishStatus != "prepared" {
+		t.Fatalf("fallback exchange intent = count:%s status:%q", intentCount, publishStatus)
+	}
+
+	if err := store.MarkAssistantExchangePublished(t.Context(), first.ID, "1710000000.000016"); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.CompleteActivationFallback(t.Context(), fallbackClaim, first.ID, "1710000000.000016", now.Add(8*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	published, err := jobs.GetActivation(t.Context(), fallbackClaim.ActivationID)
+	if err != nil || published == nil || published.FallbackSlackTS != "1710000000.000016" {
+		t.Fatalf("published fallback = %#v, err=%v", published, err)
+	}
+}
+
+func TestActivationFallbackIntentsAreExcludedFromGenericReconciliation(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-fallback-reconcile", now)
+	terminalizeActivationTestJob(t, jobs, job, now)
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000017", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobs.ClaimNextActivation(t.Context(), now.Add(4*time.Second), "activation-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("activation claim = %#v, err=%v", claimed, err)
+	}
+	if err := jobs.FailActivation(t.Context(), claimed, "activation_result_unavailable", now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	fallbackClaim, err := jobs.ClaimNextActivationFallback(t.Context(), now.Add(6*time.Second), "fallback-worker", time.Minute)
+	if err != nil || fallbackClaim == nil {
+		t.Fatalf("fallback claim = %#v, err=%v", fallbackClaim, err)
+	}
+	metadata := domain.ConversationMetadata{Key: fallbackClaim.ConversationKey, TeamID: fallbackClaim.TeamID, ChannelID: "D12345678", ChannelKind: domain.ChannelDM}
+	fallbackMessage := domain.Message{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant, Content: "fallback closing update", CreatedAt: now.Add(6 * time.Second)}
+	intent, err := jobs.PrepareActivationFallbackExchange(t.Context(), fallbackClaim, metadata, fallbackMessage, 50, now.Add(7*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// A prepared fallback intent must survive the generic reconciler even when
+	// its deterministic correlation ID matches the remote history.
+	matcher := exchangeFinder{intentID: intent.ID, correlationID: intent.CorrelationID, content: "fallback closing update", timestamp: "1710000000.000018"}
+	if err := store.ReconcileAssistantExchanges(t.Context(), matcher); err != nil {
+		t.Fatal(err)
+	}
+	assertFallbackIntentState(t, store, fallbackClaim.ConversationKey, intent.ID, "prepared", 0)
+
+	// A published fallback intent must likewise survive the generic published
+	// finalization loop, because its completion is owned exclusively by the
+	// fallback transaction.
+	if err := store.MarkAssistantExchangePublished(t.Context(), intent.ID, "1710000000.000018"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.ReconcileAssistantExchanges(t.Context(), matcher); err != nil {
+		t.Fatal(err)
+	}
+	assertFallbackIntentState(t, store, fallbackClaim.ConversationKey, intent.ID, "published", 0)
+
+	// The owning transaction then completes the fallback exactly once.
+	if err := jobs.CompleteActivationFallback(t.Context(), fallbackClaim, intent.ID, "1710000000.000018", now.Add(8*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	assertFallbackIntentState(t, store, fallbackClaim.ConversationKey, intent.ID, "consumed", 1)
+	completed, err := jobs.GetActivation(t.Context(), fallbackClaim.ActivationID)
+	if err != nil || completed == nil || completed.FallbackSlackTS != "1710000000.000018" {
+		t.Fatalf("completed fallback = %#v, err=%v", completed, err)
+	}
+}
+
+func assertFallbackIntentState(t *testing.T, store *Store, key domain.ConversationKey, intentID, wantStatus string, wantMessages int) {
+	t.Helper()
+	var status string
+	var exists int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_exchange_intents WHERE id = ?`, intentID).Scan(&exists); err != nil {
+		t.Fatal(err)
+	}
+	var messageCount int
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages WHERE conversation_key = ? AND role = 'assistant' AND content = 'fallback closing update'`, string(key)).Scan(&messageCount); err != nil {
+		t.Fatal(err)
+	}
+	if exists == 1 {
+		if err := store.DB().QueryRowContext(t.Context(), `SELECT publish_status FROM memory_exchange_intents WHERE id = ?`, intentID).Scan(&status); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if (wantStatus == "consumed") != (exists == 0) {
+		t.Fatalf("fallback intent existence = %d, want status %q", exists, wantStatus)
+	}
+	if exists == 1 && status != wantStatus {
+		t.Fatalf("fallback intent status = %q, want %q", status, wantStatus)
+	}
+	if messageCount != wantMessages {
+		t.Fatalf("fallback messages = %d, want %d", messageCount, wantMessages)
+	}
+}
+
+func TestActivationFallbackNotRequiredForIdentityFailures(t *testing.T) {
+	_, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-no-fallback", now)
+	terminalizeActivationTestJob(t, jobs, job, now)
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000014", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobs.ClaimNextActivation(t.Context(), now.Add(4*time.Second), "activation-worker", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("activation claim = %#v, err=%v", claimed, err)
+	}
+	if err := jobs.FailActivation(t.Context(), claimed, "actor_revoked", now.Add(5*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	failed, err := jobs.GetActivation(t.Context(), claimed.ActivationID)
+	if err != nil || failed == nil || failed.FallbackRequired {
+		t.Fatalf("identity failure fallback state = %#v, err=%v", failed, err)
+	}
+	if fallback, err := jobs.ClaimNextActivationFallback(t.Context(), now.Add(6*time.Second), "fallback-worker", time.Minute); err != nil || fallback != nil {
+		t.Fatalf("identity failure claimed for fallback: %#v, err=%v", fallback, err)
+	}
+}
+
 func TestActivationRestartAfterModelStartedDoesNotReplay(t *testing.T) {
 	_, jobs, now := newActivationTestStore(t)
 	job := activationTestJob("activation-restart", now)
@@ -315,23 +560,20 @@ func TestActivationRestartAfterModelStartedDoesNotReplay(t *testing.T) {
 	}
 }
 
-func TestActivationOutboxDoesNotWriteConversationMemory(t *testing.T) {
+func TestActivationOutboxDoesNotWriteConversationHistory(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
-	job := activationTestJob("activation-no-memory", now)
+	job := activationTestJob("activation-no-history", now)
 	terminalizeActivationTestJob(t, jobs, job, now)
 	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
 	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000010", now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
-	var messages, memoryOutbox int
+	var messages int
 	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages`).Scan(&messages); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_outbox`).Scan(&memoryOutbox); err != nil {
-		t.Fatal(err)
-	}
-	if messages != 0 || memoryOutbox != 0 {
-		t.Fatalf("activation changed memory tables: messages=%d outbox=%d", messages, memoryOutbox)
+	if messages != 0 {
+		t.Fatalf("activation changed conversation history: messages=%d", messages)
 	}
 }
 
@@ -377,6 +619,10 @@ func activationTestJob(id string, now time.Time) domain.ExternalAgentJob {
 	job.ID = id
 	job.OriginalCallID = id + "-call"
 	job.Mode = domain.JobDetached
+	job.WorkstreamID = "ws-activation-test"
+	job.TaskID = "task-" + id
+	job.ExecutionIdentity = "exec-" + id
+	job.AdmissionRevision = 0
 	return job
 }
 
@@ -386,6 +632,9 @@ func terminalizeActivationTestJob(t *testing.T, jobs *ExternalAgentJobStore, job
 
 func terminalizeActivationTestJobWithResult(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time, result *domain.AcpInvocationResult) {
 	t.Helper()
+	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
+		seedActivationTestBinding(t, jobs, job, now)
+	}
 	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 		t.Fatalf("create %s = %v, err=%v", job.ID, created, err)
 	}
@@ -413,6 +662,9 @@ func claimActivationTestNotification(t *testing.T, jobs *ExternalAgentJobStore, 
 // and JobAbandoned emits one terminal notification per revision.
 func terminalizeActivationTestJobByStatus(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time, status domain.ExternalAgentJobStatus) {
 	t.Helper()
+	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
+		seedActivationTestBinding(t, jobs, job, now)
+	}
 	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 		t.Fatalf("create %s = %v, err=%v", job.ID, created, err)
 	}
@@ -436,6 +688,24 @@ func terminalizeActivationTestJobByStatus(t *testing.T, jobs *ExternalAgentJobSt
 		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobAbandoned, nil, "", now.Add(2*time.Second))
 	default:
 		t.Fatalf("unsupported terminal test status %q", status)
+	}
+}
+
+func seedActivationTestBinding(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time) {
+	t.Helper()
+	if _, err := jobs.db.ExecContext(t.Context(), `INSERT INTO workstreams (
+		workstream_id, conversation_key, owner_actor, project, status, revision, objective, created_at, updated_at)
+		VALUES (?, ?, ?, ?, 'active', ?, 'activation test', ?, ?)
+		ON CONFLICT(workstream_id) DO NOTHING`,
+		job.WorkstreamID, string(job.ConversationKey), job.Actor, job.PrimaryProject, job.AdmissionRevision,
+		now.UnixNano(), now.UnixNano()); err != nil {
+		t.Fatalf("seed workstream %s: %v", job.WorkstreamID, err)
+	}
+	if _, err := jobs.db.ExecContext(t.Context(), `INSERT INTO workstream_tasks (
+		workstream_id, task_id, project, description, status, execution_identity)
+		VALUES (?, ?, ?, ?, 'running', ?)`,
+		job.WorkstreamID, job.TaskID, job.PrimaryProject, job.Task, job.ExecutionIdentity); err != nil {
+		t.Fatalf("seed workstream task %s: %v", job.TaskID, err)
 	}
 }
 
@@ -492,12 +762,24 @@ func reconcileClaimedNotification(t *testing.T, store *Store, jobs *ExternalAgen
 		WHERE job_id = ? AND status_revision = ? AND kind = ?`, notification.JobID, notification.StatusRevision, notification.Kind).Scan(&nextAttemptNanos); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications
+		SET next_attempt_at = ?
+		WHERE job_id = ? AND (status_revision != ? OR kind != ?) AND publish_state IN ('pending', 'unknown')`,
+		nextAttemptNanos+int64(time.Hour), notification.JobID, notification.StatusRevision, notification.Kind); err != nil {
+		t.Fatal(err)
+	}
 	recovered, err := jobs.ClaimNextNotification(t.Context(), time.Unix(0, nextAttemptNanos), notification.LeaseOwner, time.Minute)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if recovered == nil || !recovered.NeedsReconciliation {
 		t.Fatalf("reconciled notification claim = %#v, err=%v", recovered, err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications
+		SET next_attempt_at = ?
+		WHERE job_id = ? AND (status_revision != ? OR kind != ?) AND publish_state IN ('pending', 'unknown')`,
+		nextAttemptNanos, notification.JobID, notification.StatusRevision, notification.Kind); err != nil {
+		t.Fatal(err)
 	}
 	return recovered
 }
@@ -573,7 +855,7 @@ func TestNormalTransitionTerminalActivationByModeAndStatus(t *testing.T) {
 						t.Fatalf("unexpected %d terminal rows for %s", len(rows), status)
 					}
 					wantActivations := 0
-					if mode == domain.JobDetached {
+					if mode == domain.JobDetached && status == domain.JobCompleted {
 						wantActivations = len(rows)
 					}
 					if got := activationCountForJob(t, store, job.ID); got != wantActivations {
@@ -594,13 +876,15 @@ func TestNormalTransitionTerminalActivationByModeAndStatus(t *testing.T) {
 							if notification.RootActivationRequired {
 								t.Fatalf("foreground %s notification revision %d requires root activation", status, notification.StatusRevision)
 							}
-						} else {
+						} else if status == domain.JobCompleted {
 							if activation == nil {
 								t.Fatalf("detached %s lost activation for revision %d", status, notification.StatusRevision)
 							}
 							if activation.TerminalStatus != notification.TerminalStatus {
 								t.Fatalf("activation terminal status = %s, want %s", activation.TerminalStatus, notification.TerminalStatus)
 							}
+						} else if activation != nil || notification.RootActivationRequired {
+							t.Fatalf("detached %s unexpectedly requested root activation: notification=%#v activation=%#v", status, notification, activation)
 						}
 					}
 				})
@@ -615,6 +899,7 @@ func TestQueuedCancellationTerminalActivationByMode(t *testing.T) {
 			store, jobs, now := newActivationTestStore(t)
 			job := activationTestJob("activation-cancelled-"+string(mode), now)
 			job.Mode = mode
+			seedActivationTestBinding(t, jobs, job, now)
 			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 				t.Fatalf("create = %v, err = %v", created, err)
 			}
@@ -627,9 +912,6 @@ func TestQueuedCancellationTerminalActivationByMode(t *testing.T) {
 				t.Fatalf("published %d notifications, want 1", len(published))
 			}
 			want := 0
-			if mode == domain.JobDetached {
-				want = 1
-			}
 			if got := activationCountForJob(t, store, job.ID); got != want {
 				t.Fatalf("queued-cancelled %s activation count = %d, want %d", mode, got, want)
 			}
@@ -640,8 +922,8 @@ func TestQueuedCancellationTerminalActivationByMode(t *testing.T) {
 			if mode == domain.JobForeground && activation != nil {
 				t.Fatalf("foreground queued cancellation created activation %#v", activation)
 			}
-			if mode == domain.JobDetached && (activation == nil || activation.TerminalStatus != domain.JobCancelled) {
-				t.Fatalf("detached queued cancellation activation = %#v", activation)
+			if mode == domain.JobDetached && activation != nil {
+				t.Fatalf("detached queued cancellation created activation %#v", activation)
 			}
 		})
 	}
@@ -662,6 +944,7 @@ func TestExpiredRecoveryTerminalActivationByMode(t *testing.T) {
 				store, jobs, now := newActivationTestStore(t)
 				job := activationTestJob("activation-recovered-"+outcome.name+"-"+string(mode), now)
 				job.Mode = mode
+				seedActivationTestBinding(t, jobs, job, now)
 				if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 					t.Fatalf("create = %v, err = %v", created, err)
 				}
@@ -682,9 +965,6 @@ func TestExpiredRecoveryTerminalActivationByMode(t *testing.T) {
 					t.Fatalf("published %d notifications, want 1", len(published))
 				}
 				want := 0
-				if mode == domain.JobDetached {
-					want = 1
-				}
 				if got := activationCountForJob(t, store, job.ID); got != want {
 					t.Fatalf("recovered %s activation count = %d, want %d", mode, got, want)
 				}
@@ -695,8 +975,8 @@ func TestExpiredRecoveryTerminalActivationByMode(t *testing.T) {
 				if mode == domain.JobForeground && activation != nil {
 					t.Fatalf("foreground recovery created activation %#v", activation)
 				}
-				if mode == domain.JobDetached && (activation == nil || activation.TerminalStatus != outcome.status) {
-					t.Fatalf("detached recovery activation = %#v", activation)
+				if mode == domain.JobDetached && activation != nil {
+					t.Fatalf("detached recovery created activation %#v", activation)
 				}
 			})
 		}

@@ -29,7 +29,9 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/tooldef"
 	canvasusecase "github.com/Dauno/slack-local-agent/internal/usecase/canvas"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
+	resultanalysisusecase "github.com/Dauno/slack-local-agent/internal/usecase/resultanalysis"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
+	workstreamusecase "github.com/Dauno/slack-local-agent/internal/usecase/workstream"
 )
 
 var _ port.AgentToolFactory = (*Factory)(nil)
@@ -62,6 +64,9 @@ type Factory struct {
 	metrics            port.MetricRecorder
 	declarativeTools   map[string]tooldef.ToolDef
 	declarativeRunner  DeclarativeToolExecutor
+	workstreams        *workstreamusecase.Service
+	resultLinksEnabled bool
+	resultAnalysis     *resultanalysisusecase.Service
 }
 
 func (f *Factory) WithCodeReaders(readers map[string]port.CodeReader) *Factory {
@@ -170,6 +175,33 @@ func (f *Factory) WithExternalAgentJobs(reader port.ExternalAgentJobReader) *Fac
 	return f
 }
 
+func (f *Factory) WithWorkstreams(service *workstreamusecase.Service) *Factory {
+	if f != nil {
+		f.workstreams = service
+	}
+	return f
+}
+
+// WithResultLinksEnabled exposes the V2 result-link mutation tool only after
+// its feature gate has enabled native result creation.
+func (f *Factory) WithResultLinksEnabled(enabled bool) *Factory {
+	if f != nil {
+		f.resultLinksEnabled = enabled
+	}
+	return f
+}
+
+// WithResultAnalysis configures the TRD 07 objective-bound result analysis
+// service. The three analysis tools are exposed only when service is
+// non-nil, following the same f.workstreams != nil gating pattern every
+// other optional tool group in this factory already uses.
+func (f *Factory) WithResultAnalysis(service *resultanalysisusecase.Service) *Factory {
+	if f != nil {
+		f.resultAnalysis = service
+	}
+	return f
+}
+
 // WithAllowedUserIDs configures the users allowed to install agent definitions.
 func (f *Factory) WithAllowedUserIDs(ids []string) *Factory {
 	f.allowedUserIDs = append([]string(nil), ids...)
@@ -189,7 +221,7 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, nil
 	}
 
-	tools := make([]any, 0, 13)
+	tools := make([]any, 0, 16)
 
 	// Conversation tool.
 	ro, err := f.listMessagesTool(key)
@@ -197,6 +229,55 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, fmt.Errorf("build list_messages tool: %w", err)
 	}
 	tools = append(tools, ro)
+	if f.workstreams != nil {
+		getTool, err := f.workstreamGetTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_get tool: %w", err)
+		}
+		activeTool, err := f.workstreamActiveTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_active tool: %w", err)
+		}
+		createTool, err := f.workstreamCreateTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_create tool: %w", err)
+		}
+		transitionTool, err := f.workstreamTransitionTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_transition tool: %w", err)
+		}
+		handleTool, err := f.workstreamResultHandleTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_result_handle tool: %w", err)
+		}
+		chunkTool, err := f.workstreamReadResultChunkTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_read_result_chunk tool: %w", err)
+		}
+		tools = append(tools, getTool, activeTool, createTool, transitionTool, handleTool, chunkTool)
+		if f.resultLinksEnabled {
+			linkTool, err := f.workstreamLinkCompletedResultTool(actor, key)
+			if err != nil {
+				return nil, fmt.Errorf("build workstream_link_completed_result tool: %w", err)
+			}
+			tools = append(tools, linkTool)
+		}
+	}
+	if f.resultAnalysis != nil {
+		requestTool, err := f.resultAnalysisRequestTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_request_result_analysis tool: %w", err)
+		}
+		statusTool, err := f.resultAnalysisStatusTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_analysis_status tool: %w", err)
+		}
+		packetTool, err := f.resultAnalysisPacketTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_read_analysis_packet tool: %w", err)
+		}
+		tools = append(tools, requestTool, statusTool, packetTool)
+	}
 	if f.externalJobs != nil {
 		statusTool, err := f.jobStatusTool(actor, key)
 		if err != nil {
@@ -341,12 +422,12 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 	return tools, nil
 }
 
-// ToolsForActivation is deliberately separate from ToolsForInvocation. An
-// activation must never inherit child agents, workflows, mutable tools, or a
-// result reader bound to the job's current revision.
+// ToolsForActivation is deliberately separate from ToolsForInvocation. V1
+// activations receive no tools: the host selects and verifies the result
+// representation before model contact, so the model cannot re-read the job.
 func (f *Factory) ToolsForActivation(actor string, key domain.ConversationKey, activation domain.ExternalAgentJobActivation) ([]any, error) {
-	if f == nil || f.externalJobs == nil {
-		return nil, errors.New("external-agent activation tools are unavailable")
+	if f == nil {
+		return nil, nil
 	}
 	if strings.TrimSpace(actor) == "" || actor != activation.Actor || key == "" || key != activation.ConversationKey {
 		return nil, errors.New("external-agent activation tool binding is invalid")
@@ -354,19 +435,7 @@ func (f *Factory) ToolsForActivation(actor string, key domain.ConversationKey, a
 	if strings.TrimSpace(activation.ActivationID) == "" || strings.TrimSpace(activation.JobID) == "" || activation.StatusRevision < 0 || strings.TrimSpace(string(activation.TerminalStatus)) == "" {
 		return nil, errors.New("external-agent activation tool identity is incomplete")
 	}
-	reader, ok := f.externalJobs.(port.ExternalAgentJobActivationReader)
-	if !ok {
-		return nil, errors.New("external-agent activation reader is unavailable")
-	}
-	statusTool, err := f.activationJobStatusTool(reader, activation)
-	if err != nil {
-		return nil, fmt.Errorf("build activation job_status tool: %w", err)
-	}
-	chunkTool, err := f.activationReadJobResultChunkTool(reader, activation)
-	if err != nil {
-		return nil, fmt.Errorf("build activation read_job_result_chunk tool: %w", err)
-	}
-	return []any{statusTool, chunkTool}, nil
+	return nil, nil
 }
 
 func (f *Factory) syntaxQueryTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
@@ -1024,21 +1093,24 @@ func (f *Factory) activationJobStatusTool(reader port.ExternalAgentJobActivation
 }
 
 type readJobResultResult struct {
-	JobID           string `json:"job_id"`
-	StatusRevision  int    `json:"status_revision"`
-	ResultAvailable bool   `json:"result_available"`
-	HostDelivery    bool   `json:"host_delivery"`
-	Result          string `json:"result"`
-	ContentSHA256   string `json:"content_sha256"`
-	ContentBytes    int64  `json:"content_bytes"`
-	DeliveryMode    string `json:"delivery_mode"`
+	JobID           string                      `json:"job_id"`
+	StatusRevision  int                         `json:"status_revision"`
+	ResultAvailable bool                        `json:"result_available"`
+	HostDelivery    bool                        `json:"host_delivery"`
+	Result          string                      `json:"result"`
+	ContentSHA256   string                      `json:"content_sha256"`
+	ContentBytes    int64                       `json:"content_bytes"`
+	DeliveryMode    string                      `json:"delivery_mode"`
+	ResultID        string                      `json:"result_id,omitempty"`
+	MediaType       string                      `json:"media_type,omitempty"`
+	Availability    []domain.ResultAvailability `json:"availability,omitempty"`
 }
 
 func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "read_job_result",
-		Description: "Reads the complete sanitized result of a completed ACP durable job in this Slack conversation. Read-only; no ACP task is rerun and no confirmation is requested.",
+		Description: "Reads bounded result metadata for a completed ACP durable job in this Slack conversation. V2 jobs return a handle; legacy inline jobs may return complete sanitized text. No ACP task is rerun.",
 	}, func(ctx agent.Context, args jobIDArgs) (readJobResultResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return readJobResultResult{}, errors.New("job_id is required")
@@ -1049,6 +1121,19 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 		}
 		if job == nil {
 			return readJobResultResult{}, errors.New("external-agent job was not found")
+		}
+		if nativeReader, ok := reader.(port.ExternalAgentJobNativeResultReader); ok {
+			handle, found, err := nativeReader.NativeResultHandleForJob(ctx, args.JobID, actor, key)
+			if err != nil {
+				return readJobResultResult{}, err
+			}
+			if found {
+				return readJobResultResult{
+					JobID: job.ID, StatusRevision: job.StatusRevision, ResultAvailable: true,
+					ResultID: handle.ResultID, ContentSHA256: handle.SHA256, ContentBytes: handle.Bytes,
+					MediaType: handle.MediaType, Availability: append([]domain.ResultAvailability(nil), handle.Availability...),
+				}, nil
+			}
 		}
 		status := job.StatusView()
 		if status.DeliveryMode == domain.JobResultDeliveryFile {

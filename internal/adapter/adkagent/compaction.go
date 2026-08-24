@@ -532,19 +532,24 @@ type DurableTurnSource struct {
 	Redact  func(string) string
 }
 
+// durableEventRangeLoader exposes the sqlite adapter's bounded, indexed range
+// scan. sessionIdentity here is an ADK session ID; afterOrdinal/throughOrdinal
+// on ClosedTurns are turn ordinals (a sequential per-session turn count), not
+// ADK event ordinals, so they cannot be passed through to LoadEventRange
+// directly. Turn boundaries depend on scanning content roles, which requires
+// walking the event stream from the start. This loader instead pages that
+// walk through bounded, indexed queries instead of one unbounded Get.
+type durableEventRangeLoader interface {
+	LoadEventRange(ctx context.Context, appName, userID, sessionID string, afterOrdinal, limit int64) ([]*session.Event, error)
+}
+
 func (s DurableTurnSource) ClosedTurns(ctx context.Context, sessionIdentity string, afterOrdinal, throughOrdinal int64) ([]domain.ConversationTurn, error) {
 	if s.Service == nil || s.AppName == "" || s.UserID == "" || sessionIdentity == "" {
 		return nil, errors.New("durable summary turn source is not configured")
 	}
-	response, err := s.Service.Get(ctx, &session.GetRequest{AppName: s.AppName, UserID: s.UserID, SessionID: sessionIdentity})
+	events, err := s.loadAllEvents(ctx, sessionIdentity)
 	if err != nil {
 		return nil, err
-	}
-	var events []*session.Event
-	if response != nil && response.Session != nil && response.Session.Events() != nil {
-		for event := range response.Session.Events().All() {
-			events = append(events, event)
-		}
 	}
 	turns, err := ConversationTurnsFromEvents(events, s.Redact)
 	if err != nil {
@@ -557,4 +562,42 @@ func (s DurableTurnSource) ClosedTurns(ctx context.Context, sessionIdentity stri
 		}
 	}
 	return result, nil
+}
+
+// loadAllEvents returns the full durable event history for one session.
+// Turn classification needs the complete history regardless of the
+// afterOrdinal/throughOrdinal window (see durableEventRangeLoader), so this
+// still reads every event; the fix is that it no longer does so through one
+// unbounded Get. When the backing service exposes LoadEventRange, it pages
+// through the indexed range scan in bounded batches instead. Event ordinals
+// are contiguous per session (DEC-08-3), so the next page's cursor is simply
+// the running count, with no need to read an ordinal back off the event.
+func (s DurableTurnSource) loadAllEvents(ctx context.Context, sessionIdentity string) ([]*session.Event, error) {
+	if loader, ok := s.Service.(durableEventRangeLoader); ok {
+		const pageSize = int64(domain.MaxContextEpochRange)
+		var events []*session.Event
+		after := int64(-1)
+		for {
+			batch, err := loader.LoadEventRange(ctx, s.AppName, s.UserID, sessionIdentity, after, pageSize)
+			if err != nil {
+				return nil, err
+			}
+			events = append(events, batch...)
+			if int64(len(batch)) < pageSize {
+				return events, nil
+			}
+			after += int64(len(batch))
+		}
+	}
+	response, err := s.Service.Get(ctx, &session.GetRequest{AppName: s.AppName, UserID: s.UserID, SessionID: sessionIdentity})
+	if err != nil {
+		return nil, err
+	}
+	var events []*session.Event
+	if response != nil && response.Session != nil && response.Session.Events() != nil {
+		for event := range response.Session.Events().All() {
+			events = append(events, event)
+		}
+	}
+	return events, nil
 }

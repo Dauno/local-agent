@@ -37,9 +37,11 @@ type failingDatabase struct{ err error }
 func (d failingDatabase) CheckDatabase(context.Context, string) error { return d.err }
 
 type fakeLive struct {
-	bot, app, context, canvas, exports, model, attachment, audio int
-	modelAPIKey                                                  string
-	audioAPIKey                                                  string
+	bot, app, context, canvas, exports, model, attachment, audio, embedding int
+	modelAPIKey                                                             string
+	audioAPIKey                                                             string
+	embeddingAPIKey                                                         string
+	embeddingErr                                                            error
 }
 
 type fakeCLI struct {
@@ -78,11 +80,6 @@ func (f *fakeLive) CheckSlackApp(context.Context, string, string) error { f.app+
 func (f *fakeLive) CheckSlackContext(context.Context, string) error     { f.context++; return nil }
 func (f *fakeLive) CheckSlackCanvas(context.Context, string) error      { f.canvas++; return nil }
 func (f *fakeLive) CheckSlackExports(context.Context, string) error     { f.exports++; return nil }
-func (f *fakeLive) CheckModel(context.Context, config.ModelConfig, string) error {
-	f.model++
-	return nil
-}
-
 func (f *fakeLive) CheckResolvedModel(_ context.Context, _ *agentdef.ResolvedModel, apiKey string) error {
 	f.model++
 	f.modelAPIKey = apiKey
@@ -99,6 +96,12 @@ func (f *fakeLive) CheckAudioTranscription(_ context.Context, _ *agentdef.Resolv
 	f.audio++
 	f.audioAPIKey = apiKey
 	return nil
+}
+
+func (f *fakeLive) CheckKnowledgeEmbedding(_ context.Context, _ config.KnowledgeEmbeddingConfig, apiKey string) error {
+	f.embedding++
+	f.embeddingAPIKey = apiKey
+	return f.embeddingErr
 }
 
 // fakeCounter implements CounterChecker with a configurable availability set.
@@ -127,9 +130,95 @@ func validDependencies() (Dependencies, *fakeDatabase, *fakeLive) {
 			SlackBotTokenKey:   "xoxb-secret-token",
 			SlackAppTokenKey:   "xapp-secret-token",
 		}},
-		Database: database,
-		Live:     live,
+		Database:      database,
+		Live:          live,
+		SQLiteRuntime: &fakeSQLiteRuntimeChecker{health: healthySQLiteRuntime()},
 	}, database, live
+}
+
+func TestDoctorLiveEmbeddingCheckRunsOnlyWhenEnabledAndKeyResolves(t *testing.T) {
+	deps, _, live := validDependencies()
+	live.embeddingErr = errors.New("embedding endpoint exploded")
+	deps.LoadConfig = func(string) (config.Config, error) {
+		cfg := config.Default()
+		cfg.Orchestration.Knowledge.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Enabled = true
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.ProviderID = "acme"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.BaseURL = "https://embeddings.example.test"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.APIKeyEnv = "EMBEDDING_API_KEY"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Model = "embed-3"
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.Dimensions = 4
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.MinSimilarityBasisPoints = 5000
+		cfg.Orchestration.Knowledge.Retrieval.Embedding.TimeoutSeconds = 5
+		return cfg, nil
+	}
+	service, err := New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The embedding key is resolved before the live check: a missing key
+	// fails the secret check and the live call never runs.
+	report := service.Run(t.Context(), true)
+	if live.embedding != 0 {
+		t.Fatalf("embedding live check ran without a resolved key: %#v", live)
+	}
+	secretMissing := false
+	for _, result := range report.Results {
+		if result.Name == "knowledge embedding API key" && result.Status == StatusFail {
+			secretMissing = true
+		}
+	}
+	if !secretMissing {
+		t.Fatalf("missing embedding API key was not reported: %#v", report.Results)
+	}
+
+	deps.Secrets = fakeSecrets{values: map[string]string{
+		"DEEPSEEK_API_KEY":  "secret-model-key",
+		"EMBEDDING_API_KEY": "secret-embedding-key",
+		SlackBotTokenKey:    "xoxb-secret-token",
+		SlackAppTokenKey:    "xapp-secret-token",
+	}}
+	service, err = New(deps)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = service.Run(t.Context(), true)
+	if live.embedding != 1 || live.embeddingAPIKey != "secret-embedding-key" {
+		t.Fatalf("embedding live check calls = %d key %q, want one call with the resolved key", live.embedding, live.embeddingAPIKey)
+	}
+	failed := false
+	for _, result := range report.Results {
+		if result.Name == "knowledge embedding endpoint" {
+			if result.Status != StatusFail || !strings.Contains(result.Detail, "embedding endpoint exploded") {
+				t.Fatalf("embedding endpoint result = %#v, want a failure with the checked error", result)
+			}
+			failed = true
+		}
+	}
+	if !failed {
+		t.Fatalf("embedding endpoint failure missing: %#v", report.Results)
+	}
+
+	// With embeddings disabled the key is neither resolved nor checked.
+	disabled, _, _ := validDependencies()
+	disabledSecrets := fakeSecrets{values: map[string]string{
+		"DEEPSEEK_API_KEY": "secret-model-key",
+		SlackBotTokenKey:   "xoxb-secret-token",
+		SlackAppTokenKey:   "xapp-secret-token",
+	}}
+	disabled.Secrets = disabledSecrets
+	disabled.Live = &fakeLive{}
+	service, err = New(disabled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report = service.Run(t.Context(), true)
+	for _, result := range report.Results {
+		if strings.Contains(result.Name, "embedding") {
+			t.Fatalf("embedding-disabled doctor reported an embedding check: %#v", report.Results)
+		}
+	}
 }
 
 func TestOfflineDoctorCannotCallLiveChecks(t *testing.T) {
@@ -159,6 +248,10 @@ func TestDoctorValidatesADKCompactionModesAndLimits(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			deps, _, _ := validDependencies()
+			root := t.TempDir()
+			stateDir := filepath.Join(root, ".local-agent")
+			writeDoctorOpenAIDefinitions(t, stateDir)
+			deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 			deps.LoadConfig = func(string) (config.Config, error) {
 				cfg := config.Default()
 				test.mutate(&cfg)
@@ -184,6 +277,10 @@ func TestDoctorValidatesADKCompactionModesAndLimits(t *testing.T) {
 
 func TestLiveDoctorCallsEveryLiveCheck(t *testing.T) {
 	deps, _, live := validDependencies()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	writeDoctorOpenAIDefinitions(t, stateDir)
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	service, _ := New(deps)
 	report := service.Run(t.Context(), true)
 	if report.ExitCode() != 0 || live.bot != 1 || live.app != 1 || live.context != 0 || live.model != 1 {
@@ -234,9 +331,42 @@ func TestLiveDoctorChecksGeneratedFileCapabilityWhenEnabled(t *testing.T) {
 
 func TestDoctorValidatesAndChecksDedicatedAudioTranscriptionProfile(t *testing.T) {
 	deps, _, live := validDependencies()
+	root := t.TempDir()
+	stateDir := filepath.Join(root, ".local-agent")
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "provider.yaml"), []byte(`
+name: test
+type: openai_compatible
+base_url: https://example.test
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  default:
+    model: test-model
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(`
+agent_class: LlmAgent
+name: root_agent
+model: test/default
+global_instruction: policy here
+instruction: test
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Slack.Files.TranscriptionProfile = "legacy/default"
+		cfg.Slack.Files.TranscriptionProfile = "test/default"
 		return cfg, nil
 	}
 	service, err := New(deps)
@@ -431,7 +561,6 @@ func TestDoctorValidatesEverySelectedCLIProfileAndDescribesProviderOnce(t *testi
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = true
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -445,7 +574,7 @@ func TestDoctorValidatesEverySelectedCLIProfileAndDescribesProviderOnce(t *testi
 	if report.ExitCode() != 0 {
 		t.Fatalf("doctor failed: %#v", report.Results)
 	}
-	if len(cli.models) != 2 || cli.models[0] != "anthropic/root" || cli.models[1] != "anthropic/curator" {
+	if len(cli.models) != 2 || cli.models[0] != "anthropic/root" || cli.models[1] != "anthropic/worker" {
 		t.Fatalf("selected CLI profiles not all validated: %v", cli.models)
 	}
 	if cli.describeCalls != 1 {
@@ -463,7 +592,6 @@ func TestLiveDoctorAuthenticatesWithRetainedShimIdentity(t *testing.T) {
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = true
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -600,7 +728,6 @@ func TestLiveDoctorSkipsAuthenticationWhenProviderDescribeFails(t *testing.T) {
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = true
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -712,7 +839,6 @@ include_contents: none
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = false
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -796,7 +922,6 @@ tool_scope: invocation_scoped
 	deps.ConfigPath = filepath.Join(stateDir, "config.yaml")
 	deps.LoadConfig = func(string) (config.Config, error) {
 		cfg := config.Default()
-		cfg.Memory.Enabled = false
 		cfg.Sandbox.Enabled = true
 		cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 		return cfg, nil
@@ -906,8 +1031,8 @@ shim:
 profiles:
   root:
     model: anthropic/root
-  curator:
-    model: anthropic/curator
+  worker:
+    model: anthropic/worker
   attachment:
     model: anthropic/attachment
 `
@@ -918,16 +1043,17 @@ model: opencode/root
 global_instruction: policy
 instruction: root
 `
-	curator := `
+	worker := `
 agent_class: LlmAgent
-name: memory_curator
-model: opencode/curator
-instruction: curate
+name: worker
+description: Handles worker tasks.
+model: opencode/worker
+instruction: work
 `
 	files := map[string]string{
-		filepath.Join(stateDir, "providers", "opencode.yaml"):    provider,
-		filepath.Join(stateDir, "agents", "root_agent.yaml"):     rootAgent,
-		filepath.Join(stateDir, "agents", "memory_curator.yaml"): curator,
+		filepath.Join(stateDir, "providers", "opencode.yaml"): provider,
+		filepath.Join(stateDir, "agents", "root_agent.yaml"):  rootAgent,
+		filepath.Join(stateDir, "agents", "worker.yaml"):      worker,
 	}
 	if includeAttachment {
 		files[filepath.Join(stateDir, "agents", "attachment_analyzer.yaml")] = `
@@ -941,5 +1067,39 @@ instruction: inspect image
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			t.Fatal(err)
 		}
+	}
+}
+
+func writeDoctorOpenAIDefinitions(t *testing.T, stateDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(stateDir, "agents"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(stateDir, "providers"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "providers", "provider.yaml"), []byte(`
+name: test
+type: openai_compatible
+base_url: https://example.test
+api_key_env: DEEPSEEK_API_KEY
+profiles:
+  default:
+    model: test-model
+    context_window_tokens: 128000
+    max_output_tokens: 2048
+    token_counter:
+      strategy: byte_bound
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(stateDir, "agents", "root_agent.yaml"), []byte(`
+agent_class: LlmAgent
+name: root_agent
+model: test/default
+global_instruction: policy here
+instruction: test
+`), 0o644); err != nil {
+		t.Fatal(err)
 	}
 }

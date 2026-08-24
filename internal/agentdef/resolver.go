@@ -25,6 +25,7 @@ func (d *Definitions) ResolveModel(modelRef string) (*ResolvedModel, error) {
 		Profile:  profile,
 		Model:    profile.Model,
 	}
+	resolved.MaxDirectInlineBytes = profile.ResultHandles.MaxDirectInlineBytes
 	if profile.ContextWindowTokens != nil {
 		resolved.ContextWindowTokens = *profile.ContextWindowTokens
 	}

@@ -11,6 +11,7 @@ type PendingConfirmation struct {
 	ConversationKey ConversationKey
 	Actor           string
 	Summary         string
+	Payload         string
 	ParameterHash   string
 	Expiry          time.Time
 }

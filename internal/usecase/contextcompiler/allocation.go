@@ -11,7 +11,7 @@ import (
 )
 
 func assembleCompilation(state compilationState) (compilationState, error) {
-	state.result.Contents = assembleContents(state.summary, state.recent, state.capsule, state.active)
+	state.result.Contents = assembleContents(state.summary, state.recent, state.capsule, assembleActiveWithSources(state))
 	if err := validateProjectedContents(state.result.Contents, state.request.OpenInvocationIDs); err != nil {
 		return state, fmt.Errorf("context compiler: validate projection: %w", err)
 	}
@@ -19,14 +19,29 @@ func assembleCompilation(state compilationState) (compilationState, error) {
 }
 
 func reassembleCompilation(state compilationState) compilationState {
-	state.result.Contents = assembleContents(state.summary, state.recent, state.capsule, state.active)
+	state.result.Contents = assembleContents(state.summary, state.recent, state.capsule, assembleActiveWithSources(state))
 	return state
 }
 
-// evictOptionalContext removes lower-priority history before active response
-// reduction. It performs no counting and does not mutate the prior state.
-func evictOptionalContext(state compilationState) compilationState {
+// assembleActiveWithSources attaches the workstream block ahead of the
+// knowledge block onto the current active turn, so the rendered order
+// matches TRD 03 selection priority (workstream ranks above knowledge cards).
+func assembleActiveWithSources(state compilationState) []domain.Content {
+	return assembleActiveWithKnowledge(assembleActiveWithWorkstream(state.active, state.workstream), state.knowledge)
+}
+
+// evictSummary removes the optional summary alone as the first
+// total-pressure phase. Old completed turns, knowledge, continuity, and
+// protected active protocol content all outrank it.
+func evictSummary(state compilationState) compilationState {
 	state.summary = nil
+	state.optionalEvicted = true
+	return reassembleCompilation(state)
+}
+
+// evictRecentTurns removes the optional old completed turns as the second
+// total-pressure phase, after the summary and before knowledge.
+func evictRecentTurns(state compilationState) compilationState {
 	state.recent = nil
 	state.optionalEvicted = true
 	state.diagnostics.RecentTurnsRetained = 0
@@ -41,6 +56,21 @@ func evictContinuityAndExcerpts(state compilationState) compilationState {
 	state.active = domain.CloneContents(state.active)
 	stripProjectedExcerpts(state.active)
 	return reassembleCompilation(state)
+}
+
+// hasProjectedExcerpts reports whether the active frame carries projected
+// excerpt markers that evictContinuityAndExcerpts would strip.
+func hasProjectedExcerpts(contents []domain.Content) bool {
+	for _, content := range contents {
+		for _, part := range content.Parts {
+			if part.FunctionResponse != nil {
+				if _, projected := part.FunctionResponse.Response[projectionMarkerKey]; projected {
+					return true
+				}
+			}
+		}
+	}
+	return false
 }
 
 // prepareReduction builds the dry-run minimum and the allocation candidates.
@@ -64,23 +94,44 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 		return state, nil
 	}
 
-	var (
-		reducibleForAlloc     []reduciblePart
-		minEnvForAlloc        []int
-		minimumContents       []domain.Content
-		plannedProjections    []projectionMutation
-		responseCountBefore   int
-		responseTokensRemoved int
-	)
-	state = evictOptionalContext(state)
+	// Total-pressure eviction is deterministic and ordered: the summary,
+	// old completed turns, the entire selected knowledge block, continuity
+	// and projected excerpts, then the entire admitted workstream block,
+	// before protected active protocol content. Per TRD 03 selection
+	// priority the workstream snapshot outranks every other optional source,
+	// so it is evicted last among them; none of these sources can make an
+	// otherwise admissible request irreducible. A phase with nothing to evict
+	// is skipped without
+	// recounting so unchanged frames never consume provider counts.
 	var err error
-	state, err = c.countCompilation(ctx, state, false)
-	if err != nil {
-		return state, err
+	if len(state.summary) > 0 {
+		state = evictSummary(state)
+		state, err = c.countCompilation(ctx, state, false)
+		if err != nil {
+			return state, err
+		}
+		state.diagnostics.RecountPasses++
 	}
-	state.diagnostics.RecountPasses++
 
-	if state.count.Tokens > state.allocationLimit {
+	if state.count.Tokens > state.allocationLimit && len(state.recent) > 0 {
+		state = evictRecentTurns(state)
+		state, err = c.countCompilation(ctx, state, false)
+		if err != nil {
+			return state, err
+		}
+		state.diagnostics.RecountPasses++
+	}
+
+	if state.count.Tokens > state.allocationLimit && len(state.knowledge) > 0 {
+		state = evictKnowledge(state)
+		state, err = c.countCompilation(ctx, state, false)
+		if err != nil {
+			return state, err
+		}
+		state.diagnostics.RecountPasses++
+	}
+
+	if state.count.Tokens > state.allocationLimit && (len(state.capsule) > 0 || hasProjectedExcerpts(state.active)) {
 		state = evictContinuityAndExcerpts(state)
 		state, err = c.countCompilation(ctx, state, false)
 		if err != nil {
@@ -89,16 +140,33 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 		state.diagnostics.RecountPasses++
 	}
 
+	if state.count.Tokens > state.allocationLimit && len(state.workstream) > 0 {
+		state = evictWorkstream(state)
+		state, err = c.countCompilation(ctx, state, false)
+		if err != nil {
+			return state, err
+		}
+		state.diagnostics.RecountPasses++
+	}
+	if c.projectionWritesDisabled {
+		return state, nil
+	}
+
+	var (
+		reducibleForAlloc     []reduciblePart
+		minEnvForAlloc        []int
+		minimumContents       []domain.Content
+		responseCountBefore   int
+		responseTokensRemoved int
+	)
 	if state.count.Tokens > state.allocationLimit {
 		reducibleForAlloc, minEnvForAlloc, minimumContents = prepareReduction(state)
 		if len(reducibleForAlloc) > 0 {
-			minimumCount, countErr := c.countProjection(ctx, minimumContents, state.request.FixedRequestTokens)
+			minimumCount, countErr := c.countProjection(ctx, minimumContents, state.request.FixedRequestTokens, state.frameCounter)
 			if countErr != nil {
 				return state, countErr
 			}
 			state.diagnostics.RecountPasses++
-			// ProtectedTokens remains the legacy minimum-request metric. The
-			// explicit code-point diagnostics describe allocation costs.
 			state.diagnostics.ProtectedTokens = minimumCount.Tokens
 			if minimumCount.Tokens > state.hardLimit {
 				state.diagnostics.RequestTokensAfter = minimumCount.Tokens
@@ -122,7 +190,6 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 		if planErr != nil {
 			return state, planErr
 		}
-		plannedProjections = planned
 		if len(planned) > 0 {
 			var removed, externalized int
 			state.active, removed, externalized, err = c.materializeProjections(ctx, state.request, state.active, planned)
@@ -162,39 +229,6 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 	}
 	state.diagnostics.ResponseTokensRemoved = responseTokensRemoved
 
-	if state.count.Tokens > state.hardLimit {
-		lateContents, lateRemoved, lateExternalized, lateErr := c.lateExternalize(ctx, state.request, state.active, state.reducible, plannedProjections, state.hardLimit)
-		if lateErr != nil {
-			state.diagnostics.RequestTokensAfter = lateRemoved
-			state.diagnostics.ReductionReason = "min_irreducible"
-			state.exposeDiagnosticsOnError = true
-			if irreducible, ok := lateErr.(*domain.IrreducibleContextError); ok {
-				state.diagnostics.ReductionReason = "irreducible"
-				state.diagnostics.ReductionStage = "min_irreducible"
-				state.diagnosticsIrreducible = true
-				return state, irreducible
-			}
-			return state, lateErr
-		}
-		if lateExternalized > 0 {
-			state.diagnostics.LateExternalized = true
-			state.diagnostics.ReductionStage = "late"
-			state.active = lateContents
-			state.diagnostics.ResponsesExternalized += lateExternalized
-			state.diagnostics.ResponseCodePointsRemoved += lateRemoved
-			state.result.Contents = state.active
-			beforeLateCount := state.count.Tokens
-			state, err = c.countCompilation(ctx, state, false)
-			if err != nil {
-				return state, err
-			}
-			state.diagnostics.RecountPasses++
-			if beforeLateCount > state.count.Tokens {
-				responseTokensRemoved += beforeLateCount - state.count.Tokens
-				state.diagnostics.ResponseTokensRemoved = responseTokensRemoved
-			}
-		}
-	}
 	return state, nil
 }
 

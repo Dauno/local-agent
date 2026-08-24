@@ -1,0 +1,30 @@
+{
+  "schema": "knowledge-retrieval-eval/v1",
+  "scenario": "hard-paraphrase-embedding-gate",
+  "now_unix": 4102444800,
+  "exchange_ts": "4102444800.000000",
+  "seed": {
+    "claims": [
+      {"id": "kclaim_00000000000000000000f001", "subject": "shipment management", "predicate": "is", "value_kind": "string", "value_text": "code ships through the pipeline every tuesday", "scope_kind": "project", "scope_id": "my-project", "source_class": "human", "status": "asserted", "revision": 1, "vector": [1, 0, 0, 0, 0, 0, 0, 0]},
+      {"id": "kclaim_00000000000000000000f002", "subject": "record storage location", "predicate": "is", "value_kind": "string", "value_text": "records live in the main server", "scope_kind": "project", "scope_id": "my-project", "source_class": "human", "status": "asserted", "revision": 1, "vector": [0, 1, 0, 0, 0, 0, 0, 0]},
+      {"id": "kclaim_00000000000000000000f003", "subject": "failure recovery", "predicate": "is", "value_kind": "string", "value_text": "services restart by themselves after crashes", "scope_kind": "project", "scope_id": "my-project", "source_class": "human", "status": "asserted", "revision": 1, "vector": [0, 0, 1, 0, 0, 0, 0, 0]},
+      {"id": "kclaim_00000000000000000000f004", "subject": "team roster", "predicate": "is", "value_kind": "string", "value_text": "the group staffs six engineers", "scope_kind": "project", "scope_id": "my-project", "source_class": "human", "status": "asserted", "revision": 1, "vector": [0, 0, 0, 1, 0, 0, 0, 0]},
+      {"id": "kclaim_00000000000000000000f005", "subject": "tiempo respuesta", "predicate": "is", "value_kind": "string", "value_text": "el sistema siempre contesta antes del segundo", "scope_kind": "project", "scope_id": "my-project", "source_class": "human", "status": "asserted", "revision": 1, "vector": [0, 0, 0, 0, 1, 0, 0, 0]}
+    ],
+    "preferences": [],
+    "documents": [
+      {"id": "kdoc_0000000000000000000000f1", "subject": "welcome guide", "scope_kind": "global", "status": "active", "source_id": "topic-hardguide", "source_rev": 1, "vector": [0, 0, 0, 0, 0, 1, 0, 0]}
+    ],
+    "document_sources": [
+      {"id": "topic-hardguide", "revisions": [{"number": 1, "content": "new members complete setup tasks the first day"}]}
+    ]
+  },
+  "cases": [
+    {"name": "hard-paraphrase-deployments", "gate": "hard-paraphrase", "subset": "hard-paraphrase", "query": "deployments occur weekly via automation", "want": ["claim:kclaim_00000000000000000000f001"], "want_reasons": ["semantic"], "query_vector": [1, 0, 0, 0, 0, 0, 0, 0]},
+    {"name": "hard-paraphrase-persistence", "gate": "hard-paraphrase", "subset": "hard-paraphrase", "query": "where does information persist", "want": ["claim:kclaim_00000000000000000000f002"], "want_reasons": ["semantic"], "query_vector": [0, 1, 0, 0, 0, 0, 0, 0]},
+    {"name": "hard-paraphrase-outages", "gate": "hard-paraphrase", "subset": "hard-paraphrase", "query": "system bounce back from outages", "want": ["claim:kclaim_00000000000000000000f003"], "want_reasons": ["semantic"], "query_vector": [0, 0, 1, 0, 0, 0, 0, 0]},
+    {"name": "hard-paraphrase-headcount", "gate": "hard-paraphrase", "subset": "hard-paraphrase", "query": "crew headcount", "want": ["claim:kclaim_00000000000000000000f004"], "want_reasons": ["semantic"], "query_vector": [0, 0, 0, 1, 0, 0, 0, 0]},
+    {"name": "hard-paraphrase-spanish", "gate": "hard-paraphrase", "subset": "hard-paraphrase", "query": "qué tan veloz responde plataforma", "want": ["claim:kclaim_00000000000000000000f005"], "want_reasons": ["semantic"], "query_vector": [0, 0, 0, 0, 1, 0, 0, 0]},
+    {"name": "hard-paraphrase-onboarding", "gate": "hard-paraphrase", "subset": "hard-paraphrase", "query": "fresh hire orientation steps", "want": ["document:kdoc_0000000000000000000000f1"], "want_reasons": ["semantic"], "query_vector": [0, 0, 0, 0, 0, 1, 0, 0]}
+  ]
+}

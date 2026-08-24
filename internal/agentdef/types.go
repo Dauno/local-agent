@@ -43,7 +43,7 @@ var validAgentNamePattern = regexp.MustCompile(AgentNamePattern)
 
 func IsReservedAgentName(name string) bool {
 	switch name {
-	case "root_agent", "user", "explore", "attachment_analyzer", "memory_curator":
+	case "root_agent", "user", "explore", "attachment_analyzer":
 		return true
 	default:
 		return false
@@ -110,6 +110,11 @@ type Profile struct {
 	ExtraBody             map[string]any         `yaml:"extra_body,omitempty"`
 	GenerateContentConfig *GenerateContentConfig `yaml:"generate_content_config,omitempty"`
 
+	// ResultHandles carries the consuming profile's TRD 02 direct-inline
+	// admission. A profile must declare a positive max_direct_inline_bytes to
+	// opt in; no declaration means zero V2 direct-inline bytes.
+	ResultHandles ProfileResultHandlesConfig `yaml:"result_handles,omitempty"`
+
 	// agent_cli profile fields.
 	Agent    string `yaml:"agent,omitempty"`
 	Approval string `yaml:"approval,omitempty"`
@@ -122,6 +127,14 @@ type Profile struct {
 	// acp profile fields.
 	ConfigOptions        []ACPConfigOption `yaml:"config_options,omitempty"`
 	PermissionOptionKind string            `yaml:"permission_option_kind,omitempty"`
+}
+
+// HardMaxDirectInlineBytes mirrors the TRD 02 hard maximum without importing
+// the application domain package.
+const HardMaxDirectInlineBytes = 64 * 1024
+
+type ProfileResultHandlesConfig struct {
+	MaxDirectInlineBytes int `yaml:"max_direct_inline_bytes,omitempty"`
 }
 
 type TokenCounterDef struct {
@@ -269,6 +282,10 @@ type ResolvedModel struct {
 	ReasoningEffort       string
 	ExtraBody             map[string]any
 	GenerateContentConfig *GenerateContentConfig
+
+	// The consuming profile's TRD 02 direct-inline admission. Zero means no
+	// opt-in and therefore no V2 direct-inline bytes.
+	MaxDirectInlineBytes int
 
 	// agent_cli provider fields.
 	Shim     ShimConfig

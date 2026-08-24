@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/acpclient"
@@ -28,9 +29,20 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 	if setup.defs == nil {
 		return domain.ExternalAgentJobStatusView{}, errors.New("durable ACP definitions are unavailable")
 	}
-	store, err := adaptersqlite.OpenExisting(ctx, setup.paths.DatabaseFile)
+	lock, err := a.schemaLock(setup.paths.DatabaseFile)
 	if err != nil {
-		return domain.ExternalAgentJobStatusView{}, err
+		return domain.ExternalAgentJobStatusView{}, schemaLockFailure(err)
+	}
+	defer func() { _ = lock.Release() }()
+	// Rollout-completeness preflight (checkpoint 5): read-only reads under the
+	// lock, strictly before OpenCurrent's own mode=rw open, mirroring run.
+	a.traceSchemaEvent("preflight")
+	if err := a.requireRolloutComplete(ctx, setup.paths.DatabaseFile); err != nil {
+		return domain.ExternalAgentJobStatusView{}, rolloutPreflightFailure(err)
+	}
+	store, err := a.openCurrentTraced(ctx, setup.paths.DatabaseFile)
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, schemaOpenFailure(err)
 	}
 	defer store.Close()
 	jobStore := adaptersqlite.NewExternalAgentJobStore(store)
@@ -62,6 +74,17 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 	if err := policy.Validate(); err != nil {
 		return domain.ExternalAgentJobStatusView{}, err
 	}
+	var nativeResults port.TrustedResultStore
+	if setup.cfg.Orchestration.ResultHandles.Enabled {
+		payloads, payloadErr := fsartifact.NewTypedStore(filepath.Join(setup.paths.ArtifactDir, "v2-results"), int64(setup.cfg.ACP.MaxResultArtifactBytes))
+		if payloadErr != nil {
+			return domain.ExternalAgentJobStatusView{}, fmt.Errorf("initialize native ACP result payload store: %w", payloadErr)
+		}
+		nativeResults, err = adaptersqlite.NewResultStore(store, payloads)
+		if err != nil {
+			return domain.ExternalAgentJobStatusView{}, fmt.Errorf("initialize native ACP result store: %w", err)
+		}
+	}
 	resolvedCopy := *resolved
 	dispatcher := &acpJobDispatcher{
 		children: []preparedAgentTool{{definition: definition, acpRuntime: acpclient.NewWithBounds(resolved.Command, resolved.Args, acpclient.Bounds{
@@ -71,14 +94,14 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 			StderrTailBytes:        setup.cfg.ACP.StderrTailBytes,
 		}), acpResolved: &resolvedCopy, projectRoots: setup.paths.SandboxProjectRoots, registryRevision: revision}},
 		global: setup.defs.Agents["root_agent"].EffectiveDelegatedGlobalInstruction(), store: jobStore,
-		artifacts: artifactStore, policy: policy, partLabels: setup.cfg.Slack.PartLabels,
+		artifacts: artifactStore, results: nativeResults, policy: policy, partLabels: setup.cfg.Slack.PartLabels,
 		reconciliationTimeout: time.Duration(setup.cfg.ACP.ReconciliationTimeoutSeconds) * time.Second,
 	}
 	service, err := externalagent.New(externalagent.Config{
 		DefaultTimeout: time.Duration(setup.cfg.ACP.DefaultJobTimeoutSeconds) * time.Second,
 		MaxTimeout:     time.Duration(setup.cfg.ACP.MaxJobTimeoutSeconds) * time.Second,
 		LeaseTTL:       30 * time.Second, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 2,
-	}, externalagent.Dependencies{Store: jobStore, Runtime: dispatcher, Artifacts: artifactStore, MaxResultBytes: int64(setup.cfg.ACP.MaxResultArtifactBytes)})
+	}, externalagent.Dependencies{Store: jobStore, Runtime: dispatcher, Artifacts: artifactStore, NativeResults: nativeResults, MaxResultBytes: int64(setup.cfg.ACP.MaxResultArtifactBytes)})
 	if err != nil {
 		return domain.ExternalAgentJobStatusView{}, err
 	}

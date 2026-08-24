@@ -27,6 +27,15 @@ const (
 	maxMarkdownParts        = 8
 )
 
+func detachedCompletionMarker(jobID string) string {
+	return fmt.Sprintf("OpenCode job `%s` completed. Root integration is pending.", jobID)
+}
+
+func rootActivationRequired(job ExternalAgentJob) bool {
+	return job.Status == JobCompleted && job.Mode == JobDetached &&
+		CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision)
+}
+
 type NotificationPublishState string
 
 const (
@@ -84,8 +93,12 @@ type ExternalAgentJobNotification struct {
 	PublishedAt    time.Time
 	// Actor and ConversationKey are loaded from the authoritative job row for
 	// host-owned completion. They are not part of the immutable delivery key.
-	Actor           string
-	ConversationKey ConversationKey
+	Actor             string
+	ConversationKey   ConversationKey
+	WorkstreamID      string
+	TaskID            string
+	ExecutionIdentity string
+	AdmissionRevision int
 	// HostResultText is ephemeral completion data. It is never written to the
 	// notification row or exposed through an ADK function response.
 	HostResultText string
@@ -137,6 +150,12 @@ const (
 	// v31 repair migration on foreground activations retired without model
 	// execution or response publication. It is not a worker classification.
 	ActivationForegroundRetiredCode = "foreground_activation_retired"
+
+	// ActivationLegacyContentCode is the bounded informational code stamped by
+	// the legacy identity quarantine on historical completed activations whose
+	// content was never delivered. It is never a worker classification and is
+	// never written over an existing error code.
+	ActivationLegacyContentCode = "legacy_activation_content"
 )
 
 // ExternalAgentJobActivation is the durable host-originated root-turn outbox
@@ -149,9 +168,14 @@ type ExternalAgentJobActivation struct {
 	Kind               string
 	TerminalStatus     ExternalAgentJobStatus
 	NotificationSHA256 string
+	ResultSHA256       string
 	Actor              string
 	TeamID             string
 	ConversationKey    ConversationKey
+	WorkstreamID       string
+	TaskID             string
+	ExecutionIdentity  string
+	AdmissionRevision  int
 	OriginalCallID     string
 	DeliveryMode       JobResultDeliveryMode
 	ContentBytes       int64
@@ -168,6 +192,8 @@ type ExternalAgentJobActivation struct {
 	ExchangeIntentID   string
 	CorrelationID      string
 	ResponseSlackTS    string
+	FallbackRequired   bool
+	FallbackSlackTS    string
 	CreatedAt          time.Time
 	UpdatedAt          time.Time
 }
@@ -190,13 +216,55 @@ func (a ExternalAgentJobActivation) Validate() error {
 	if !validSHA256Hex(a.NotificationSHA256) {
 		return errors.New("external-agent activation notification digest is invalid")
 	}
+	if a.ResultSHA256 != "" && !validSHA256Hex(a.ResultSHA256) {
+		return errors.New("external-agent activation result digest is invalid")
+	}
+	if err := ValidateCompletionBinding(a.WorkstreamID, a.TaskID, a.ExecutionIdentity, a.AdmissionRevision); err != nil {
+		return err
+	}
 	if a.DeliveryMode != JobResultDeliveryMarkdown && a.DeliveryMode != JobResultDeliveryFile {
 		return fmt.Errorf("invalid external-agent activation delivery mode %q", a.DeliveryMode)
 	}
 	if !validActivationState(a.State) {
 		return fmt.Errorf("invalid external-agent activation state %q", a.State)
 	}
+	if a.FallbackSlackTS != "" {
+		if !a.FallbackRequired || !plausibleSlackTimestamp(a.FallbackSlackTS) {
+			return errors.New("external-agent activation fallback timestamp is invalid")
+		}
+	}
 	return nil
+}
+
+// ActivationFallbackRequired reports whether a terminal activation failure
+// with the given error code must still publish one host-owned Slack update.
+// The human already saw the terminal marker, so an integrated-response
+// failure without a fallback would leave the completion visibly open.
+func ActivationFallbackRequired(code string) bool {
+	switch code {
+	case "activation_result_unavailable", "activation_frame_invalid", "completion_unknown",
+		"activation_confirmation_not_allowed", "activation_empty_response",
+		"activation_response_policy_invalid", "activation_retry_exhausted":
+		return true
+	default:
+		return false
+	}
+}
+
+func plausibleSlackTimestamp(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	dot := strings.IndexByte(value, '.')
+	if dot <= 0 || dot == len(value)-1 || strings.IndexByte(value[dot+1:], '.') >= 0 {
+		return false
+	}
+	for _, r := range value {
+		if r != '.' && (r < '0' || r > '9') {
+			return false
+		}
+	}
+	return true
 }
 
 func (a *ExternalAgentJobActivation) Transition(next ExternalAgentJobActivationState) error {
@@ -296,6 +364,10 @@ type ExternalAgentJobIdentityHealth struct {
 	// count is not positive. Failed, cancelled, completion_unknown, and
 	// abandoned activations legitimately carry no result content.
 	ActivationsWithoutContent int
+	// ActivationsWithoutContentLegacy counts historical completed activations
+	// whose unavailable content is informational (quarantined with the bounded
+	// ActivationLegacyContentCode) rather than a current defect.
+	ActivationsWithoutContentLegacy int
 	// ActivationsWithoutIdentity counts activations whose notification digest is
 	// not lowercase hexadecimal SHA-256.
 	ActivationsWithoutIdentity int
@@ -363,8 +435,11 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 	if job.ID == "" || job.StatusRevision < 0 {
 		return ExternalAgentJobNotification{}, errors.New("external-agent notification identity is invalid")
 	}
+	activationRequired := rootActivationRequired(job)
 	markdown := fmt.Sprintf("OpenCode job `%s` %s.", job.ID, job.Status)
-	if job.Status == JobCompleted && strings.TrimSpace(job.ResultSummary) != "" {
+	if activationRequired {
+		markdown = detachedCompletionMarker(job.ID)
+	} else if job.Status == JobCompleted && strings.TrimSpace(job.ResultSummary) != "" {
 		markdown += "\n\nSummary: " + job.ResultSummary
 	}
 	if job.Status == JobCompletionUnknown {
@@ -393,8 +468,10 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
+		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
+		AdmissionRevision:      job.AdmissionRevision,
 		CanonicalMarkdown:      markdown,
-		RootActivationRequired: job.Mode == JobDetached,
+		RootActivationRequired: activationRequired,
 		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
 		ResultSHA256: resultSHA, ResultBytes: resultBytes,
 		RendererVersion: JobNotificationRenderer, Target: target,
@@ -462,7 +539,11 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 			return ExternalAgentJobNotification{}, errors.New("result delivery digest does not match complete Markdown content")
 		}
 	}
+	activationRequired := rootActivationRequired(job)
 	markdown := fmt.Sprintf("OpenCode job `%s` completed.", job.ID)
+	if activationRequired {
+		markdown = detachedCompletionMarker(job.ID)
+	}
 	artifactRef := ""
 	uploadState := JobResultUploadNotApplicable
 	if mode == JobResultDeliveryFile {
@@ -482,7 +563,9 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 		if result.ArtifactRef != "" || result.DeliveryArtifactRef != "" {
 			return ExternalAgentJobNotification{}, errors.New("Markdown delivery cannot reference an artifact")
 		}
-		if result.DeliveryCanonicalMarkdown != "" {
+		if activationRequired {
+			// The root activation owns substantive completion prose.
+		} else if result.DeliveryCanonicalMarkdown != "" {
 			markdown = result.DeliveryCanonicalMarkdown
 		} else if result.Text != "" {
 			markdown += "\n\n" + result.Text
@@ -502,8 +585,10 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
+		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
+		AdmissionRevision: job.AdmissionRevision,
 		CanonicalMarkdown: markdown, RendererVersion: JobNotificationRenderer,
-		RootActivationRequired: job.Mode == JobDetached,
+		RootActivationRequired: activationRequired,
 		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
 		ResultSHA256: contentDigest, ResultBytes: contentBytes,
 		Target: target, PublishState: NotificationPending, DeliveryMode: mode, PolicyVersion: policyVersion,
@@ -767,6 +852,29 @@ type ExternalAgentJobRequest struct {
 	Actor                string               `json:"actor"`
 	TeamID               string               `json:"team_id"`
 	ConversationKey      ConversationKey      `json:"conversation_key"`
+	WorkstreamID         string               `json:"workstream_id,omitempty"`
+	TaskID               string               `json:"task_id,omitempty"`
+	ExecutionIdentity    string               `json:"execution_identity,omitempty"`
+	AdmissionRevision    int                  `json:"admission_revision,omitempty"`
+}
+
+// ExternalAgentJobCompletionBinding is the trusted workstream execution
+// identity copied into a detached job when its requested task is currently
+// running. It is never supplied by the model.
+type ExternalAgentJobCompletionBinding struct {
+	WorkstreamID      string
+	TaskID            string
+	ExecutionIdentity string
+	AdmissionRevision int
+	// RequiredInputs are the task's declared source result identities. They
+	// are display-only provenance for the delegation confirmation prompt
+	// (TRD 04 §Confirmation); they carry no authority and are never used to
+	// resolve or admit a result.
+	RequiredInputs []string
+}
+
+func (b ExternalAgentJobCompletionBinding) Present() bool {
+	return CompletionBindingPresent(b.WorkstreamID, b.TaskID, b.ExecutionIdentity, b.AdmissionRevision)
 }
 
 type ExternalAgentJob struct {
@@ -783,6 +891,10 @@ type ExternalAgentJob struct {
 	Actor               string
 	TeamID              string
 	ConversationKey     ConversationKey
+	WorkstreamID        string
+	TaskID              string
+	ExecutionIdentity   string
+	AdmissionRevision   int
 	Status              ExternalAgentJobStatus
 	Attempt             int
 	ACPSessionID        string
@@ -893,6 +1005,30 @@ func (j ExternalAgentJob) Validate() error {
 	}
 	if j.Attempt < 0 || j.ResultBytes < 0 || j.StatusRevision < 0 {
 		return errors.New("external-agent job counters are invalid")
+	}
+	if err := ValidateCompletionBinding(j.WorkstreamID, j.TaskID, j.ExecutionIdentity, j.AdmissionRevision); err != nil {
+		return err
+	}
+	return nil
+}
+
+// CompletionBindingPresent reports whether a job carries the complete trusted
+// workstream/task/execution identity required for detached root activation.
+func CompletionBindingPresent(workstreamID, taskID, executionIdentity string, admissionRevision int) bool {
+	return strings.TrimSpace(workstreamID) != "" && strings.TrimSpace(taskID) != "" &&
+		strings.TrimSpace(executionIdentity) != "" && admissionRevision >= 0
+}
+
+// ValidateCompletionBinding accepts an empty legacy binding but rejects partial
+// identities. Historical rows remain readable; only complete bindings can
+// create a new detached root activation.
+func ValidateCompletionBinding(workstreamID, taskID, executionIdentity string, admissionRevision int) error {
+	values := []string{strings.TrimSpace(workstreamID), strings.TrimSpace(taskID), strings.TrimSpace(executionIdentity)}
+	if values[0] == "" && values[1] == "" && values[2] == "" && admissionRevision == 0 {
+		return nil
+	}
+	if admissionRevision < 0 || values[0] == "" || values[1] == "" || values[2] == "" {
+		return errors.New("external-agent completion binding is incomplete")
 	}
 	return nil
 }

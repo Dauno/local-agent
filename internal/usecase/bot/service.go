@@ -17,8 +17,10 @@ import (
 )
 
 const (
-	DefaultDedupeTTL         = 7 * 24 * time.Hour
-	confirmationRendererMode = "confirmation_v1"
+	DefaultDedupeTTL            = 7 * 24 * time.Hour
+	confirmationRendererMode    = "confirmation_v1"
+	knowledgeDisabledMessage    = "Knowledge commands are disabled in this installation."
+	knowledgeUnavailableMessage = "Knowledge is temporarily unavailable. Try again."
 )
 
 type Config struct {
@@ -37,20 +39,42 @@ type Config struct {
 	StreamingEnabled    bool
 	UpdateInterval      time.Duration
 	StreamingCarryRunes int
+	// ResultHandlesEnabled reports the V2 result-handles gate state. While
+	// enabled, direct-inline selection requires a positive per-profile
+	// MaxDirectInlineBytes admission; while disabled, the legacy rune-cap-only
+	// selection remains for legacy ACP delivery.
+	ResultHandlesEnabled bool
+	// MaxDirectInlineBytes is the consuming root profile's declared TRD 02
+	// direct-inline admission. Zero means no V2 direct-inline bytes when the
+	// gate is enabled.
+	MaxDirectInlineBytes int64
+	// KnowledgeRetrievalLimits are the validated retrieval bounds used to
+	// build one retrieval request per authorized human turn. The zero value
+	// is only admissible while no retriever is configured.
+	KnowledgeRetrievalLimits domain.KnowledgeRetrievalLimits
+	// WorkstreamsEnabled mirrors orchestration.workstreams.enabled. While
+	// false, the active workstream revision and snapshot never reach a turn
+	// even when a bound workstream is found by binding resolution.
+	WorkstreamsEnabled bool
+	// KnowledgeGateEnabled mirrors orchestration.knowledge.enabled. While
+	// true, legacy scope-blind memory-topic recall is retired for the
+	// normal turn: TRD 05's resolution kept it active only "until TRD 06
+	// implements scope-first retrieval," and TRD 06 is verified.
+	KnowledgeGateEnabled bool
 }
 
 type Dependencies struct {
-	Store           port.ConversationStore
-	Runtime         port.AgentRuntime
-	ActivationStore port.ExternalAgentJobActivationStore
-	History         port.HistoryReader
-	Publisher       port.ResponsePublisher
-	Clock           port.Clock
-	Logger          port.Logger
-	ModelCalls      port.ModelCallLimiter
+	Store            port.ConversationStore
+	Runtime          port.AgentRuntime
+	ActivationStore  port.ExternalAgentJobActivationStore
+	CompletionReader port.ExternalAgentJobReader
+	History          port.HistoryReader
+	Publisher        port.ResponsePublisher
+	Clock            port.Clock
+	Logger           port.Logger
+	ModelCalls       port.ModelCallLimiter
 
 	SanitizeContent       func(string) string
-	Memory                port.MemoryRetriever
 	Exchange              port.AssistantExchangeWriter
 	Enricher              port.ContextEnricher
 	ConfirmationStore     port.ConfirmationDeliveryStore
@@ -69,6 +93,29 @@ type Dependencies struct {
 	IncrementalPublisher  port.IncrementalPublisher
 	SummaryScheduler      port.SummaryScheduler
 	ExchangeFinder        port.AssistantExchangeFinder
+	Workstreams           port.WorkstreamService
+	// Coordinator serializes durable mutations and model turns within one
+	// canonical conversation. When nil, the service creates the per-process
+	// limiter it has always used; composition injects one shared instance so
+	// root turns, activations, confirmations, workstream commands, and
+	// knowledge commands contend for the same per-conversation lock.
+	Coordinator port.ConversationCoordinator
+	// Knowledge is the consumer-owned memory-human command executor. When
+	// nil, memory-human text falls through to the normal agent flow and no
+	// knowledge command is ever executed.
+	Knowledge port.KnowledgeCommands
+	// KnowledgeBindings resolves the trusted project/workstream identity for
+	// one invocation. When nil, knowledge commands run with the user scope
+	// default and project selectors are always rejected.
+	KnowledgeBindings port.KnowledgeBindingResolver
+	// KnowledgeRetriever is the optional consumer-owned retrieval surface
+	// for authorized human turns. It requires KnowledgeRetrievalBindings
+	// and validated KnowledgeRetrievalLimits; when nil no retrieval runs.
+	KnowledgeRetriever port.KnowledgeRetriever
+	// KnowledgeRetrievalBindings resolves the trusted team/actor/
+	// conversation binding plus the active workstream snapshot for one
+	// retrieval. When nil no retrieval runs.
+	KnowledgeRetrievalBindings port.KnowledgeRetrievalBindingResolver
 }
 
 type Outcome string
@@ -88,16 +135,19 @@ type Service struct {
 	store                 port.ConversationStore
 	runtime               port.AgentRuntime
 	activationStore       port.ExternalAgentJobActivationStore
+	completionReader      port.ExternalAgentJobReader
 	history               port.HistoryReader
 	publisher             port.ResponsePublisher
 	clock                 port.Clock
 	logger                port.Logger
-	limiter               *Limiter
+	limiter               port.ConversationCoordinator
 	modelCalls            port.ModelCallLimiter
 	sanitize              func(string) string
-	recall                port.MemoryRetriever
 	exchange              port.AssistantExchangeWriter
-	memoryEnabled         bool
+	knowledge             port.KnowledgeCommands
+	knowledgeBindings     port.KnowledgeBindingResolver
+	knowledgeRetriever    port.KnowledgeRetriever
+	retrievalBindings     port.KnowledgeRetrievalBindingResolver
 	enricher              port.ContextEnricher
 	confirmationStore     port.ConfirmationDeliveryStore
 	confirmationPublisher port.ConfirmationPublisher
@@ -115,6 +165,7 @@ type Service struct {
 	incrementalPublisher  port.IncrementalPublisher
 	summaryScheduler      port.SummaryScheduler
 	exchangeFinder        port.AssistantExchangeFinder
+	workstreams           port.WorkstreamService
 }
 
 type confirmationExpirer interface {
@@ -159,6 +210,9 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if cfg.DedupeTTL < 0 {
 		return nil, errors.New("dedupe TTL cannot be negative")
 	}
+	if cfg.MaxDirectInlineBytes < 0 || cfg.MaxDirectInlineBytes > domain.HardMaxDirectInlineResultBytes {
+		return nil, errors.New("direct-inline admission must be between zero and the hard result byte limit")
+	}
 	if deps.FileLoader != nil || deps.AttachmentProc != nil {
 		if deps.FileLoader == nil || deps.AttachmentProc == nil {
 			return nil, errors.New("file loader and attachment processor must be configured together")
@@ -198,11 +252,23 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 			deps.ExchangeFinder = finder
 		}
 	}
+	if deps.Coordinator == nil {
+		deps.Coordinator = NewLimiter(cfg.MaxConcurrentCalls)
+	}
+	if deps.KnowledgeRetriever != nil {
+		if deps.KnowledgeRetrievalBindings == nil {
+			return nil, errors.New("knowledge retrieval bindings are required when a retriever is configured")
+		}
+		if err := cfg.KnowledgeRetrievalLimits.Validate(); err != nil {
+			return nil, fmt.Errorf("knowledge retrieval limits are invalid: %w", err)
+		}
+	}
 	return &Service{
 		cfg: cfg, store: deps.Store, runtime: deps.Runtime, activationStore: deps.ActivationStore,
-		history: deps.History, publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
-		limiter: NewLimiter(cfg.MaxConcurrentCalls), modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
-		recall: deps.Memory, exchange: deps.Exchange, enricher: deps.Enricher,
+		completionReader: deps.CompletionReader,
+		history:          deps.History, publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
+		limiter: deps.Coordinator, modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
+		exchange: deps.Exchange, enricher: deps.Enricher,
 		confirmationStore:     deps.ConfirmationStore,
 		confirmationPublisher: deps.ConfirmationPublisher,
 		structuredPublisher:   deps.StructuredPublisher,
@@ -217,6 +283,8 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		streamingRuntime:     deps.StreamingRuntime,
 		incrementalPublisher: deps.IncrementalPublisher,
 		summaryScheduler:     deps.SummaryScheduler, exchangeFinder: deps.ExchangeFinder,
+		workstreams: deps.Workstreams, knowledge: deps.Knowledge, knowledgeBindings: deps.KnowledgeBindings,
+		knowledgeRetriever: deps.KnowledgeRetriever, retrievalBindings: deps.KnowledgeRetrievalBindings,
 	}, nil
 }
 
@@ -265,6 +333,45 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	key, err := invocation.ConversationKey()
 	if err != nil {
 		return "", err
+	}
+	if s.workstreams != nil {
+		command, handled, parseErr := parseHumanWorkstreamCommand(invocation.Text)
+		if handled {
+			if parseErr != nil {
+				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Invalid workstream command: "+parseErr.Error())); publishErr != nil {
+					return OutcomePublishFailed, nil
+				}
+				return OutcomeResponded, nil
+			}
+			// Human workstream commands mutate durable state, so they share
+			// the conversation coordinator with completion activations and
+			// confirmation resumes. A busy conversation never mutates a
+			// workstream while an activation is reading or using a
+			// snapshot.
+			release, acquired := s.limiter.TryAcquire(string(key))
+			if !acquired {
+				s.logger.Info("workstream command rejected by backpressure", "conversation_key", key)
+				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); publishErr != nil {
+					return OutcomePublishFailed, nil
+				}
+				return OutcomeBusy, nil
+			}
+			outcome, handledErr := s.applyHumanWorkstreamCommand(ctx, invocation, key, command)
+			release()
+			if handledErr != nil {
+				return "", handledErr
+			}
+			return outcome, nil
+		}
+	}
+	if s.knowledge != nil && s.knowledge.MatchesKnowledge(invocation.Text) {
+		outcome, handled, handledErr := s.handleKnowledgeCommand(ctx, invocation, key)
+		if handledErr != nil {
+			return "", handledErr
+		}
+		if handled {
+			return outcome, nil
+		}
 	}
 	if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
 		return outcome, nil
@@ -356,16 +463,14 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 
 	modelContext := domain.LimitMessages(append(prior, userMessage), s.cfg.ContextLimits)
 
-	var memory []domain.MemorySnippet
-	if s.recall != nil {
-		snippets, err := s.recall.Recall(ctx, invocation.Text, domain.SlackOwnerKey(key, invocation.UserID))
-		if err != nil {
-			s.logger.Warn("memory recall failed", "event_id", invocation.EventID, "error", err)
-		} else {
-			memory = domain.FitMemorySnippets(snippets, s.cfg.ContextLimits.MaxChars-messageChars(modelContext))
-		}
-	}
 	agentContext := s.enrich(ctx, invocation)
+
+	// Retrieval runs exactly once per authorized human turn, after the user
+	// message is persisted and before the shared model-call limiter is
+	// acquired. Timeout, cancellation, binding failure, validation, or
+	// retrieval failure continues the root turn without knowledge and only
+	// bounded sanitized categories reach the log.
+	knowledge, workstreamRevision, workstreamSnapshot := s.retrieveKnowledge(ctx, invocation, key)
 
 	modelCtx := ctx
 	cancel := func() {}
@@ -385,20 +490,126 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	s.logger.Info("model call started", "conversation_key", key, "event_id", invocation.EventID)
 	progress := s.beginProgress(ctx, invocation, key)
 	if s.cfg.StreamingEnabled {
-		return s.handleStreamingTurn(ctx, modelCtx, cancel, invocation, key, modelContext, memory, agentContext, metadata, modelRelease, progress)
+		return s.handleStreamingTurn(ctx, modelCtx, cancel, invocation, key, modelContext, agentContext, metadata, modelRelease, progress, knowledge, workstreamRevision, workstreamSnapshot)
 	}
 
-	return s.handleRuntimeTurn(ctx, modelCtx, cancel, invocation, key, modelContext, memory, agentContext, metadata, modelRelease, progress)
+	return s.handleRuntimeTurn(ctx, modelCtx, cancel, invocation, key, modelContext, agentContext, metadata, modelRelease, progress, knowledge, workstreamRevision, workstreamSnapshot)
 }
 
-func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Context, cancel func(), invocation domain.Invocation, key domain.ConversationKey, modelContext []domain.Message, memory []domain.MemorySnippet, agentContext domain.AgentContext, metadata domain.ConversationMetadata, modelRelease func(), progress *domain.ProgressOperation) (Outcome, error) {
+// retrieveKnowledge resolves the trusted binding once per turn and runs the
+// composed retriever, when configured, exactly once under the configured
+// retrieval timeout. Binding resolution — and therefore the active
+// workstream revision and bounded snapshot — is independent of whether a
+// knowledge retriever is composed, so both stay accurate with retrieval
+// disabled (the default). With workstreams disabled the revision and
+// snapshot stay zero/nil regardless of binding resolution. Any failure
+// returns no cards and continues the turn; only bounded sanitized categories
+// are logged, never queries, content, identities, actors, conversations,
+// digests, handles, sources, or credentials.
+func (s *Service) retrieveKnowledge(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey) ([]domain.KnowledgeFrameCard, int64, *domain.WorkstreamSnapshot) {
+	if s.retrievalBindings == nil {
+		return nil, 0, nil
+	}
+	binding, err := s.retrievalBindings.ResolveRetrievalBinding(ctx, invocation.TeamID, invocation.UserID, key, invocation.EventTS)
+	if err != nil {
+		s.logger.Warn("knowledge retrieval skipped", "category", "binding_failed")
+		return nil, 0, nil
+	}
+	revision := int64(0)
+	var snapshot *domain.WorkstreamSnapshot
+	if s.cfg.WorkstreamsEnabled && binding.Workstream != nil {
+		revision = int64(binding.Workstream.Revision)
+		snapshot = binding.Workstream
+	}
+	if s.knowledgeRetriever == nil {
+		return nil, revision, snapshot
+	}
+	request := domain.KnowledgeRetrievalRequest{
+		Binding:        binding.Binding,
+		Workstream:     binding.Workstream,
+		ExchangeTS:     binding.ExchangeTS,
+		CurrentMessage: invocation.Text,
+		Now:            s.clock.Now().UTC(),
+		Limits:         s.cfg.KnowledgeRetrievalLimits,
+	}
+	if err := request.Validate(); err != nil {
+		s.logger.Warn("knowledge retrieval skipped", "category", "validation_rejected")
+		return nil, revision, snapshot
+	}
+	retrieveCtx, cancel := context.WithTimeout(ctx, time.Duration(s.cfg.KnowledgeRetrievalLimits.TimeoutSeconds)*time.Second)
+	defer cancel()
+	result, err := s.knowledgeRetriever.Retrieve(retrieveCtx, request)
+	if err != nil {
+		category := "unavailable"
+		switch {
+		case errors.Is(err, port.ErrKnowledgeValidation):
+			category = "validation_rejected"
+		case errors.Is(err, context.DeadlineExceeded):
+			category = "timeout"
+		case errors.Is(err, context.Canceled):
+			category = "canceled"
+		}
+		s.logger.Warn("knowledge retrieval failed", "category", category)
+		return nil, revision, snapshot
+	}
+	// The retriever may return a success after its context expired or was
+	// cancelled; cards produced past the deadline are never admitted.
+	if retrieveCtx.Err() != nil {
+		category := "timeout"
+		if errors.Is(retrieveCtx.Err(), context.Canceled) {
+			category = "canceled"
+		}
+		s.logger.Warn("knowledge retrieval failed", "category", category)
+		return nil, revision, snapshot
+	}
+	s.logKnowledgeRetrievalDiagnostics(result.Diagnostics)
+	return result.Cards, revision, snapshot
+}
+
+// logKnowledgeRetrievalDiagnostics surfaces the per-turn TRD 06
+// §Metrics and Diagnostics contract that metrics alone do not carry:
+// ranking policy ID, fingerprint version, enabled channels, and omission
+// categories. Only bounded closed categories and counts are logged — never
+// a query, card content, vector, handle, digest, or actor/conversation
+// identity. Selected card identities are reduced to a count for the same
+// reason.
+func (s *Service) logKnowledgeRetrievalDiagnostics(diag domain.KnowledgeRetrievalDiagnostics) {
+	channels := make([]string, 0, len(diag.EnabledChannels))
+	for _, channel := range diag.EnabledChannels {
+		channels = append(channels, string(channel))
+	}
+	failures := make([]string, 0, len(diag.Failures))
+	for _, failure := range diag.Failures {
+		failures = append(failures, string(failure))
+	}
+	omissions := make([]string, 0, len(diag.Omissions))
+	for _, omission := range diag.Omissions {
+		omissions = append(omissions, string(omission))
+	}
+	s.logger.Info("knowledge retrieval diagnostics",
+		"ranking_policy", diag.RankingPolicy,
+		"fingerprint_version", diag.IndexFingerprintVersion,
+		"enabled_channels", channels,
+		"candidate_count", diag.CandidateCount,
+		"selected_count", diag.SelectedCount,
+		"omitted_count", diag.OmittedCount,
+		"selected_identity_count", len(diag.SelectedIdentities),
+		"failures", failures,
+		"omissions", omissions,
+		"elapsed_ms", diag.Elapsed.Milliseconds(),
+	)
+}
+
+func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Context, cancel func(), invocation domain.Invocation, key domain.ConversationKey, modelContext []domain.Message, agentContext domain.AgentContext, metadata domain.ConversationMetadata, modelRelease func(), progress *domain.ProgressOperation, knowledge []domain.KnowledgeFrameCard, workstreamRevision int64, workstreamSnapshot *domain.WorkstreamSnapshot) (Outcome, error) {
 	turn, modelErr := func() (port.AgentTurn, error) {
 		defer modelRelease()
 		return s.runtime.Run(modelCtx, port.AgentRequest{
-			ConversationKey: key,
-			Messages:        modelContext,
-			Memory:          memory,
-			Context:         agentContext,
+			ConversationKey:    key,
+			Messages:           modelContext,
+			Context:            agentContext,
+			Knowledge:          append([]domain.KnowledgeFrameCard(nil), knowledge...),
+			WorkstreamRevision: workstreamRevision,
+			WorkstreamSnapshot: workstreamSnapshot,
 		})
 	}()
 	cancel()
@@ -673,6 +884,7 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 	pc.ConversationKey = key
 	pc.Actor = invocation.UserID
 	pc.Summary = s.sanitize(pc.Summary)
+	pc.Payload = s.sanitize(pc.Payload)
 	if strings.TrimSpace(pc.Summary) == "" {
 		pc.Summary = "A tool action requires confirmation"
 	}
@@ -692,6 +904,7 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 		ThreadTS:        invocation.ReplyTarget().ThreadTS,
 		ConversationKey: key,
 		Summary:         pc.Summary,
+		Payload:         pc.Payload,
 		ParameterHash:   pc.ParameterHash,
 		Status:          port.ConfirmationPending,
 		CorrelationID:   correlationID,
@@ -725,7 +938,7 @@ func (s *Service) handlePendingConfirmation(ctx context.Context, invocation doma
 		return OutcomeResponded, nil
 	}
 
-	confirmText := confirmationPrompt(pc.Summary, pc.OriginalCallID, pc.WrapperCallID, pc.Expiry)
+	confirmText := confirmationPrompt(pc.Summary, pc.Payload, pc.OriginalCallID, pc.WrapperCallID, pc.Expiry)
 
 	safeText := s.sanitize(confirmText)
 	target := invocation.ReplyTarget()
@@ -809,7 +1022,7 @@ func (s *Service) finalizeStructuredTurn(ctx context.Context, invocation domain.
 			CreatedAt: s.clock.Now().UTC(),
 		}
 		var prepareErr error
-		prepared, prepareErr = s.exchange.PrepareStructuredAssistantExchange(ctx, metadata, intentMessage, presentationJSON, s.cfg.RetainMessages, s.memoryEnabled && len(invocation.Attachments) == 0)
+		prepared, prepareErr = s.exchange.PrepareStructuredAssistantExchange(ctx, metadata, intentMessage, presentationJSON, s.cfg.RetainMessages)
 		if prepareErr != nil {
 			s.logger.Error("structured assistant exchange preparation failed", "conversation_key", key, "error", prepareErr)
 			return "", fmt.Errorf("prepare structured assistant exchange: %w", prepareErr)
@@ -882,7 +1095,7 @@ func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation
 			CreatedAt: s.clock.Now().UTC(),
 		}
 		var prepareErr error
-		prepared, prepareErr = s.exchange.PrepareAssistantExchange(ctx, metadata, intentMessage, s.cfg.RetainMessages, s.memoryEnabled && len(invocation.Attachments) == 0)
+		prepared, prepareErr = s.exchange.PrepareAssistantExchange(ctx, metadata, intentMessage, s.cfg.RetainMessages)
 		if prepareErr != nil {
 			s.logger.Error("assistant exchange preparation failed", "conversation_key", key, "error", prepareErr)
 			return "", fmt.Errorf("prepare assistant exchange: %w", prepareErr)
@@ -907,18 +1120,10 @@ func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation
 	return OutcomeResponded, nil
 }
 
-func messageChars(messages []domain.Message) int {
-	total := 0
-	for _, message := range messages {
-		total += utf8.RuneCountInString(message.Content)
-	}
-	return total
-}
-
-func (s *Service) AddMemory(recall port.MemoryRetriever, exchange port.AssistantExchangeWriter) {
-	s.recall = recall
+// SetExchange configures durable assistant exchange publication for tests and
+// embedders that construct the service without composition.
+func (s *Service) SetExchange(exchange port.AssistantExchangeWriter) {
 	s.exchange = exchange
-	s.memoryEnabled = true
 }
 
 func (s *Service) processAttachments(ctx context.Context, invocation domain.Invocation, maxChars int) (string, error) {
@@ -1024,7 +1229,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 			return fmt.Errorf("recover legacy confirmation %s: assistant exchange finder is unavailable", delivery.WrapperCallID)
 		}
 		correlationID := confirmationCorrelationID(delivery.WrapperCallID)
-		prompt := confirmationPrompt(delivery.Summary, delivery.OriginalCallID, delivery.WrapperCallID, delivery.Expiry)
+		prompt := confirmationPrompt(delivery.Summary, delivery.Payload, delivery.OriginalCallID, delivery.WrapperCallID, delivery.Expiry)
 		safePrompt := s.sanitize(prompt)
 		channelKind := channelKindForChannel(delivery.ChannelID)
 		_, found, err := finder.FindPublishedAssistantExchange(ctx, port.AssistantExchangeIntent{
@@ -1052,9 +1257,12 @@ func confirmationCorrelationID(wrapperCallID string) string {
 	return "confirmation:" + wrapperCallID
 }
 
-func confirmationPrompt(summary, originalCallID, wrapperCallID string, expiry time.Time) string {
-	return fmt.Sprintf(":lock: %s\n\n**Call ID**: `%s`\n**Expires**: %s\n\nReply `approve %s` or `reject %s` to proceed.",
-		summary, originalCallID, expiry.Format("15:04"), wrapperCallID, wrapperCallID)
+func confirmationPrompt(summary, payload, originalCallID, wrapperCallID string, expiry time.Time) string {
+	prompt := fmt.Sprintf(":lock: %s\n\n**Call ID**: `%s`\n**Expires**: %s", summary, originalCallID, expiry.Format("15:04"))
+	if strings.TrimSpace(payload) != "" {
+		prompt += "\n\n**Proposed payload**:\n```json\n" + payload + "\n```"
+	}
+	return prompt + fmt.Sprintf("\n\nReply `approve %s` or `reject %s` to proceed.", wrapperCallID, wrapperCallID)
 }
 
 func (s *Service) enrich(ctx context.Context, invocation domain.Invocation) domain.AgentContext {

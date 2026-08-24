@@ -117,9 +117,15 @@ type AcpInvocationRequest struct {
 }
 
 type AcpInvocationResult struct {
-	Text                      string
-	Inline                    bool
-	ArtifactRef               string
+	Text        string
+	Inline      bool
+	ArtifactRef string
+	// NativeResultID is host-only durable catalog identity. It is carried from
+	// the runtime to the job transition and never persisted in model-visible
+	// result text or provider protocol payloads.
+	NativeResultID            string
+	NativeJobID               string
+	NativeResultHandle        ResultHandle
 	ResultSHA256              string
 	ResultBytes               int64
 	DeliveryMode              JobResultDeliveryMode

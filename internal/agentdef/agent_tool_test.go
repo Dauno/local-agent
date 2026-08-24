@@ -154,7 +154,7 @@ func TestRejectInvalidAgentToolComposition(t *testing.T) {
 		{
 			name:   "child role",
 			root:   agentToolRoot,
-			worker: agentToolScopedExplore + "role: memory_curator\n",
+			worker: agentToolScopedExplore + "role: worker\n",
 			want:   "durable_session and role are not supported",
 		},
 		{
