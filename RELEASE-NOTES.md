@@ -1,5 +1,12 @@
 # Release Notes
 
+## v0.7.0 (2026-08-23)
+
+- Durable workstreams, native result handles, and bounded result analysis support long-running Slack orchestration with restart-safe state.
+- Scope-authorized knowledge documents replace legacy entity memory and add lexical and semantic retrieval, context epochs, and retained source results.
+- Schema v42 adds an explicit `local-agent db upgrade` flow with a cross-process lock, verified backup, quarantine, and preflight and postflight checks.
+- SQLite WAL pooling, wake-driven workers, bounded context paths, and expanded doctor checks improve load behavior and recovery.
+
 ## v0.6.0 (2026-08-06)
 
 - Foreground ACP calls now return one verified terminal result; detached jobs remain the only route for root activation and asynchronous synthesis.
