@@ -137,16 +137,14 @@ func WithExtraBody(values map[string]any) Option {
 		if err != nil {
 			return fmt.Errorf("extra request body must contain JSON-compatible values: %w", err)
 		}
-		json.Unmarshal(encoded, &cfg.extraBody)
+		_ = json.Unmarshal(encoded, &cfg.extraBody)
 		return nil
 	}
 }
 
 func (cfg settings) clientOptions() []option.RequestOption {
-	options := []option.RequestOption{
-		option.WithAPIKey(cfg.apiKey),
-		option.WithBaseURL(cfg.baseURL),
-	}
+	options := make([]option.RequestOption, 0, 2+len(cfg.headers))
+	options = append(options, option.WithAPIKey(cfg.apiKey), option.WithBaseURL(cfg.baseURL))
 	for _, name := range slices.Sorted(maps.Keys(cfg.headers)) {
 		options = append(options, option.WithHeader(name, cfg.headers[name]))
 	}

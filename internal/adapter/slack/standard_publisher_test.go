@@ -285,9 +285,8 @@ func TestStandardPublisherAcceptsProgressLabelAtLimitAfterNeutralization(t *test
 
 func TestStandardPublisherRecoversProgressByExactMetadata(t *testing.T) {
 	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
-	client := &fakeStandardMessageClient{messages: []slackapi.Message{{Msg: slackapi.Msg{
-		User: "U00000001", Timestamp: "1700000001.000001", Metadata: progressMetadata(operation),
-	}}}}
+	client := &fakeStandardMessageClient{messages: []slackapi.Message{{
+		User: "U00000001", Timestamp: "1700000001.000001", Metadata: progressMetadata(operation)}}}
 	publisher := &StandardPublisher{client: client, botUserID: "U00000001"}
 
 	published, found, err := publisher.RecoverProgress(t.Context(), operation)
@@ -355,7 +354,7 @@ func TestOnboardingPublisherUsesTypedTemplateAndRecoveryMetadata(t *testing.T) {
 		t.Fatalf("unsafe onboarding prompt = %q", promptBlock.Text.Text)
 	}
 
-	client.messages = []slackapi.Message{{Msg: slackapi.Msg{User: "U00000001", Timestamp: "1700000001.000010", Metadata: client.postedMeta}}}
+	client.messages = []slackapi.Message{{User: "U00000001", Timestamp: "1700000001.000010", Metadata: client.postedMeta}}
 	recovered, found, err := publisher.RecoverOnboarding(t.Context(), target, request.DeliveryID)
 	if err != nil || !found || recovered.LastMessageTS != "1700000001.000010" {
 		t.Fatalf("recovered=%#v found=%v err=%v", recovered, found, err)

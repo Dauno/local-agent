@@ -291,7 +291,7 @@ func TestWorkstreamKnowledgeRetrievalBindingResolverPropagatesStoreFailure(t *te
 
 func TestWorkstreamKnowledgeRetrievalBindingResolverSingleRead(t *testing.T) {
 	ctx := t.Context()
-	store := &countingWorkstreamStore{knowledgeBindingTestStore: knowledgeBindingTestStore{active: activeWorkstream()}}
+	store := &countingWorkstreamStore{active: activeWorkstream()}
 	resolver := workstreamKnowledgeBindingResolver{store: store, allowed: map[string]struct{}{"workspace": {}}}
 	binding, err := resolver.ResolveRetrievalBinding(ctx, "T12345678", "U12345678", knowledgeBindingConversation(), "1710000000.000001")
 	if err != nil {

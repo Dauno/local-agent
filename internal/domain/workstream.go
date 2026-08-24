@@ -478,7 +478,26 @@ func (w Workstream) ValidateWithLimits(limits WorkstreamLimits) error {
 	if len(w.Tasks) > limits.MaxTasks || len(w.Constraints) > limits.MaxConstraints || len(w.Decisions) > limits.MaxDecisions || len(w.OpenQuestions) > limits.MaxQuestions || len(w.ResultLinks) > limits.MaxResultLinks {
 		return fmt.Errorf("%w: workstream collection limit exceeded", ErrWorkstreamLimitExceeded)
 	}
+	if err := validateWorkstreamCollections(w, limits); err != nil {
+		return err
+	}
+	tasksByID, nonTerminalTasks, err := validateWorkstreamTasks(w, limits)
+	if err != nil {
+		return err
+	}
+	if nonTerminalTasks > limits.MaxNonTerminalTasks {
+		return fmt.Errorf("%w: workstream has %d non-terminal tasks, maximum is %d", ErrWorkstreamLimitExceeded, nonTerminalTasks, limits.MaxNonTerminalTasks)
+	}
+	if err := validateWorkstreamDependencies(tasksByID); err != nil {
+		return err
+	}
+	if workstreamSnapshotRunes(w.Snapshot()) > HardMaxWorkstreamSnapshotRunes {
+		return fmt.Errorf("%w: workstream snapshot exceeds %d runes", ErrWorkstreamLimitExceeded, HardMaxWorkstreamSnapshotRunes)
+	}
+	return nil
+}
 
+func validateWorkstreamCollections(w Workstream, limits WorkstreamLimits) error {
 	constraintIDs := make(map[string]struct{}, len(w.Constraints))
 	for _, constraint := range w.Constraints {
 		if strings.TrimSpace(constraint.ID) == "" || strings.TrimSpace(constraint.Text) == "" {
@@ -548,43 +567,37 @@ func (w Workstream) ValidateWithLimits(limits WorkstreamLimits) error {
 		}
 		resultIDs[result.ID] = struct{}{}
 	}
+	return nil
+}
 
+func validateWorkstreamTasks(w Workstream, limits WorkstreamLimits) (map[string]WorkstreamTask, int, error) {
 	tasksByID := make(map[string]WorkstreamTask, len(w.Tasks))
 	nonTerminalTasks := 0
 	for _, task := range w.Tasks {
 		if err := task.Validate(); err != nil {
-			return err
+			return nil, 0, err
 		}
 		if task.Project != w.Project {
-			return fmt.Errorf("%w: task %q belongs to project %q, workstream belongs to %q", ErrWorkstreamProjectMismatch, task.ID, task.Project, w.Project)
+			return nil, 0, fmt.Errorf("%w: task %q belongs to project %q, workstream belongs to %q", ErrWorkstreamProjectMismatch, task.ID, task.Project, w.Project)
 		}
 		if utf8.RuneCountInString(task.ID) > limits.MaxIDRunes || utf8.RuneCountInString(task.Project) > limits.MaxTextRunes || utf8.RuneCountInString(task.Description) > limits.MaxTextRunes || utf8.RuneCountInString(task.ResultIdentity) > limits.MaxIDRunes || utf8.RuneCountInString(task.ExecutionIdentity) > limits.MaxIDRunes || utf8.RuneCountInString(task.ConfirmationIdentity) > limits.MaxIDRunes {
-			return fmt.Errorf("%w: workstream task exceeds configured bounds", ErrWorkstreamLimitExceeded)
+			return nil, 0, fmt.Errorf("%w: workstream task exceeds configured bounds", ErrWorkstreamLimitExceeded)
 		}
 		if len(task.RequiredInputs) > limits.MaxDependenciesPerTask || len(task.Dependencies) > limits.MaxDependenciesPerTask {
-			return fmt.Errorf("%w: task %q input/dependency limit exceeded", ErrWorkstreamLimitExceeded, task.ID)
+			return nil, 0, fmt.Errorf("%w: task %q input/dependency limit exceeded", ErrWorkstreamLimitExceeded, task.ID)
 		}
 		if _, exists := tasksByID[task.ID]; exists {
-			return fmt.Errorf("duplicate workstream task %q", task.ID)
+			return nil, 0, fmt.Errorf("duplicate workstream task %q", task.ID)
 		}
 		tasksByID[task.ID] = task
 		if !task.Status.Terminal() {
 			nonTerminalTasks++
 		}
 		if len(task.Dependencies) > limits.MaxDependenciesPerTask {
-			return fmt.Errorf("%w: task %q has %d dependencies, maximum is %d", ErrWorkstreamLimitExceeded, task.ID, len(task.Dependencies), limits.MaxDependenciesPerTask)
+			return nil, 0, fmt.Errorf("%w: task %q has %d dependencies, maximum is %d", ErrWorkstreamLimitExceeded, task.ID, len(task.Dependencies), limits.MaxDependenciesPerTask)
 		}
 	}
-	if nonTerminalTasks > limits.MaxNonTerminalTasks {
-		return fmt.Errorf("%w: workstream has %d non-terminal tasks, maximum is %d", ErrWorkstreamLimitExceeded, nonTerminalTasks, limits.MaxNonTerminalTasks)
-	}
-	if err := validateWorkstreamDependencies(tasksByID); err != nil {
-		return err
-	}
-	if workstreamSnapshotRunes(w.Snapshot()) > HardMaxWorkstreamSnapshotRunes {
-		return fmt.Errorf("%w: workstream snapshot exceeds %d runes", ErrWorkstreamLimitExceeded, HardMaxWorkstreamSnapshotRunes)
-	}
-	return nil
+	return tasksByID, nonTerminalTasks, nil
 }
 
 func workstreamSnapshotRunes(snapshot WorkstreamSnapshot) int {
@@ -945,7 +958,10 @@ func (t WorkstreamTransition) ValidateAgainstWithLimits(workstream Workstream, l
 			return err
 		}
 	}
+	return validateTransitionPayload(t, workstream)
+}
 
+func validateTransitionPayload(t WorkstreamTransition, workstream Workstream) error {
 	switch t.Action {
 	case WorkstreamActionProposeTask:
 		if t.Task == nil {

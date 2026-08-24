@@ -47,7 +47,7 @@ func (l *LLM) exchange(ctx context.Context, request cliprotocol.Request) (clipro
 	}
 
 	go func() {
-		defer stdin.Close()
+		defer func() { _ = stdin.Close() }()
 		_, _ = stdin.Write(line)
 	}()
 
@@ -213,8 +213,7 @@ func classifyStartError(command string, err error) error {
 }
 
 func (l *LLM) annotateProtocol(err error, stderrDiagnostic diagnosticSummary) error {
-	var violation *ProtocolViolation
-	if errors.As(err, &violation) {
+	if violation, ok := errors.AsType[*ProtocolViolation](err); ok {
 		return &ShimError{
 			Code:    cliprotocol.CodeProtocolError,
 			Message: l.sanitizeText(violation.Reason) + diagnosticSuffix("stderr", stderrDiagnostic),

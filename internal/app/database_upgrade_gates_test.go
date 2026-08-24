@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -55,9 +56,7 @@ func rowTwoFixture(t *testing.T, h *upgradeHarness, overrides map[string]string)
 		keyBackupSource:   "33",
 		keyBackupVerified: identity.VerifiedAt.UTC().Format("2006-01-02T15:04:05Z07:00"),
 	}
-	for key, value := range overrides {
-		seed[key] = value
-	}
+	maps.Copy(seed, overrides)
 	seedRolloutKeys(t, dbPath, seed)
 	return identity
 }
@@ -69,9 +68,7 @@ func rowFourFixture(t *testing.T, h *upgradeHarness, postflight map[string]strin
 		keyCutoffStr:   "999",
 		keyNotRequired: "2026-08-21T14:30:00Z",
 	}
-	for key, value := range postflight {
-		seed[key] = value
-	}
+	maps.Copy(seed, postflight)
 	replaceFixture(t, h.paths.DatabaseFile, rollout.TargetVersion, seed)
 }
 
@@ -86,7 +83,7 @@ func seedRolloutKeys(t *testing.T, dbPath string, seed map[string]string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	for key, value := range seed {
 		if _, err := plain.Exec(
 			`INSERT INTO runtime_state (state_key, state_value, updated_at) VALUES (?, ?, 1)
@@ -185,7 +182,7 @@ func TestApplyRowOneFullRunPinsFrozenOrdering(t *testing.T) {
 	}
 	var keyCount int
 	plain, _ := sqlOpenPlain(dbPath)
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	for _, key := range []string{keyBaselineStr, keyCutoffStr, keyBackupPath, keyBackupBytes, keyBackupSHA, keyBackupSource, keyBackupVerified, keyPostStatus, keyPostDetail} {
 		if err := plain.QueryRow(`SELECT COUNT(*) FROM runtime_state WHERE state_key = ?`, key).Scan(&keyCount); err != nil || keyCount != 1 {
 			t.Fatalf("key %s rows=%d err=%v, want exactly one durable row", key, keyCount, err)
@@ -214,7 +211,7 @@ func TestApplySecondRunAfterSuccessIsPreviewOnlyNoLock(t *testing.T) {
 	if err := plain.QueryRow(`SELECT updated_at FROM runtime_state WHERE state_key = ?`, keyCutoffStr).Scan(&cutoffUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
-	plain.Close()
+	_ = plain.Close()
 
 	second, err := h.application.PreviewDatabaseUpgrade(ctx(), opts)
 	if err != nil || second.Kind != rollout.UpgradeAlreadyComplete || second.ResolvedBackupDir != "" {
@@ -224,7 +221,7 @@ func TestApplySecondRunAfterSuccessIsPreviewOnlyNoLock(t *testing.T) {
 		t.Fatalf("no-op preview took the lock: %q", h.lockerLog.joined())
 	}
 	plain, _ = sqlOpenPlain(h.paths.DatabaseFile)
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var afterUpdatedAt int64
 	if err := plain.QueryRow(`SELECT updated_at FROM runtime_state WHERE state_key = ?`, keyCutoffStr).Scan(&afterUpdatedAt); err != nil {
 		t.Fatal(err)
@@ -244,7 +241,7 @@ func TestRowTwoIntactResumeSkipsCaptureBackupAndRecord(t *testing.T) {
 	if err := plain.QueryRow(`SELECT updated_at FROM runtime_state WHERE state_key = ?`, keyCutoffStr).Scan(&cutoffUpdatedAt); err != nil {
 		t.Fatal(err)
 	}
-	plain.Close()
+	_ = plain.Close()
 
 	preview, err := h.application.PreviewDatabaseUpgrade(ctx(), rollout.UpgradeOptions{})
 	if err != nil || preview.Kind != rollout.UpgradeFreshUpgrade {
@@ -270,7 +267,7 @@ func TestRowTwoIntactResumeSkipsCaptureBackupAndRecord(t *testing.T) {
 		t.Fatalf("user_version = %d", got)
 	}
 	plain, _ = sqlOpenPlain(dbPath)
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var after int64
 	if err := plain.QueryRow(`SELECT updated_at FROM runtime_state WHERE state_key = ?`, keyCutoffStr).Scan(&after); err != nil {
 		t.Fatal(err)

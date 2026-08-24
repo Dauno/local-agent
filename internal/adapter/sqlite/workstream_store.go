@@ -366,7 +366,7 @@ func (s *WorkstreamStore) Transitions(ctx context.Context, workstreamID string) 
 	if err != nil {
 		return nil, fmt.Errorf("%w: read workstream journal: %v", port.ErrWorkstreamUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var records []domain.WorkstreamTransitionRecord
 	for rows.Next() {
 		var record domain.WorkstreamTransitionRecord

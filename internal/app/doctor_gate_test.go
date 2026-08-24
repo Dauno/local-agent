@@ -58,7 +58,7 @@ func writeDoctorGateFixture(t *testing.T, detected int, journalDelete bool) stri
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	if journalDelete {
 		var mode string
 		if err := raw.QueryRowContext(ctx, "PRAGMA journal_mode = delete").Scan(&mode); err != nil || mode != "delete" {

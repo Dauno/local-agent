@@ -22,8 +22,8 @@ func TestLoadValidDefinitions(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -120,7 +120,7 @@ func TestLoadRejectsOnlyAgentsDir(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "agents"), 0o755)
+	_ = os.MkdirAll(filepath.Join(root, "agents"), 0o755)
 	if _, err := agentdef.Load(root); err == nil {
 		t.Error("expected error when providers dir is missing")
 	}
@@ -130,7 +130,7 @@ func TestLoadRejectsOnlyProvidersDir(t *testing.T) {
 	t.Parallel()
 
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "providers"), 0o755)
+	_ = os.MkdirAll(filepath.Join(root, "providers"), 0o755)
 	if _, err := agentdef.Load(root); err == nil {
 		t.Error("expected error when agents dir is missing")
 	}
@@ -141,8 +141,8 @@ func TestRejectUnknownAgentField(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -174,8 +174,8 @@ func TestProfileResultHandlesAdmissionLoadsAndValidates(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -230,8 +230,8 @@ func TestRejectUnknownProviderField(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -260,8 +260,8 @@ func TestRejectUnknownProviderType(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -290,8 +290,8 @@ func TestRejectMalformedYAML(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "bad.yaml", `}{malformed`)
 	writeFile(t, agentsDir, "agent.yaml", `
@@ -312,8 +312,8 @@ func TestRejectEmptyProviderName(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: ""
@@ -342,8 +342,8 @@ func TestRejectDuplicateProviderName(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "a.yaml", `
 name: deepseek
@@ -381,8 +381,8 @@ func TestRejectDuplicateAgentName(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -417,8 +417,8 @@ func TestRejectInvalidModelReference(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -447,8 +447,8 @@ func TestRejectUnknownProviderInReference(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -477,8 +477,8 @@ func TestRejectUnknownProfileInReference(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -507,8 +507,8 @@ func TestRejectEmptyProfileModel(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -537,8 +537,8 @@ func TestRejectStreamInExtraBody(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -569,8 +569,8 @@ func TestRejectInvalidProviderURL(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -599,8 +599,8 @@ func TestRejectInvalidAPIKeyEnv(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -629,8 +629,8 @@ func TestRejectAgentClassNotLlmAgent(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -659,8 +659,8 @@ func TestRejectEmptyInstruction(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -688,8 +688,8 @@ func TestResolveModel(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -812,8 +812,8 @@ func TestRequiredAPIKeyEnvs(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -909,7 +909,7 @@ func TestNoFallbackWhenDirsIncomplete(t *testing.T) {
 
 	root := t.TempDir()
 	agentsDir := filepath.Join(root, "agents")
-	os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
 	writeFile(t, agentsDir, "agent.yaml", `
 agent_class: LlmAgent
 name: test
@@ -927,8 +927,8 @@ func TestRejectRootAgentWithoutGlobalInstruction(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -957,8 +957,8 @@ func TestRejectNonRootAgentWithGlobalInstruction(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -995,8 +995,8 @@ func TestRejectEmptyGlobalInstructionOnRoot(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1026,8 +1026,8 @@ func TestRejectWhitespaceGlobalInstructionOnNonRootAgent(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1145,8 +1145,8 @@ func TestAgentContextBudgetInheritsRootPercent(t *testing.T) {
 func TestLoadValidACPDefinition(t *testing.T) {
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 	writeFile(t, providersDir, "opencode.yaml", `
 name: opencode
 type: acp
@@ -1195,8 +1195,8 @@ func TestRejectInvalidACPDefinitionContracts(t *testing.T) {
 		t.Run(test.name, func(t *testing.T) {
 			agentsDir := filepath.Join(t.TempDir(), "agents")
 			providersDir := filepath.Join(t.TempDir(), "providers")
-			os.MkdirAll(agentsDir, 0o755)
-			os.MkdirAll(providersDir, 0o755)
+			_ = os.MkdirAll(agentsDir, 0o755)
+			_ = os.MkdirAll(providersDir, 0o755)
 			writeFile(t, providersDir, "opencode.yaml", "name: opencode\ntype: acp\ncommand: opencode\nprofiles:\n  build:\n"+test.profileBody)
 			agentBody := test.agentBody
 			if agentBody == "" {
@@ -1532,8 +1532,8 @@ func TestRejectProfileInvalidContextWindow(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1568,8 +1568,8 @@ func TestRejectProfileContextWindowExceedsMaximum(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1604,8 +1604,8 @@ func TestRejectProfileOutputExceedsWindow(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1641,8 +1641,8 @@ func TestRejectProfileInvalidCounterStrategy(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1680,8 +1680,8 @@ func TestRejectProfileEmptyCounterStrategy(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1719,8 +1719,8 @@ func TestRejectProfileCounterMissingIDForOfficialStrategy(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1758,8 +1758,8 @@ func TestAcceptProfileEstimatorWithID(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1795,8 +1795,8 @@ func TestRejectProfileEstimatorWithoutID(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1834,8 +1834,8 @@ func TestAcceptProfileWithByteBoundCounter(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1870,8 +1870,8 @@ func TestRejectProfileByteBoundCounterWithID(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1907,8 +1907,8 @@ func TestAcceptProfileNegativeOutputWithZeroWindowIsSeparateError(t *testing.T) 
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -1944,8 +1944,8 @@ func TestLoadValidProfileWithFullCapability(t *testing.T) {
 
 	agentsDir := filepath.Join(t.TempDir(), "agents")
 	providersDir := filepath.Join(t.TempDir(), "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
@@ -2033,7 +2033,6 @@ func TestValidateProfileCapability(t *testing.T) {
 		{name: "missing estimator id", mutate: func(model *agentdef.ResolvedModel) { model.CounterStrategy, model.CounterID = "estimator", "" }},
 	}
 	for _, test := range tests {
-		test := test
 		t.Run(test.name, func(t *testing.T) {
 			t.Parallel()
 			candidate := valid

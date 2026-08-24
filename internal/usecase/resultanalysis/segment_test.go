@@ -359,10 +359,7 @@ func TestSegmentRejectsUnknownVersion(t *testing.T) {
 // OverlapMaxBytes. It is used to prove each limitCases entry below actually
 // drives the segmenter to its overlap ceiling, not merely close to it.
 func effectiveOverlapBytes(nominal int64, limits domain.AnalysisLimits) int64 {
-	overlap := nominal * int64(limits.OverlapBasisPoints) / 10000
-	if overlap > limits.OverlapMaxBytes {
-		overlap = limits.OverlapMaxBytes
-	}
+	overlap := min(nominal*int64(limits.OverlapBasisPoints)/10000, limits.OverlapMaxBytes)
 	return overlap
 }
 

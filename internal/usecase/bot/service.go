@@ -289,94 +289,13 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 }
 
 func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Outcome, error) {
-	if err := invocation.Validate(); err != nil {
-		return "", fmt.Errorf("invalid invocation: %w", err)
-	}
-
-	authorization := s.cfg.AccessPolicy.Authorize(invocation)
-	now := s.clock.Now().UTC()
-	claimed, err := s.store.ClaimDedupe(ctx, invocation.DedupeKeys(), now, now.Add(s.cfg.DedupeTTL))
-	if err != nil {
-		s.logger.Error("dedupe claim failed", "event_id", invocation.EventID, "error", err)
-		return "", fmt.Errorf("claim Slack invocation: %w", err)
-	}
-	if !claimed {
-		if authorization.Allowed && isIsolatedGreeting(invocation) {
-			key, keyErr := invocation.ConversationKey()
-			if keyErr != nil {
-				return "", keyErr
-			}
-			if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
-				return outcome, nil
-			}
-		}
-		s.logger.Debug("duplicate Slack invocation ignored", "event_id", invocation.EventID)
-		return OutcomeDuplicate, nil
-	}
-
-	if !authorization.Allowed {
-		s.logger.Info("Slack invocation denied", "event_id", invocation.EventID, "user_id", invocation.UserID, "reason", authorization.Reason)
-		if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.UnauthorizedMessage); err != nil {
-			s.logger.Error("authorization response failed", "event_id", invocation.EventID, "error", err)
-			return OutcomePublishFailed, nil
-		}
-		return OutcomeDenied, nil
-	}
-
-	// Before the normal agent flow, check if this is a confirmation reply.
-	if s.confirmationStore != nil {
-		if outcome, ok := s.tryResumeConfirmation(ctx, invocation); ok {
-			return outcome, nil
-		}
-	}
-
-	key, err := invocation.ConversationKey()
+	outcome, handled, key, now, err := s.prepareInvocation(ctx, invocation)
 	if err != nil {
 		return "", err
 	}
-	if s.workstreams != nil {
-		command, handled, parseErr := parseHumanWorkstreamCommand(invocation.Text)
-		if handled {
-			if parseErr != nil {
-				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Invalid workstream command: "+parseErr.Error())); publishErr != nil {
-					return OutcomePublishFailed, nil
-				}
-				return OutcomeResponded, nil
-			}
-			// Human workstream commands mutate durable state, so they share
-			// the conversation coordinator with completion activations and
-			// confirmation resumes. A busy conversation never mutates a
-			// workstream while an activation is reading or using a
-			// snapshot.
-			release, acquired := s.limiter.TryAcquire(string(key))
-			if !acquired {
-				s.logger.Info("workstream command rejected by backpressure", "conversation_key", key)
-				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); publishErr != nil {
-					return OutcomePublishFailed, nil
-				}
-				return OutcomeBusy, nil
-			}
-			outcome, handledErr := s.applyHumanWorkstreamCommand(ctx, invocation, key, command)
-			release()
-			if handledErr != nil {
-				return "", handledErr
-			}
-			return outcome, nil
-		}
-	}
-	if s.knowledge != nil && s.knowledge.MatchesKnowledge(invocation.Text) {
-		outcome, handled, handledErr := s.handleKnowledgeCommand(ctx, invocation, key)
-		if handledErr != nil {
-			return "", handledErr
-		}
-		if handled {
-			return outcome, nil
-		}
-	}
-	if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
+	if handled {
 		return outcome, nil
 	}
-	s.presentSuggestedPrompts(ctx, invocation, key)
 
 	var recovered port.History
 	if invocation.Trigger == domain.TriggerThreadReply {
@@ -494,6 +413,88 @@ func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Out
 	}
 
 	return s.handleRuntimeTurn(ctx, modelCtx, cancel, invocation, key, modelContext, agentContext, metadata, modelRelease, progress, knowledge, workstreamRevision, workstreamSnapshot)
+}
+
+func (s *Service) prepareInvocation(ctx context.Context, invocation domain.Invocation) (Outcome, bool, domain.ConversationKey, time.Time, error) {
+	if err := invocation.Validate(); err != nil {
+		return "", false, "", time.Time{}, fmt.Errorf("invalid invocation: %w", err)
+	}
+	authorization := s.cfg.AccessPolicy.Authorize(invocation)
+	now := s.clock.Now().UTC()
+	claimed, err := s.store.ClaimDedupe(ctx, invocation.DedupeKeys(), now, now.Add(s.cfg.DedupeTTL))
+	if err != nil {
+		s.logger.Error("dedupe claim failed", "event_id", invocation.EventID, "error", err)
+		return "", false, "", now, fmt.Errorf("claim Slack invocation: %w", err)
+	}
+	if !claimed {
+		if authorization.Allowed && isIsolatedGreeting(invocation) {
+			key, keyErr := invocation.ConversationKey()
+			if keyErr != nil {
+				return "", false, "", now, keyErr
+			}
+			if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
+				return outcome, true, key, now, nil
+			}
+		}
+		s.logger.Debug("duplicate Slack invocation ignored", "event_id", invocation.EventID)
+		return OutcomeDuplicate, true, "", now, nil
+	}
+	if !authorization.Allowed {
+		s.logger.Info("Slack invocation denied", "event_id", invocation.EventID, "user_id", invocation.UserID, "reason", authorization.Reason)
+		if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.UnauthorizedMessage); err != nil {
+			s.logger.Error("authorization response failed", "event_id", invocation.EventID, "error", err)
+			return OutcomePublishFailed, true, "", now, nil
+		}
+		return OutcomeDenied, true, "", now, nil
+	}
+	if s.confirmationStore != nil {
+		if outcome, ok := s.tryResumeConfirmation(ctx, invocation); ok {
+			return outcome, true, "", now, nil
+		}
+	}
+	key, err := invocation.ConversationKey()
+	if err != nil {
+		return "", false, "", now, err
+	}
+	if s.workstreams != nil {
+		command, handled, parseErr := parseHumanWorkstreamCommand(invocation.Text)
+		if handled {
+			if parseErr != nil {
+				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Invalid workstream command: "+parseErr.Error())); publishErr != nil {
+					return OutcomePublishFailed, true, key, now, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
+				}
+				return OutcomeResponded, true, key, now, nil
+			}
+			release, acquired := s.limiter.TryAcquire(string(key))
+			if !acquired {
+				s.logger.Info("workstream command rejected by backpressure", "conversation_key", key)
+				if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.cfg.BusyMessage); publishErr != nil {
+					return OutcomePublishFailed, true, key, now, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
+				}
+				return OutcomeBusy, true, key, now, nil
+			}
+			outcome, handledErr := s.applyHumanWorkstreamCommand(ctx, invocation, key, command)
+			release()
+			if handledErr != nil {
+				return "", false, key, now, handledErr
+			}
+			return outcome, true, key, now, nil
+		}
+	}
+	if s.knowledge != nil && s.knowledge.MatchesKnowledge(invocation.Text) {
+		outcome, handled, handledErr := s.handleKnowledgeCommand(ctx, invocation, key)
+		if handledErr != nil {
+			return "", false, key, now, handledErr
+		}
+		if handled {
+			return outcome, true, key, now, nil
+		}
+	}
+	if outcome, handled := s.handleOnboarding(ctx, invocation, key); handled {
+		return outcome, true, key, now, nil
+	}
+	s.presentSuggestedPrompts(ctx, invocation, key)
+	return "", false, key, now, nil
 }
 
 // retrieveKnowledge resolves the trusted binding once per turn and runs the
@@ -1110,7 +1111,7 @@ func (s *Service) finalizeTurn(ctx context.Context, invocation domain.Invocation
 	}
 	assistantTS := published.LastMessageTS
 	if assistantTS == "" {
-		return "", errors.New("Slack published a response without a timestamp")
+		return "", errors.New("slack published a response without a timestamp")
 	}
 	if err := s.persistAssistantTurn(ctx, metadata, assistantTS, safeResponse, prepared); err != nil {
 		return "", err
@@ -1410,27 +1411,8 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		return OutcomeIgnoredFollowup
 	}
 	if interactive != nil {
-		expectedDigest := port.ConfirmationContentDigest(*delivery)
-		if delivery.RendererMode != confirmationRendererMode || delivery.TeamID != interactive.TeamID || delivery.ChannelID != interactive.ChannelID ||
-			delivery.ThreadTS != interactive.ThreadTS || delivery.SlackMessageTS == "" ||
-			delivery.SlackMessageTS != interactive.MessageTS {
-			s.logger.Warn("confirmation interaction identity mismatch", "wrapper_call_id", wrapperCallID)
-			return OutcomeIgnoredFollowup
-		}
-		hasMetadata := interactive.CorrelationID != "" || interactive.RendererMode != "" || interactive.ContentSHA256 != ""
-		if hasMetadata && (interactive.RendererMode != confirmationRendererMode ||
-			delivery.CorrelationID != interactive.CorrelationID || interactive.ContentSHA256 != expectedDigest) {
-			s.logger.Warn("confirmation interaction metadata mismatch", "wrapper_call_id", wrapperCallID)
-			return OutcomeIgnoredFollowup
-		}
-		channelKind := channelKindForChannel(interactive.ChannelID)
-		authorization := s.cfg.AccessPolicy.Authorize(domain.Invocation{
-			TeamID: interactive.TeamID, ChannelID: interactive.ChannelID,
-			ChannelKind: channelKind, UserID: interactive.Actor,
-		})
-		if !authorization.Allowed {
-			s.logger.Warn("confirmation interaction no longer authorized", "wrapper_call_id", wrapperCallID, "reason", authorization.Reason)
-			return OutcomeDenied
+		if outcome, rejected := s.validConfirmationInteraction(*delivery, *interactive, wrapperCallID); rejected {
+			return outcome
 		}
 	}
 
@@ -1459,30 +1441,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	}
 
 	if !delivery.Expiry.After(now) {
-		expiredDelivery := *delivery
-		expiredDelivery.Status = port.ConfirmationExpired
-		publishExpired := func() error {
-			if interactive != nil && s.confirmationPublisher != nil {
-				if err := s.confirmationPublisher.UpdateConfirmation(ctx, expiredDelivery, "This confirmation has expired."); err != nil {
-					s.logger.Error("expired confirmation prompt update failed", "wrapper_call_id", wrapperCallID, "error", err)
-				}
-			}
-			s.publishIfText(ctx, invocation, interactive, "This confirmation has expired.", "expiry reply failed")
-			return nil
-		}
-		firstExpiry, expiryErr := s.expireAndResumeConfirmation(ctx, *delivery, publishExpired)
-		if errors.Is(expiryErr, errConversationBusy) {
-			s.logger.Info("expired confirmation deferred by conversation backpressure", "wrapper_call_id", wrapperCallID)
-			return OutcomeModelFailed
-		}
-		if expiryErr != nil {
-			s.logger.Error("confirmation expiry or terminal response failed", "wrapper_call_id", wrapperCallID, "error", expiryErr)
-			return OutcomeModelFailed
-		}
-		if !firstExpiry || s.runtime == nil {
-			_ = publishExpired()
-		}
-		return OutcomeIgnoredFollowup
+		return s.handleExpiredConfirmation(ctx, invocation, interactive, wrapperCallID, *delivery)
 	}
 
 	if delivery.Status != port.ConfirmationPending && delivery.Status != port.ConfirmationPublished {
@@ -1497,7 +1456,60 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		return OutcomeBusy
 	}
 	defer conversationRelease()
+	return s.resumeConfirmation(ctx, invocation, interactive, wrapperCallID, approved, actor, *delivery)
+}
 
+func (s *Service) validConfirmationInteraction(delivery port.ConfirmationDelivery, interactive domain.ConfirmationInteractiveAction, wrapperCallID string) (Outcome, bool) {
+	expectedDigest := port.ConfirmationContentDigest(delivery)
+	if delivery.RendererMode != confirmationRendererMode || delivery.TeamID != interactive.TeamID || delivery.ChannelID != interactive.ChannelID ||
+		delivery.ThreadTS != interactive.ThreadTS || delivery.SlackMessageTS == "" || delivery.SlackMessageTS != interactive.MessageTS {
+		s.logger.Warn("confirmation interaction identity mismatch", "wrapper_call_id", wrapperCallID)
+		return OutcomeIgnoredFollowup, true
+	}
+	hasMetadata := interactive.CorrelationID != "" || interactive.RendererMode != "" || interactive.ContentSHA256 != ""
+	if hasMetadata && (interactive.RendererMode != confirmationRendererMode || delivery.CorrelationID != interactive.CorrelationID || interactive.ContentSHA256 != expectedDigest) {
+		s.logger.Warn("confirmation interaction metadata mismatch", "wrapper_call_id", wrapperCallID)
+		return OutcomeIgnoredFollowup, true
+	}
+	authorization := s.cfg.AccessPolicy.Authorize(domain.Invocation{
+		TeamID: interactive.TeamID, ChannelID: interactive.ChannelID,
+		ChannelKind: channelKindForChannel(interactive.ChannelID), UserID: interactive.Actor,
+	})
+	if !authorization.Allowed {
+		s.logger.Warn("confirmation interaction no longer authorized", "wrapper_call_id", wrapperCallID, "reason", authorization.Reason)
+		return OutcomeDenied, true
+	}
+	return "", false
+}
+
+func (s *Service) handleExpiredConfirmation(ctx context.Context, invocation domain.Invocation, interactive *domain.ConfirmationInteractiveAction, wrapperCallID string, delivery port.ConfirmationDelivery) Outcome {
+	expiredDelivery := delivery
+	expiredDelivery.Status = port.ConfirmationExpired
+	publishExpired := func() error {
+		if interactive != nil && s.confirmationPublisher != nil {
+			if err := s.confirmationPublisher.UpdateConfirmation(ctx, expiredDelivery, "This confirmation has expired."); err != nil {
+				s.logger.Error("expired confirmation prompt update failed", "wrapper_call_id", wrapperCallID, "error", err)
+			}
+		}
+		s.publishIfText(ctx, invocation, interactive, "This confirmation has expired.", "expiry reply failed")
+		return nil
+	}
+	firstExpiry, expiryErr := s.expireAndResumeConfirmation(ctx, delivery, publishExpired)
+	if errors.Is(expiryErr, errConversationBusy) {
+		s.logger.Info("expired confirmation deferred by conversation backpressure", "wrapper_call_id", wrapperCallID)
+		return OutcomeModelFailed
+	}
+	if expiryErr != nil {
+		s.logger.Error("confirmation expiry or terminal response failed", "wrapper_call_id", wrapperCallID, "error", expiryErr)
+		return OutcomeModelFailed
+	}
+	if !firstExpiry || s.runtime == nil {
+		_ = publishExpired()
+	}
+	return OutcomeIgnoredFollowup
+}
+
+func (s *Service) resumeConfirmation(ctx context.Context, invocation domain.Invocation, interactive *domain.ConfirmationInteractiveAction, wrapperCallID string, approved bool, actor string, delivery port.ConfirmationDelivery) Outcome {
 	modelCtx := ctx
 	cancel := func() {}
 	if s.cfg.ModelTimeout > 0 {
@@ -1544,7 +1556,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		s.updateProgress(ctx, progress, domain.ProgressFailed)
 		s.logger.Error("confirmation resume failed", "wrapper_call_id", wrapperCallID, "error", resumeErr)
 		if interactive != nil && s.confirmationPublisher != nil {
-			failedDelivery := *delivery
+			failedDelivery := delivery
 			failedDelivery.Status = port.ConfirmationFailed
 			if updateErr := s.confirmationPublisher.UpdateConfirmation(ctx, failedDelivery, s.cfg.ModelErrorMessage); updateErr != nil {
 				s.logger.Error("failed confirmation prompt update failed", "wrapper_call_id", wrapperCallID, "error", updateErr)
@@ -1583,7 +1595,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 	s.updateProgress(ctx, progress, domain.ProgressFinalizing)
 
 	if interactive != nil && s.confirmationPublisher != nil {
-		terminalDelivery := *delivery
+		terminalDelivery := delivery
 		if approved {
 			terminalDelivery.Status = port.ConfirmationConsumed
 		} else {

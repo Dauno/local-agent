@@ -39,8 +39,7 @@ func TestAdversarial_LargeUserContentPoorTokenRatio(t *testing.T) {
 		ModelBudget: budget,
 	})
 	if err != nil {
-		var irr *domain.IrreducibleContextError
-		if errors.As(err, &irr) {
+		if irr, ok := errors.AsType[*domain.IrreducibleContextError](err); ok {
 			t.Logf("correctly irreducible: %v", irr)
 			return
 		}
@@ -63,13 +62,13 @@ func TestAdversarial_ManySmallToolResponsesExceedBudget(t *testing.T) {
 
 	userContent := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "analyze files"}}}
 	modelCalls := make([]domain.ContentPart, 50)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		modelCalls[i] = domain.ContentPart{FunctionCall: &domain.FunctionCall{ID: fmt.Sprintf("call-%d", i), Name: "read_file", Args: map[string]any{"path": fmt.Sprintf("f%d.go", i)}}}
 	}
 	modelContent := domain.Content{Role: domain.ContentRoleModel, Parts: modelCalls}
 
 	responses := make([]domain.Content, 50)
-	for i := 0; i < 50; i++ {
+	for i := range 50 {
 		responses[i] = domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: fmt.Sprintf("call-%d", i), Name: "read_file", Response: map[string]any{"text": fmt.Sprintf("content %d", i)}}}}}
 	}
 
@@ -82,8 +81,7 @@ func TestAdversarial_ManySmallToolResponsesExceedBudget(t *testing.T) {
 		ModelBudget: budget,
 	})
 	if err != nil {
-		var irr *domain.IrreducibleContextError
-		if errors.As(err, &irr) {
+		if irr, ok := errors.AsType[*domain.IrreducibleContextError](err); ok {
 			t.Logf("correctly irreducible with 50 small responses: %v", irr)
 			return
 		}
@@ -392,7 +390,7 @@ func TestAdversarial_ParallelLargeResponsesDeterministic(t *testing.T) {
 	t.Parallel()
 
 	iterations := 5
-	for i := 0; i < iterations; i++ {
+	for i := range iterations {
 		store := &fakeResultStore{results: make(map[string]string), actors: make(map[string]string), convKeys: make(map[string]string)}
 		counter := &fakeTokenCounter{}
 		compiler := contextcompiler.New(store, counter)
@@ -401,13 +399,13 @@ func TestAdversarial_ParallelLargeResponsesDeterministic(t *testing.T) {
 
 		userContent := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read all"}}}
 		modelCalls := make([]domain.ContentPart, 5)
-		for j := 0; j < 5; j++ {
+		for j := range 5 {
 			modelCalls[j] = domain.ContentPart{FunctionCall: &domain.FunctionCall{ID: fmt.Sprintf("call-%d", j), Name: "read_file", Args: map[string]any{"path": fmt.Sprintf("f%d.go", j)}}}
 		}
 		modelContent := domain.Content{Role: domain.ContentRoleModel, Parts: modelCalls}
 
 		responses := make([]domain.Content, 5)
-		for j := 0; j < 5; j++ {
+		for j := range 5 {
 			responses[j] = domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: fmt.Sprintf("call-%d", j), Name: "read_file", Response: map[string]any{"text": strings.Repeat(fmt.Sprintf("r%d ", j), 5000)}}}}}
 		}
 
@@ -464,10 +462,7 @@ func (f *fakeResultStore) ReadChunk(ctx context.Context, req domain.ResultChunkR
 	if start >= len(content) {
 		return domain.ResultChunk{Content: "", OffsetBytes: req.OffsetBytes, NextOffsetBytes: req.OffsetBytes, EOF: true}, nil
 	}
-	end := start + req.MaxBytes
-	if end > len(content) {
-		end = len(content)
-	}
+	end := min(start+req.MaxBytes, len(content))
 	return domain.ResultChunk{Content: content[start:end], OffsetBytes: req.OffsetBytes, NextOffsetBytes: int64(end), EOF: end >= len(content)}, nil
 }
 

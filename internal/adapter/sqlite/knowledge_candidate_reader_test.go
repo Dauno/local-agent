@@ -163,7 +163,7 @@ func TestKnowledgeCandidateReaderExactAuthorizationBeforeLimit(t *testing.T) {
 	nowUnix := now.Unix()
 	// Unauthorized rows sort first alphabetically; the cap must apply
 	// after authorization so they can never displace authorized rows.
-	for i := 0; i < 5; i++ {
+	for i := range 5 {
 		seedRetrievalClaim(t, store, "aaa_unauthorized_"+string(rune('a'+i)), "shared subject", "is", "string", "value-"+string(rune('a'+i)), "", "team", "T00000002", "asserted", nowUnix, 0, 1)
 	}
 	seedRetrievalClaim(t, store, "zzz_authorized", "shared subject", "is", "string", "value-last", "", "project", "my-project", "asserted", nowUnix, 0, 1)

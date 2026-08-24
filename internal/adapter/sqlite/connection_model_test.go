@@ -22,7 +22,7 @@ func TestConnectionModelPragmasAndPoolSize(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var journalMode string
 	if err := store.db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
@@ -81,7 +81,7 @@ func TestOpenExistingUpgradesLegacyRollbackJournalDatabaseToWAL(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting on legacy rollback-journal database: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var journalMode string
 	if err := store.db.QueryRowContext(ctx, "PRAGMA journal_mode").Scan(&journalMode); err != nil {
@@ -145,7 +145,7 @@ func TestOpenReadOnlyOnRollbackJournalDatabaseOpensAndDoesNotChangeJournalMode(t
 	if err != nil {
 		t.Fatalf("OpenReadOnly on a rollback-journal database: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var count int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM t`).Scan(&count); err != nil {
@@ -176,7 +176,7 @@ func TestReadDuringOpenWriteTransactionSeesPreWriteSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if _, err := store.db.ExecContext(ctx, `CREATE TABLE checkpoint1_probe (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)`); err != nil {
 		t.Fatal(err)
@@ -236,7 +236,7 @@ func TestConcurrentReadThenWriteTransactionsAllCompleteUnderTxlockImmediate(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if _, err := store.db.ExecContext(ctx, `CREATE TABLE checkpoint1_counter (id INTEGER PRIMARY KEY, value INTEGER NOT NULL)`); err != nil {
 		t.Fatal(err)
@@ -248,7 +248,7 @@ func TestConcurrentReadThenWriteTransactionsAllCompleteUnderTxlockImmediate(t *t
 	const writers = 40
 	var wg sync.WaitGroup
 	errs := make([]error, writers)
-	for i := 0; i < writers; i++ {
+	for i := range writers {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()

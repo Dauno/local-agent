@@ -169,7 +169,7 @@ func TestEnsureBaseArtifactsRespectsExistingConfigAndNeverOverwritesOrResets(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	messages, err := store.RecentMessages(t.Context(), metadata.Key, 10)
 	if err != nil || len(messages) != 1 || messages[0].Content != "persisted" {
 		t.Fatalf("database was reset: messages=%#v err=%v", messages, err)

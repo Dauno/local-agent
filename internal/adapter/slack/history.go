@@ -51,7 +51,7 @@ func (c sdkHistoryClient) ConversationHistory(ctx context.Context, channelID, la
 		return nil, err
 	}
 	if response == nil {
-		return nil, errors.New("Slack conversations.history returned no response")
+		return nil, errors.New("slack conversations.history returned no response")
 	}
 	return response.Messages, nil
 }
@@ -82,13 +82,13 @@ func newHistoryReader(client historyClient, botUserID string, timeout time.Durat
 
 func (r *HistoryReader) RecentHistory(ctx context.Context, invocation domain.Invocation, limits domain.ContextLimits) (port.History, error) {
 	if r == nil || r.client == nil {
-		return port.History{}, errors.New("Slack history client is required")
+		return port.History{}, errors.New("slack history client is required")
 	}
 	if r.botUserID == "" {
-		return port.History{}, errors.New("Slack bot user ID is required")
+		return port.History{}, errors.New("slack bot user ID is required")
 	}
 	if limits.MaxMessages <= 0 || limits.MaxChars <= 0 {
-		return port.History{}, errors.New("Slack history limits must be positive")
+		return port.History{}, errors.New("slack history limits must be positive")
 	}
 	if err := invocation.Validate(); err != nil {
 		return port.History{}, fmt.Errorf("invalid Slack history invocation: %w", err)
@@ -137,7 +137,7 @@ func (r *HistoryReader) RecentHistory(ctx context.Context, invocation domain.Inv
 // exact returned message.text equality.
 func (r *HistoryReader) FindPublishedAssistantExchange(ctx context.Context, intent port.AssistantExchangeIntent) (string, bool, error) {
 	if r == nil || r.client == nil {
-		return "", false, errors.New("Slack history client is required")
+		return "", false, errors.New("slack history client is required")
 	}
 	if r.botUserID == "" || intent.ChannelID == "" || intent.CorrelationID == "" {
 		return "", false, errors.New("invalid assistant exchange finder input")

@@ -120,7 +120,7 @@ func TestGateANoUnboundedGetDuringNormalTurns(t *testing.T) {
 	}
 
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1700000000.000001")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := runtime.Run(t.Context(), port.AgentRequest{
 			ConversationKey: key,
 			Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "hello again"}},
@@ -173,7 +173,7 @@ func TestEnsureSessionUsesExistenceCheckNotFailedCreate(t *testing.T) {
 	}
 
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, err := runtime.Run(t.Context(), port.AgentRequest{
 			ConversationKey: key,
 			Messages:        []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "hello again"}},

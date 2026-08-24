@@ -153,17 +153,6 @@ func validateCompletionBindingAdmission(ctx context.Context, queryer queryRower,
 	return nil
 }
 
-func (s *ExternalAgentJobStore) findExisting(ctx context.Context, jobID, originalCallID string) (*domain.ExternalAgentJob, error) {
-	job, err := s.load(ctx, s.db, `WHERE job_id = ? OR original_call_id = ?`, jobID, originalCallID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
-	if err != nil {
-		return nil, fmt.Errorf("load existing external-agent job: %w", err)
-	}
-	return &job, nil
-}
-
 func (s *ExternalAgentJobStore) GetJob(ctx context.Context, jobID string) (*domain.ExternalAgentJob, error) {
 	job, err := s.load(ctx, s.db, `WHERE job_id = ?`, jobID)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -229,7 +218,7 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	if err != nil {
 		return nil, fmt.Errorf("inspect external-agent job deliveries: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var delivery domain.ExternalAgentJobDeliveryInspection
 		var kind, publishState, errorCode, deliveryMode, uploadState, recoveredTS string
@@ -278,7 +267,7 @@ func (s *ExternalAgentJobStore) NotificationHealth(ctx context.Context, now time
 	if err != nil {
 		return health, fmt.Errorf("count external-agent notification states: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var state string
 		var count int
@@ -734,7 +723,7 @@ func (s *ExternalAgentJobStore) ListExpiredRunning(ctx context.Context, now time
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var jobs []domain.ExternalAgentJob
 	for rows.Next() {
 		job, err := scanJob(rows)
@@ -751,7 +740,7 @@ func (s *ExternalAgentJobStore) ShutdownStats(ctx context.Context) (domain.Exter
 	if err != nil {
 		return domain.ExternalAgentJobShutdownStats{}, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var stats domain.ExternalAgentJobShutdownStats
 	for rows.Next() {
 		var status domain.ExternalAgentJobStatus

@@ -225,7 +225,7 @@ func (s *knowledgeQueueStore) List(ctx context.Context, kind domain.KnowledgeRet
 	if err != nil {
 		return nil, fmt.Errorf("%w: list queue rows: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var items []domain.KnowledgeQueueItem
 	for rows.Next() {
 		var (

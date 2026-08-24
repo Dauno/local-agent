@@ -34,7 +34,7 @@ func TestContinuityStoreCASAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	loaded, err := NewContinuityStore(db).Latest(ctx, "adk:conversation")
 	if err != nil {
 		t.Fatal(err)

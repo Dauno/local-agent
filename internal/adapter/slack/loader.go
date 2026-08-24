@@ -29,7 +29,7 @@ func NewFileLoader(client *slack.Client, token string, timeout time.Duration) *F
 
 func (l *FileLoader) Load(ctx context.Context, attachment domain.Attachment, maxBytes int64) (port.LoadedAttachment, error) {
 	if l == nil || l.client == nil {
-		return port.LoadedAttachment{}, errors.New("Slack file client is required")
+		return port.LoadedAttachment{}, errors.New("slack file client is required")
 	}
 	if strings.TrimSpace(attachment.ID) == "" {
 		return port.LoadedAttachment{}, errors.New("attachment ID is required")
@@ -66,7 +66,7 @@ func (l *FileLoader) Load(ctx context.Context, attachment domain.Attachment, max
 	if err != nil {
 		return port.LoadedAttachment{}, fmt.Errorf("download file %q: %w", attachment.ID, err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if resp.StatusCode != http.StatusOK {
 		return port.LoadedAttachment{}, fmt.Errorf("download file %q: Slack returned HTTP %d", attachment.ID, resp.StatusCode)

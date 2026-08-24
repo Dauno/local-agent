@@ -84,12 +84,12 @@ func seedTurnPathBenchCorpus() (turnPathBenchCorpus, error) {
 	db := store.DB()
 	if _, err := db.ExecContext(ctx, `INSERT INTO adk_app_state (app_name, state, update_time) VALUES (?, '{}', ?)`,
 		turnPathBenchApp, now); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO adk_user_state (app_name, user_id, state, update_time) VALUES (?, ?, '{}', ?)`,
 		turnPathBenchApp, turnPathBenchUser, now); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	for _, n := range turnPathBenchSizes {
@@ -100,13 +100,13 @@ func seedTurnPathBenchCorpus() (turnPathBenchCorpus, error) {
 			(app_name, user_id, session_id, state, revision, create_time, update_time)
 			VALUES (?, ?, ?, '{}', ?, ?, ?)`,
 			turnPathBenchApp, turnPathBenchUser, sessionID, n, now, now); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("insert session %s: %w", sessionID, err))
 		}
 
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(err)
 		}
 		stmt, err := tx.PrepareContext(ctx, `INSERT INTO adk_events
@@ -114,27 +114,27 @@ func seedTurnPathBenchCorpus() (turnPathBenchCorpus, error) {
 			VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, 0, 1, 0)`)
 		if err != nil {
 			_ = tx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(err)
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			content := fmt.Sprintf(`{"role":"model","parts":[{"text":"event %d %s"}]}`, i, filler)
 			if _, err := stmt.ExecContext(ctx, fmt.Sprintf("%s-evt-%d", sessionID, i),
 				turnPathBenchApp, turnPathBenchUser, sessionID, i, "bench-invocation", "model",
 				now+int64(i), content); err != nil {
 				_ = stmt.Close()
 				_ = tx.Rollback()
-				store.Close()
+				_ = store.Close()
 				return fail(fmt.Errorf("insert event %d for session %s: %w", i, sessionID, err))
 			}
 		}
 		if err := stmt.Close(); err != nil {
 			_ = tx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(err)
 		}
 		if err := tx.Commit(); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("commit session %s corpus: %w", sessionID, err))
 		}
 	}

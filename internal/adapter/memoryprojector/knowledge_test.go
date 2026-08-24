@@ -399,13 +399,11 @@ func TestKnowledgeProjectionConcurrentPromotionsDoNotCorrupt(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for i := range 20 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			if err := p.Project(context.Background(), readers[i%2], bundle); err != nil {
 				t.Errorf("concurrent projection: %v", err)
 			}
-		}()
+		})
 	}
 	wg.Wait()
 
@@ -647,7 +645,7 @@ func TestStagingCleanupFailuresKeepTypedErrorUntilHealed(t *testing.T) {
 	}
 	// Every retry keeps the typed error while the staging residue cannot
 	// be removed, without touching the live bundle or creating a backup.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := failing.Project(t.Context(), &stubProjectionReader{snapshot: next}, bundle); !errors.Is(err, port.ErrProjectionCleanup) {
 			t.Fatalf("retry %d error = %v, want ErrProjectionCleanup", i+1, err)
 		}
@@ -799,7 +797,7 @@ func TestRollbackFailureKeepsTypedErrorForStagingResidueUntilHealed(t *testing.T
 	}
 	// Every retry keeps the typed error while the staging residue cannot
 	// be removed, and never touches the backup.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if err := failing.Project(t.Context(), &stubProjectionReader{snapshot: next}, bundle); !errors.Is(err, port.ErrProjectionCleanup) {
 			t.Fatalf("retry %d error = %v, want ErrProjectionCleanup", i+1, err)
 		}
@@ -1014,7 +1012,7 @@ func TestRepeatedCleanupFailuresKeepTypedErrorUntilHealed(t *testing.T) {
 	// backup cannot be removed (internal recovery runs under the mutex at
 	// the start of each Project), never degrade into a generic failure,
 	// and never touch the live bundle.
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		if err := failing.Project(t.Context(), &stubProjectionReader{snapshot: next}, bundle); !errors.Is(err, port.ErrProjectionCleanup) {
 			t.Fatalf("retry %d error = %v, want ErrProjectionCleanup", i+1, err)
 		}

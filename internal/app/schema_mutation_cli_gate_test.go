@@ -73,7 +73,7 @@ func assertJournalStillDelete(t *testing.T, dbPath string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var mode string
 	if err := plain.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "delete" {
 		t.Fatalf("journal_mode=%q err=%v, want delete untouched", mode, err)
@@ -223,7 +223,7 @@ func TestResetStateConfirmedReplacesBehindDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	if err := plain.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != 42 {
 		t.Fatalf("post-reset user_version=%d err=%v, want 42", version, err)
 	}

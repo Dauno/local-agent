@@ -136,7 +136,7 @@ func (e *Executor) readFile(args map[string]any) (sandbox.SandboxResult, error) 
 	if err != nil {
 		return sandbox.SandboxResult{}, pathUnavailable(path)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data, err := io.ReadAll(io.LimitReader(file, int64(e.maxOutputBytes)+int64(utf8.UTFMax)))
 	if err != nil {
 		return sandbox.SandboxResult{}, pathUnavailable(path)
@@ -243,7 +243,6 @@ func (e *Executor) listDirectory(args map[string]any) (sandbox.SandboxResult, er
 			}
 			if end > e.maxOutputBytes {
 				names = names[:i]
-				truncated = true
 				break
 			}
 			last = end
@@ -259,8 +258,8 @@ func (e *Executor) listDirectory(args map[string]any) (sandbox.SandboxResult, er
 }
 
 func anyRestrictedSegment(path string) bool {
-	segs := strings.Split(filepath.ToSlash(filepath.Clean(path)), "/")
-	for _, seg := range segs {
+	segs := strings.SplitSeq(filepath.ToSlash(filepath.Clean(path)), "/")
+	for seg := range segs {
 		if seg == "." {
 			continue
 		}

@@ -134,7 +134,7 @@ func TestHandleSubstantiveGreetingUsesNormalModelPath(t *testing.T) {
 func TestHandleOnboardingPublicationFailureDoesNotFallBackToModel(t *testing.T) {
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "model response"}}
 	store := &onboardingStoreFake{}
-	publisher := &onboardingPublisherFake{publishErr: errors.New("Slack unavailable")}
+	publisher := &onboardingPublisherFake{publishErr: errors.New("slack unavailable")}
 	service := newOnboardingService(t, store, publisher, runtime)
 
 	outcome, err := service.Handle(t.Context(), onboardingInvocation())

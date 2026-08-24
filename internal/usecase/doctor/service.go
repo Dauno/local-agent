@@ -241,6 +241,32 @@ type selectedModel struct {
 	resolved *agentdef.ResolvedModel
 }
 
+type definitionCheck struct {
+	defs           *agentdef.Definitions
+	resolvedModel  *agentdef.ResolvedModel
+	selectedModels []selectedModel
+	loadFailed     bool
+}
+
+type liveCheckState struct {
+	cfg                     config.Config
+	values                  map[string]string
+	validSecrets            map[string]bool
+	redactor                secure.Redactor
+	durableACP              bool
+	rootCLIProvider         bool
+	modelAPIKeyEnv          string
+	defsLoadFailed          bool
+	resolvedModel           *agentdef.ResolvedModel
+	selectedModels          []selectedModel
+	transcriptionProfile    string
+	transcriptionResolved   *agentdef.ResolvedModel
+	audioTranscriptionReady bool
+	embeddingEnabled        bool
+	embeddingCfg            config.KnowledgeEmbeddingConfig
+	shimNames               map[string]string
+}
+
 func selectedModelAlreadyIncluded(selected []selectedModel, agent string) bool {
 	for _, model := range selected {
 		if model.agent == agent {
@@ -296,141 +322,24 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 
 	projectRoot := filepath.Dir(filepath.Dir(s.deps.ConfigPath))
 	paths, pathErr := cfg.ResolvePaths(projectRoot)
-	var (
-		defs                    *agentdef.Definitions
-		resolvedModel           *agentdef.ResolvedModel
-		selectedModels          []selectedModel
-		defsLoadFailed          bool
-		durableACP              bool
-		transcriptionResolved   *agentdef.ResolvedModel
-		transcriptionResolveErr error
-	)
+	definitions := definitionCheck{}
 	if pathErr != nil {
 		report.fail("SQLite", pathErr.Error(), "Fix state.dir and state.db in .local-agent/config.yaml.", false)
 	} else {
-		var defsErr error
-		defs, defsErr = agentdef.Load(paths.StateDir)
-		if defsErr != nil {
-			defsLoadFailed = true
-			report.fail("agent definitions", defsErr.Error(), "Fix .local-agent/agents/*.yaml and .local-agent/providers/*.yaml files.", false)
-		} else if defs != nil {
-			rootDef, ok := defs.Agents["root_agent"]
-			if !ok {
-				defsLoadFailed = true
-				report.fail("agent definitions", "agent definition root_agent is required", "Add .local-agent/agents/root_agent.yaml.", false)
-			} else if resolvedModel, defsErr = defs.ResolveModel(rootDef.Model); defsErr != nil {
-				defsLoadFailed = true
-				report.fail("agent definitions", defsErr.Error(), "Fix root_agent.model in .local-agent/agents/root_agent.yaml.", false)
-			} else {
-				selectedModels = append(selectedModels, selectedModel{agent: "root_agent", resolved: resolvedModel})
-				for _, agentToolName := range rootDef.AgentTools {
-					agentTool, exists := defs.Agents[agentToolName]
-					if !exists {
-						defsErr = fmt.Errorf("agent tool %q is not defined", agentToolName)
-						break
-					}
-					modelRef := agentTool.Model
-					if agentTool.AgentClass == "AcpAgent" {
-						modelRef = agentTool.Runtime
-					}
-					agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
-					if resolveErr != nil {
-						defsErr = fmt.Errorf("resolve agent tool %q model: %w", agentToolName, resolveErr)
-						break
-					}
-					selectedModels = append(selectedModels, selectedModel{agent: agentToolName, resolved: agentToolResolved})
-				}
-				if defsErr == nil {
-					// Tambien revisar agentes auto-descubiertos.
-					for _, name := range agentdef.EligibleAgentNames(defs) {
-						if agentdef.IsReservedAgentName(name) {
-							continue
-						}
-						// Skip if already checked via rootDef.AgentTools.
-						alreadyChecked := false
-						for _, toolName := range rootDef.AgentTools {
-							if toolName == name {
-								alreadyChecked = true
-								break
-							}
-						}
-						if alreadyChecked {
-							continue
-						}
-						agentTool, exists := defs.Agents[name]
-						if !exists {
-							continue
-						}
-						modelRef := agentTool.Model
-						if agentTool.AgentClass == "AcpAgent" {
-							modelRef = agentTool.Runtime
-						}
-						agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
-						if resolveErr != nil {
-							defsErr = fmt.Errorf("resolve auto-discovered agent %q model: %w", name, resolveErr)
-							break
-						}
-						selectedModels = append(selectedModels, selectedModel{agent: name, resolved: agentToolResolved})
-					}
-				}
-				if defsErr == nil {
-					blueprints := make([]*agentdef.WorkflowBlueprint, 0, len(rootDef.WorkflowTools))
-					for _, workflowID := range rootDef.WorkflowTools {
-						bp, loadErr := defs.LoadWorkflow(paths.StateDir, workflowID)
-						if loadErr != nil {
-							defsErr = fmt.Errorf("workflow %q: %w", workflowID, loadErr)
-							break
-						}
-						blueprints = append(blueprints, bp)
-						for _, doc := range bp.OrderedDocuments() {
-							if doc.AgentClass == agentdef.AgentClassAcp && doc.ACP != nil {
-								workflowResolved, resolveErr := defs.ResolveModel(doc.ACP.Runtime)
-								if resolveErr != nil {
-									defsErr = fmt.Errorf("workflow %q agent %q: resolve runtime %q: %w", workflowID, doc.Name, doc.ACP.Runtime, resolveErr)
-									break
-								}
-								selectedModels = append(selectedModels, selectedModel{agent: "workflow:" + doc.Name, resolved: workflowResolved})
-								continue
-							}
-							if doc.AgentClass != agentdef.AgentClassLLM || doc.LLM == nil {
-								continue
-							}
-							workflowResolved, resolveErr := defs.ResolveModel(doc.LLM.Model)
-							if resolveErr != nil {
-								defsErr = fmt.Errorf("workflow %q agent %q: resolve model %q: %w", workflowID, doc.Name, doc.LLM.Model, resolveErr)
-								break
-							}
-							selectedModels = append(selectedModels, selectedModel{agent: "workflow:" + doc.Name, resolved: workflowResolved})
-						}
-						if defsErr != nil {
-							break
-						}
-					}
-					if defsErr == nil {
-						defsErr = defs.ValidateWorkflowComposition(rootDef, blueprints, cfg.Sandbox.Enabled)
-					}
-				}
-				if defsErr == nil {
-					if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
-						attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model)
-						if resolveErr != nil {
-							defsErr = fmt.Errorf("resolve attachment_analyzer model: %w", resolveErr)
-						} else if problems := agentdef.ValidateAttachmentModelCapability(attachmentResolved); len(problems) > 0 {
-							defsErr = errors.New(strings.Join(problems, "; "))
-						} else if !selectedModelAlreadyIncluded(selectedModels, "attachment_analyzer") {
-							selectedModels = append(selectedModels, selectedModel{agent: "attachment_analyzer", resolved: attachmentResolved})
-						}
-					}
-				}
-				if defsErr != nil {
-					defsLoadFailed = true
-					report.fail("agent definitions", defsErr.Error(), "Fix selected agent model references and provider compatibility.", false)
-				} else {
-					report.pass("agent definitions", fmt.Sprintf("%d providers, %d agents loaded", len(defs.Providers), len(defs.Agents)))
-				}
+		definitions = s.checkDefinitions(&report, cfg, paths)
+	}
+	defs, resolvedModel, selectedModels, defsLoadFailed := definitions.defs, definitions.resolvedModel, definitions.selectedModels, definitions.loadFailed
+	durableACP := false
+	if defs != nil {
+		for _, definition := range defs.Agents {
+			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
+				durableACP = true
+				break
 			}
 		}
 	}
+	var transcriptionResolved *agentdef.ResolvedModel
+	var transcriptionResolveErr error
 	transcriptionProfile := strings.TrimSpace(cfg.Slack.Files.TranscriptionProfile)
 	if transcriptionProfile != "" {
 		if defs == nil {
@@ -439,14 +348,6 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			transcriptionResolved, transcriptionResolveErr = defs.ResolveModel(transcriptionProfile)
 			if transcriptionResolveErr == nil {
 				transcriptionResolveErr = validateAudioTranscriptionProfile(transcriptionResolved)
-			}
-		}
-	}
-	if defs != nil {
-		for _, definition := range defs.Agents {
-			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
-				durableACP = true
-				break
 			}
 		}
 	}
@@ -467,269 +368,13 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	}
 	embeddingCfg := cfg.Orchestration.Knowledge.Retrieval.Embedding
 	embeddingEnabled := embeddingCfg.Enabled && strings.TrimSpace(embeddingCfg.APIKeyEnv) != ""
-	keys := []string{modelAPIKeyEnv, SlackBotTokenKey, SlackAppTokenKey}
-	if defs != nil {
-		keys = append(keys, defs.RequiredAPIKeyEnvs()...)
-	}
-	if transcriptionResolved != nil && transcriptionResolved.Type() == agentdef.ProviderTypeOpenAICompatible && strings.TrimSpace(transcriptionResolved.APIKeyEnv) != "" {
-		keys = append(keys, transcriptionResolved.APIKeyEnv)
-	}
-	if embeddingCfg.Enabled && strings.TrimSpace(embeddingCfg.APIKeyEnv) != "" {
-		keys = append(keys, embeddingCfg.APIKeyEnv)
-	}
-	keys = uniqueStrings(keys)
-	values, err := s.deps.Secrets.Resolve(keys...)
-	if err != nil {
-		report.fail("secrets", err.Error(), "Fix .env syntax or process environment values.", false)
+	values, redactor, validSecrets, audioTranscriptionReady, secretsOK := s.checkSecrets(&report, cfg, defs, resolvedModel, selectedModels, modelAPIKeyEnv, rootCLIProvider, transcriptionProfile, transcriptionResolved, transcriptionResolveErr, embeddingCfg, embeddingEnabled)
+	if !secretsOK {
 		return report
 	}
-	redactionValues := make([]string, 0, len(keys))
-	for _, key := range keys {
-		redactionValues = append(redactionValues, values[key])
-	}
-	redactor := secure.NewRedactor(redactionValues...)
 
-	validSecrets := make(map[string]bool, len(keys))
-	checkSecret := func(name, key, expectedPrefix, remediation string) {
-		value, exists := values[key]
-		if !exists || strings.TrimSpace(value) == "" {
-			report.fail(name, fmt.Sprintf("%s is not set", key), remediation, false)
-			return
-		}
-		if expectedPrefix != "" && (len(value) <= len(expectedPrefix) || !strings.HasPrefix(value, expectedPrefix)) {
-			report.fail(name, fmt.Sprintf("%s must start with %s", key, expectedPrefix), remediation, false)
-			return
-		}
-		validSecrets[key] = true
-		report.pass(name, fmt.Sprintf("%s is configured (%s)", key, secure.Mask(value)))
-	}
-	checkedModelAPIKeys := make(map[string]bool)
-	switch {
-	case resolvedModel == nil:
-		report.skip("model API key", "no declarative root model resolved")
-	case rootCLIProvider:
-		// agent_cli providers require no model API key.
-		report.pass("model API key", "agent CLI provider requires no model API key")
-	case resolvedModel.IsACP():
-		report.pass("model API key", "ACP provider requires no model API key")
-	default:
-		checkSecret("model API key", modelAPIKeyEnv, "", "Set "+modelAPIKeyEnv+" in the process environment or .env.")
-		checkedModelAPIKeys[modelAPIKeyEnv] = true
-	}
-	for _, selected := range selectedModels {
-		if selected.resolved.IsAgentCLI() || selected.resolved.IsACP() || checkedModelAPIKeys[selected.resolved.APIKeyEnv] {
-			continue
-		}
-		key := selected.resolved.APIKeyEnv
-		checkedModelAPIKeys[key] = true
-		checkSecret("model API key ("+selected.agent+")", key, "", "Set "+key+" in the process environment or .env.")
-	}
-	checkSecret("Slack bot token", SlackBotTokenKey, "xoxb-", "Set a Bot User OAuth Token beginning with xoxb-.")
-	checkSecret("Slack app token", SlackAppTokenKey, "xapp-", "Set an app-level Socket Mode token beginning with xapp- and connections:write.")
-
-	if embeddingEnabled {
-		checkSecret("knowledge embedding API key", embeddingCfg.APIKeyEnv, "", "Set "+embeddingCfg.APIKeyEnv+" in the process environment or .env.")
-	}
-
-	audioTranscriptionReady := false
-	if transcriptionProfile != "" {
-		switch {
-		case transcriptionResolveErr != nil:
-			report.fail("audio transcription profile", redactor.String(fmt.Sprintf("resolve %q: %v", transcriptionProfile, transcriptionResolveErr)), "Fix slack.files.transcription_profile and its openai_compatible provider definition.", false)
-		case cfg.Slack.Files.TranscriptionTimeoutSeconds <= 0:
-			report.fail("audio transcription profile", "transcription timeout must be greater than zero", "Set slack.files.transcription_timeout_seconds to a positive value.", false)
-		case transcriptionResolved.Type() != agentdef.ProviderTypeOpenAICompatible:
-			report.fail("audio transcription profile", "profile must resolve to an openai_compatible provider", "Select an openai_compatible profile in slack.files.transcription_profile.", false)
-		case !validSecrets[transcriptionResolved.APIKeyEnv]:
-			report.fail("audio transcription profile", fmt.Sprintf("profile %q requires %s, which is not set", transcriptionProfile, transcriptionResolved.APIKeyEnv), "Set the transcription provider API key in the process environment or .env.", false)
-		default:
-			validSecrets[transcriptionResolved.APIKeyEnv] = true
-			audioTranscriptionReady = true
-			report.pass("audio transcription profile", fmt.Sprintf("profile %q resolved to %s/%s; dedicated multipart STT is configured", transcriptionProfile, transcriptionResolved.Provider.Name, transcriptionResolved.Model))
-		}
-	}
-
-	if pathErr == nil {
-		// Schema inspector, consumer-owned (TRD 09 checkpoint 2): this is the
-		// only schema-version read per run, and the checker is mandatory in
-		// New. It runs before every other SQLite check, and each later check
-		// consults the local `detected` value. An unreadable version and a
-		// future version are both fatal and stop all later checks with exit
-		// 2; an old version is informational here and lets each check decide
-		// by the minimum-schema table.
-		health, runtimeErr := s.deps.SQLiteRuntime.CheckSQLiteRuntime(ctx, paths.DatabaseFile)
-		if runtimeErr != nil {
-			report.fail("SQLite connection model", redactDoctorPathError(redactor, runtimeErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", true)
-			return report
-		}
-		detected := health.SchemaVersion
-		switch {
-		case detected > expectedSQLiteSchemaVersion:
-			report.fail("SQLite connection model",
-				fmt.Sprintf("user_version=%d is newer than this binary supports (%d)", detected, expectedSQLiteSchemaVersion),
-				"Install a local-agent version that supports this database. To discard local conversation state, stop the agent, back up and delete only the configured database file, then run init.",
-				true)
-			return report
-		case detected < minimumSchemaConnectionModel:
-			// A v0 database (for example an empty file) satisfies no schema
-			// floor; report the frozen skip detail instead of validating
-			// pragmas against it.
-			report.skip("SQLite connection model", fmt.Sprintf("requires schema v%d, database is v%d", minimumSchemaConnectionModel, detected))
-		case detected < expectedSQLiteSchemaVersion:
-			if problems := validatePreUpgradeConnectionModel(health); len(problems) > 0 {
-				report.fail("SQLite connection model", strings.Join(problems, "; "),
-					"Restore the connection contract: synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
-			} else {
-				report.pass("SQLite connection model", fmt.Sprintf(
-					"schema v%d, current binary requires v%d; run local-agent db upgrade; journal_mode=%s (informational); synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
-					detected, expectedSQLiteSchemaVersion, health.JournalMode,
-					health.Synchronous, health.BusyTimeoutMillis, health.ForeignKeys, health.MaxOpenConnections))
-			}
-		default:
-			if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
-				report.fail("SQLite connection model", strings.Join(problems, "; "),
-					"Restore the v42 connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
-			} else {
-				report.pass("SQLite connection model", fmt.Sprintf(
-					"schema_version=%d journal_mode=%s synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
-					health.SchemaVersion, health.JournalMode, health.Synchronous, health.BusyTimeoutMillis, health.ForeignKeys, health.MaxOpenConnections))
-			}
-		}
-		// runIfSchema gates one check behind the minimum-schema table.
-		runIfSchema := func(name string, minimum int, run func()) {
-			if detected >= minimum {
-				run()
-				return
-			}
-			report.skip(name, fmt.Sprintf("requires schema v%d, database is v%d", minimum, detected))
-		}
-		runIfSchema("SQLite", minimumSchemaDatabaseFile, func() {
-			if err := s.deps.Database.CheckDatabase(ctx, paths.DatabaseFile); err != nil {
-				remediation := "Run local-agent init or fix permissions for the configured database path."
-				var actionable RemediableError
-				if errors.As(err, &actionable) && actionable.Remediation() != "" {
-					remediation = actionable.Remediation()
-				}
-				report.fail("SQLite", redactor.String(err.Error()), remediation, false)
-			} else {
-				report.pass("SQLite", "database exists and passes the integrity check")
-			}
-		})
-		if s.deps.Knowledge != nil {
-			runIfSchema("knowledge retrieval state", minimumSchemaKnowledge, func() {
-				health, healthErr := s.deps.Knowledge.CheckKnowledgeRetrievalState(ctx, paths.DatabaseFile)
-				if healthErr != nil {
-					report.fail("knowledge retrieval state", redactor.String(healthErr.Error()), "Run: local-agent knowledge rebuild-index to rebuild the reconstructible lexical index, or restart the agent so the lexical and embedding workers can reconcile normally.", false)
-				} else {
-					report.pass("knowledge retrieval state", fmt.Sprintf("lexical queue pending=%d processing=%d stale=%d repairable=%d; embedding queue pending=%d processing=%d stale=%d repairable=%d", health.LexicalQueuePending, health.LexicalQueueProcessing, health.LexicalQueueStaleProcessing, health.LexicalRepairableMismatch, health.EmbeddingQueuePending, health.EmbeddingQueueProcessing, health.EmbeddingQueueStaleProcessing, health.EmbeddingRepairableMismatch))
-				}
-			})
-		}
-		if s.deps.ResultRetention != nil {
-			runIfSchema("v2 result retention", minimumSchemaResultRetention, func() {
-				ages := domain.ResultRetentionAges{
-					Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
-					Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
-					Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
-				}
-				health, retentionErr := s.deps.ResultRetention.CheckResultRetention(ctx, paths.DatabaseFile, ages, time.Now().UTC())
-				if retentionErr != nil {
-					report.fail("v2 result retention", redactor.String(retentionErr.Error()), "Fix the configured database path and retry.", false)
-				} else {
-					detail := "no deletion worker is implemented yet (TRD 02 finding 6, deferred to TRD 09); this reports bounded candidate counts only"
-					for _, class := range health.Classes {
-						detail += fmt.Sprintf("; %s candidates=%d reference_protected=%d materialization_pending=%d", class.Class, class.Candidates, class.ReferenceProtected, class.MaterializationPending)
-					}
-					if health.ExportedNotImplemented {
-						detail += "; exported class is never scanned: its age anchor is a verified-publication event that does not exist yet"
-					}
-					report.pass("v2 result retention", detail)
-				}
-			})
-		}
-		if s.deps.ResultAnalysis != nil {
-			runIfSchema("v40 result analysis", minimumSchemaResultAnalysis, func() {
-				health, analysisErr := s.deps.ResultAnalysis.CheckResultAnalysisState(ctx, paths.DatabaseFile)
-				if analysisErr != nil {
-					report.fail("v40 result analysis", redactor.String(analysisErr.Error()),
-						"Run local-agent init --reset-state to rebuild the database, or restore a verified backup; do not hand-edit the analysis tables.", false)
-				} else {
-					report.pass("v40 result analysis", fmt.Sprintf(
-						"schema_version=%d step_queue_depth=%d expired_leases=%d non_terminal_analyses=%d incomplete_coverage_analyses=%d",
-						health.SchemaVersion, health.StepQueueDepth, health.ExpiredLeases, health.NonTerminalAnalyses, health.IncompleteCoverageAnalyses))
-				}
-			})
-		}
-		if s.deps.RecoverableRefs != nil {
-			runIfSchema("recoverable reference index", minimumSchemaRecoverableRefs, func() {
-				health, refErr := s.deps.RecoverableRefs.CheckRecoverableReferenceHealth(ctx, paths.DatabaseFile)
-				switch {
-				case refErr != nil:
-					report.fail("recoverable reference index", redactDoctorPathError(redactor, refErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
-				case health.DanglingRefs > 0 || health.DanglingOwners > 0:
-					report.fail("recoverable reference index", fmt.Sprintf(
-						"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d dangling_refs=%d dangling_owners=%d",
-						health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners, health.DanglingRefs, health.DanglingOwners),
-						"Stop retention cleanup now. Restore a verified backup, or rebuild state through the repair path TRD 09 decides. Do not hand-edit recoverable_result_refs or its owner tables.", false)
-				default:
-					report.pass("recoverable reference index", fmt.Sprintf(
-						"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d",
-						health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners))
-				}
-			})
-		}
-		if s.deps.Artifacts != nil {
-			if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ACP.MaxResultArtifactBytes); err != nil {
-				report.fail("ACP artifacts", redactor.String(err.Error()), "Fix the configured artifact directory and permissions; do not place secrets in it.", false)
-			} else {
-				report.pass("ACP artifacts", fmt.Sprintf("private artifact directory and %d-byte bound are valid", cfg.ACP.MaxResultArtifactBytes))
-			}
-		}
-		if s.deps.Jobs != nil {
-			runIfSchema("external-agent jobs", minimumSchemaJobs, func() {
-				if err := s.deps.Jobs.CheckExternalAgentJobs(ctx, paths.DatabaseFile); err != nil {
-					report.fail("external-agent jobs", redactor.String(err.Error()), "Run local-agent init to migrate the local job store, or repair the configured database.", false)
-				} else {
-					report.pass("external-agent jobs", "durable job and notification outbox are available")
-				}
-			})
-			runIfSchema("external-agent activations", minimumSchemaActivations, func() {
-				if healthChecker, ok := s.deps.Jobs.(JobStoreHealthChecker); ok {
-					health, healthErr := healthChecker.CheckExternalAgentActivationHealth(ctx, paths.DatabaseFile)
-					if healthErr != nil {
-						report.fail("external-agent activations", redactor.String(healthErr.Error()), "Drain or investigate the activation outbox before starting the agent.", false)
-					} else if health.Stuck > 0 {
-						report.fail("external-agent activations", fmt.Sprintf("activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)", health.Stuck, health.Pending, health.Processed, health.CompletionUnknown), "Inspect the activation worker and let expired leases become reclaimable.", false)
-					} else {
-						report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
-					}
-				}
-			})
-			// Operational decision (P2-02): a non-terminal foreground
-			// activation is the P0 contract violation and fails doctor; an
-			// incomplete delivery identity (notification or activation) also
-			// fails because every post-v32 delivery must carry bytes and a
-			// SHA-256. Retired foreground activations are expected v31 repair
-			// evidence. Historical completed jobs without result identity are
-			// marked in the existing event ledger and remain informational; current
-			// incomplete rows fail closed. Only counts are emitted; no job ID, actor,
-			// conversation, digest, reference, or content value.
-			runIfSchema("external-agent result identity", minimumSchemaResultIdentity, func() {
-				if identityChecker, ok := s.deps.Jobs.(JobStoreIdentityChecker); ok {
-					identity, identityErr := identityChecker.CheckExternalAgentResultIdentityHealth(ctx, paths.DatabaseFile)
-					switch {
-					case identityErr != nil:
-						report.fail("external-agent result identity", redactor.String(identityErr.Error()), "Repair the configured database so every durable result carries a complete identity, or reset state after backup.", false)
-					case identity.ForegroundActivationsActive > 0:
-						report.fail("external-agent result identity", fmt.Sprintf("identity health: %d non-terminal foreground activations (defect), %d notifications without identity, %d activations without content, %d activations without identity, %d retired foreground activations, %d current completed jobs without result identity", identity.ForegroundActivationsActive, identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity), "Stop the agent and restore the foreground-suppression build: foreground jobs must never produce claimable activations.", false)
-					case identity.NotificationsWithoutIdentity > 0 || identity.ActivationsWithoutContent > 0 || identity.ActivationsWithoutIdentity > 0 || identity.JobsCompletedWithoutResultIdentity > 0:
-						report.fail("external-agent result identity", fmt.Sprintf("identity health: %d notifications without identity, %d activations without content, %d activations without identity, %d non-terminal foreground activations, %d retired foreground activations, %d current completed jobs without result identity, %d historical completed jobs without result identity, %d historical activations without content", identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.ForegroundActivationsActive, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity, identity.JobsCompletedWithoutResultIdentityLegacy, identity.ActivationsWithoutContentLegacy), "Do not start the agent until incomplete delivery identity is repaired; results must carry bytes and SHA-256 after transformation.", false)
-					default:
-						report.pass("external-agent result identity", fmt.Sprintf("result identity is complete (informational: %d historical completed jobs without result identity, %d historical activations without content, %d retired foreground activations)", identity.JobsCompletedWithoutResultIdentityLegacy, identity.ActivationsWithoutContentLegacy, identity.RetiredForegroundActivations))
-					}
-				}
-			})
-		}
+	if !s.checkSQLite(ctx, &report, cfg, pathErr, paths, redactor) {
+		return report
 	}
 	if pathErr == nil {
 		var acpModels []selectedModel
@@ -788,7 +433,452 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		}
 	}
 
-	// Context engineering offline checks.
+	s.checkOfflineContext(&report, cfg, defs, resolvedModel, selectedModels, redactor)
+
+	if !includeLive {
+		return report
+	}
+	s.runLiveChecks(ctx, &report, liveCheckState{
+		cfg: cfg, values: values, validSecrets: validSecrets, redactor: redactor,
+		durableACP: durableACP, rootCLIProvider: rootCLIProvider, modelAPIKeyEnv: modelAPIKeyEnv,
+		defsLoadFailed: defsLoadFailed, resolvedModel: resolvedModel, selectedModels: selectedModels,
+		transcriptionProfile: transcriptionProfile, transcriptionResolved: transcriptionResolved,
+		audioTranscriptionReady: audioTranscriptionReady, embeddingEnabled: embeddingEnabled,
+		embeddingCfg: embeddingCfg, shimNames: shimNames,
+	})
+	return report
+}
+
+func (s *Service) runLiveChecks(ctx context.Context, report *Report, state liveCheckState) {
+	if s.deps.Live == nil {
+		report.fail("live checks", "live checker is unavailable", "Reinstall local-agent with live-check support.", false)
+		return
+	}
+	if value := state.values[SlackBotTokenKey]; state.validSecrets[SlackBotTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.SlackAPITimeoutSeconds)
+		err := s.deps.Live.CheckSlackBot(liveCtx, value)
+		cancel()
+		if err != nil {
+			report.fail("Slack bot connectivity", state.redactor.String(err.Error()), "Verify SLACK_BOT_TOKEN and Slack workspace access.", false)
+		} else {
+			report.pass("Slack bot connectivity", "Slack auth check passed")
+		}
+	}
+	if botToken, appToken := state.values[SlackBotTokenKey], state.values[SlackAppTokenKey]; state.validSecrets[SlackBotTokenKey] && state.validSecrets[SlackAppTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.SlackAPITimeoutSeconds)
+		err := s.deps.Live.CheckSlackApp(liveCtx, botToken, appToken)
+		cancel()
+		if err != nil {
+			report.fail("Slack Socket Mode", state.redactor.String(err.Error()), "Verify SLACK_APP_TOKEN has connections:write and belongs to this app.", false)
+		} else {
+			report.pass("Slack Socket Mode", "app-level token can open a Socket Mode connection")
+		}
+	}
+	if state.cfg.Slack.Context.Enabled && state.validSecrets[SlackBotTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.SlackAPITimeoutSeconds)
+		err := s.deps.Live.CheckSlackContext(liveCtx, state.values[SlackBotTokenKey])
+		cancel()
+		if err != nil {
+			report.fail("Slack context enrichment", state.redactor.String(err.Error()), "Reinstall the Slack app with users:read, then verify the bot token.", false)
+		} else {
+			report.pass("Slack context enrichment", "users:read capability check passed")
+		}
+	}
+	if state.cfg.Canvases.Enabled && state.validSecrets[SlackBotTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, state.cfg.Canvases.TimeoutSeconds)
+		err := s.deps.Live.CheckSlackCanvas(liveCtx, state.values[SlackBotTokenKey])
+		cancel()
+		if err != nil {
+			report.fail("Slack Canvas", state.redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with canvases:write, and verify Canvas availability for the workspace.", false)
+		} else {
+			report.pass("Slack Canvas", "canvases:write scope check passed")
+		}
+	}
+	if state.cfg.Exports.Enabled && state.validSecrets[SlackBotTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, state.cfg.Exports.TimeoutSeconds)
+		err := s.deps.Live.CheckSlackExports(liveCtx, state.values[SlackBotTokenKey])
+		cancel()
+		if err != nil {
+			report.fail("Slack generated files", state.redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
+		} else {
+			report.pass("Slack generated files", "files:write scope check passed")
+		}
+	}
+	if state.durableACP && state.validSecrets[SlackBotTokenKey] {
+		liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.SlackAPITimeoutSeconds)
+		err := s.deps.Live.CheckSlackExports(liveCtx, state.values[SlackBotTokenKey])
+		cancel()
+		if err != nil {
+			report.fail("Slack ACP result delivery", state.redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
+		} else {
+			report.pass("Slack ACP result delivery", "files:write scope check passed")
+		}
+	}
+	if s.deps.CLI != nil {
+		authChecked := make(map[string]bool)
+		for _, selected := range state.selectedModels {
+			if !selected.resolved.IsAgentCLI() {
+				continue
+			}
+			providerName := selected.resolved.Provider.Name
+			shimName := state.shimNames[providerName]
+			// A missing identity means describe failed and already produced the
+			// actionable provider result. Do not add a misleading auth failure.
+			if strings.TrimSpace(shimName) == "" || authChecked[providerName] {
+				continue
+			}
+			authChecked[providerName] = true
+			liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.ModelTimeoutSeconds)
+			detail, err := s.deps.CLI.CheckAuthentication(liveCtx, selected.resolved, shimName)
+			cancel()
+			if err != nil {
+				report.fail("agent CLI authentication ("+providerName+")", state.redactor.String(err.Error()),
+					"Log in to the agent CLI (for example: opencode auth login or codex login) so it can reuse its saved credentials.", false)
+			} else {
+				report.pass("agent CLI authentication ("+providerName+")", detail)
+			}
+		}
+	}
+	if !state.rootCLIProvider {
+		if apiKey := state.values[state.modelAPIKeyEnv]; state.validSecrets[state.modelAPIKeyEnv] && !state.defsLoadFailed {
+			liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.ModelTimeoutSeconds)
+			var err error
+			if state.resolvedModel != nil {
+				err = s.deps.Live.CheckResolvedModel(liveCtx, state.resolvedModel, apiKey)
+			}
+			cancel()
+			if err != nil {
+				report.fail("model endpoint", state.redactor.String(err.Error()), "Verify the declarative root provider profile and its configured API key.", false)
+			} else {
+				report.pass("model endpoint", "minimal non-streaming Chat Completions request passed")
+			}
+		}
+	}
+	if state.transcriptionProfile != "" && state.audioTranscriptionReady && state.transcriptionResolved != nil {
+		checker, ok := s.deps.Live.(AudioTranscriptionLiveChecker)
+		if !ok {
+			report.fail("audio transcription endpoint", "audio transcription live checker is unavailable", "Reinstall local-agent with dedicated STT live-check support.", false)
+		} else {
+			liveCtx, cancel := checkTimeout(ctx, defaultAuxiliaryModelTimeoutSeconds)
+			err := checker.CheckAudioTranscription(liveCtx, state.transcriptionResolved, state.values[state.transcriptionResolved.APIKeyEnv])
+			cancel()
+			if err != nil {
+				report.fail("audio transcription endpoint", state.redactor.String(err.Error()), "Verify the transcription provider base URL, model, API key, and /audio/transcriptions support.", false)
+			} else {
+				report.pass("audio transcription endpoint", "dedicated multipart /audio/transcriptions request passed")
+			}
+		}
+	}
+	if state.embeddingEnabled && state.validSecrets[state.embeddingCfg.APIKeyEnv] {
+		liveCtx, cancel := checkTimeout(ctx, state.embeddingCfg.TimeoutSeconds)
+		err := s.deps.Live.CheckKnowledgeEmbedding(liveCtx, state.embeddingCfg, state.values[state.embeddingCfg.APIKeyEnv])
+		cancel()
+		if err != nil {
+			report.fail("knowledge embedding endpoint", state.redactor.String(err.Error()), "Verify orchestration.knowledge.retrieval.embedding base_url, model, dimensions, and API key.", false)
+		} else {
+			report.pass("knowledge embedding endpoint", "minimal embeddings request passed with the configured dimensions")
+		}
+	}
+	for _, selected := range state.selectedModels {
+		if selected.resolved == nil || selected.resolved.Type() != agentdef.ProviderTypeOpenAICompatible || selected.agent == "root_agent" {
+			continue
+		}
+		key := selected.resolved.APIKeyEnv
+		if !state.validSecrets[key] {
+			continue
+		}
+		selectedCtx, selectedCancel := checkTimeout(ctx, defaultAuxiliaryModelTimeoutSeconds)
+		var selectedErr error
+		name := "model endpoint (" + selected.agent + ")"
+		if selected.agent == "attachment_analyzer" {
+			checker, ok := s.deps.Live.(AttachmentLiveChecker)
+			if !ok {
+				selectedErr = errors.New("attachment analyzer live checker is unavailable")
+			} else {
+				selectedErr = checker.CheckAttachmentAnalyzer(selectedCtx, selected.resolved, state.values[key])
+			}
+		} else {
+			selectedErr = s.deps.Live.CheckResolvedModel(selectedCtx, selected.resolved, state.values[key])
+		}
+		selectedCancel()
+		if selectedErr != nil {
+			report.fail(name, state.redactor.String(selectedErr.Error()), "Verify the selected auxiliary model endpoint, API key, and tool capability.", false)
+		} else {
+			report.pass(name, "selected auxiliary model live check passed")
+		}
+	}
+}
+
+func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Config, pathErr error, paths config.Paths, redactor secure.Redactor) bool {
+	if pathErr != nil {
+		return true
+	}
+	// Schema inspector, consumer-owned (TRD 09 checkpoint 2): this is the
+	// only schema-version read per run, and the checker is mandatory in
+	// New. It runs before every other SQLite check, and each later check
+	// consults the local `detected` value. An unreadable version and a
+	// future version are both fatal and stop all later checks with exit
+	// 2; an old version is informational here and lets each check decide
+	// by the minimum-schema table.
+	health, runtimeErr := s.deps.SQLiteRuntime.CheckSQLiteRuntime(ctx, paths.DatabaseFile)
+	if runtimeErr != nil {
+		report.fail("SQLite connection model", redactDoctorPathError(redactor, runtimeErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", true)
+		return false
+	}
+	detected := health.SchemaVersion
+	switch {
+	case detected > expectedSQLiteSchemaVersion:
+		report.fail("SQLite connection model",
+			fmt.Sprintf("user_version=%d is newer than this binary supports (%d)", detected, expectedSQLiteSchemaVersion),
+			"Install a local-agent version that supports this database. To discard local conversation state, stop the agent, back up and delete only the configured database file, then run init.",
+			true)
+		return false
+	case detected < minimumSchemaConnectionModel:
+		// A v0 database (for example an empty file) satisfies no schema
+		// floor; report the frozen skip detail instead of validating
+		// pragmas against it.
+		report.skip("SQLite connection model", fmt.Sprintf("requires schema v%d, database is v%d", minimumSchemaConnectionModel, detected))
+	case detected < expectedSQLiteSchemaVersion:
+		if problems := validatePreUpgradeConnectionModel(health); len(problems) > 0 {
+			report.fail("SQLite connection model", strings.Join(problems, "; "),
+				"Restore the connection contract: synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
+		} else {
+			report.pass("SQLite connection model", fmt.Sprintf(
+				"schema v%d, current binary requires v%d; run local-agent db upgrade; journal_mode=%s (informational); synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
+				detected, expectedSQLiteSchemaVersion, health.JournalMode,
+				health.Synchronous, health.BusyTimeoutMillis, health.ForeignKeys, health.MaxOpenConnections))
+		}
+	default:
+		if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
+			report.fail("SQLite connection model", strings.Join(problems, "; "),
+				"Restore the v42 connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
+		} else {
+			report.pass("SQLite connection model", fmt.Sprintf(
+				"schema_version=%d journal_mode=%s synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
+				health.SchemaVersion, health.JournalMode, health.Synchronous, health.BusyTimeoutMillis, health.ForeignKeys, health.MaxOpenConnections))
+		}
+	}
+	runIfSchema := func(name string, minimum int, run func()) {
+		if detected >= minimum {
+			run()
+			return
+		}
+		report.skip(name, fmt.Sprintf("requires schema v%d, database is v%d", minimum, detected))
+	}
+	runIfSchema("SQLite", minimumSchemaDatabaseFile, func() {
+		if err := s.deps.Database.CheckDatabase(ctx, paths.DatabaseFile); err != nil {
+			remediation := "Run local-agent init or fix permissions for the configured database path."
+			var actionable RemediableError
+			if errors.As(err, &actionable) && actionable.Remediation() != "" {
+				remediation = actionable.Remediation()
+			}
+			report.fail("SQLite", redactor.String(err.Error()), remediation, false)
+		} else {
+			report.pass("SQLite", "database exists and passes the integrity check")
+		}
+	})
+	if s.deps.Knowledge != nil {
+		runIfSchema("knowledge retrieval state", minimumSchemaKnowledge, func() {
+			health, healthErr := s.deps.Knowledge.CheckKnowledgeRetrievalState(ctx, paths.DatabaseFile)
+			if healthErr != nil {
+				report.fail("knowledge retrieval state", redactor.String(healthErr.Error()), "Run: local-agent knowledge rebuild-index to rebuild the reconstructible lexical index, or restart the agent so the lexical and embedding workers can reconcile normally.", false)
+			} else {
+				report.pass("knowledge retrieval state", fmt.Sprintf("lexical queue pending=%d processing=%d stale=%d repairable=%d; embedding queue pending=%d processing=%d stale=%d repairable=%d", health.LexicalQueuePending, health.LexicalQueueProcessing, health.LexicalQueueStaleProcessing, health.LexicalRepairableMismatch, health.EmbeddingQueuePending, health.EmbeddingQueueProcessing, health.EmbeddingQueueStaleProcessing, health.EmbeddingRepairableMismatch))
+			}
+		})
+	}
+	if s.deps.ResultRetention != nil {
+		runIfSchema("v2 result retention", minimumSchemaResultRetention, func() {
+			ages := domain.ResultRetentionAges{
+				Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
+				Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
+				Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
+			}
+			health, retentionErr := s.deps.ResultRetention.CheckResultRetention(ctx, paths.DatabaseFile, ages, time.Now().UTC())
+			if retentionErr != nil {
+				report.fail("v2 result retention", redactor.String(retentionErr.Error()), "Fix the configured database path and retry.", false)
+			} else {
+				var detail strings.Builder
+				detail.WriteString("no deletion worker is implemented yet (TRD 02 finding 6, deferred to TRD 09); this reports bounded candidate counts only")
+				for _, class := range health.Classes {
+					fmt.Fprintf(&detail, "; %s candidates=%d reference_protected=%d materialization_pending=%d", class.Class, class.Candidates, class.ReferenceProtected, class.MaterializationPending)
+				}
+				if health.ExportedNotImplemented {
+					detail.WriteString("; exported class is never scanned: its age anchor is a verified-publication event that does not exist yet")
+				}
+				report.pass("v2 result retention", detail.String())
+			}
+		})
+	}
+	if s.deps.ResultAnalysis != nil {
+		runIfSchema("v40 result analysis", minimumSchemaResultAnalysis, func() {
+			health, analysisErr := s.deps.ResultAnalysis.CheckResultAnalysisState(ctx, paths.DatabaseFile)
+			if analysisErr != nil {
+				report.fail("v40 result analysis", redactor.String(analysisErr.Error()),
+					"Run local-agent init --reset-state to rebuild the database, or restore a verified backup; do not hand-edit the analysis tables.", false)
+			} else {
+				report.pass("v40 result analysis", fmt.Sprintf(
+					"schema_version=%d step_queue_depth=%d expired_leases=%d non_terminal_analyses=%d incomplete_coverage_analyses=%d",
+					health.SchemaVersion, health.StepQueueDepth, health.ExpiredLeases, health.NonTerminalAnalyses, health.IncompleteCoverageAnalyses))
+			}
+		})
+	}
+	if s.deps.RecoverableRefs != nil {
+		runIfSchema("recoverable reference index", minimumSchemaRecoverableRefs, func() {
+			health, refErr := s.deps.RecoverableRefs.CheckRecoverableReferenceHealth(ctx, paths.DatabaseFile)
+			switch {
+			case refErr != nil:
+				report.fail("recoverable reference index", redactDoctorPathError(redactor, refErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
+			case health.DanglingRefs > 0 || health.DanglingOwners > 0:
+				report.fail("recoverable reference index", fmt.Sprintf(
+					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d dangling_refs=%d dangling_owners=%d",
+					health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners, health.DanglingRefs, health.DanglingOwners),
+					"Stop retention cleanup now. Restore a verified backup, or rebuild state through the repair path TRD 09 decides. Do not hand-edit recoverable_result_refs or its owner tables.", false)
+			default:
+				report.pass("recoverable reference index", fmt.Sprintf(
+					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d",
+					health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners))
+			}
+		})
+	}
+	if s.deps.Artifacts != nil {
+		if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ACP.MaxResultArtifactBytes); err != nil {
+			report.fail("ACP artifacts", redactor.String(err.Error()), "Fix the configured artifact directory and permissions; do not place secrets in it.", false)
+		} else {
+			report.pass("ACP artifacts", fmt.Sprintf("private artifact directory and %d-byte bound are valid", cfg.ACP.MaxResultArtifactBytes))
+		}
+	}
+	if s.deps.Jobs != nil {
+		runIfSchema("external-agent jobs", minimumSchemaJobs, func() {
+			if err := s.deps.Jobs.CheckExternalAgentJobs(ctx, paths.DatabaseFile); err != nil {
+				report.fail("external-agent jobs", redactor.String(err.Error()), "Run local-agent init to migrate the local job store, or repair the configured database.", false)
+			} else {
+				report.pass("external-agent jobs", "durable job and notification outbox are available")
+			}
+		})
+		runIfSchema("external-agent activations", minimumSchemaActivations, func() {
+			if healthChecker, ok := s.deps.Jobs.(JobStoreHealthChecker); ok {
+				health, healthErr := healthChecker.CheckExternalAgentActivationHealth(ctx, paths.DatabaseFile)
+				if healthErr != nil {
+					report.fail("external-agent activations", redactor.String(healthErr.Error()), "Drain or investigate the activation outbox before starting the agent.", false)
+				} else if health.Stuck > 0 {
+					report.fail("external-agent activations", fmt.Sprintf("activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)", health.Stuck, health.Pending, health.Processed, health.CompletionUnknown), "Inspect the activation worker and let expired leases become reclaimable.", false)
+				} else {
+					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
+				}
+			}
+		})
+		// Operational decision (P2-02): a non-terminal foreground
+		// activation is the P0 contract violation and fails doctor; an
+		// incomplete delivery identity (notification or activation) also
+		// fails because every post-v32 delivery must carry bytes and a
+		// SHA-256. Retired foreground activations are expected v31 repair
+		// evidence. Historical completed jobs without result identity are
+		// marked in the existing event ledger and remain informational; current
+		// incomplete rows fail closed. Only counts are emitted; no job ID, actor,
+		// conversation, digest, reference, or content value.
+		runIfSchema("external-agent result identity", minimumSchemaResultIdentity, func() {
+			if identityChecker, ok := s.deps.Jobs.(JobStoreIdentityChecker); ok {
+				identity, identityErr := identityChecker.CheckExternalAgentResultIdentityHealth(ctx, paths.DatabaseFile)
+				switch {
+				case identityErr != nil:
+					report.fail("external-agent result identity", redactor.String(identityErr.Error()), "Repair the configured database so every durable result carries a complete identity, or reset state after backup.", false)
+				case identity.ForegroundActivationsActive > 0:
+					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d non-terminal foreground activations (defect), %d notifications without identity, %d activations without content, %d activations without identity, %d retired foreground activations, %d current completed jobs without result identity", identity.ForegroundActivationsActive, identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity), "Stop the agent and restore the foreground-suppression build: foreground jobs must never produce claimable activations.", false)
+				case identity.NotificationsWithoutIdentity > 0 || identity.ActivationsWithoutContent > 0 || identity.ActivationsWithoutIdentity > 0 || identity.JobsCompletedWithoutResultIdentity > 0:
+					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d notifications without identity, %d activations without content, %d activations without identity, %d non-terminal foreground activations, %d retired foreground activations, %d current completed jobs without result identity, %d historical completed jobs without result identity, %d historical activations without content", identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.ForegroundActivationsActive, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity, identity.JobsCompletedWithoutResultIdentityLegacy, identity.ActivationsWithoutContentLegacy), "Do not start the agent until incomplete delivery identity is repaired; results must carry bytes and SHA-256 after transformation.", false)
+				default:
+					report.pass("external-agent result identity", fmt.Sprintf("result identity is complete (informational: %d historical completed jobs without result identity, %d historical activations without content, %d retired foreground activations)", identity.JobsCompletedWithoutResultIdentityLegacy, identity.ActivationsWithoutContentLegacy, identity.RetiredForegroundActivations))
+				}
+			}
+		})
+	}
+	return true
+}
+
+func (s *Service) checkSecrets(report *Report, cfg config.Config, defs *agentdef.Definitions, resolvedModel *agentdef.ResolvedModel, selectedModels []selectedModel, modelAPIKeyEnv string, rootCLIProvider bool, transcriptionProfile string, transcriptionResolved *agentdef.ResolvedModel, transcriptionResolveErr error, embeddingCfg config.KnowledgeEmbeddingConfig, embeddingEnabled bool) (map[string]string, secure.Redactor, map[string]bool, bool, bool) {
+	keys := []string{modelAPIKeyEnv, SlackBotTokenKey, SlackAppTokenKey}
+	if defs != nil {
+		keys = append(keys, defs.RequiredAPIKeyEnvs()...)
+	}
+	if transcriptionResolved != nil && transcriptionResolved.Type() == agentdef.ProviderTypeOpenAICompatible && strings.TrimSpace(transcriptionResolved.APIKeyEnv) != "" {
+		keys = append(keys, transcriptionResolved.APIKeyEnv)
+	}
+	if embeddingCfg.Enabled && strings.TrimSpace(embeddingCfg.APIKeyEnv) != "" {
+		keys = append(keys, embeddingCfg.APIKeyEnv)
+	}
+	keys = uniqueStrings(keys)
+	values, err := s.deps.Secrets.Resolve(keys...)
+	if err != nil {
+		report.fail("secrets", err.Error(), "Fix .env syntax or process environment values.", false)
+		return nil, secure.Redactor{}, nil, false, false
+	}
+	redactionValues := make([]string, 0, len(keys))
+	for _, key := range keys {
+		redactionValues = append(redactionValues, values[key])
+	}
+	redactor := secure.NewRedactor(redactionValues...)
+	validSecrets := make(map[string]bool, len(keys))
+	checkSecret := func(name, key, expectedPrefix, remediation string) {
+		value, exists := values[key]
+		if !exists || strings.TrimSpace(value) == "" {
+			report.fail(name, fmt.Sprintf("%s is not set", key), remediation, false)
+			return
+		}
+		if expectedPrefix != "" && (len(value) <= len(expectedPrefix) || !strings.HasPrefix(value, expectedPrefix)) {
+			report.fail(name, fmt.Sprintf("%s must start with %s", key, expectedPrefix), remediation, false)
+			return
+		}
+		validSecrets[key] = true
+		report.pass(name, fmt.Sprintf("%s is configured (%s)", key, secure.Mask(value)))
+	}
+	checkedModelAPIKeys := make(map[string]bool)
+	switch {
+	case resolvedModel == nil:
+		report.skip("model API key", "no declarative root model resolved")
+	case rootCLIProvider:
+		// agent_cli providers require no model API key.
+		report.pass("model API key", "agent CLI provider requires no model API key")
+	case resolvedModel.IsACP():
+		report.pass("model API key", "ACP provider requires no model API key")
+	default:
+		checkSecret("model API key", modelAPIKeyEnv, "", "Set "+modelAPIKeyEnv+" in the process environment or .env.")
+		checkedModelAPIKeys[modelAPIKeyEnv] = true
+	}
+	for _, selected := range selectedModels {
+		if selected.resolved.IsAgentCLI() || selected.resolved.IsACP() || checkedModelAPIKeys[selected.resolved.APIKeyEnv] {
+			continue
+		}
+		key := selected.resolved.APIKeyEnv
+		checkedModelAPIKeys[key] = true
+		checkSecret("model API key ("+selected.agent+")", key, "", "Set "+key+" in the process environment or .env.")
+	}
+	checkSecret("Slack bot token", SlackBotTokenKey, "xoxb-", "Set a Bot User OAuth Token beginning with xoxb-.")
+	checkSecret("Slack app token", SlackAppTokenKey, "xapp-", "Set an app-level Socket Mode token beginning with xapp- and connections:write.")
+	if embeddingEnabled {
+		checkSecret("knowledge embedding API key", embeddingCfg.APIKeyEnv, "", "Set "+embeddingCfg.APIKeyEnv+" in the process environment or .env.")
+	}
+	audioTranscriptionReady := false
+	if transcriptionProfile != "" {
+		switch {
+		case transcriptionResolveErr != nil:
+			report.fail("audio transcription profile", redactor.String(fmt.Sprintf("resolve %q: %v", transcriptionProfile, transcriptionResolveErr)), "Fix slack.files.transcription_profile and its openai_compatible provider definition.", false)
+		case cfg.Slack.Files.TranscriptionTimeoutSeconds <= 0:
+			report.fail("audio transcription profile", "transcription timeout must be greater than zero", "Set slack.files.transcription_timeout_seconds to a positive value.", false)
+		case transcriptionResolved.Type() != agentdef.ProviderTypeOpenAICompatible:
+			report.fail("audio transcription profile", "profile must resolve to an openai_compatible provider", "Select an openai_compatible profile in slack.files.transcription_profile.", false)
+		case !validSecrets[transcriptionResolved.APIKeyEnv]:
+			report.fail("audio transcription profile", fmt.Sprintf("profile %q requires %s, which is not set", transcriptionProfile, transcriptionResolved.APIKeyEnv), "Set the transcription provider API key in the process environment or .env.", false)
+		default:
+			validSecrets[transcriptionResolved.APIKeyEnv] = true
+			audioTranscriptionReady = true
+			report.pass("audio transcription profile", fmt.Sprintf("profile %q resolved to %s/%s; dedicated multipart STT is configured", transcriptionProfile, transcriptionResolved.Provider.Name, transcriptionResolved.Model))
+		}
+	}
+	return values, redactor, validSecrets, audioTranscriptionReady, true
+}
+
+func (s *Service) checkOfflineContext(report *Report, cfg config.Config, defs *agentdef.Definitions, resolvedModel *agentdef.ResolvedModel, selectedModels []selectedModel, redactor secure.Redactor) {
 	if cfg.Context.ModelBudget != nil {
 		budgetPct := cfg.Context.ModelBudget.MaxRequestPercent
 		if budgetPct >= 20 && budgetPct <= 80 {
@@ -816,7 +906,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			if counterCheck == "" {
 				report.fail("token counter", "no token_counter configured for root openai_compatible model", "Add token_counter.strategy (e.g. byte_bound) to the root profile YAML.", false)
 			} else {
-				s.checkTokenCounter(&report, redactor, "token counter", counterCheck, resolvedModel.CounterID, "Use a strategy and id implemented by this release, or roll back to a binary that implements the configured combination. There is no silent fallback.")
+				s.checkTokenCounter(report, redactor, "token counter", counterCheck, resolvedModel.CounterID, "Use a strategy and id implemented by this release, or roll back to a binary that implements the configured combination. There is no silent fallback.")
 			}
 			if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
 				if attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model); resolveErr == nil {
@@ -838,174 +928,134 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 				continue
 			}
 			agentName := "token counter (" + selected.agent + ")"
-			s.checkTokenCounter(&report, redactor, agentName, selected.resolved.CounterStrategy, selected.resolved.CounterID, "Use a strategy and id implemented by this release; there is no silent fallback.")
+			s.checkTokenCounter(report, redactor, agentName, selected.resolved.CounterStrategy, selected.resolved.CounterID, "Use a strategy and id implemented by this release; there is no silent fallback.")
 		}
 	}
 	if cfg.CodeIntelligence != nil && cfg.CodeIntelligence.Enabled {
 		report.pass("code intelligence", fmt.Sprintf("enabled: %d LSP servers, %d routes", len(cfg.CodeIntelligence.LSPServers), len(cfg.CodeIntelligence.LSPRoutes)))
 	}
+}
 
-	if !includeLive {
-		return report
+func (s *Service) checkDefinitions(report *Report, cfg config.Config, paths config.Paths) definitionCheck {
+	result := definitionCheck{}
+	defs, defsErr := agentdef.Load(paths.StateDir)
+	if defsErr != nil {
+		result.loadFailed = true
+		report.fail("agent definitions", defsErr.Error(), "Fix .local-agent/agents/*.yaml and .local-agent/providers/*.yaml files.", false)
+		return result
 	}
-	if s.deps.Live == nil {
-		report.fail("live checks", "live checker is unavailable", "Reinstall local-agent with live-check support.", false)
-		return report
+	if defs == nil {
+		return result
 	}
-	if value := values[SlackBotTokenKey]; validSecrets[SlackBotTokenKey] {
-		liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.SlackAPITimeoutSeconds)
-		err := s.deps.Live.CheckSlackBot(liveCtx, value)
-		cancel()
-		if err != nil {
-			report.fail("Slack bot connectivity", redactor.String(err.Error()), "Verify SLACK_BOT_TOKEN and Slack workspace access.", false)
-		} else {
-			report.pass("Slack bot connectivity", "Slack auth check passed")
+	result.defs = defs
+	rootDef, ok := defs.Agents["root_agent"]
+	if !ok {
+		result.loadFailed = true
+		report.fail("agent definitions", "agent definition root_agent is required", "Add .local-agent/agents/root_agent.yaml.", false)
+		return result
+	}
+	result.resolvedModel, defsErr = defs.ResolveModel(rootDef.Model)
+	if defsErr != nil {
+		result.loadFailed = true
+		report.fail("agent definitions", defsErr.Error(), "Fix root_agent.model in .local-agent/agents/root_agent.yaml.", false)
+		return result
+	}
+	result.selectedModels = append(result.selectedModels, selectedModel{agent: "root_agent", resolved: result.resolvedModel})
+	for _, agentToolName := range rootDef.AgentTools {
+		agentTool, exists := defs.Agents[agentToolName]
+		if !exists {
+			defsErr = fmt.Errorf("agent tool %q is not defined", agentToolName)
+			break
 		}
-	}
-	if botToken, appToken := values[SlackBotTokenKey], values[SlackAppTokenKey]; validSecrets[SlackBotTokenKey] && validSecrets[SlackAppTokenKey] {
-		liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.SlackAPITimeoutSeconds)
-		err := s.deps.Live.CheckSlackApp(liveCtx, botToken, appToken)
-		cancel()
-		if err != nil {
-			report.fail("Slack Socket Mode", redactor.String(err.Error()), "Verify SLACK_APP_TOKEN has connections:write and belongs to this app.", false)
-		} else {
-			report.pass("Slack Socket Mode", "app-level token can open a Socket Mode connection")
+		modelRef := agentTool.Model
+		if agentTool.AgentClass == "AcpAgent" {
+			modelRef = agentTool.Runtime
 		}
-	}
-	if cfg.Slack.Context.Enabled && validSecrets[SlackBotTokenKey] {
-		liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.SlackAPITimeoutSeconds)
-		err := s.deps.Live.CheckSlackContext(liveCtx, values[SlackBotTokenKey])
-		cancel()
-		if err != nil {
-			report.fail("Slack context enrichment", redactor.String(err.Error()), "Reinstall the Slack app with users:read, then verify the bot token.", false)
-		} else {
-			report.pass("Slack context enrichment", "users:read capability check passed")
+		agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
+		if resolveErr != nil {
+			defsErr = fmt.Errorf("resolve agent tool %q model: %w", agentToolName, resolveErr)
+			break
 		}
+		result.selectedModels = append(result.selectedModels, selectedModel{agent: agentToolName, resolved: agentToolResolved})
 	}
-	if cfg.Canvases.Enabled && validSecrets[SlackBotTokenKey] {
-		liveCtx, cancel := checkTimeout(ctx, cfg.Canvases.TimeoutSeconds)
-		err := s.deps.Live.CheckSlackCanvas(liveCtx, values[SlackBotTokenKey])
-		cancel()
-		if err != nil {
-			report.fail("Slack Canvas", redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with canvases:write, and verify Canvas availability for the workspace.", false)
-		} else {
-			report.pass("Slack Canvas", "canvases:write scope check passed")
-		}
-	}
-	if cfg.Exports.Enabled && validSecrets[SlackBotTokenKey] {
-		liveCtx, cancel := checkTimeout(ctx, cfg.Exports.TimeoutSeconds)
-		err := s.deps.Live.CheckSlackExports(liveCtx, values[SlackBotTokenKey])
-		cancel()
-		if err != nil {
-			report.fail("Slack generated files", redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
-		} else {
-			report.pass("Slack generated files", "files:write scope check passed")
-		}
-	}
-	if durableACP && validSecrets[SlackBotTokenKey] {
-		liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.SlackAPITimeoutSeconds)
-		err := s.deps.Live.CheckSlackExports(liveCtx, values[SlackBotTokenKey])
-		cancel()
-		if err != nil {
-			report.fail("Slack ACP result delivery", redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
-		} else {
-			report.pass("Slack ACP result delivery", "files:write scope check passed")
-		}
-	}
-	if s.deps.CLI != nil {
-		authChecked := make(map[string]bool)
-		for _, selected := range selectedModels {
-			if !selected.resolved.IsAgentCLI() {
+	if defsErr == nil {
+		// Tambien revisar agentes auto-descubiertos.
+		for _, name := range agentdef.EligibleAgentNames(defs) {
+			if agentdef.IsReservedAgentName(name) || selectedModelAlreadyIncluded(result.selectedModels, name) {
 				continue
 			}
-			providerName := selected.resolved.Provider.Name
-			shimName := shimNames[providerName]
-			// A missing identity means describe failed and already produced the
-			// actionable provider result. Do not add a misleading auth failure.
-			if strings.TrimSpace(shimName) == "" || authChecked[providerName] {
+			agentTool, exists := defs.Agents[name]
+			if !exists {
 				continue
 			}
-			authChecked[providerName] = true
-			liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.ModelTimeoutSeconds)
-			detail, err := s.deps.CLI.CheckAuthentication(liveCtx, selected.resolved, shimName)
-			cancel()
-			if err != nil {
-				report.fail("agent CLI authentication ("+providerName+")", redactor.String(err.Error()),
-					"Log in to the agent CLI (for example: opencode auth login or codex login) so it can reuse its saved credentials.", false)
-			} else {
-				report.pass("agent CLI authentication ("+providerName+")", detail)
+			modelRef := agentTool.Model
+			if agentTool.AgentClass == "AcpAgent" {
+				modelRef = agentTool.Runtime
+			}
+			agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
+			if resolveErr != nil {
+				defsErr = fmt.Errorf("resolve auto-discovered agent %q model: %w", name, resolveErr)
+				break
+			}
+			result.selectedModels = append(result.selectedModels, selectedModel{agent: name, resolved: agentToolResolved})
+		}
+	}
+	if defsErr == nil {
+		blueprints := make([]*agentdef.WorkflowBlueprint, 0, len(rootDef.WorkflowTools))
+		for _, workflowID := range rootDef.WorkflowTools {
+			bp, loadErr := defs.LoadWorkflow(paths.StateDir, workflowID)
+			if loadErr != nil {
+				defsErr = fmt.Errorf("workflow %q: %w", workflowID, loadErr)
+				break
+			}
+			blueprints = append(blueprints, bp)
+			for _, doc := range bp.OrderedDocuments() {
+				if doc.AgentClass == agentdef.AgentClassAcp && doc.ACP != nil {
+					workflowResolved, resolveErr := defs.ResolveModel(doc.ACP.Runtime)
+					if resolveErr != nil {
+						defsErr = fmt.Errorf("workflow %q agent %q: resolve runtime %q: %w", workflowID, doc.Name, doc.ACP.Runtime, resolveErr)
+						break
+					}
+					result.selectedModels = append(result.selectedModels, selectedModel{agent: "workflow:" + doc.Name, resolved: workflowResolved})
+					continue
+				}
+				if doc.AgentClass != agentdef.AgentClassLLM || doc.LLM == nil {
+					continue
+				}
+				workflowResolved, resolveErr := defs.ResolveModel(doc.LLM.Model)
+				if resolveErr != nil {
+					defsErr = fmt.Errorf("workflow %q agent %q: resolve model %q: %w", workflowID, doc.Name, doc.LLM.Model, resolveErr)
+					break
+				}
+				result.selectedModels = append(result.selectedModels, selectedModel{agent: "workflow:" + doc.Name, resolved: workflowResolved})
+			}
+			if defsErr != nil {
+				break
+			}
+		}
+		if defsErr == nil {
+			defsErr = defs.ValidateWorkflowComposition(rootDef, blueprints, cfg.Sandbox.Enabled)
+		}
+	}
+	if defsErr == nil {
+		if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
+			attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model)
+			if resolveErr != nil {
+				defsErr = fmt.Errorf("resolve attachment_analyzer model: %w", resolveErr)
+			} else if problems := agentdef.ValidateAttachmentModelCapability(attachmentResolved); len(problems) > 0 {
+				defsErr = errors.New(strings.Join(problems, "; "))
+			} else if !selectedModelAlreadyIncluded(result.selectedModels, "attachment_analyzer") {
+				result.selectedModels = append(result.selectedModels, selectedModel{agent: "attachment_analyzer", resolved: attachmentResolved})
 			}
 		}
 	}
-	if !rootCLIProvider {
-		if apiKey := values[modelAPIKeyEnv]; validSecrets[modelAPIKeyEnv] && !defsLoadFailed {
-			liveCtx, cancel := checkTimeout(ctx, cfg.Runtime.ModelTimeoutSeconds)
-			var err error
-			if resolvedModel != nil {
-				err = s.deps.Live.CheckResolvedModel(liveCtx, resolvedModel, apiKey)
-			}
-			cancel()
-			if err != nil {
-				report.fail("model endpoint", redactor.String(err.Error()), "Verify the declarative root provider profile and its configured API key.", false)
-			} else {
-				report.pass("model endpoint", "minimal non-streaming Chat Completions request passed")
-			}
-		}
+	if defsErr != nil {
+		result.loadFailed = true
+		report.fail("agent definitions", defsErr.Error(), "Fix selected agent model references and provider compatibility.", false)
+	} else {
+		report.pass("agent definitions", fmt.Sprintf("%d providers, %d agents loaded", len(defs.Providers), len(defs.Agents)))
 	}
-	if transcriptionProfile != "" && audioTranscriptionReady && transcriptionResolved != nil {
-		checker, ok := s.deps.Live.(AudioTranscriptionLiveChecker)
-		if !ok {
-			report.fail("audio transcription endpoint", "audio transcription live checker is unavailable", "Reinstall local-agent with dedicated STT live-check support.", false)
-		} else {
-			liveCtx, cancel := checkTimeout(ctx, defaultAuxiliaryModelTimeoutSeconds)
-			err := checker.CheckAudioTranscription(liveCtx, transcriptionResolved, values[transcriptionResolved.APIKeyEnv])
-			cancel()
-			if err != nil {
-				report.fail("audio transcription endpoint", redactor.String(err.Error()), "Verify the transcription provider base URL, model, API key, and /audio/transcriptions support.", false)
-			} else {
-				report.pass("audio transcription endpoint", "dedicated multipart /audio/transcriptions request passed")
-			}
-		}
-	}
-	if embeddingEnabled && validSecrets[embeddingCfg.APIKeyEnv] {
-		liveCtx, cancel := checkTimeout(ctx, embeddingCfg.TimeoutSeconds)
-		err := s.deps.Live.CheckKnowledgeEmbedding(liveCtx, embeddingCfg, values[embeddingCfg.APIKeyEnv])
-		cancel()
-		if err != nil {
-			report.fail("knowledge embedding endpoint", redactor.String(err.Error()), "Verify orchestration.knowledge.retrieval.embedding base_url, model, dimensions, and API key.", false)
-		} else {
-			report.pass("knowledge embedding endpoint", "minimal embeddings request passed with the configured dimensions")
-		}
-	}
-	for _, selected := range selectedModels {
-		if selected.resolved == nil || selected.resolved.Type() != agentdef.ProviderTypeOpenAICompatible || selected.agent == "root_agent" {
-			continue
-		}
-		key := selected.resolved.APIKeyEnv
-		if !validSecrets[key] {
-			continue
-		}
-		selectedCtx, selectedCancel := checkTimeout(ctx, defaultAuxiliaryModelTimeoutSeconds)
-		var selectedErr error
-		name := "model endpoint (" + selected.agent + ")"
-		if selected.agent == "attachment_analyzer" {
-			checker, ok := s.deps.Live.(AttachmentLiveChecker)
-			if !ok {
-				selectedErr = errors.New("attachment analyzer live checker is unavailable")
-			} else {
-				selectedErr = checker.CheckAttachmentAnalyzer(selectedCtx, selected.resolved, values[key])
-			}
-		} else {
-			selectedErr = s.deps.Live.CheckResolvedModel(selectedCtx, selected.resolved, values[key])
-		}
-		selectedCancel()
-		if selectedErr != nil {
-			report.fail(name, redactor.String(selectedErr.Error()), "Verify the selected auxiliary model endpoint, API key, and tool capability.", false)
-		} else {
-			report.pass(name, "selected auxiliary model live check passed")
-		}
-	}
-	return report
+	return result
 }
 
 // redactDoctorPathError strips the configured database path out of an error

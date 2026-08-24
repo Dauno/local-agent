@@ -229,76 +229,9 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		return nil, fmt.Errorf("build list_messages tool: %w", err)
 	}
 	tools = append(tools, ro)
-	if f.workstreams != nil {
-		getTool, err := f.workstreamGetTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_get tool: %w", err)
-		}
-		activeTool, err := f.workstreamActiveTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_active tool: %w", err)
-		}
-		createTool, err := f.workstreamCreateTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_create tool: %w", err)
-		}
-		transitionTool, err := f.workstreamTransitionTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_transition tool: %w", err)
-		}
-		handleTool, err := f.workstreamResultHandleTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_result_handle tool: %w", err)
-		}
-		chunkTool, err := f.workstreamReadResultChunkTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_read_result_chunk tool: %w", err)
-		}
-		tools = append(tools, getTool, activeTool, createTool, transitionTool, handleTool, chunkTool)
-		if f.resultLinksEnabled {
-			linkTool, err := f.workstreamLinkCompletedResultTool(actor, key)
-			if err != nil {
-				return nil, fmt.Errorf("build workstream_link_completed_result tool: %w", err)
-			}
-			tools = append(tools, linkTool)
-		}
-	}
-	if f.resultAnalysis != nil {
-		requestTool, err := f.resultAnalysisRequestTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_request_result_analysis tool: %w", err)
-		}
-		statusTool, err := f.resultAnalysisStatusTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_analysis_status tool: %w", err)
-		}
-		packetTool, err := f.resultAnalysisPacketTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build workstream_read_analysis_packet tool: %w", err)
-		}
-		tools = append(tools, requestTool, statusTool, packetTool)
-	}
-	if f.externalJobs != nil {
-		statusTool, err := f.jobStatusTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build job_status tool: %w", err)
-		}
-		resultTool, err := f.readJobResultTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build read_job_result tool: %w", err)
-		}
-		chunkTool, err := f.readJobResultChunkTool(actor, key)
-		if err != nil {
-			return nil, fmt.Errorf("build read_job_result_chunk tool: %w", err)
-		}
-		tools = append(tools, statusTool, resultTool, chunkTool)
-		if f.externalReconciler != nil {
-			reconcileTool, err := f.reconcileJobTool(actor, key)
-			if err != nil {
-				return nil, fmt.Errorf("build reconcile_job tool: %w", err)
-			}
-			tools = append(tools, reconcileTool)
-		}
+	tools, err = f.appendConversationTools(tools, actor, key)
+	if err != nil {
+		return nil, err
 	}
 	if f.recoverableResults != nil {
 		readResult, err := f.readResultChunkTool(actor, key)
@@ -419,6 +352,81 @@ func (f *Factory) ToolsForInvocation(actor string, key domain.ConversationKey) (
 		tools = append(tools, exportTools...)
 	}
 
+	return tools, nil
+}
+
+func (f *Factory) appendConversationTools(tools []any, actor string, key domain.ConversationKey) ([]any, error) {
+	if f.workstreams != nil {
+		getTool, err := f.workstreamGetTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_get tool: %w", err)
+		}
+		activeTool, err := f.workstreamActiveTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_active tool: %w", err)
+		}
+		createTool, err := f.workstreamCreateTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_create tool: %w", err)
+		}
+		transitionTool, err := f.workstreamTransitionTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_transition tool: %w", err)
+		}
+		handleTool, err := f.workstreamResultHandleTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_result_handle tool: %w", err)
+		}
+		chunkTool, err := f.workstreamReadResultChunkTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_read_result_chunk tool: %w", err)
+		}
+		tools = append(tools, getTool, activeTool, createTool, transitionTool, handleTool, chunkTool)
+		if f.resultLinksEnabled {
+			linkTool, err := f.workstreamLinkCompletedResultTool(actor, key)
+			if err != nil {
+				return nil, fmt.Errorf("build workstream_link_completed_result tool: %w", err)
+			}
+			tools = append(tools, linkTool)
+		}
+	}
+	if f.resultAnalysis != nil {
+		requestTool, err := f.resultAnalysisRequestTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_request_result_analysis tool: %w", err)
+		}
+		statusTool, err := f.resultAnalysisStatusTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_analysis_status tool: %w", err)
+		}
+		packetTool, err := f.resultAnalysisPacketTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build workstream_read_analysis_packet tool: %w", err)
+		}
+		tools = append(tools, requestTool, statusTool, packetTool)
+	}
+	if f.externalJobs != nil {
+		statusTool, err := f.jobStatusTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build job_status tool: %w", err)
+		}
+		resultTool, err := f.readJobResultTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_job_result tool: %w", err)
+		}
+		chunkTool, err := f.readJobResultChunkTool(actor, key)
+		if err != nil {
+			return nil, fmt.Errorf("build read_job_result_chunk tool: %w", err)
+		}
+		tools = append(tools, statusTool, resultTool, chunkTool)
+		if f.externalReconciler != nil {
+			reconcileTool, err := f.reconcileJobTool(actor, key)
+			if err != nil {
+				return nil, fmt.Errorf("build reconcile_job tool: %w", err)
+			}
+			tools = append(tools, reconcileTool)
+		}
+	}
 	return tools, nil
 }
 
@@ -1048,50 +1056,6 @@ func (f *Factory) jobStatusTool(actor string, key domain.ConversationKey) (tool.
 	})
 }
 
-func (f *Factory) activationJobStatusTool(reader port.ExternalAgentJobActivationReader, activation domain.ExternalAgentJobActivation) (tool.Tool, error) {
-	return functiontool.New(functiontool.Config{
-		Name:        "job_status",
-		Description: "Returns the status snapshot bound to this external-agent activation revision. Read-only; actor, destination, revision, and terminal status are host-bound. When acp_session_id is non-empty, the response must always be presented with the complete ACP session line verbatim; presenting an authorized status without that line is a contract failure, not optional summarization.",
-	}, func(ctx agent.Context, args jobIDArgs) (jobStatusResult, error) {
-		if strings.TrimSpace(args.JobID) == "" {
-			return jobStatusResult{}, errors.New("job_id is required")
-		}
-		if args.JobID != activation.JobID {
-			return jobStatusResult{}, errors.New("job_id is not bound to this activation")
-		}
-		job, err := reader.StatusAtRevision(ctx, activation.JobID, activation.Actor, activation.ConversationKey, activation.StatusRevision, activation.TerminalStatus)
-		if err != nil {
-			return jobStatusResult{}, err
-		}
-		if job == nil {
-			return jobStatusResult{}, errors.New("external-agent job was not found")
-		}
-		status := job.StatusView()
-		// Live projection fields are best-effort enrichment of the
-		// revision-bound snapshot: they are merged only when the current
-		// revision still matches the activation, so a concurrent transition
-		// can never mix identities. Errors degrade only the live fields, never
-		// the revision-bound status contract.
-		if projection, ok := reader.(port.ExternalAgentJobStatusProjectionReader); ok {
-			if projected, projectionErr := projection.StatusProjection(ctx, activation.JobID, activation.Actor, activation.ConversationKey); projectionErr == nil && projected != nil &&
-				projected.StatusRevision == activation.StatusRevision && projected.Status == activation.TerminalStatus {
-				status.Phase = projected.Phase
-				status.Health = projected.Health
-				status.LastEventKind = projected.LastEventKind
-				status.LastTransportActivityAt = projected.LastTransportActivityAt
-				status.LastSessionUpdateAt = projected.LastSessionUpdateAt
-				status.LastMeaningfulProgressAt = projected.LastMeaningfulProgressAt
-				status.ActiveToolCount = projected.ActiveToolCount
-				status.PendingPermission = projected.PendingPermission
-				status.PromptElapsedSeconds = projected.PromptElapsedSeconds
-				status.StopReason = projected.StopReason
-				status.ProcessAlive = projected.ProcessAlive
-			}
-		}
-		return statusViewToJobResult(status), nil
-	})
-}
-
 type readJobResultResult struct {
 	JobID           string                      `json:"job_id"`
 	StatusRevision  int                         `json:"status_revision"`
@@ -1183,28 +1147,6 @@ func (f *Factory) readJobResultChunkTool(actor string, key domain.ConversationKe
 			return readJobResultChunkResult{}, errors.New("job_id is required")
 		}
 		chunk, err := reader.ReadResultChunk(ctx, args.JobID, actor, key, args.OffsetBytes, args.MaxBytes)
-		if err != nil {
-			return readJobResultChunkResult{}, err
-		}
-		return readJobResultChunkResult{
-			Content: chunk.Content, OffsetBytes: chunk.OffsetBytes, NextOffsetBytes: chunk.NextOffsetBytes,
-			EOF: chunk.EOF, SHA256: chunk.SHA256,
-		}, nil
-	})
-}
-
-func (f *Factory) activationReadJobResultChunkTool(reader port.ExternalAgentJobActivationReader, activation domain.ExternalAgentJobActivation) (tool.Tool, error) {
-	return functiontool.New(functiontool.Config{
-		Name:        "read_job_result_chunk",
-		Description: "Reads one bounded, verified UTF-8 result chunk from the terminal revision that created this activation. Read-only; later reconciliations are not visible.",
-	}, func(ctx agent.Context, args readJobResultChunkArgs) (readJobResultChunkResult, error) {
-		if strings.TrimSpace(args.JobID) == "" {
-			return readJobResultChunkResult{}, errors.New("job_id is required")
-		}
-		if args.JobID != activation.JobID {
-			return readJobResultChunkResult{}, errors.New("job_id is not bound to this activation")
-		}
-		chunk, err := reader.ReadResultChunkAtRevision(ctx, activation.JobID, activation.Actor, activation.ConversationKey, activation.StatusRevision, activation.TerminalStatus, args.OffsetBytes, args.MaxBytes)
 		if err != nil {
 			return readJobResultChunkResult{}, err
 		}
@@ -1365,16 +1307,6 @@ func (f *Factory) listWorktreesTool(actor string) (tool.Tool, error) {
 }
 
 // --- mutable: sandbox (native ADK confirmation) ---
-
-type removeWorktreeArgs struct {
-	Project string `json:"project" jsonschema:"the project name from list_repos"`
-	Name    string `json:"name" jsonschema:"name of the worktree to remove"`
-}
-
-type removeWorktreeResult struct {
-	Status string `json:"status"`
-	Name   string `json:"name"`
-}
 
 func splitNonEmpty(s string) []string {
 	if s == "" || s == "(no worktrees)" {

@@ -102,7 +102,7 @@ func (s *KnowledgeLexicalIndexStore) SearchLexical(ctx context.Context, scopes [
 	if err != nil {
 		return nil, fmt.Errorf("%w: lexical search: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	hits := make([]port.KnowledgeIndexHit, 0, limit)
 	for rows.Next() {
 		var hit port.KnowledgeIndexHit
@@ -195,7 +195,7 @@ func (s *KnowledgeLexicalIndexStore) SearchSemantic(ctx context.Context, scopes 
 	if err != nil {
 		return nil, fmt.Errorf("%w: semantic search: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	type scoredHit struct {
 		hit         port.KnowledgeIndexHit
@@ -330,7 +330,7 @@ func (s *KnowledgeLexicalIndexStore) ListLexical(ctx context.Context, kind domai
 	if err != nil {
 		return nil, fmt.Errorf("%w: list lexical index rows: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := make([]port.KnowledgeLexicalIndexRow, 0, limit)
 	for rows.Next() {
 		var row port.KnowledgeLexicalIndexRow

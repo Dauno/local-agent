@@ -834,7 +834,7 @@ func TestIncidentFixtureExternalizesLargeResponses(t *testing.T) {
 
 	// Model emits 7 read_file function calls.
 	modelCalls := make([]domain.ContentPart, 7)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		modelCalls[i] = domain.ContentPart{
 			FunctionCall: &domain.FunctionCall{
 				ID:   funcCallID(i),
@@ -847,7 +847,7 @@ func TestIncidentFixtureExternalizesLargeResponses(t *testing.T) {
 
 	// 7 large function responses.
 	responses := make([]domain.Content, 7)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		responses[i] = domain.Content{
 			Role: domain.ContentRoleUser,
 			Parts: []domain.ContentPart{{
@@ -867,9 +867,7 @@ func TestIncidentFixtureExternalizesLargeResponses(t *testing.T) {
 	contents = append(contents, completed2...)
 	contents = append(contents, activeUser)
 	contents = append(contents, activeModel)
-	for _, r := range responses {
-		contents = append(contents, r)
-	}
+	contents = append(contents, responses...)
 
 	beforeChars, err := domain.ContentCost(contents)
 	if err != nil {
@@ -912,7 +910,7 @@ func TestIncidentFixtureExternalizesLargeResponses(t *testing.T) {
 
 	// Verify: call IDs and ordering preserved.
 	callIDs := collectCallIDs(result.Contents)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		expected := funcCallID(i)
 		if _, ok := callIDs[expected]; !ok {
 			t.Errorf("call ID %q not found in result", expected)
@@ -1075,10 +1073,11 @@ func largeProjectionContents(willContinue ...bool) []domain.Content {
 			ID: id, Name: "lookup", WillContinue: &continuation, Response: map[string]any{"text": strings.Repeat("large payload ", 20_000)},
 		}}}}
 	}
-	contents := []domain.Content{
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect"}}},
-		{Role: domain.ContentRoleModel, Parts: parts},
-	}
+	contents := make([]domain.Content, 0, 2+len(responses))
+	contents = append(contents,
+		domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect"}}},
+		domain.Content{Role: domain.ContentRoleModel, Parts: parts},
+	)
 	return append(contents, responses...)
 }
 
@@ -1180,8 +1179,7 @@ func TestCompilerDoesNotExternalizeResultChunks(t *testing.T) {
 		},
 		ModelBudget: domain.RequestBudget{HardTokens: 1_000, TargetTokens: 1_000}, Actor: "U1", ConversationKey: "no-recursive-projection",
 	})
-	var irreducible *domain.IrreducibleContextError
-	if !errors.As(err, &irreducible) {
+	if _, ok := errors.AsType[*domain.IrreducibleContextError](err); !ok {
 		t.Fatalf("Compile() error = %v, want irreducible context", err)
 	}
 	if store.putCalls != 0 {
@@ -1201,8 +1199,7 @@ func TestCompilerV2BoundaryDoesNotWriteAnyProjection(t *testing.T) {
 		},
 		ModelBudget: domain.RequestBudget{HardTokens: 1_000, TargetTokens: 1_000}, Actor: "U1", ConversationKey: "v2-no-writes",
 	})
-	var irreducible *domain.IrreducibleContextError
-	if !errors.As(err, &irreducible) {
+	if _, ok := errors.AsType[*domain.IrreducibleContextError](err); !ok {
 		t.Fatalf("Compile() error = %v, want irreducible context", err)
 	}
 	if store.putCalls != 0 {
@@ -1245,7 +1242,7 @@ func TestCallIDsAndOrderingPreserved(t *testing.T) {
 	budget := budget60Percent(128_000)
 
 	modelCalls := make([]domain.ContentPart, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		modelCalls[i] = domain.ContentPart{
 			FunctionCall: &domain.FunctionCall{
 				ID:   funcCallID(i),
@@ -1255,7 +1252,7 @@ func TestCallIDsAndOrderingPreserved(t *testing.T) {
 		}
 	}
 	responses := make([]domain.Content, 3)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		responses[i] = domain.Content{
 			Role: domain.ContentRoleUser,
 			Parts: []domain.ContentPart{{
@@ -1270,10 +1267,11 @@ func TestCallIDsAndOrderingPreserved(t *testing.T) {
 		}
 	}
 
-	contents := []domain.Content{
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read files"}}},
-		{Role: domain.ContentRoleModel, Parts: modelCalls},
-	}
+	contents := make([]domain.Content, 0, 2+len(responses))
+	contents = append(contents,
+		domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read files"}}},
+		domain.Content{Role: domain.ContentRoleModel, Parts: modelCalls},
+	)
 	contents = append(contents, responses...)
 
 	compiler := newCompiler()
@@ -1288,7 +1286,7 @@ func TestCallIDsAndOrderingPreserved(t *testing.T) {
 
 	// Verify all call IDs exist in the result.
 	callIDs := collectCallIDs(result.Contents)
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		expected := funcCallID(i)
 		if _, ok := callIDs[expected]; !ok {
 			t.Errorf("call ID %q not found in result (found: %v)", expected, structKeys(callIDs))
@@ -1318,7 +1316,7 @@ func TestCallIDsAndOrderingPreserved(t *testing.T) {
 			respPos[entry[5:]] = i
 		}
 	}
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		id := funcCallID(i)
 		cPos, cOk := callPos[id]
 		rPos, rOk := respPos[id]
@@ -1339,7 +1337,7 @@ func TestCallIDsAndOrderingPreserved(t *testing.T) {
 
 func TestSmallResponsesNoExternalization(t *testing.T) {
 	modelCalls := make([]domain.ContentPart, 2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		modelCalls[i] = domain.ContentPart{
 			FunctionCall: &domain.FunctionCall{
 				ID:   funcCallID(i),
@@ -1349,7 +1347,7 @@ func TestSmallResponsesNoExternalization(t *testing.T) {
 		}
 	}
 	responses := make([]domain.Content, 2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		responses[i] = domain.Content{
 			Role: domain.ContentRoleUser,
 			Parts: []domain.ContentPart{{
@@ -1364,10 +1362,11 @@ func TestSmallResponsesNoExternalization(t *testing.T) {
 		}
 	}
 
-	contents := []domain.Content{
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read files"}}},
-		{Role: domain.ContentRoleModel, Parts: modelCalls},
-	}
+	contents := make([]domain.Content, 0, 2+len(responses))
+	contents = append(contents,
+		domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read files"}}},
+		domain.Content{Role: domain.ContentRoleModel, Parts: modelCalls},
+	)
 	contents = append(contents, responses...)
 
 	budget := budget60Percent(128_000)
@@ -1441,7 +1440,7 @@ func TestAllHugeResponsesFairDivision(t *testing.T) {
 	budget := budget60Percent(128_000)
 
 	modelCalls := make([]domain.ContentPart, numResponses)
-	for i := 0; i < numResponses; i++ {
+	for i := range numResponses {
 		modelCalls[i] = domain.ContentPart{
 			FunctionCall: &domain.FunctionCall{
 				ID:   funcCallID(i),
@@ -1451,7 +1450,7 @@ func TestAllHugeResponsesFairDivision(t *testing.T) {
 		}
 	}
 	responses := make([]domain.Content, numResponses)
-	for i := 0; i < numResponses; i++ {
+	for i := range numResponses {
 		responses[i] = domain.Content{
 			Role: domain.ContentRoleUser,
 			Parts: []domain.ContentPart{{
@@ -1466,10 +1465,11 @@ func TestAllHugeResponsesFairDivision(t *testing.T) {
 		}
 	}
 
-	contents := []domain.Content{
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read all files"}}},
-		{Role: domain.ContentRoleModel, Parts: modelCalls},
-	}
+	contents := make([]domain.Content, 0, 2+len(responses))
+	contents = append(contents,
+		domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read all files"}}},
+		domain.Content{Role: domain.ContentRoleModel, Parts: modelCalls},
+	)
 	contents = append(contents, responses...)
 
 	compiler := newCompiler()
@@ -1543,7 +1543,7 @@ func TestSmallResponseDonatesUnusedAllocationToLargeResponse(t *testing.T) {
 
 func TestEmptyResponsesNoOp(t *testing.T) {
 	modelCalls := make([]domain.ContentPart, 2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		modelCalls[i] = domain.ContentPart{
 			FunctionCall: &domain.FunctionCall{
 				ID:   funcCallID(i),
@@ -1553,7 +1553,7 @@ func TestEmptyResponsesNoOp(t *testing.T) {
 		}
 	}
 	responses := make([]domain.Content, 2)
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		responses[i] = domain.Content{
 			Role: domain.ContentRoleUser,
 			Parts: []domain.ContentPart{{
@@ -1566,10 +1566,11 @@ func TestEmptyResponsesNoOp(t *testing.T) {
 		}
 	}
 
-	contents := []domain.Content{
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "run empty tools"}}},
-		{Role: domain.ContentRoleModel, Parts: modelCalls},
-	}
+	contents := make([]domain.Content, 0, 2+len(responses))
+	contents = append(contents,
+		domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "run empty tools"}}},
+		domain.Content{Role: domain.ContentRoleModel, Parts: modelCalls},
+	)
 	contents = append(contents, responses...)
 
 	budget := budget60Percent(128_000)
@@ -1927,7 +1928,7 @@ func TestSummaryInjectedWhenFits(t *testing.T) {
 func TestRecentCompletedTurnsSelected(t *testing.T) {
 	// Build 10 completed turns.
 	completed := make([]domain.Content, 0, 20)
-	for i := 0; i < 10; i++ {
+	for i := range 10 {
 		completed = append(completed, domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: fmt.Sprintf("msg %d", i)}}})
 		completed = append(completed, domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: fmt.Sprintf("resp %d", i)}}})
 	}
@@ -1973,7 +1974,7 @@ func collectCallIDs(contents []domain.Content) map[string]struct{} {
 }
 
 func keys(m map[string]int) []string {
-	var result []string
+	result := make([]string, 0, len(m))
 	for k := range m {
 		result = append(result, k)
 	}
@@ -1981,7 +1982,7 @@ func keys(m map[string]int) []string {
 }
 
 func structKeys(m map[string]struct{}) []string {
-	var result []string
+	result := make([]string, 0, len(m))
 	for k := range m {
 		result = append(result, k)
 	}

@@ -87,12 +87,12 @@ func seedSessionReadBenchCorpus() (sessionReadBenchCorpus, error) {
 	db := store.DB()
 	if _, err := db.ExecContext(ctx, `INSERT INTO adk_app_state (app_name, state, update_time) VALUES (?, '{}', ?)`,
 		sessionReadBenchApp, now); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	if _, err := db.ExecContext(ctx, `INSERT INTO adk_user_state (app_name, user_id, state, update_time) VALUES (?, ?, '{}', ?)`,
 		sessionReadBenchApp, sessionReadBenchUser, now); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	for _, n := range sessionReadBenchSizes {
@@ -103,13 +103,13 @@ func seedSessionReadBenchCorpus() (sessionReadBenchCorpus, error) {
 			(app_name, user_id, session_id, state, revision, create_time, update_time)
 			VALUES (?, ?, ?, '{}', ?, ?, ?)`,
 			sessionReadBenchApp, sessionReadBenchUser, sessionID, n, now, now); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("insert session %s: %w", sessionID, err))
 		}
 
 		tx, err := db.BeginTx(ctx, nil)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(err)
 		}
 		stmt, err := tx.PrepareContext(ctx, `INSERT INTO adk_events
@@ -117,27 +117,27 @@ func seedSessionReadBenchCorpus() (sessionReadBenchCorpus, error) {
 			VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, 0, 1, 0)`)
 		if err != nil {
 			_ = tx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(err)
 		}
-		for i := 0; i < n; i++ {
+		for i := range n {
 			content := fmt.Sprintf(`{"role":"model","parts":[{"text":"event %d %s"}]}`, i, filler)
 			if _, err := stmt.ExecContext(ctx, fmt.Sprintf("%s-evt-%d", sessionID, i),
 				sessionReadBenchApp, sessionReadBenchUser, sessionID, i, "bench-invocation", "model",
 				now+int64(i), content); err != nil {
 				_ = stmt.Close()
 				_ = tx.Rollback()
-				store.Close()
+				_ = store.Close()
 				return fail(fmt.Errorf("insert event %d for session %s: %w", i, sessionID, err))
 			}
 		}
 		if err := stmt.Close(); err != nil {
 			_ = tx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(err)
 		}
 		if err := tx.Commit(); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("commit session %s corpus: %w", sessionID, err))
 		}
 	}
@@ -178,10 +178,7 @@ func BenchmarkSessionGetBounded(b *testing.B) {
 	corpus := sessionReadBench(b)
 	for _, n := range sessionReadBenchSizes {
 		sessionID := corpus.sessionID[n]
-		want := domain.MaxContextEpochRange
-		if n < want {
-			want = n
-		}
+		want := min(n, domain.MaxContextEpochRange)
 		b.Run(fmt.Sprintf("events=%d", n), func(b *testing.B) {
 			ctx := context.Background()
 			for b.Loop() {
@@ -314,13 +311,13 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 		(app_name, user_id, session_id, state, revision, create_time, update_time)
 		VALUES (?, ?, ?, '{}', ?, ?, ?)`,
 		sessionReadBenchApp, sessionReadBenchUser, sessionID, events, now, now); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 
 	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	stmt, err := tx.PrepareContext(ctx, `INSERT INTO adk_events
@@ -328,10 +325,10 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 		VALUES (?, ?, ?, ?, ?, ?, ?, '{}', ?, ?, 0, 1, 0)`)
 	if err != nil {
 		_ = tx.Rollback()
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
-	for i := 0; i < events; i++ {
+	for i := range events {
 		// adk_events content no longer matters to
 		// IsRecoverableResultReferenced's cost after checkpoint 3 (it reads
 		// recoverable_result_refs only), but this table is still populated
@@ -344,17 +341,17 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 			now+int64(i), content); err != nil {
 			_ = stmt.Close()
 			_ = tx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(err)
 		}
 	}
 	if err := stmt.Close(); err != nil {
 		_ = tx.Rollback()
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	if err := tx.Commit(); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 
@@ -364,7 +361,7 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 	createdAt := time.Now().Unix()
 	candidateTx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	resultStmt, err := candidateTx.PrepareContext(ctx, `INSERT INTO recoverable_results
@@ -372,7 +369,7 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 		VALUES (?, 'bench-actor', 'slack:T1:dm:D1', 'bench', ?, 1, 1, ?, ?, ?)`)
 	if err != nil {
 		_ = candidateTx.Rollback()
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	// See the comment above retentionBenchEvents: recoverable_result_refs is
@@ -381,17 +378,17 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 		(ref, owner_kind, owner_id, created_at) VALUES (?, 'adk_event', ?, ?)`)
 	if err != nil {
 		_ = candidateTx.Rollback()
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
-	for i := 0; i < maxCandidates; i++ {
+	for i := range maxCandidates {
 		absentRef := retentionBenchRef(fmt.Sprintf("absent-%d-%d", events, i))
 		absentRefs[i] = absentRef
 		if _, err := resultStmt.ExecContext(ctx, absentRef, "bench/"+absentRef, strings.Repeat("0", 64), createdAt, createdAt+3600); err != nil {
 			_ = indexStmt.Close()
 			_ = resultStmt.Close()
 			_ = candidateTx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("insert absent candidate %d: %w", i, err))
 		}
 
@@ -401,7 +398,7 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 			_ = indexStmt.Close()
 			_ = resultStmt.Close()
 			_ = candidateTx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("insert present candidate %d: %w", i, err))
 		}
 		ownerID := fmt.Sprintf("bench-owner-%d-%d", events, i)
@@ -409,23 +406,23 @@ func seedRetentionBenchCorpus(events int) (*retentionBenchCorpus, error) {
 			_ = indexStmt.Close()
 			_ = resultStmt.Close()
 			_ = candidateTx.Rollback()
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("index present candidate %d: %w", i, err))
 		}
 	}
 	if err := indexStmt.Close(); err != nil {
 		_ = resultStmt.Close()
 		_ = candidateTx.Rollback()
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	if err := resultStmt.Close(); err != nil {
 		_ = candidateTx.Rollback()
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	if err := candidateTx.Commit(); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 

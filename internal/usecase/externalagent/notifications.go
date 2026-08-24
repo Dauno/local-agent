@@ -165,7 +165,7 @@ func (w *NotificationWorker) processOne(ctx context.Context) (bool, error) {
 			// An ambiguous URL request did not leave a durable Slack file ID.
 			// Reissuing it could create a duplicate file that cannot be
 			// reconciled by identity, so fail closed instead.
-			return true, wrapNotificationError(notification, w.recordFailure(ctx, notification, port.NewNotificationPublishError("result_file_upload_unknown", false, false, errors.New("Slack file identity is unavailable"))))
+			return true, wrapNotificationError(notification, w.recordFailure(ctx, notification, port.NewNotificationPublishError("result_file_upload_unknown", false, false, errors.New("slack file identity is unavailable"))))
 		}
 		ts, found, reconcileErr := w.publisher.Reconcile(ctx, *notification)
 		if reconcileErr != nil {
@@ -416,10 +416,7 @@ func (w *NotificationWorker) retryDelay(attempts int) time.Duration {
 	if attempts < 1 {
 		attempts = 1
 	}
-	shift := attempts - 1
-	if shift > 20 {
-		shift = 20
-	}
+	shift := min(attempts-1, 20)
 	delay := float64(w.cfg.RetryBase) * math.Pow(2, float64(shift))
 	if delay >= float64(w.cfg.RetryMax) {
 		return w.cfg.RetryMax

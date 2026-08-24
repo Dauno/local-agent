@@ -17,9 +17,7 @@ type SeedModelConfig struct {
 
 func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 	extraBody := make(map[string]any)
-	for k, v := range cfg.ExtraBody {
-		extraBody[k] = v
-	}
+	maps.Copy(extraBody, cfg.ExtraBody)
 
 	return Provider{
 		Name:      "deepseek",
@@ -31,15 +29,15 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 			"flash-reasoning": {
 				Model:               cfg.Name,
 				ReasoningEffort:     cfg.ReasoningEffort,
-				ContextWindowTokens: ptrTo(1_000_000),
-				MaxOutputTokens:     ptrTo(32_000),
+				ContextWindowTokens: new(1_000_000),
+				MaxOutputTokens:     new(32_000),
 				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
 				ExtraBody:           extraBody,
 			},
 			"flash-json": {
 				Model:               cfg.Name,
-				ContextWindowTokens: ptrTo(1_000_000),
-				MaxOutputTokens:     ptrTo(1_200),
+				ContextWindowTokens: new(1_000_000),
+				MaxOutputTokens:     new(1_200),
 				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
 				ExtraBody: map[string]any{
 					// DeepSeek V4 enables thinking by default; reserve this profile's output budget for curator JSON.
@@ -51,15 +49,15 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 					},
 				},
 				GenerateContentConfig: &GenerateContentConfig{
-					Temperature:     ptrTo(0.0),
+					Temperature:     new(0.0),
 					MaxOutputTokens: 1200,
 				},
 			},
 			"pro-reasoning": {
 				Model:               "deepseek-v4-pro",
 				ReasoningEffort:     "xhigh",
-				ContextWindowTokens: ptrTo(1_000_000),
-				MaxOutputTokens:     ptrTo(32_000),
+				ContextWindowTokens: new(1_000_000),
+				MaxOutputTokens:     new(32_000),
 				TokenCounter:        &TokenCounterDef{Strategy: "byte_bound"},
 				ExtraBody: map[string]any{
 					"thinking": map[string]any{
@@ -164,10 +162,6 @@ func SeedOpenCodeProviderExample() Provider {
 			},
 		},
 	}
-}
-
-func ptrTo[T any](v T) *T {
-	return &v
 }
 
 func MarshalProvider(p Provider) ([]byte, error) {

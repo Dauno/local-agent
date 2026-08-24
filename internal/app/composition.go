@@ -153,7 +153,7 @@ func (a *Application) loadRuntimeSetup() (runtimeSetup, error) {
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return runtimeSetup{}, errors.New("Configuration not found. Run: local-agent init")
+			return runtimeSetup{}, errors.New("configuration not found. Run: local-agent init")
 		}
 		return runtimeSetup{}, fmt.Errorf("load runtime configuration: %w", err)
 	}
@@ -163,13 +163,13 @@ func (a *Application) loadRuntimeSetup() (runtimeSetup, error) {
 	}
 	info, statErr := os.Stat(paths.StateDir)
 	if errors.Is(statErr, os.ErrNotExist) {
-		return runtimeSetup{}, errors.New("Local state not found. Run: local-agent init")
+		return runtimeSetup{}, errors.New("local state not found. Run: local-agent init")
 	}
 	if statErr != nil {
 		return runtimeSetup{}, fmt.Errorf("inspect configured state directory: %w. Run: local-agent doctor", statErr)
 	}
 	if !info.IsDir() {
-		return runtimeSetup{}, errors.New("Configured state.dir is not a directory. Run: local-agent doctor")
+		return runtimeSetup{}, errors.New("configured state.dir is not a directory. Run: local-agent doctor")
 	}
 	defs, err := agentdef.Load(paths.StateDir)
 	if err != nil {
@@ -404,7 +404,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 	a.traceSchemaEvent("preflight")
 	if err := a.requireRolloutComplete(ctx, paths.DatabaseFile); err != nil {
 		if errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {
-			return nil, errors.New("Local state not found. Run: local-agent init")
+			return nil, errors.New("local state not found. Run: local-agent init")
 		}
 		return nil, rolloutPreflightFailure(err)
 	}
@@ -418,7 +418,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 	store, err := a.openCurrentTraced(ctx, paths.DatabaseFile)
 	if err != nil {
 		if errors.Is(err, adaptersqlite.ErrDatabaseNotFound) {
-			return nil, errors.New("Local state not found. Run: local-agent init")
+			return nil, errors.New("local state not found. Run: local-agent init")
 		}
 		return nil, models.redactor.Error(schemaOpenFailure(err))
 	}
@@ -545,6 +545,20 @@ type runtimeComposition struct {
 	notificationDone     chan struct{}
 }
 
+type rootRuntimeComposition struct {
+	agentBuilderSvc      port.AgentBuilderService
+	toolFactory          port.AgentToolFactory
+	compositeFactory     *compositeAgentToolFactory
+	externalJobService   *externalagentusecase.Service
+	notificationWorker   *externalagentusecase.NotificationWorker
+	activationStore      port.ExternalAgentJobActivationStore
+	externalSchedules    externalAgentSchedules
+	continuityStore      port.ContinuityStore
+	resultStore          *recoverableresult.Store
+	workstreamService    *workstreamusecase.Service
+	resultAnalysisWorker *resultanalysisusecase.Worker
+}
+
 func (c *runtimeComposition) StopExternalAdmission() {
 	if c == nil {
 		return
@@ -652,248 +666,29 @@ func bindAndCleanupRecoverableResults(ctx context.Context, store *adaptersqlite.
 
 func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (*runtimeComposition, error) {
 	cfg, paths := setup.cfg, setup.paths
-	defs := setup.defs
-	var agentBuilderSvc port.AgentBuilderService
-	if defs != nil {
-		agentBuilderSvc = agentbuilder.New()
+	features := cfg.Context.ContextFeatures
+	root, err := a.composeRootRuntime(ctx, setup, models, infra)
+	if err != nil {
+		return nil, err
 	}
-	var toolFactory port.AgentToolFactory
-	var compositeFactory *compositeAgentToolFactory
-	var externalJobService *externalagentusecase.Service
-	var notificationWorker *externalagentusecase.NotificationWorker
-	var activationStore port.ExternalAgentJobActivationStore
+	agentBuilderSvc := root.agentBuilderSvc
+	toolFactory := root.toolFactory
+	externalJobService := root.externalJobService
+	notificationWorker := root.notificationWorker
+	activationStore := root.activationStore
+	externalSchedules := root.externalSchedules
+	continuityStore := root.continuityStore
+	resultStore := root.resultStore
+	workstreamService := root.workstreamService
+	resultAnalysisWorker := root.resultAnalysisWorker
 	var activationWorker *externalagentusecase.ActivationWorker
-	var externalSchedules externalAgentSchedules
 	var notificationDone chan struct{}
 	var summaryScheduler port.SummaryScheduler
-	var continuityStore port.ContinuityStore
-	var resultStore *recoverableresult.Store
-	var workstreamService *workstreamusecase.Service
 	var knowledgeBindings port.KnowledgeBindingResolver
 	var knowledgeRetriever port.KnowledgeRetriever
 	var knowledgeLexicalWorker *knowledgeusecase.LexicalWorker
 	var knowledgeEmbeddingWorker *knowledgeusecase.EmbeddingWorker
-	var resultAnalysisWorker *resultanalysisusecase.Worker
 	var knowledgeRetrievalLimits domain.KnowledgeRetrievalLimits
-	features := cfg.Context.ContextFeatures
-	var err error
-	// The TRD 02 V2 retention policy is composed and validated at startup
-	// even though no deletion worker consumes it yet (see TRD 02 §Retention,
-	// finding 6): failing closed here catches a misconfigured age before the
-	// offline doctor check ever runs against it.
-	resultRetentionPolicy := resultsusecase.RetentionPolicy{
-		Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
-		Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
-		Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
-		Exported:     time.Duration(cfg.Orchestration.ResultHandles.Retention.ExportedDays) * 24 * time.Hour,
-	}
-	if err := resultRetentionPolicy.Validate(); err != nil {
-		return nil, fmt.Errorf("initialize result retention policy: %w", err)
-	}
-	if models.rootIsAgentCLI && cfg.Orchestration.Workstreams.Enabled {
-		return nil, errors.New("orchestration.workstreams.enabled requires an openai_compatible root agent")
-	}
-	if !models.rootIsAgentCLI && features != nil && features.ContinuityCapsuleEnabled {
-		continuityStore = adaptersqlite.NewContinuityStore(infra.store)
-	}
-	if !models.rootIsAgentCLI && features != nil && features.RecoverableResultsEnabled {
-		resultsCfg := cfg.Context.RecoverableResults
-		resultStore = recoverableresult.NewStore(infra.store.DB(), filepath.Join(paths.StateDir, "recoverable-results"), resultsCfg.MaxResultBytes, resultsCfg.ChunkMaxBytes, resultsCfg.RetentionDays, resultsCfg.CleanupBatchSize, models.metrics)
-		if _, cleanupErr := bindAndCleanupRecoverableResults(ctx, infra.store, resultStore, time.Now().UTC(), resultsCfg.CleanupBatchSize); cleanupErr != nil {
-			return nil, models.redactor.Error(cleanupErr)
-		}
-	}
-	if !models.rootIsAgentCLI {
-		var sandboxService *sandboxusecase.Service
-		var codeReaders map[string]port.CodeReader
-		var syntaxEngine port.SyntaxEngine
-		var codeIntelligence port.CodeIntelligence
-		if cfg.Sandbox.Enabled {
-			projects := paths.SandboxProjectRoots
-			if len(projects) == 0 {
-				projects = cfg.Sandbox.Projects
-			}
-			executor, err := fssandbox.New(projects, cfg.Sandbox.MaxOutputBytes)
-			if err != nil {
-				return nil, models.redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", err))
-			}
-			executor.WithMetrics(models.metrics)
-			sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
-				AllowedCapabilities: []domain.Capability{domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees},
-				CommandTimeout:      time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
-				MaxOutputBytes:      cfg.Sandbox.MaxOutputBytes,
-			}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(infra.store), Executor: executor})
-			if err != nil {
-				return nil, models.redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
-			}
-			if resultStore != nil && cfg.CodeIntelligence != nil && cfg.CodeIntelligence.Enabled {
-				codeReaders = make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
-				syntaxReaders := make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
-				for name, root := range paths.SandboxProjectRoots {
-					codeReaders[name] = rangedreader.NewReader(root, cfg.Sandbox.MaxOutputBytes, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithMetrics(models.metrics)
-					syntaxReaders[name] = rangedreader.NewReader(root, 1<<20, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithPreservedLineEndings().WithMetrics(models.metrics)
-				}
-				syntaxEngine = goast.New(syntaxReaders).WithMetrics(models.metrics)
-				if len(cfg.CodeIntelligence.LSPServers) > 0 {
-					candidates := make([]port.ServerCandidate, 0, len(cfg.CodeIntelligence.LSPServers))
-					for _, server := range cfg.CodeIntelligence.LSPServers {
-						candidates = append(candidates, port.ServerCandidate{ID: server.ID, Command: server.Command, Args: server.Args, Languages: server.Languages})
-					}
-					rootList := make([]string, 0, len(paths.SandboxProjectRoots))
-					for _, root := range paths.SandboxProjectRoots {
-						rootList = append(rootList, root)
-					}
-					descriptors, discoveryErr := lspdiscovery.New(rootList).Discover(ctx, candidates)
-					if discoveryErr != nil {
-						return nil, models.redactor.Error(fmt.Errorf("discover language servers: %w", discoveryErr))
-					}
-					definitions := make(map[string]config.LSPServerConfig, len(cfg.CodeIntelligence.LSPServers))
-					for _, server := range cfg.CodeIntelligence.LSPServers {
-						definitions[server.ID] = server
-					}
-					servers := make([]lspclient.Server, 0, len(descriptors))
-					for _, descriptor := range descriptors {
-						if descriptor.Status != "available" {
-							continue
-						}
-						definition := definitions[descriptor.ID]
-						servers = append(servers, lspclient.Server{ID: descriptor.ID, Path: descriptor.Path, SHA256: descriptor.BinarySHA256, Args: definition.Args, Languages: definition.Languages})
-					}
-					if len(servers) > 0 {
-						routes := make(map[string][]string, len(cfg.CodeIntelligence.LSPRoutes))
-						for language, route := range cfg.CodeIntelligence.LSPRoutes {
-							routes[language] = append([]string(nil), route.Priority...)
-						}
-						codeIntelligence, err = lspclient.New(lspclient.Config{Servers: servers, Routes: routes,
-							ProjectRoots: paths.SandboxProjectRoots, Readers: syntaxReaders, ResultStore: resultStore, MaxProcesses: cfg.CodeIntelligence.MaxProcesses,
-							InitTimeout:    time.Duration(cfg.CodeIntelligence.InitTimeoutSeconds) * time.Second,
-							RequestTimeout: time.Duration(cfg.CodeIntelligence.RequestTimeoutSeconds) * time.Second})
-						if err != nil {
-							return nil, models.redactor.Error(fmt.Errorf("initialize language server runtime: %w", err))
-						}
-						if concrete, ok := codeIntelligence.(*lspclient.Client); ok {
-							concrete.WithMetrics(models.metrics)
-						}
-					}
-				}
-			}
-		}
-		var canvasService *canvasusecase.Service
-		if cfg.Canvases.Enabled {
-			canvasCreator := slackadapter.NewCanvasCreator(infra.api, time.Duration(cfg.Canvases.TimeoutSeconds)*time.Second)
-			canvasService, err = canvasusecase.New(canvasusecase.Config{MaxTitleChars: cfg.Canvases.MaxTitleChars, MaxContentChars: cfg.Canvases.MaxContentChars, MaxContentBytes: cfg.Canvases.MaxContentBytes}, canvasusecase.Dependencies{Creator: canvasCreator, Store: adaptersqlite.NewCanvasOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String})
-			if err != nil {
-				return nil, models.redactor.Error(fmt.Errorf("initialize canvas service: %w", err))
-			}
-		}
-		var generatedFileService *generatedfileusecase.Service
-		if cfg.Exports.Enabled {
-			uploader := slackadapter.NewGeneratedFileUploader(infra.api, time.Duration(cfg.Exports.TimeoutSeconds)*time.Second)
-			generatedFileService, err = generatedfileusecase.New(generatedfileusecase.Config{MaxFilenameChars: cfg.Exports.MaxFilenameChars, MaxContentBytes: cfg.Exports.MaxContentBytes}, generatedfileusecase.Dependencies{Uploader: uploader, Store: adaptersqlite.NewGeneratedFileOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String})
-			if err != nil {
-				return nil, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
-			}
-		}
-		// The TRD 07 result analysis gate is positive: with the feature
-		// disabled, composeResultAnalysis returns (nil, nil) and never
-		// constructs a v40 adapter, so no v40 table is opened or written
-		// and the worker is never created. This must compose before the
-		// workstream service below, because an enabled analysis feature
-		// injects resultAnalysisComp.gate into the workstream service's
-		// dependent-dispatch check.
-		resultAnalysisComp, resultAnalysisErr := composeResultAnalysis(cfg, models, infra.modelCalls, infra.store)
-		if resultAnalysisErr != nil {
-			return nil, models.redactor.Error(fmt.Errorf("initialize result analysis: %w", resultAnalysisErr))
-		}
-		if resultAnalysisComp != nil {
-			resultAnalysisWorker = resultAnalysisComp.worker
-			go resultAnalysisWorker.Run(ctx)
-		}
-		factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence).WithMetrics(models.metrics)
-		if resultAnalysisComp != nil {
-			factory = factory.WithResultAnalysis(resultAnalysisComp.service)
-		}
-		if cfg.Orchestration.Workstreams.Enabled {
-			var analysisGate port.AnalysesByWorkstream
-			if resultAnalysisComp != nil {
-				analysisGate = resultAnalysisComp.gate
-			}
-			var workstreamErr error
-			workstreamService, workstreamErr = composeWorkstream(cfg, paths, infra.store, models.resultPayloadStore, analysisGate)
-			if workstreamErr != nil {
-				return nil, models.redactor.Error(workstreamErr)
-			}
-			factory.WithWorkstreams(workstreamService).WithResultLinksEnabled(cfg.Orchestration.ResultHandles.Enabled)
-		}
-		// Configurar Agent Builder (preview + install tools).
-		if agentBuilderSvc != nil && defs != nil {
-			agentsDir := filepath.Join(paths.StateDir, "agents")
-			if info, statErr := os.Stat(agentsDir); statErr == nil && info.IsDir() {
-				writer, writerErr := filesystem.NewAgentWriter(agentsDir)
-				if writerErr == nil {
-					factory = factory.
-						WithAgentBuilder(agentBuilderSvc).
-						WithAgentWriter(writer).
-						WithCurrentDefinitions(defs).
-						WithDraftStore(adaptersqlite.NewAgentDraftStore(infra.store))
-				}
-			}
-		}
-		if infra.publisher != nil && infra.api != nil {
-			factory = factory.WithBuilderLauncher(
-				slackadapter.NewBuilderLauncherPublisherWithStore(infra.api, infra.publisher, models.logger, infra.store, infra.auth.UserID),
-			)
-		}
-		toolFactory = factory
-		if len(models.preparedAgentTools) > 0 || len(models.preparedWorkflows) > 0 {
-			delegatedGlobalInstruction := ""
-			if models.rootDef != nil {
-				delegatedGlobalInstruction = models.rootDef.EffectiveDelegatedGlobalInstruction()
-			}
-			compositeFactory = newCompositeAgentToolFactory(toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
-			compositeFactory.setChildContextResultStore(resultStore)
-			toolFactory = compositeFactory
-		}
-		// Declarative tools must be wired after the composite factory exists so
-		// children and workflow steps can reference them.
-		if err := wireDeclarativeTools(factory, models, paths, compositeFactory); err != nil {
-			return nil, models.redactor.Error(err)
-		}
-		externalSchedules, err = newExternalAgentSchedules()
-		if err != nil {
-			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent schedulers: %w", err))
-		}
-		externalJobService, notificationWorker, err = newExternalAgentJobService(cfg, models, infra, externalSchedules)
-		if err != nil {
-			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent jobs: %w", err))
-		}
-		if externalJobService != nil {
-			factory.WithExternalAgentJobs(externalJobService)
-			activationStore = adaptersqlite.NewExternalAgentJobStore(infra.store)
-			if activationStore == nil {
-				return nil, errors.New("initialize external-agent activation store")
-			}
-		}
-		if compositeFactory != nil && externalJobService != nil {
-			compositeFactory.setJobStarter(externalJobService)
-			if workstreamService != nil {
-				compositeFactory.setCompletionBindingResolver(workstreamService)
-			}
-		}
-		if setup.defs != nil {
-			if provider, exists := setup.defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
-				resolved, resolveErr := setup.defs.ResolveModel("opencode/smoke")
-				if resolveErr != nil {
-					return nil, models.redactor.Error(fmt.Errorf("resolve OpenCode management profile: %w", resolveErr))
-				}
-				primaryPath, pathErr := managementProbePath(paths.SandboxProjectRoots)
-				if pathErr != nil {
-					return nil, models.redactor.Error(pathErr)
-				}
-				toolFactory = &openCodeManagementToolFactory{base: toolFactory, runtime: acpclient.NewWithCoordinator(resolved.Command, resolved.Args, models.openCodeCoordinator), manager: opencodemanager.New(resolved.Command), allowedIDs: cfg.OpenCode.Management.AllowedUserIDs, primaryPath: primaryPath, configOptions: domainConfigOptions(resolved), coordinator: models.openCodeCoordinator}
-			}
-		}
-	}
 	if !models.rootIsAgentCLI && cfg.Context.ADKCompaction != nil && cfg.Context.ADKCompaction.SummaryEnabled {
 		summarizer, summaryErr := openaillm.NewSummarizer(models.rootModel, openaillm.SummarizerConfig{
 			MaxChars: cfg.Context.ADKCompaction.SummaryMaxChars, Timeout: 30 * time.Second,
@@ -1096,20 +891,246 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, knowledgeRetriever: knowledgeRetriever, lexicalWorker: knowledgeLexicalWorker, embeddingWorker: knowledgeEmbeddingWorker, resultAnalysisWorker: resultAnalysisWorker, notificationDone: notificationDone}, nil
 }
 
+func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (rootRuntimeComposition, error) {
+	cfg, paths, defs := setup.cfg, setup.paths, setup.defs
+	result := rootRuntimeComposition{}
+	if defs != nil {
+		result.agentBuilderSvc = agentbuilder.New()
+	}
+	features := cfg.Context.ContextFeatures
+	resultRetentionPolicy := resultsusecase.RetentionPolicy{
+		Context:      time.Duration(cfg.Orchestration.ResultHandles.Retention.ContextDays) * 24 * time.Hour,
+		Conversation: time.Duration(cfg.Orchestration.ResultHandles.Retention.ConversationDays) * 24 * time.Hour,
+		Workstream:   time.Duration(cfg.Orchestration.ResultHandles.Retention.WorkstreamDays) * 24 * time.Hour,
+		Exported:     time.Duration(cfg.Orchestration.ResultHandles.Retention.ExportedDays) * 24 * time.Hour,
+	}
+	if err := resultRetentionPolicy.Validate(); err != nil {
+		return rootRuntimeComposition{}, fmt.Errorf("initialize result retention policy: %w", err)
+	}
+	if models.rootIsAgentCLI && cfg.Orchestration.Workstreams.Enabled {
+		return rootRuntimeComposition{}, errors.New("orchestration.workstreams.enabled requires an openai_compatible root agent")
+	}
+	if !models.rootIsAgentCLI && features != nil && features.ContinuityCapsuleEnabled {
+		result.continuityStore = adaptersqlite.NewContinuityStore(infra.store)
+	}
+	if !models.rootIsAgentCLI && features != nil && features.RecoverableResultsEnabled {
+		resultsCfg := cfg.Context.RecoverableResults
+		result.resultStore = recoverableresult.NewStore(infra.store.DB(), filepath.Join(paths.StateDir, "recoverable-results"), resultsCfg.MaxResultBytes, resultsCfg.ChunkMaxBytes, resultsCfg.RetentionDays, resultsCfg.CleanupBatchSize, models.metrics)
+		if _, cleanupErr := bindAndCleanupRecoverableResults(ctx, infra.store, result.resultStore, time.Now().UTC(), resultsCfg.CleanupBatchSize); cleanupErr != nil {
+			return rootRuntimeComposition{}, models.redactor.Error(cleanupErr)
+		}
+	}
+	if models.rootIsAgentCLI {
+		return result, nil
+	}
+	var sandboxService *sandboxusecase.Service
+	var codeReaders map[string]port.CodeReader
+	var syntaxEngine port.SyntaxEngine
+	var codeIntelligence port.CodeIntelligence
+	var err error
+	if cfg.Sandbox.Enabled {
+		projects := paths.SandboxProjectRoots
+		if len(projects) == 0 {
+			projects = cfg.Sandbox.Projects
+		}
+		executor, executorErr := fssandbox.New(projects, cfg.Sandbox.MaxOutputBytes)
+		if executorErr != nil {
+			return rootRuntimeComposition{}, models.redactor.Error(fmt.Errorf("initialize filesystem sandbox: %w", executorErr))
+		}
+		executor.WithMetrics(models.metrics)
+		sandboxService, err = sandboxusecase.New(sandboxusecase.Config{
+			AllowedCapabilities: []domain.Capability{domain.CapListRepos, domain.CapListDirectory, domain.CapReadFile, domain.CapListWorktrees},
+			CommandTimeout:      time.Duration(cfg.Sandbox.CommandTimeoutSeconds) * time.Second,
+			MaxOutputBytes:      cfg.Sandbox.MaxOutputBytes,
+		}, sandboxusecase.Dependencies{AuditStore: adaptersqlite.NewSandboxAuditStore(infra.store), Executor: executor})
+		if err != nil {
+			return rootRuntimeComposition{}, models.redactor.Error(fmt.Errorf("initialize sandbox service: %w", err))
+		}
+		if result.resultStore != nil && cfg.CodeIntelligence != nil && cfg.CodeIntelligence.Enabled {
+			codeReaders, syntaxEngine, codeIntelligence, err = composeCodeIntelligence(ctx, cfg, paths, result.resultStore, models.metrics)
+			if err != nil {
+				return rootRuntimeComposition{}, models.redactor.Error(err)
+			}
+		}
+	}
+	var canvasService *canvasusecase.Service
+	if cfg.Canvases.Enabled {
+		canvasCreator := slackadapter.NewCanvasCreator(infra.api, time.Duration(cfg.Canvases.TimeoutSeconds)*time.Second)
+		canvasService, err = canvasusecase.New(canvasusecase.Config{MaxTitleChars: cfg.Canvases.MaxTitleChars, MaxContentChars: cfg.Canvases.MaxContentChars, MaxContentBytes: cfg.Canvases.MaxContentBytes}, canvasusecase.Dependencies{Creator: canvasCreator, Store: adaptersqlite.NewCanvasOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String})
+		if err != nil {
+			return rootRuntimeComposition{}, models.redactor.Error(fmt.Errorf("initialize canvas service: %w", err))
+		}
+	}
+	var generatedFileService *generatedfileusecase.Service
+	if cfg.Exports.Enabled {
+		uploader := slackadapter.NewGeneratedFileUploader(infra.api, time.Duration(cfg.Exports.TimeoutSeconds)*time.Second)
+		generatedFileService, err = generatedfileusecase.New(generatedfileusecase.Config{MaxFilenameChars: cfg.Exports.MaxFilenameChars, MaxContentBytes: cfg.Exports.MaxContentBytes}, generatedfileusecase.Dependencies{Uploader: uploader, Store: adaptersqlite.NewGeneratedFileOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String})
+		if err != nil {
+			return rootRuntimeComposition{}, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
+		}
+	}
+	resultAnalysisComp, resultAnalysisErr := composeResultAnalysis(cfg, models, infra.modelCalls, infra.store)
+	if resultAnalysisErr != nil {
+		return rootRuntimeComposition{}, models.redactor.Error(fmt.Errorf("initialize result analysis: %w", resultAnalysisErr))
+	}
+	if resultAnalysisComp != nil {
+		result.resultAnalysisWorker = resultAnalysisComp.worker
+		go result.resultAnalysisWorker.Run(ctx)
+	}
+	factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(result.resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence).WithMetrics(models.metrics)
+	if resultAnalysisComp != nil {
+		factory = factory.WithResultAnalysis(resultAnalysisComp.service)
+	}
+	if cfg.Orchestration.Workstreams.Enabled {
+		var analysisGate port.AnalysesByWorkstream
+		if resultAnalysisComp != nil {
+			analysisGate = resultAnalysisComp.gate
+		}
+		result.workstreamService, err = composeWorkstream(cfg, paths, infra.store, models.resultPayloadStore, analysisGate)
+		if err != nil {
+			return rootRuntimeComposition{}, models.redactor.Error(err)
+		}
+		factory.WithWorkstreams(result.workstreamService).WithResultLinksEnabled(cfg.Orchestration.ResultHandles.Enabled)
+	}
+	if result.agentBuilderSvc != nil && defs != nil {
+		agentsDir := filepath.Join(paths.StateDir, "agents")
+		if info, statErr := os.Stat(agentsDir); statErr == nil && info.IsDir() {
+			writer, writerErr := filesystem.NewAgentWriter(agentsDir)
+			if writerErr == nil {
+				factory = factory.WithAgentBuilder(result.agentBuilderSvc).WithAgentWriter(writer).WithCurrentDefinitions(defs).WithDraftStore(adaptersqlite.NewAgentDraftStore(infra.store))
+			}
+		}
+	}
+	if infra.publisher != nil && infra.api != nil {
+		factory = factory.WithBuilderLauncher(slackadapter.NewBuilderLauncherPublisherWithStore(infra.api, infra.publisher, models.logger, infra.store, infra.auth.UserID))
+	}
+	result.toolFactory = factory
+	if len(models.preparedAgentTools) > 0 || len(models.preparedWorkflows) > 0 {
+		delegatedGlobalInstruction := ""
+		if models.rootDef != nil {
+			delegatedGlobalInstruction = models.rootDef.EffectiveDelegatedGlobalInstruction()
+		}
+		result.compositeFactory = newCompositeAgentToolFactory(result.toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
+		result.compositeFactory.setChildContextResultStore(result.resultStore)
+		result.toolFactory = result.compositeFactory
+	}
+	if err := composeExternalAgentRuntime(cfg, paths, defs, models, infra, factory, &result); err != nil {
+		return rootRuntimeComposition{}, err
+	}
+	return result, nil
+}
+
+func composeExternalAgentRuntime(cfg config.Config, paths config.Paths, defs *agentdef.Definitions, models runtimeModels, infra *runtimeInfrastructure, factory *toolfactory.Factory, result *rootRuntimeComposition) error {
+	if err := wireDeclarativeTools(factory, models, paths, result.compositeFactory); err != nil {
+		return models.redactor.Error(err)
+	}
+	var err error
+	result.externalSchedules, err = newExternalAgentSchedules()
+	if err != nil {
+		return models.redactor.Error(fmt.Errorf("initialize external-agent schedulers: %w", err))
+	}
+	result.externalJobService, result.notificationWorker, err = newExternalAgentJobService(cfg, models, infra, result.externalSchedules)
+	if err != nil {
+		return models.redactor.Error(fmt.Errorf("initialize external-agent jobs: %w", err))
+	}
+	if result.externalJobService != nil {
+		factory.WithExternalAgentJobs(result.externalJobService)
+		result.activationStore = adaptersqlite.NewExternalAgentJobStore(infra.store)
+		if result.activationStore == nil {
+			return errors.New("initialize external-agent activation store")
+		}
+	}
+	if result.compositeFactory != nil && result.externalJobService != nil {
+		result.compositeFactory.setJobStarter(result.externalJobService)
+		if result.workstreamService != nil {
+			result.compositeFactory.setCompletionBindingResolver(result.workstreamService)
+		}
+	}
+	if defs != nil {
+		if provider, exists := defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
+			resolved, resolveErr := defs.ResolveModel("opencode/smoke")
+			if resolveErr != nil {
+				return models.redactor.Error(fmt.Errorf("resolve OpenCode management profile: %w", resolveErr))
+			}
+			primaryPath, pathErr := managementProbePath(paths.SandboxProjectRoots)
+			if pathErr != nil {
+				return models.redactor.Error(pathErr)
+			}
+			result.toolFactory = &openCodeManagementToolFactory{base: result.toolFactory, runtime: acpclient.NewWithCoordinator(resolved.Command, resolved.Args, models.openCodeCoordinator), manager: opencodemanager.New(resolved.Command), allowedIDs: cfg.OpenCode.Management.AllowedUserIDs, primaryPath: primaryPath, configOptions: domainConfigOptions(resolved), coordinator: models.openCodeCoordinator}
+		}
+	}
+	return nil
+}
+
+func composeCodeIntelligence(ctx context.Context, cfg config.Config, paths config.Paths, resultStore *recoverableresult.Store, metrics port.MetricRecorder) (map[string]port.CodeReader, port.SyntaxEngine, port.CodeIntelligence, error) {
+	codeReaders := make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
+	syntaxReaders := make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
+	for name, root := range paths.SandboxProjectRoots {
+		codeReaders[name] = rangedreader.NewReader(root, cfg.Sandbox.MaxOutputBytes, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithMetrics(metrics)
+		syntaxReaders[name] = rangedreader.NewReader(root, 1<<20, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithPreservedLineEndings().WithMetrics(metrics)
+	}
+	syntaxEngine := goast.New(syntaxReaders).WithMetrics(metrics)
+	if len(cfg.CodeIntelligence.LSPServers) == 0 {
+		return codeReaders, syntaxEngine, nil, nil
+	}
+	candidates := make([]port.ServerCandidate, 0, len(cfg.CodeIntelligence.LSPServers))
+	for _, server := range cfg.CodeIntelligence.LSPServers {
+		candidates = append(candidates, port.ServerCandidate{ID: server.ID, Command: server.Command, Args: server.Args, Languages: server.Languages})
+	}
+	rootList := make([]string, 0, len(paths.SandboxProjectRoots))
+	for _, root := range paths.SandboxProjectRoots {
+		rootList = append(rootList, root)
+	}
+	descriptors, err := lspdiscovery.New(rootList).Discover(ctx, candidates)
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("discover language servers: %w", err)
+	}
+	definitions := make(map[string]config.LSPServerConfig, len(cfg.CodeIntelligence.LSPServers))
+	for _, server := range cfg.CodeIntelligence.LSPServers {
+		definitions[server.ID] = server
+	}
+	servers := make([]lspclient.Server, 0, len(descriptors))
+	for _, descriptor := range descriptors {
+		if descriptor.Status != "available" {
+			continue
+		}
+		definition := definitions[descriptor.ID]
+		servers = append(servers, lspclient.Server{ID: descriptor.ID, Path: descriptor.Path, SHA256: descriptor.BinarySHA256, Args: definition.Args, Languages: definition.Languages})
+	}
+	if len(servers) == 0 {
+		return codeReaders, syntaxEngine, nil, nil
+	}
+	routes := make(map[string][]string, len(cfg.CodeIntelligence.LSPRoutes))
+	for language, route := range cfg.CodeIntelligence.LSPRoutes {
+		routes[language] = append([]string(nil), route.Priority...)
+	}
+	codeIntelligence, err := lspclient.New(lspclient.Config{Servers: servers, Routes: routes,
+		ProjectRoots: paths.SandboxProjectRoots, Readers: syntaxReaders, ResultStore: resultStore, MaxProcesses: cfg.CodeIntelligence.MaxProcesses,
+		InitTimeout:    time.Duration(cfg.CodeIntelligence.InitTimeoutSeconds) * time.Second,
+		RequestTimeout: time.Duration(cfg.CodeIntelligence.RequestTimeoutSeconds) * time.Second})
+	if err != nil {
+		return nil, nil, nil, fmt.Errorf("initialize language server runtime: %w", err)
+	}
+	codeIntelligence.WithMetrics(metrics)
+	return codeReaders, syntaxEngine, codeIntelligence, nil
+}
+
 func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure, composition *runtimeComposition) error {
 	cfg := setup.cfg
 	socket := socketmode.New(infra.api, socketmode.OptionLog(infra.sdkLog))
 	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(infra.auth.UserID, cfg.Slack.StandardAgent.ThreadedDM), models.logger).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs)
 	if composition != nil && composition.agentBuilderSvc != nil && setup.defs != nil && infra.publisher != nil && infra.store != nil {
-		var providerNames []string
-		for name := range setup.defs.Providers {
+		providerNames := make([]string, 0, len(setup.defs.Providers))
+		totalProfiles := 0
+		for name, provider := range setup.defs.Providers {
 			providerNames = append(providerNames, name)
+			totalProfiles += len(provider.Profiles)
 		}
 		sort.Strings(providerNames)
-		var allowedProfiles []slackadapter.BuilderProviderProfile
+		allowedProfiles := make([]slackadapter.BuilderProviderProfile, 0, totalProfiles)
 		for _, name := range providerNames {
 			provider := setup.defs.Providers[name]
-			var profileNames []string
+			profileNames := make([]string, 0, len(provider.Profiles))
 			for profileName := range provider.Profiles {
 				profileNames = append(profileNames, profileName)
 			}

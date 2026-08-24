@@ -430,7 +430,7 @@ func (c *weightedKnowledgeFrameCounter) CountContextFrame(_ context.Context, con
 // identified by id, for weightedKnowledgeFrameCounter to key its weight on.
 func weightedDocumentCard(id string, words int) domain.KnowledgeFrameCard {
 	var b strings.Builder
-	for w := 0; w < words; w++ {
+	for w := range words {
 		fmt.Fprintf(&b, "word%d ", w)
 	}
 	doc := domain.KnowledgeDocumentCard{

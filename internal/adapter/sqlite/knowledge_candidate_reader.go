@@ -233,7 +233,7 @@ func (r *KnowledgeCandidateReader) ReadExact(ctx context.Context, binding domain
 		ORDER BY kind, id
 		LIMIT ?`
 
-	var args []any
+	args := make([]any, 0, 2*len(scopeArgs)+2+len(claimArgs)+1+len(preferenceArgs)+len(params.texts)+1)
 	args = append(args, scopeArgs...)
 	args = append(args, nowUnix, nowUnix)
 	args = append(args, claimArgs...)
@@ -436,7 +436,7 @@ func scanEligibleCandidates(rows *sql.Rows, err error) ([]port.KnowledgeEligible
 	if err != nil {
 		return nil, fmt.Errorf("%w: eligible candidate scan: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var candidates []port.KnowledgeEligibleCandidate
 	for rows.Next() {
 		var candidate port.KnowledgeEligibleCandidate
@@ -452,7 +452,7 @@ func scanEligibleCandidates(rows *sql.Rows, err error) ([]port.KnowledgeEligible
 }
 
 func collectRows(rows *sql.Rows, consume func(scan func(dest ...any) error) error) error {
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		if err := consume(rows.Scan); err != nil {
 			return err

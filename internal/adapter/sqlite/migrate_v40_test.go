@@ -33,7 +33,7 @@ func TestMigrationV40FreshObjectsAndConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 
 	for _, table := range []string{
@@ -201,7 +201,7 @@ func TestMigrationV40TriggersAbortProtectedUpdates(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	now := time.Now().UTC().Unix()
 	hex64 := strings.Repeat("a", 64)
@@ -279,7 +279,7 @@ func TestMigrationV40UpgradePreservesV39State(t *testing.T) {
 	insert := func(statement string, args ...any) {
 		t.Helper()
 		if _, err := raw.ExecContext(t.Context(), statement, args...); err != nil {
-			raw.Close()
+			_ = raw.Close()
 			t.Fatalf("seed v39 row: %v", err)
 		}
 	}
@@ -300,7 +300,7 @@ func TestMigrationV40UpgradePreservesV39State(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upgraded.Close()
+	defer func() { _ = upgraded.Close() }()
 	db := upgraded.DB()
 
 	var version int
@@ -359,7 +359,7 @@ func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := raw.ExecContext(t.Context(), fmt.Sprintf(`PRAGMA user_version = %d`, future)); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -368,7 +368,7 @@ func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
 
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatalf("OpenExisting succeeded for a SchemaVersion=%d binary opening a database claiming v%d", SchemaVersion, future)
 	}
 	var versionError *FutureSchemaError
@@ -382,7 +382,7 @@ func TestMigrationV40CrashRollsBackAndReopens(t *testing.T) {
 	now := time.Now().UTC().UnixNano()
 	if _, err := raw.ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
 		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -399,7 +399,7 @@ func TestMigrationV40CrashRollsBackAndReopens(t *testing.T) {
 	}
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal("OpenExisting succeeded after injected v40 crash")
 	}
 	if err == nil || !strings.Contains(err.Error(), "injected v40 crash") {
@@ -409,7 +409,7 @@ func TestMigrationV40CrashRollsBackAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer check.Close()
+	defer func() { _ = check.Close() }()
 	var version, objects int
 	if err := check.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
@@ -426,7 +426,7 @@ func TestMigrationV40CrashRollsBackAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after crash: %v", err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	if err := reopened.DB().QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("reopened version = %d, %v", version, err)
 	}
@@ -453,7 +453,7 @@ func TestMigrationV40ReopenPreservesRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	var rows int
 	if err := reopened.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM result_analyses`).Scan(&rows); err != nil || rows != 1 {
 		t.Fatalf("reopened result_analyses rows = %d, %v", rows, err)

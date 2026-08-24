@@ -145,7 +145,7 @@ func (p *BlockPublisher) waitForChannel(ctx context.Context, channel *channelPac
 }
 
 func (p *BlockPublisher) postWithRetry(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		callCtx, cancel := slackTimeout(ctx, p.timeout)
 		timestamp, err := p.client.PostBlocks(callCtx, channelID, fallbackText, blocks, metadata, threadTS)
 		cancel()
@@ -161,7 +161,7 @@ func (p *BlockPublisher) postWithRetry(ctx context.Context, channelID, fallbackT
 			return "", err
 		}
 	}
-	return "", errors.New("Slack block response retry exhausted")
+	return "", errors.New("slack block response retry exhausted")
 }
 
 func structuredPartDigest(presentationJSON []byte, partIndex int) string {

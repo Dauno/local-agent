@@ -23,7 +23,7 @@ func TestBindAndCleanupRecoverableResultsPreservesReferencedResult(t *testing.T)
 	if err != nil {
 		t.Fatalf("Create() = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	resultStore := recoverableresult.NewStore(store.DB(), filepath.Join(dir, "recoverable-results"), 1<<20, 4096, 1, 100)
 

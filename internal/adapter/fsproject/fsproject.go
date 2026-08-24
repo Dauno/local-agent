@@ -116,7 +116,7 @@ func (*FS) CreateFile(
 	if err != nil {
 		return false, fmt.Errorf("create managed file %q: %w", path, err)
 	}
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 	if err := contextError(ctx); err != nil {
 		return false, err
 	}
@@ -266,8 +266,7 @@ type stagedFile struct {
 
 func rollbackBatch(committed []stagedFile, cause error) error {
 	var rollbackErrors []error
-	for index := len(committed) - 1; index >= 0; index-- {
-		file := committed[index]
+	for _, file := range slices.Backward(committed) {
 		if !file.original.exists {
 			if err := os.Remove(file.path); err != nil && !errors.Is(err, os.ErrNotExist) {
 				rollbackErrors = append(rollbackErrors, fmt.Errorf("remove new file %q: %w", file.path, err))
@@ -481,7 +480,7 @@ func validGitMarker(marker string, info fs.FileInfo) (bool, error) {
 
 func gitIgnoreCoversEnv(data []byte, entry string) bool {
 	covered := false
-	for _, line := range strings.Split(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
+	for line := range strings.SplitSeq(strings.ReplaceAll(string(data), "\r\n", "\n"), "\n") {
 		line = strings.TrimSpace(line)
 		if line == "" || strings.HasPrefix(line, "#") {
 			continue
@@ -517,7 +516,7 @@ func syncDirectory(path string) error {
 	if err != nil {
 		return err
 	}
-	defer directory.Close()
+	defer func() { _ = directory.Close() }()
 	return directory.Sync()
 }
 

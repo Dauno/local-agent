@@ -546,7 +546,8 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 	}
 	artifactRef := ""
 	uploadState := JobResultUploadNotApplicable
-	if mode == JobResultDeliveryFile {
+	switch mode {
+	case JobResultDeliveryFile:
 		artifactRef = result.DeliveryArtifactRef
 		if artifactRef == "" {
 			artifactRef = result.ArtifactRef
@@ -559,9 +560,9 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 		}
 		uploadState = JobResultUploadPending
 		markdown += fmt.Sprintf(" The complete result was attached as `opencode-%s.md` (%d bytes, SHA-256 `%s`).", job.ID, contentBytes, contentDigest)
-	} else if mode == JobResultDeliveryMarkdown {
+	case JobResultDeliveryMarkdown:
 		if result.ArtifactRef != "" || result.DeliveryArtifactRef != "" {
-			return ExternalAgentJobNotification{}, errors.New("Markdown delivery cannot reference an artifact")
+			return ExternalAgentJobNotification{}, errors.New("markdown delivery cannot reference an artifact")
 		}
 		if activationRequired {
 			// The root activation owns substantive completion prose.
@@ -570,7 +571,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResul
 		} else if result.Text != "" {
 			markdown += "\n\n" + result.Text
 		}
-	} else {
+	default:
 		return ExternalAgentJobNotification{}, fmt.Errorf("unsupported result delivery mode %q", mode)
 	}
 	if !utf8.ValidString(markdown) || strings.TrimSpace(markdown) == "" {
@@ -805,7 +806,7 @@ func ConversationReplyTarget(key ConversationKey) (ReplyTarget, error) {
 	if len(parts) == 4 && parts[2] != "dm" {
 		return ReplyTarget{}, errors.New("job conversation key is malformed")
 	}
-	if len(parts) != 4 && !(len(parts) == 6 && (parts[2] == "dm" || parts[2] == "channel" || parts[2] == "group") && parts[4] == "thread" && parts[5] != "") {
+	if len(parts) != 4 && (len(parts) != 6 || (parts[2] != "dm" && parts[2] != "channel" && parts[2] != "group") || parts[4] != "thread" || parts[5] == "") {
 		return ReplyTarget{}, errors.New("job conversation key is malformed")
 	}
 	target := ReplyTarget{ChannelID: parts[3]}

@@ -26,7 +26,7 @@ func (doctorFixtureJobsChecker) CheckExternalAgentJobs(ctx context.Context, path
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckExternalAgentJobStore(ctx)
 }
 
@@ -35,7 +35,7 @@ func (doctorFixtureJobsChecker) CheckExternalAgentActivationHealth(ctx context.C
 	if err != nil {
 		return domain.ExternalAgentJobActivationHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return NewExternalAgentJobStore(store).ActivationHealth(ctx, time.Now().UTC(), 5*time.Minute)
 }
 
@@ -44,7 +44,7 @@ func (doctorFixtureJobsChecker) CheckExternalAgentResultIdentityHealth(ctx conte
 	if err != nil {
 		return domain.ExternalAgentJobIdentityHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return NewExternalAgentJobStore(store).IdentityHealth(ctx)
 }
 
@@ -58,7 +58,7 @@ func (doctorFixtureRuntimeChecker) CheckSQLiteRuntime(ctx context.Context, path 
 	if err != nil {
 		return domain.SQLiteRuntimeHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckSQLiteRuntime(ctx)
 }
 

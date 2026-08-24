@@ -64,13 +64,11 @@ func TestResultArtifactStoreCreateNoReplaceIsAtomic(t *testing.T) {
 	const writers = 8
 	results := make(chan error, writers)
 	var group sync.WaitGroup
-	for i := 0; i < writers; i++ {
-		group.Add(1)
-		go func() {
-			defer group.Done()
+	for range writers {
+		group.Go(func() {
 			_, err := store.Put(context.Background(), "same-job", "complete result")
 			results <- err
-		}()
+		})
 	}
 	group.Wait()
 	close(results)
@@ -368,11 +366,11 @@ func TestResultArtifactChunkRejectsMisalignedRequestRanges(t *testing.T) {
 		}
 		return err
 	}
-	read(artifact.Bytes+1, 4)
-	read(1, 1)
-	read(2, 4)
-	read(3, 4)
-	read(4, 4)
+	_ = read(artifact.Bytes+1, 4)
+	_ = read(1, 1)
+	_ = read(2, 4)
+	_ = read(3, 4)
+	_ = read(4, 4)
 }
 
 func TestResultArtifactStoreRejectsChunkBindingAndTampering(t *testing.T) {

@@ -17,7 +17,7 @@ func openRegularNoFollow(baseDir, name string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(dirFD)
+	defer func() { _ = unix.Close(dirFD) }()
 
 	fd, err := unix.Openat(dirFD, name, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_NOFOLLOW, 0)
 	if err != nil {
@@ -44,7 +44,7 @@ func removeFileNoFollow(baseDir, name string) error {
 	if err != nil {
 		return err
 	}
-	defer unix.Close(dirFD)
+	defer func() { _ = unix.Close(dirFD) }()
 	return unix.Unlinkat(dirFD, name, 0)
 }
 

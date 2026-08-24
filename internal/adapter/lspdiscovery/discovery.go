@@ -119,7 +119,7 @@ func (d *Discovery) discoverOne(ctx context.Context, candidate port.ServerCandid
 	outBytes, readErr := io.ReadAll(stdout)
 	stdoutDone := make(chan struct{})
 	go func() {
-		io.ReadAll(stderr)
+		_, _ = io.ReadAll(stderr)
 		close(stdoutDone)
 	}()
 	<-stdoutDone
@@ -163,7 +163,7 @@ func computeSHA256(path string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	h := sha256.New()
 	if _, err := io.Copy(h, f); err != nil {
 		return "", err

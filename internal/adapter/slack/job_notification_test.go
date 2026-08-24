@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,13 +91,12 @@ func TestJobNotificationHistoryRejectsPartialEvidenceBeforeRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{{Msg: slackapi.Msg{
+	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{{
 		User: "BOT", Timestamp: "1710000000.000001", Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: map[string]any{
 			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
 			"renderer_version": notification.RendererVersion, "content_sha256": notification.NotificationSHA256,
 			"part_sha256": contentSHA256(notification.CanonicalMarkdown), "part_index": 1, "part_count": 2,
-		}},
-	}}}}, "BOT", 0, nil, false)
+		}}}}}, "BOT", 0, nil, false)
 	_, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
 	if err == nil || found {
 		t.Fatalf("partial evidence found=%v err=%v", found, err)
@@ -124,16 +124,14 @@ func TestFileShareEvidenceRequiresOriginalThread(t *testing.T) {
 	notification := domain.ExternalAgentJobNotification{
 		SlackFileID: "F123", Target: domain.ReplyTarget{ChannelID: "C123", ThreadTS: "1710000000.000001"},
 	}
-	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{{Msg: slackapi.Msg{
-		User: "BOT", Timestamp: "1710000000.000002", Files: []slackapi.File{{ID: "F999"}},
-	}}}}, "BOT", 0, nil, false)
+	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{{
+		User: "BOT", Timestamp: "1710000000.000002", Files: []slackapi.File{{ID: "F999"}}}}}, "BOT", 0, nil, false)
 	shared, err := NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, nil).fileSharedInThread(t.Context(), notification)
 	if err != nil || shared {
 		t.Fatalf("foreign file share shared=%v err=%v", shared, err)
 	}
-	history.client = &jobNotificationHistoryRecorder{messages: []slackapi.Message{{Msg: slackapi.Msg{
-		User: "BOT", Timestamp: "1710000000.000002", Files: []slackapi.File{{ID: "F123"}},
-	}}}}
+	history.client = &jobNotificationHistoryRecorder{messages: []slackapi.Message{{
+		User: "BOT", Timestamp: "1710000000.000002", Files: []slackapi.File{{ID: "F123"}}}}}
 	shared, err = NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, nil).fileSharedInThread(t.Context(), notification)
 	if err != nil || !shared {
 		t.Fatalf("matching file share shared=%v err=%v", shared, err)
@@ -417,10 +415,9 @@ func TestJobNotificationReconcileAcceptsPreV32MarkdownEvidence(t *testing.T) {
 		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
 	notification.UploadState = domain.JobResultUploadNotApplicable
 	notification.SlackFileID = ""
-	message := slackapi.Message{Msg: slackapi.Msg{
+	message := slackapi.Message{
 		User: "BOT", Timestamp: "1710000000.000001",
-		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)},
-	}}
+		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)}}
 	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{message}}, "BOT", 0, nil, false)
 	got, found, err := NewJobNotificationPublisher(nil, history).Reconcile(t.Context(), notification)
 	if err != nil || !found || got != "1710000000.000001" {
@@ -440,10 +437,9 @@ func TestJobNotificationReconcileAcceptsPreV32FileEvidence(t *testing.T) {
 	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
 	notification := preV32DeliveryNotification(domain.JobResultDeliveryFile,
 		"OpenCode job `job-1` completed. The complete result was attached.", "file bytes", "job-1-delivery.result")
-	message := slackapi.Message{Msg: slackapi.Msg{
+	message := slackapi.Message{
 		User: "BOT", Timestamp: "1710000000.000001",
-		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)},
-	}}
+		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)}}
 	history := newHistoryReader(&jobNotificationHistoryRecorder{messages: []slackapi.Message{message}}, "BOT", 0, nil, false)
 	got, found, err := NewDurableJobNotificationPublisher(nil, history, nil, nil, nil, fileClient).Reconcile(t.Context(), notification)
 	if err != nil || !found || got != "1710000000.000001" {
@@ -458,10 +454,9 @@ func TestJobNotificationReconcileFailsClosedOnEvidenceIdentityMismatch(t *testin
 	notification.SlackFileID = ""
 	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
 	makeMessage := func(payload map[string]any) slackapi.Message {
-		return slackapi.Message{Msg: slackapi.Msg{
+		return slackapi.Message{
 			User: "BOT", Timestamp: "1710000000.000001",
-			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload},
-		}}
+			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload}}
 	}
 	// A v32 payload whose notification_sha256 mismatches stays inconsistent
 	// even when its content_sha256 matches the legacy content identity.
@@ -506,9 +501,7 @@ func v32EvidencePayload(notification domain.ExternalAgentJobNotification) map[st
 // tamperEvidencePayload returns a copy of the payload with one value replaced.
 func tamperEvidencePayload(payload map[string]any, key string, value any) map[string]any {
 	clone := make(map[string]any, len(payload)+1)
-	for name, existing := range payload {
-		clone[name] = existing
-	}
+	maps.Copy(clone, payload)
 	clone[key] = value
 	return clone
 }
@@ -518,9 +511,7 @@ func tamperEvidencePayload(payload map[string]any, key string, value any) map[st
 // result_bytes); the other identity fields are removed.
 func onlyIdentityField(payload map[string]any, keep string) map[string]any {
 	clone := make(map[string]any, len(payload))
-	for name, existing := range payload {
-		clone[name] = existing
-	}
+	maps.Copy(clone, payload)
 	for _, field := range []string{"notification_sha256", "notification_bytes", "result_sha256", "result_bytes", "content_sha256"} {
 		if field != keep {
 			delete(clone, field)
@@ -541,10 +532,9 @@ func TestJobNotificationReconcileRequiresAllIdentityFields(t *testing.T) {
 	notification.UploadState = domain.JobResultUploadNotApplicable
 	notification.SlackFileID = ""
 	makeMessage := func(payload map[string]any) slackapi.Message {
-		return slackapi.Message{Msg: slackapi.Msg{
+		return slackapi.Message{
 			User: "BOT", Timestamp: "1710000000.000001",
-			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload},
-		}}
+			Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: payload}}
 	}
 	v32 := v32EvidencePayload(notification)
 	legacy := preV32EvidencePayload(notification)
@@ -637,7 +627,7 @@ func markdownTestNotification(t *testing.T, wantParts int) domain.ExternalAgentJ
 }
 
 func jobEvidenceMessage(notification domain.ExternalAgentJobNotification, index, count int, part, timestamp string) slackapi.Message {
-	return slackapi.Message{Msg: slackapi.Msg{
+	return slackapi.Message{
 		User: "BOT", Timestamp: timestamp,
 		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: map[string]any{
 			"job_id": notification.JobID, "status_revision": notification.StatusRevision, "kind": notification.Kind,
@@ -645,8 +635,7 @@ func jobEvidenceMessage(notification domain.ExternalAgentJobNotification, index,
 			"notification_bytes": notification.NotificationBytes, "result_sha256": notification.ResultSHA256,
 			"result_bytes": notification.ResultBytes,
 			"part_sha256":  contentSHA256(part), "part_index": index, "part_count": count,
-		}},
-	}}
+		}}}
 }
 
 func fileTestNotification(content string, state domain.JobResultUploadState, fileID string) domain.ExternalAgentJobNotification {

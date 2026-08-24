@@ -71,7 +71,7 @@ func tableHasColumn(ctx context.Context, tx *sql.Tx, table, column string) (bool
 	if err != nil {
 		return false, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var cid int
 		var name, columnType string

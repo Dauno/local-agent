@@ -25,14 +25,14 @@ const contextPrivacyNotice = `Contexto Slack opcional:
 `
 
 func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io.Writer) error {
-	fmt.Fprintln(output, "[1/9] Creando artefactos locales faltantes")
+	_, _ = fmt.Fprintln(output, "[1/9] Creando artefactos locales faltantes")
 	snapshot, existingSecrets, err := backend.PrepareSetup(ctx)
 	if err != nil {
 		return fmt.Errorf("initialize local artifacts: %w", err)
 	}
 	cfg := snapshot.Config
 
-	fmt.Fprintln(output, "\n[2/9] Identidad de la app Slack")
+	_, _ = fmt.Fprintln(output, "\n[2/9] Identidad de la app Slack")
 	agentName := "root_agent"
 	appName, err := prompt.Text("Nombre de la app Slack", cfg.Slack.AppName, true)
 	if err != nil {
@@ -44,33 +44,33 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 	}
 	identity := bootstrap.Identity{AgentName: agentName, SlackAppName: appName, SlackBotDisplayName: botName}
 
-	fmt.Fprintln(output, "\n[3/9] Crear la app Slack desde el manifest")
+	_, _ = fmt.Fprintln(output, "\n[3/9] Crear la app Slack desde el manifest")
 	creationURL, err := manifest.RenderCreationURL(manifest.Identity{AppName: appName, BotDisplayName: botName})
 	if err != nil {
 		return err
 	}
-	fmt.Fprintf(output, "Abre esta URL para crear la app con el manifest generado:\n%s\n", creationURL)
-	fmt.Fprintln(output, "Manifest: https://api.slack.com/reference/manifests")
-	fmt.Fprintln(output, "Socket Mode: https://api.slack.com/apis/connections/socket")
-	fmt.Fprintln(output, "Tokens: https://api.slack.com/authentication/token-types#app")
-	fmt.Fprintln(output, "El manifest configura Socket Mode, eventos y scopes. El token xapp- con connections:write se crea manualmente.")
+	_, _ = fmt.Fprintf(output, "Abre esta URL para crear la app con el manifest generado:\n%s\n", creationURL)
+	_, _ = fmt.Fprintln(output, "Manifest: https://api.slack.com/reference/manifests")
+	_, _ = fmt.Fprintln(output, "Socket Mode: https://api.slack.com/apis/connections/socket")
+	_, _ = fmt.Fprintln(output, "Tokens: https://api.slack.com/authentication/token-types#app")
+	_, _ = fmt.Fprintln(output, "El manifest configura Socket Mode, eventos y scopes. El token xapp- con connections:write se crea manualmente.")
 
-	fmt.Fprintln(output, "\n[4/9] Instalar la app y configurar el token del bot")
-	fmt.Fprintln(output, "En OAuth & Permissions, instala o reinstala la app y copia el Bot User OAuth Token.")
+	_, _ = fmt.Fprintln(output, "\n[4/9] Instalar la app y configurar el token del bot")
+	_, _ = fmt.Fprintln(output, "En OAuth & Permissions, instala o reinstala la app y copia el Bot User OAuth Token.")
 	botToken, err := prompt.Secret("SLACK_BOT_TOKEN", existingSecrets.SlackBotToken, "xoxb-")
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintln(output, "\n[5/9] Crear el token de Socket Mode")
-	fmt.Fprintln(output, "En Basic Information, crea un app-level token con connections:write.")
+	_, _ = fmt.Fprintln(output, "\n[5/9] Crear el token de Socket Mode")
+	_, _ = fmt.Fprintln(output, "En Basic Information, crea un app-level token con connections:write.")
 	appToken, err := prompt.Secret("SLACK_APP_TOKEN", existingSecrets.SlackAppToken, "xapp-")
 	if err != nil {
 		return err
 	}
 
-	fmt.Fprintln(output, "\n[6/9] Restringir quién puede usar el bot")
-	fmt.Fprintln(output, "Recomendación: comienza con tu Slack user ID. Para encontrarlo, abre tu perfil, More y Copy member ID.")
+	_, _ = fmt.Fprintln(output, "\n[6/9] Restringir quién puede usar el bot")
+	_, _ = fmt.Fprintln(output, "Recomendación: comienza con tu Slack user ID. Para encontrarlo, abre tu perfil, More y Copy member ID.")
 	var access bootstrap.AccessControl
 	for {
 		access.AllowedUserIDs, err = prompt.CSV("Slack user IDs permitidos (separados por coma)", cfg.Slack.AllowedUserIDs)
@@ -89,7 +89,7 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 		if err != nil {
 			return err
 		}
-		fmt.Fprint(output, contextPrivacyNotice)
+		_, _ = fmt.Fprint(output, contextPrivacyNotice)
 		access.ContextEnabled, err = prompt.Confirm("Habilitar enriquecimiento de contexto Slack", cfg.Slack.Context.Enabled)
 		if err != nil {
 			return err
@@ -103,20 +103,20 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 		candidate.Slack.AllowedChannelIDs = access.AllowedChannelIDs
 		candidate.Slack.Context.Enabled = access.ContextEnabled
 		if err := config.Validate(candidate); err != nil {
-			fmt.Fprintf(output, "Configuración inválida: %v\nVuelve a ingresar el control de acceso.\n", err)
+			_, _ = fmt.Fprintf(output, "Configuración inválida: %v\nVuelve a ingresar el control de acceso.\n", err)
 			continue
 		}
 		break
 	}
 
-	fmt.Fprintln(output, "\n[7/9] Configurar la clave del modelo")
+	_, _ = fmt.Fprintln(output, "\n[7/9] Configurar la clave del modelo")
 	modelAPIKeyEnv := snapshot.ModelAPIKeyEnv
 	if !snapshot.ModelAPIKeyEnvResolved {
 		modelAPIKeyEnv = bootstrap.DefaultModelAPIKeyEnv
 	}
 	modelKey := ""
 	if modelAPIKeyEnv == "" {
-		fmt.Fprintln(output, "El proveedor raíz no requiere una clave de API de modelo.")
+		_, _ = fmt.Fprintln(output, "El proveedor raíz no requiere una clave de API de modelo.")
 	} else {
 		modelKey, err = prompt.Secret(modelAPIKeyEnv, existingSecrets.ModelAPIKey, "")
 		if err != nil {
@@ -125,34 +125,34 @@ func runWizard(ctx context.Context, backend Backend, prompt *Prompter, output io
 	}
 	secrets := bootstrap.Secrets{ModelAPIKey: modelKey, SlackBotToken: botToken, SlackAppToken: appToken}
 
-	fmt.Fprintln(output, "\n[8/9] Confirmar cambios")
-	fmt.Fprintf(output, "Agente: %s\nApp Slack: %s\nBot visible: %s\n", agentName, appName, botName)
-	fmt.Fprintf(output, "Permitir todos: %t\nUsuarios: %s\nTeams: %s\nCanales: %s\nContexto Slack: %t\n",
+	_, _ = fmt.Fprintln(output, "\n[8/9] Confirmar cambios")
+	_, _ = fmt.Fprintf(output, "Agente: %s\nApp Slack: %s\nBot visible: %s\n", agentName, appName, botName)
+	_, _ = fmt.Fprintf(output, "Permitir todos: %t\nUsuarios: %s\nTeams: %s\nCanales: %s\nContexto Slack: %t\n",
 		access.AllowAllUsers, displayList(access.AllowedUserIDs), displayList(access.AllowedTeamIDs), displayList(access.AllowedChannelIDs), access.ContextEnabled)
 	if access.ContextEnabled {
-		fmt.Fprintln(output, "Reinstala la app Slack para conceder users:read antes de ejecutar local-agent run.")
+		_, _ = fmt.Fprintln(output, "Reinstala la app Slack para conceder users:read antes de ejecutar local-agent run.")
 	}
 	if modelAPIKeyEnv != "" {
-		fmt.Fprintf(output, "%s: %s\n", modelAPIKeyEnv, secure.Mask(modelKey))
+		_, _ = fmt.Fprintf(output, "%s: %s\n", modelAPIKeyEnv, secure.Mask(modelKey))
 	}
-	fmt.Fprintf(output, "SLACK_BOT_TOKEN: %s\nSLACK_APP_TOKEN: %s\n", secure.Mask(botToken), secure.Mask(appToken))
-	fmt.Fprint(output, privacyNotice)
+	_, _ = fmt.Fprintf(output, "SLACK_BOT_TOKEN: %s\nSLACK_APP_TOKEN: %s\n", secure.Mask(botToken), secure.Mask(appToken))
+	_, _ = fmt.Fprint(output, privacyNotice)
 	confirmed, err := prompt.Confirm("Escribir la configuración confirmada", false)
 	if err != nil {
 		return err
 	}
 	if !confirmed {
-		fmt.Fprintln(output, "Cambios cancelados. Los artefactos base creados en el paso 1 se conservan.")
+		_, _ = fmt.Fprintln(output, "Cambios cancelados. Los artefactos base creados en el paso 1 se conservan.")
 		return nil
 	}
 	if err := backend.ApplySetup(ctx, snapshot, identity, access, secrets); err != nil {
 		return fmt.Errorf("apply confirmed setup: %w", err)
 	}
 
-	fmt.Fprintln(output, "\n[9/9] Próximos pasos")
-	fmt.Fprintln(output, "local-agent doctor")
-	fmt.Fprintln(output, "local-agent doctor --live")
-	fmt.Fprintln(output, "local-agent run")
+	_, _ = fmt.Fprintln(output, "\n[9/9] Próximos pasos")
+	_, _ = fmt.Fprintln(output, "local-agent doctor")
+	_, _ = fmt.Fprintln(output, "local-agent doctor --live")
+	_, _ = fmt.Fprintln(output, "local-agent run")
 	return nil
 }
 

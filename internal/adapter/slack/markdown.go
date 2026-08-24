@@ -464,9 +464,10 @@ func markdownSafeCuts(runes []rune) []bool {
 	for index := 0; index < len(runes); {
 		if linkDepth > 0 {
 			safe[index+1] = false
-			if runes[index] == '(' {
+			switch runes[index] {
+			case '(':
 				linkDepth++
-			} else if runes[index] == ')' {
+			case ')':
 				linkDepth--
 				if linkDepth == 0 {
 					safe[index+1] = true
@@ -524,7 +525,7 @@ func isTableSeparator(line string) bool {
 	if trimmed == "" {
 		return false
 	}
-	for _, cell := range strings.Split(trimmed, "|") {
+	for cell := range strings.SplitSeq(trimmed, "|") {
 		cell = strings.TrimSpace(cell)
 		cell = strings.TrimPrefix(cell, ":")
 		cell = strings.TrimSuffix(cell, ":")
@@ -551,11 +552,11 @@ func splitLinesKeepEnd(text string) []string {
 }
 
 func splitLineEnding(line string) (string, string) {
-	if strings.HasSuffix(line, "\r\n") {
-		return strings.TrimSuffix(line, "\r\n"), "\r\n"
+	if before, ok := strings.CutSuffix(line, "\r\n"); ok {
+		return before, "\r\n"
 	}
-	if strings.HasSuffix(line, "\n") {
-		return strings.TrimSuffix(line, "\n"), "\n"
+	if before, ok := strings.CutSuffix(line, "\n"); ok {
+		return before, "\n"
 	}
 	return line, ""
 }

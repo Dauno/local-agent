@@ -178,7 +178,7 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 	if err != nil {
 		return nil, fmt.Errorf("fetch events: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	loadedEvents, err := scanEvents(rows, time.Time{})
 	if err != nil {
@@ -219,7 +219,7 @@ func (s *AdkSessionService) LoadEventRange(ctx context.Context, appName, userID,
 	if err != nil {
 		return nil, fmt.Errorf("fetch event range: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	loadedEvents, err := scanEventsOrdered(rows, time.Time{}, false)
 	if err != nil {
 		return nil, err
@@ -314,7 +314,7 @@ func (s *AdkSessionService) List(ctx context.Context, req *adksession.ListReques
 	if err != nil {
 		return nil, fmt.Errorf("list sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var sessions []adksession.Session
 	for rows.Next() {
@@ -351,7 +351,7 @@ func (s *AdkSessionService) RootSessionProviderFamilies(ctx context.Context) (ma
 	if err != nil {
 		return nil, fmt.Errorf("list session provider families: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	families := make(map[string]string)
 	for rows.Next() {

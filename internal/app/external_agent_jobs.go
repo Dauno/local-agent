@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -187,12 +188,7 @@ func (d *acpJobDispatcher) materializeNativeResult(ctx context.Context, job doma
 }
 
 func hasArtifactAvailability(values []domain.ResultAvailability) bool {
-	for _, value := range values {
-		if value == domain.ResultAvailabilityPrivateArtifact {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, domain.ResultAvailabilityPrivateArtifact)
 }
 
 // normalizeResultText applies the host redactor and domain control
@@ -406,7 +402,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		PollInterval:           time.Second,
 		Concurrency:            cfg.ACP.WorkerConcurrency,
 		MaxAttempts:            2,
-		ProgressWarningSeconds: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
+		ProgressWarningTimeout: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
 	}, externalagent.Dependencies{
 		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
 			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,

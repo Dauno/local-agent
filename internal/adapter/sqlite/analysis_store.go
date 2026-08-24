@@ -236,7 +236,7 @@ func (s *AnalysisStore) ListByWorkstream(ctx context.Context, workstreamID, acto
 	if err != nil {
 		return nil, wrapAnalysisCanceled(err, fmt.Errorf("%w: list analyses by workstream: %v", domain.ErrAnalysisUnavailable, err))
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []port.AnalysisRecord
 	for rows.Next() {
@@ -270,7 +270,7 @@ func (s *AnalysisStore) ListActive(ctx context.Context, afterAnalysisID string, 
 	if err != nil {
 		return nil, wrapAnalysisCanceled(err, fmt.Errorf("%w: list active analyses: %v", domain.ErrAnalysisUnavailable, err))
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var records []port.AnalysisRecord
 	for rows.Next() {

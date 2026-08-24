@@ -112,7 +112,7 @@ func (p *StandardPublisher) UpdateProgress(ctx context.Context, operation domain
 		return err
 	}
 	if operation.MessageTS == "" {
-		return errors.New("Slack progress message timestamp is required")
+		return errors.New("slack progress message timestamp is required")
 	}
 	markdown, err := p.progressMarkdown(operation.State)
 	if err != nil {
@@ -158,10 +158,10 @@ func (p *StandardPublisher) RecoverProgress(ctx context.Context, operation domai
 
 func (p *StandardPublisher) PublishSuggestedPrompts(ctx context.Context, target domain.ReplyTarget, deliveryID string, prompts []string) (port.PublishedResponse, error) {
 	if p == nil || p.client == nil {
-		return port.PublishedResponse{}, errors.New("Slack standard publisher is required")
+		return port.PublishedResponse{}, errors.New("slack standard publisher is required")
 	}
 	if target.ChannelID == "" || target.ThreadTS == "" || deliveryID == "" || len(prompts) == 0 {
-		return port.PublishedResponse{}, errors.New("Slack suggested prompt identity and content are required")
+		return port.PublishedResponse{}, errors.New("slack suggested prompt identity and content are required")
 	}
 	var text strings.Builder
 	text.WriteString("**Prueba con una de estas solicitudes:**")
@@ -171,7 +171,7 @@ func (p *StandardPublisher) PublishSuggestedPrompts(ctx context.Context, target 
 	}
 	markdown := neutralizeUnsafeControls(text.String())
 	if len([]rune(markdown)) > SlackMarkdownChunkRunes {
-		return port.PublishedResponse{}, errors.New("Slack suggested prompts exceed one message")
+		return port.PublishedResponse{}, errors.New("slack suggested prompts exceed one message")
 	}
 	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
@@ -185,10 +185,10 @@ func (p *StandardPublisher) PublishSuggestedPrompts(ctx context.Context, target 
 
 func (p *StandardPublisher) PublishOnboarding(ctx context.Context, target domain.ReplyTarget, request port.OnboardingPublishRequest) (port.PublishedResponse, error) {
 	if p == nil || p.blockClient == nil {
-		return port.PublishedResponse{}, errors.New("Slack onboarding publisher is required")
+		return port.PublishedResponse{}, errors.New("slack onboarding publisher is required")
 	}
 	if target.ChannelID == "" || request.DeliveryID == "" || !domain.PlausibleUserID(request.Actor) {
-		return port.PublishedResponse{}, errors.New("Slack onboarding identity is required")
+		return port.PublishedResponse{}, errors.New("slack onboarding identity is required")
 	}
 	if err := validateOnboardingPrompts(request.SuggestedPrompts); err != nil {
 		return port.PublishedResponse{}, err
@@ -218,17 +218,17 @@ func (p *StandardPublisher) PublishOnboarding(ctx context.Context, target domain
 		return port.PublishedResponse{}, fmt.Errorf("publish Slack onboarding: %w", err)
 	}
 	if timestamp == "" {
-		return port.PublishedResponse{}, errors.New("Slack onboarding publisher returned no timestamp")
+		return port.PublishedResponse{}, errors.New("slack onboarding publisher returned no timestamp")
 	}
 	return port.PublishedResponse{LastMessageTS: timestamp}, nil
 }
 
 func (p *StandardPublisher) RecoverOnboarding(ctx context.Context, target domain.ReplyTarget, deliveryID string) (port.PublishedResponse, bool, error) {
 	if p == nil || p.client == nil {
-		return port.PublishedResponse{}, false, errors.New("Slack onboarding recovery client is required")
+		return port.PublishedResponse{}, false, errors.New("slack onboarding recovery client is required")
 	}
 	if target.ChannelID == "" || deliveryID == "" {
-		return port.PublishedResponse{}, false, errors.New("Slack onboarding recovery identity is required")
+		return port.PublishedResponse{}, false, errors.New("slack onboarding recovery identity is required")
 	}
 	callCtx, cancel := slackTimeout(ctx, p.timeout)
 	defer cancel()
@@ -263,11 +263,11 @@ func onboardingMetadata(deliveryID string) slackapi.SlackMetadata {
 
 func validateOnboardingPrompts(prompts []string) error {
 	if len(prompts) > 5 {
-		return errors.New("Slack onboarding supports at most five suggested prompts")
+		return errors.New("slack onboarding supports at most five suggested prompts")
 	}
 	for index, prompt := range prompts {
 		if strings.TrimSpace(prompt) == "" || strings.ContainsAny(prompt, "\r\n\x00") || len([]rune(prompt)) > 200 {
-			return fmt.Errorf("Slack onboarding prompt %d is invalid", index)
+			return fmt.Errorf("slack onboarding prompt %d is invalid", index)
 		}
 	}
 	return nil
@@ -275,10 +275,10 @@ func validateOnboardingPrompts(prompts []string) error {
 
 func (p *StandardPublisher) validateProgress(operation domain.ProgressOperation) error {
 	if p == nil || p.client == nil {
-		return errors.New("Slack standard publisher is required")
+		return errors.New("slack standard publisher is required")
 	}
 	if p.botUserID == "" || operation.ID == "" || operation.ChannelID == "" || operation.ThreadTS == "" {
-		return errors.New("Slack progress identity is required")
+		return errors.New("slack progress identity is required")
 	}
 	if p.progressLabel(operation.State) == "" {
 		return fmt.Errorf("unsupported Slack progress state %q", operation.State)
@@ -340,7 +340,7 @@ func (p *StandardPublisher) progressMarkdown(state domain.ProgressState) (string
 	}
 	markdown := neutralizeUnsafeControls(label)
 	if len([]rune(markdown)) > domain.ProgressLabelMaxRunes {
-		return "", fmt.Errorf("Slack progress label exceeds %d Unicode code points", domain.ProgressLabelMaxRunes)
+		return "", fmt.Errorf("slack progress label exceeds %d Unicode code points", domain.ProgressLabelMaxRunes)
 	}
 	return markdown, nil
 }
@@ -457,13 +457,13 @@ func (p *StandardPublisher) RecoverIncremental(ctx context.Context, operation do
 
 func (p *StandardPublisher) validateIncremental(operation domain.IncrementalOperation, requireMessage bool) error {
 	if p == nil || p.client == nil || p.botUserID == "" {
-		return errors.New("Slack standard publisher is required")
+		return errors.New("slack standard publisher is required")
 	}
 	if operation.ID == "" || operation.ChannelID == "" || operation.ThreadTS == "" || operation.RendererVersion != standardIncrementalRenderer {
-		return errors.New("Slack incremental delivery identity is invalid")
+		return errors.New("slack incremental delivery identity is invalid")
 	}
 	if requireMessage && operation.MessageTS == "" {
-		return errors.New("Slack incremental message timestamp is required")
+		return errors.New("slack incremental message timestamp is required")
 	}
 	return nil
 }
@@ -478,7 +478,7 @@ func incrementalMetadata(operation domain.IncrementalOperation) slackapi.SlackMe
 func incrementalMarkdown(text string) (string, error) {
 	markdown := neutralizeUnsafeControls(text)
 	if strings.TrimSpace(markdown) == "" {
-		return "", errors.New("Slack incremental text is required")
+		return "", errors.New("slack incremental text is required")
 	}
 	if len([]rune(markdown)) > SlackMarkdownChunkRunes {
 		return "", fmt.Errorf("%w: Slack incremental text exceeds %d Unicode code points", port.ErrIncrementalTextTooLong, SlackMarkdownChunkRunes)

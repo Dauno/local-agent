@@ -155,7 +155,7 @@ func TestBuildManifestRejectsOversizedSourceBeforeAnyReadOrModelCall(t *testing.
 
 func repeatWord(word string, n int) string {
 	out := make([]byte, 0, len(word)*n)
-	for i := 0; i < n; i++ {
+	for range n {
 		out = append(out, word...)
 	}
 	return string(out)

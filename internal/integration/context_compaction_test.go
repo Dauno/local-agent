@@ -24,7 +24,7 @@ func TestContextCompactionLargeSessionPreservesActiveProtocolAndReloadsSummary(t
 	}
 	projector.SetSummaryStore(store)
 	contents := make([]domain.Content, 0, 663)
-	for index := 0; index < 331; index++ {
+	for range 331 {
 		contents = append(contents,
 			domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "user turn"}}},
 			domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "assistant turn"}}})

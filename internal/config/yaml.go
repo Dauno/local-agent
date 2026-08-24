@@ -7,6 +7,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -345,18 +346,18 @@ func Save(path string, cfg Config) error {
 		return fmt.Errorf("save configuration %q: create temporary file: %w", path, err)
 	}
 	temporaryPath := temporary.Name()
-	defer os.Remove(temporaryPath)
+	defer func() { _ = os.Remove(temporaryPath) }()
 
 	if err := temporary.Chmod(mode); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return fmt.Errorf("save configuration %q: set file permissions: %w", path, err)
 	}
 	if _, err := temporary.Write(data); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return fmt.Errorf("save configuration %q: write temporary file: %w", path, err)
 	}
 	if err := temporary.Sync(); err != nil {
-		temporary.Close()
+		_ = temporary.Close()
 		return fmt.Errorf("save configuration %q: sync temporary file: %w", path, err)
 	}
 	if err := temporary.Close(); err != nil {
@@ -521,13 +522,7 @@ func removeMappingEntries(mapping *yaml.Node, keys ...string) {
 	keep := mapping.Content[:0]
 	for index := 0; index+1 < len(mapping.Content); index += 2 {
 		key := mapping.Content[index]
-		remove := false
-		for _, candidate := range keys {
-			if key.Value == candidate {
-				remove = true
-				break
-			}
-		}
+		remove := slices.Contains(keys, key.Value)
 		if remove {
 			continue
 		}

@@ -44,7 +44,7 @@ func TestCheckRecoverableReferenceHealthReportsBoundedCountsWithNoDangling(t *te
 	if err != nil {
 		t.Fatalf("Create() = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ref := strings.Repeat("b", 64)
 	seedRecoverableResultRow(t, store, ref)
@@ -71,7 +71,7 @@ func TestCheckRecoverableReferenceHealthDetectsDanglingRef(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	seedContinuityCapsuleRow(t, store, "session-1")
 	seedRecoverableResultRefRow(t, store, strings.Repeat("c", 64), recoverableRefOwnerKindCapsule, "session-1")
@@ -96,7 +96,7 @@ func TestCheckRecoverableReferenceHealthDetectsDanglingOwner(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	ref := strings.Repeat("d", 64)
 	seedRecoverableResultRow(t, store, ref)

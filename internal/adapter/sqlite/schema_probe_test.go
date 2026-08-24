@@ -64,7 +64,7 @@ func seedActivation(t *testing.T, db execer, jobID, activationID, terminalStatus
 
 func TestSchemaProbeCurrentVersionReadsHeader(t *testing.T) {
 	path, raw := createSchemaAtVersion(t, 33)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	current, err := FileSchemaProbe{}.CurrentVersion(context.Background(), path)
 	if err != nil || current != 33 {
 		t.Fatalf("current=%d err=%v, want 33", current, err)
@@ -73,7 +73,7 @@ func TestSchemaProbeCurrentVersionReadsHeader(t *testing.T) {
 
 func TestSchemaProbeReadRolloutStateRoundTrip(t *testing.T) {
 	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	seedRolloutKey(t, raw, rollout.KeyBaseline, "jobs=3;activations=5")
 	seedRolloutKey(t, raw, rollout.KeyCutoff, "12345")
 	seedRolloutKey(t, raw, rollout.KeyBackupPath, "/tmp/backup.db")
@@ -143,7 +143,7 @@ func TestSchemaProbeReadRolloutStateMalformedValuesStayInvalid(t *testing.T) {
 	for _, testCase := range cases {
 		path, raw := createSchemaAtVersion(t, 41)
 		seedRolloutKey(t, raw, testCase.key, testCase.value)
-		raw.Close()
+		_ = raw.Close()
 		state, err := FileSchemaProbe{}.ReadRolloutState(context.Background(), path)
 		if err != nil {
 			t.Fatalf("%s: %v", testCase.key, err)
@@ -157,7 +157,7 @@ func TestSchemaProbeReadRolloutStateMalformedValuesStayInvalid(t *testing.T) {
 func TestSchemaProbeCaptureIdentityBaselineCountsCarveOutFields(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 41)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 
 	baseline, err := FileSchemaProbe{}.CaptureIdentityBaseline(ctx, path)
 	if err != nil || baseline.JobsCompletedWithoutResultIdentity != 0 || baseline.ActivationsWithoutContent != 0 {
@@ -180,7 +180,7 @@ func TestSchemaProbeCaptureIdentityBaselineCountsCarveOutFields(t *testing.T) {
 func TestSchemaProbeIdentityHealthSurfacesAllFatalFields(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 41)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 
 	health, err := FileSchemaProbe{}.IdentityHealth(ctx, path)
 	if err != nil {

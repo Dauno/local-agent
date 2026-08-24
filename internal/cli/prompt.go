@@ -25,9 +25,9 @@ func NewPrompter(input io.Reader, output io.Writer) *Prompter {
 func (p *Prompter) Text(label, current string, required bool) (string, error) {
 	for {
 		if current != "" {
-			fmt.Fprintf(p.output, "%s [%s]: ", label, current)
+			_, _ = fmt.Fprintf(p.output, "%s [%s]: ", label, current)
 		} else {
-			fmt.Fprintf(p.output, "%s: ", label)
+			_, _ = fmt.Fprintf(p.output, "%s: ", label)
 		}
 		value, err := p.readLine(false)
 		if err != nil {
@@ -40,16 +40,16 @@ func (p *Prompter) Text(label, current string, required bool) (string, error) {
 		if value != "" || !required {
 			return value, nil
 		}
-		fmt.Fprintln(p.output, "A value is required.")
+		_, _ = fmt.Fprintln(p.output, "A value is required.")
 	}
 }
 
 func (p *Prompter) Secret(label, current, requiredPrefix string) (string, error) {
 	for {
 		if current == "" {
-			fmt.Fprintf(p.output, "%s: ", label)
+			_, _ = fmt.Fprintf(p.output, "%s: ", label)
 		} else {
-			fmt.Fprintf(p.output, "%s [configured %s; Enter to keep]: ", label, secure.Mask(current))
+			_, _ = fmt.Fprintf(p.output, "%s [configured %s; Enter to keep]: ", label, secure.Mask(current))
 		}
 		value, err := p.readLine(true)
 		if err != nil {
@@ -59,11 +59,11 @@ func (p *Prompter) Secret(label, current, requiredPrefix string) (string, error)
 			value = current
 		}
 		if strings.TrimSpace(value) == "" {
-			fmt.Fprintln(p.output, "A value is required.")
+			_, _ = fmt.Fprintln(p.output, "A value is required.")
 			continue
 		}
 		if requiredPrefix != "" && !strings.HasPrefix(value, requiredPrefix) {
-			fmt.Fprintf(p.output, "The value must begin with %s.\n", requiredPrefix)
+			_, _ = fmt.Fprintf(p.output, "The value must begin with %s.\n", requiredPrefix)
 			continue
 		}
 		return value, nil
@@ -76,7 +76,7 @@ func (p *Prompter) Confirm(label string, defaultValue bool) (bool, error) {
 		defaultLabel = "Y/n"
 	}
 	for {
-		fmt.Fprintf(p.output, "%s [%s]: ", label, defaultLabel)
+		_, _ = fmt.Fprintf(p.output, "%s [%s]: ", label, defaultLabel)
 		value, err := p.readLine(false)
 		if err != nil {
 			return false, err
@@ -89,7 +89,7 @@ func (p *Prompter) Confirm(label string, defaultValue bool) (bool, error) {
 		case "n", "no":
 			return false, nil
 		default:
-			fmt.Fprintln(p.output, "Enter y or n.")
+			_, _ = fmt.Fprintln(p.output, "Enter y or n.")
 		}
 	}
 }
@@ -97,9 +97,9 @@ func (p *Prompter) Confirm(label string, defaultValue bool) (bool, error) {
 func (p *Prompter) CSV(label string, current []string) ([]string, error) {
 	currentValue := strings.Join(current, ",")
 	if currentValue != "" {
-		fmt.Fprintf(p.output, "%s [%s; Enter to keep; - to clear]: ", label, currentValue)
+		_, _ = fmt.Fprintf(p.output, "%s [%s; Enter to keep; - to clear]: ", label, currentValue)
 	} else {
-		fmt.Fprintf(p.output, "%s: ", label)
+		_, _ = fmt.Fprintf(p.output, "%s: ", label)
 	}
 	value, err := p.readLine(false)
 	if err != nil {
@@ -117,7 +117,7 @@ func (p *Prompter) CSV(label string, current []string) ([]string, error) {
 	}
 	seen := make(map[string]struct{})
 	result := make([]string, 0)
-	for _, item := range strings.Split(value, ",") {
+	for item := range strings.SplitSeq(value, ",") {
 		item = strings.TrimSpace(item)
 		if item == "" {
 			continue
@@ -135,7 +135,7 @@ func (p *Prompter) readLine(secret bool) (string, error) {
 	if secret {
 		if file, ok := p.input.(*os.File); ok && term.IsTerminal(int(file.Fd())) {
 			value, err := term.ReadPassword(int(file.Fd()))
-			fmt.Fprintln(p.output)
+			_, _ = fmt.Fprintln(p.output)
 			if err != nil {
 				return "", fmt.Errorf("read secret: %w", err)
 			}
@@ -143,7 +143,7 @@ func (p *Prompter) readLine(secret bool) (string, error) {
 		}
 	}
 	value, err := p.reader.ReadString('\n')
-	if err != nil && !(errors.Is(err, io.EOF) && len(value) > 0) {
+	if err != nil && (!errors.Is(err, io.EOF) || len(value) <= 0) {
 		return "", fmt.Errorf("read terminal input: %w", err)
 	}
 	return strings.TrimSuffix(strings.TrimSuffix(value, "\n"), "\r"), nil

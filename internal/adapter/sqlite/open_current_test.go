@@ -22,7 +22,7 @@ func buildVersionFixture(t *testing.T, version int, journal string) string {
 	if journal == "delete" {
 		var mode string
 		if err := raw.QueryRow("PRAGMA journal_mode = delete").Scan(&mode); err != nil || mode != "delete" {
-			raw.Close()
+			_ = raw.Close()
 			t.Fatalf("journal_mode=delete: mode=%q err=%v", mode, err)
 		}
 	}
@@ -53,7 +53,7 @@ func readPragmas(t *testing.T, path string) (int, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var version int
 	if err := db.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -96,7 +96,7 @@ func TestOpenCurrentCurrentSchemaReturnsUsableStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenCurrent(v%d): %v", SchemaVersion, err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRow("PRAGMA user_version").Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("user_version=%d err=%v, want %d", version, err, SchemaVersion)
@@ -116,7 +116,7 @@ func TestOpenCurrentRejectionLeavesV33FixtureUntouched(t *testing.T) {
 
 	store, err := OpenCurrent(context.Background(), path)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal("OpenCurrent returned a store for a v33 fixture")
 	}
 	var upgrade *SchemaUpgradeRequiredError
@@ -181,7 +181,7 @@ func TestOpenCurrentFutureSchemaIsRejectedWithoutSideEffects(t *testing.T) {
 	before := fixtureDigest(t, path)
 
 	if store, err := OpenCurrent(context.Background(), path); store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal("OpenCurrent returned a store for a future schema")
 	} else {
 		var future *FutureSchemaError

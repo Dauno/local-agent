@@ -403,7 +403,7 @@ func SanitizeConversationSummary(text string, maxChars int) (string, error) {
 			return "", errors.New("conversation summary contains prohibited instruction, credential, policy, or approval content")
 		}
 	}
-	for _, line := range strings.Split(text, "\n") {
+	for line := range strings.SplitSeq(text, "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 {
 			continue
@@ -414,7 +414,7 @@ func SanitizeConversationSummary(text string, maxChars int) (string, error) {
 		if !hasSummaryAttribution(strings.ToLower(line)) {
 			return "", errors.New("conversation summary must use attributed declarative statements")
 		}
-		for _, word := range strings.Fields(strings.ToLower(line)) {
+		for word := range strings.FieldsSeq(strings.ToLower(line)) {
 			word = strings.Trim(word, "`*_:-.,;()[]{}")
 			switch word {
 			case "run", "execute", "delete", "remove", "create", "approve", "allow", "deny", "reveal", "use", "call", "open", "close", "set", "change", "send",

@@ -55,7 +55,7 @@ var compileBenchFrameBytes = []int{2_000, 20_000, 100_000}
 
 func compileBenchKnowledgeCards(n int) []domain.KnowledgeFrameCard {
 	cards := make([]domain.KnowledgeFrameCard, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		id := fmt.Sprintf("kclaim_%024x", i)
 		cards[i] = knowledgeFrameCard(id, fmt.Sprintf("subject %05d", i), "exact_subject",
 			fmt.Sprintf("value-%05d", i))

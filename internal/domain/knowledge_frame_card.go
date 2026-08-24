@@ -548,7 +548,7 @@ func FitKnowledgeFrameCards(cards []KnowledgeFrameCard, budget int, cost Knowled
 			if total2 <= budget {
 				safe, safeTotal, safeFits = plan2, total2, true
 			}
-			if !(total2 <= budget && (len(plan2) == len(cards) || total2 == budget)) {
+			if total2 > budget || (len(plan2) != len(cards) && total2 != budget) {
 				// One more round, calibrated on plan2 instead of the first
 				// probe: plan2's shape (card count, mix of overhead-heavy
 				// and content-heavy cards) is much closer to the eventual

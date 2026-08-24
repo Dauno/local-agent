@@ -77,7 +77,7 @@ func TestIsRecoverableResultReferencedQueryPlanHasNoEventScan(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var plan strings.Builder
 	for rows.Next() {
 		var id, parent, notUsed int

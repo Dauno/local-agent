@@ -346,7 +346,7 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 		t.Fatal("unverified result-link action was accepted")
 	}
 
-	confirmationContext := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "activate-1"}}
+	confirmationContext := &recordingConfirmationContext{callID: "activate-1"}
 	if _, err := byName["workstream_transition"].Run(confirmationContext, map[string]any{
 		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
 		"action": "activate_workstream",
@@ -359,7 +359,7 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 	if store.workstream.Revision != 1 {
 		t.Fatalf("authority transition executed before confirmation: revision %d", store.workstream.Revision)
 	}
-	linkConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "link-result-1"}}
+	linkConfirmation := &recordingConfirmationContext{callID: "link-result-1"}
 	if _, err := byName["workstream_link_completed_result"].Run(linkConfirmation, map[string]any{
 		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
 		"result_id": strings.Repeat("a", 64), "result_link_id": "link-1",
@@ -369,7 +369,7 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 	if store.workstream.Revision != 1 {
 		t.Fatalf("result-link transition executed before confirmation: revision %d", store.workstream.Revision)
 	}
-	rejectTaskConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "reject-task-1"}}
+	rejectTaskConfirmation := &recordingConfirmationContext{callID: "reject-task-1"}
 	if _, err := byName["workstream_transition"].Run(rejectTaskConfirmation, map[string]any{
 		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
 		"action": "reject_task", "task_id": "task-1",
@@ -379,29 +379,29 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 	if !rejectTaskConfirmation.requested {
 		t.Fatal("root task rejection did not require confirmation")
 	}
-	blockConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "block-1"}}
+	blockConfirmation := &recordingConfirmationContext{callID: "block-1"}
 	if _, err := byName["workstream_transition"].Run(blockConfirmation, map[string]any{
 		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
 		"action": "block_workstream",
 	}); err == nil || blockConfirmation.requested {
 		t.Fatalf("root block action remained exposed: requested=%t err=%v", blockConfirmation.requested, err)
 	}
-	invalidConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "complete-1"}}
+	invalidConfirmation := &recordingConfirmationContext{callID: "complete-1"}
 	if _, err := byName["workstream_transition"].Run(invalidConfirmation, map[string]any{
 		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
 		"action": "complete_workstream",
 	}); err == nil || invalidConfirmation.requested {
 		t.Fatalf("invalid action was presented for confirmation: requested=%t err=%v", invalidConfirmation.requested, err)
 	}
-	createConfirmation := &recordingConfirmationContext{stubToolContext: stubToolContext{callID: "create-1"}}
+	createConfirmation := &recordingConfirmationContext{callID: "create-1"}
 	if _, err := byName["workstream_create"].Run(createConfirmation, map[string]any{
 		"workstream_id": "ws-2", "project": "workspace", "objective": "second objective",
 	}); err == nil || createConfirmation.requested {
 		t.Fatalf("conflicting creation was presented for confirmation: requested=%t err=%v", createConfirmation.requested, err)
 	}
 	confirmedContext := &recordingConfirmationContext{
-		stubToolContext: stubToolContext{callID: "activate-1"},
-		confirmed:       &toolconfirmation.ToolConfirmation{Confirmed: true},
+		callID:    "activate-1",
+		confirmed: &toolconfirmation.ToolConfirmation{Confirmed: true},
 	}
 	if _, err := byName["workstream_transition"].Run(confirmedContext, map[string]any{
 		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 1,
@@ -634,10 +634,8 @@ func TestFactoryReturnsNativeJobHandleWithoutCompleteResult(t *testing.T) {
 		MediaType: "text/plain; charset=utf-8", Availability: []domain.ResultAvailability{domain.ResultAvailabilityRangeRead},
 	}
 	reader := nativeExternalJobReader{
-		stubExternalJobReader: stubExternalJobReader{
-			job:    &domain.ExternalAgentJob{ID: "job_native", Status: domain.JobCompleted, StatusRevision: 4},
-			result: domain.ExternalAgentJobResult{Text: "must not enter ADK"},
-		},
+		job:    &domain.ExternalAgentJob{ID: "job_native", Status: domain.JobCompleted, StatusRevision: 4},
+		result: domain.ExternalAgentJobResult{Text: "must not enter ADK"},
 		handle: handle,
 	}
 	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)

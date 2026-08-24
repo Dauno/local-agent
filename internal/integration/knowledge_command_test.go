@@ -43,7 +43,7 @@ func insertKnowledgeCommandTestResult(t *testing.T, store *adaptersqlite.Store, 
 type knowledgeTestCoordinator struct {
 	mu      sync.Mutex
 	held    map[string]bool
-	inUse   int64
+	inUse   atomic.Int64
 	maxSeen int64
 }
 
@@ -58,12 +58,12 @@ func (c *knowledgeTestCoordinator) TryAcquire(key string) (func(), bool) {
 		return nil, false
 	}
 	c.held[key] = true
-	now := atomic.AddInt64(&c.inUse, 1)
+	now := c.inUse.Add(1)
 	if now > c.maxSeen {
 		c.maxSeen = now
 	}
 	return func() {
-		atomic.AddInt64(&c.inUse, -1)
+		c.inUse.Add(-1)
 		c.mu.Lock()
 		delete(c.held, key)
 		c.mu.Unlock()
@@ -162,7 +162,7 @@ func TestKnowledgeCommandReplayIsIdempotentAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	restarted, err := knowledge.New(knowledge.Config{Enabled: true}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(reopened), Coordinator: newKnowledgeTestCoordinator(),
 	})
@@ -182,7 +182,7 @@ func TestKnowledgeCommandReplayIsIdempotentAcrossRestart(t *testing.T) {
 func TestKnowledgeCommandsIsolateByScope(t *testing.T) {
 	ctx := t.Context()
 	service, store := newKnowledgeTestService(t, filepath.Join(t.TempDir(), "knowledge-isolation.db"))
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	projectBinding := knowledgeTestBinding("U12345678", "workspace")
 
 	_, created, err := service.Execute(ctx, projectBinding, "evt-1",
@@ -237,7 +237,7 @@ func TestKnowledgeCommandsSerializeConcurrentTransitions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	coordinator := newKnowledgeTestCoordinator()
 	service, err := knowledge.New(knowledge.Config{Enabled: true}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(store), Coordinator: coordinator,
@@ -255,7 +255,7 @@ func TestKnowledgeCommandsSerializeConcurrentTransitions(t *testing.T) {
 
 	var wg sync.WaitGroup
 	var winners, conflicts int64
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		wg.Add(1)
 		go func(seq int) {
 			defer wg.Done()
@@ -333,7 +333,7 @@ func TestKnowledgeForgetBlocksRewriteAndSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	restarted, err := knowledge.New(knowledge.Config{Enabled: true}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(reopened), Coordinator: newKnowledgeTestCoordinator(),
 	})
@@ -349,7 +349,7 @@ func TestKnowledgeForgetBlocksRewriteAndSurvivesRestart(t *testing.T) {
 func TestKnowledgePreferenceCommandsBindToActor(t *testing.T) {
 	ctx := t.Context()
 	service, store := newKnowledgeTestService(t, filepath.Join(t.TempDir(), "knowledge-preferences.db"))
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	binding := knowledgeTestBinding("U12345678", "")
 
 	_, created, err := service.Execute(ctx, binding, "evt-1",
@@ -402,7 +402,7 @@ func TestKnowledgePreferenceCommandsBindToActor(t *testing.T) {
 func TestKnowledgeCommandIdentityIsGlobalAcrossTargets(t *testing.T) {
 	ctx := t.Context()
 	service, store := newKnowledgeTestService(t, filepath.Join(t.TempDir(), "knowledge-identity.db"))
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	binding := knowledgeTestBinding("U12345678", "workspace")
 
 	remember := func(subject string) string {
@@ -434,7 +434,7 @@ func TestKnowledgeDocumentArchiveCarriesReceiptAcrossRestart(t *testing.T) {
 	ctx := t.Context()
 	database := filepath.Join(t.TempDir(), "knowledge-document-archive.db")
 	service, store := newKnowledgeTestService(t, database)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	binding := knowledgeTestBinding("U12345678", "workspace")
 
 	resultID, digest := insertKnowledgeCommandTestResult(t, store, "workspace")
@@ -477,7 +477,7 @@ func TestKnowledgeDocumentArchiveCarriesReceiptAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	var attributed string
 	var revision int
 	if err := reopened.DB().QueryRowContext(ctx, `
@@ -491,7 +491,7 @@ func TestKnowledgeInspectRediscoveryAndReadableScopes(t *testing.T) {
 	ctx := t.Context()
 	database := filepath.Join(t.TempDir(), "knowledge-inspect.db")
 	service, store := newKnowledgeTestService(t, database)
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	binding := knowledgeTestBinding("U12345678", "workspace")
 
 	knowledgeStore := adaptersqlite.NewKnowledgeStore(store)
@@ -523,7 +523,7 @@ func TestKnowledgeInspectRediscoveryAndReadableScopes(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	restarted, err := knowledge.New(knowledge.Config{Enabled: true}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(reopened), Coordinator: newKnowledgeTestCoordinator(),
 	})
@@ -552,7 +552,7 @@ func TestKnowledgeInspectRediscoveryAndReadableScopes(t *testing.T) {
 func TestKnowledgeForgetLeavesNoPlaintextSubjectAnywhere(t *testing.T) {
 	ctx := t.Context()
 	service, store := newKnowledgeTestService(t, filepath.Join(t.TempDir(), "knowledge-plaintext.db"))
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	binding := knowledgeTestBinding("U12345678", "")
 	subject := "top-secret-project-name"
 
@@ -594,7 +594,7 @@ func TestKnowledgeForgetLeavesNoPlaintextSubjectAnywhere(t *testing.T) {
 				}
 			}
 		}
-		rows.Close()
+		_ = rows.Close()
 	}
 	var tombstoneCount int
 	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_tombstones`).Scan(&tombstoneCount); err != nil || tombstoneCount != 1 {
@@ -608,7 +608,7 @@ func TestKnowledgeForgetAndInspectHonorConfiguredLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	service, err := knowledge.New(knowledge.Config{Enabled: true, Limits: domain.KnowledgeLimits{MaxSubjectRunes: 512}}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(store), Coordinator: newKnowledgeTestCoordinator(),
 	})
@@ -638,7 +638,7 @@ func TestKnowledgeForgetAndInspectHonorConfiguredLimits(t *testing.T) {
 func TestKnowledgeInspectSubjectSelectorRediscovery(t *testing.T) {
 	ctx := t.Context()
 	service, store := newKnowledgeTestService(t, filepath.Join(t.TempDir(), "knowledge-subject.db"))
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	binding := knowledgeTestBinding("U12345678", "workspace")
 	if _, _, err := service.Execute(ctx, binding, "evt-1",
 		knowledge.HumanCommandPrefix+`{"action":"remember","subject":"api","predicate":"runs_on","value_kind":"string","value_text":"pg-01"}`); err != nil {
@@ -685,7 +685,7 @@ func TestKnowledgeForgetSurvivesRestartWithDefaultLimits(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	restarted, err := knowledge.New(knowledge.Config{Enabled: true}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(reopened), Coordinator: newKnowledgeTestCoordinator(),
 	})
@@ -733,7 +733,7 @@ func TestKnowledgeForgetHardScopeValidationAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	restarted, err := knowledge.New(knowledge.Config{Enabled: true}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(reopened), Coordinator: newKnowledgeTestCoordinator(),
 	})
@@ -758,7 +758,7 @@ func TestKnowledgeForgetHardScopeValidationAcrossRestart(t *testing.T) {
 func TestKnowledgeRejectedScopeForgetDoesNotConsumeIdentity(t *testing.T) {
 	ctx := t.Context()
 	service, store := newKnowledgeTestService(t, filepath.Join(t.TempDir(), "knowledge-scope-identity.db"))
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	oversized := strings.Repeat("p", 600)
 	binding := knowledgeTestBinding("U12345678", oversized)
 	if _, _, err := service.Execute(ctx, binding, "evt-reuse",

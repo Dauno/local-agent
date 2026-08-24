@@ -68,7 +68,7 @@ func (s *Store) ListRecoverableProgress(ctx context.Context) ([]domain.ProgressO
 	if err != nil {
 		return nil, fmt.Errorf("list recoverable standard progress: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var operations []domain.ProgressOperation
 	for rows.Next() {
 		operation, err := scanProgress(rows)
@@ -299,7 +299,7 @@ func (s *Store) ListUnfinishedIncremental(ctx context.Context) ([]domain.Increme
 	if err != nil {
 		return nil, fmt.Errorf("list unfinished standard incremental operations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var operations []domain.IncrementalOperation
 	for rows.Next() {
 		var operation domain.IncrementalOperation

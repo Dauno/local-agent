@@ -123,7 +123,7 @@ func dumpResultAnalysisV40Tables(t *testing.T, store *adaptersqlite.Store) strin
 		}
 		cols, err := rows.Columns()
 		if err != nil {
-			rows.Close()
+			_ = rows.Close()
 			t.Fatalf("dump %s columns: %v", table.name, err)
 		}
 		for rows.Next() {
@@ -133,16 +133,16 @@ func dumpResultAnalysisV40Tables(t *testing.T, store *adaptersqlite.Store) strin
 				pointers[i] = &values[i]
 			}
 			if err := rows.Scan(pointers...); err != nil {
-				rows.Close()
+				_ = rows.Close()
 				t.Fatalf("scan %s row: %v", table.name, err)
 			}
 			dump += fmt.Sprintf("%s:%v\n", table.name, values)
 		}
 		if err := rows.Err(); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			t.Fatalf("iterate %s: %v", table.name, err)
 		}
-		rows.Close()
+		_ = rows.Close()
 	}
 	return dump
 }

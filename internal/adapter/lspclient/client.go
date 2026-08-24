@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/url"
 	"os"
 	"os/exec"
@@ -101,9 +102,7 @@ func (c *Client) locations(ctx context.Context, req domain.LocationRequest, meth
 		"textDocument": map[string]any{"uri": c.documentURI(req.Project, req.Path)},
 		"position":     map[string]any{"line": max(req.Line-1, 0), "character": max(req.Column-1, 0)},
 	}
-	for key, value := range extra {
-		params[key] = value
-	}
+	maps.Copy(params, extra)
 	raw, source, err := c.query(ctx, req.Project, req.Path, req.Actor, req.ConversationKey, method, params)
 	if err != nil {
 		return domain.LocationResult{}, err
@@ -222,7 +221,7 @@ func (c *Client) run(ctx context.Context, server Server, root, path, language, c
 		case <-finished:
 		}
 	}()
-	go io.Copy(io.Discard, stderr)
+	go func() { _, _ = io.Copy(io.Discard, stderr) }()
 	reader := bufio.NewReader(stdout)
 	rootURI := fileURI(root)
 	initialize := map[string]any{"processId": nil, "rootUri": rootURI, "capabilities": map[string]any{}, "workspaceFolders": []any{map[string]any{"uri": rootURI, "name": filepath.Base(root)}}}
@@ -577,7 +576,7 @@ func verifyBinary(path, expected string) error {
 	if err != nil {
 		return errors.New("language server binary is unavailable")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	hash := sha256.New()
 	if _, err := io.Copy(hash, file); err != nil || !strings.EqualFold(hex.EncodeToString(hash.Sum(nil)), expected) {
 		return errors.New("language server binary digest changed")

@@ -360,7 +360,6 @@ func scanContentProtocol(contents []Content, options ProtocolValidationOptions) 
 						ledger.openCount--
 					}
 				}
-
 			}
 		}
 	}

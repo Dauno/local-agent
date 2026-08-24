@@ -102,7 +102,7 @@ func TestRealCLISetupDoctorManifestAndVersion(t *testing.T) {
 
 	output.Reset()
 	command, _ = cli.NewRoot(application, cli.Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
-	if code := cli.Execute(t.Context(), command, []string{"version"}, &stderr); code != 0 || !strings.Contains(output.String(), "go1.25") {
+	if code := cli.Execute(t.Context(), command, []string{"version"}, &stderr); code != 0 || !strings.Contains(output.String(), "go1.27") {
 		t.Fatalf("version exit=%d output=%s", code, output.String())
 	}
 }

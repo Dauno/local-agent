@@ -20,7 +20,7 @@ func TestFileLoaderDownloadsBoundedSlackFile(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/files.info":
-			fmt.Fprintf(w, `{"ok":true,"file":{"id":"F1","name":"notes.txt","mimetype":"text/plain","size":4,"url_private_download":%q}}`, "http://"+r.Host+"/download")
+			_, _ = fmt.Fprintf(w, `{"ok":true,"file":{"id":"F1","name":"notes.txt","mimetype":"text/plain","size":4,"url_private_download":%q}}`, "http://"+r.Host+"/download")
 		case "/download":
 			downloadCalls.Add(1)
 			if got := r.Header.Get("Authorization"); got != "Bearer xoxb-test" {
@@ -59,7 +59,7 @@ func TestFileLoaderRejectsDeclaredAndStreamedOversizeFiles(t *testing.T) {
 			var downloads atomic.Int64
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if r.URL.Path == "/files.info" {
-					fmt.Fprintf(w, `{"ok":true,"file":{"id":"F1","name":"file.txt","mimetype":"text/plain","size":%d,"url_private_download":%q}}`, tt.declaredSize, "http://"+r.Host+"/download")
+					_, _ = fmt.Fprintf(w, `{"ok":true,"file":{"id":"F1","name":"file.txt","mimetype":"text/plain","size":%d,"url_private_download":%q}}`, tt.declaredSize, "http://"+r.Host+"/download")
 					return
 				}
 				downloads.Add(1)

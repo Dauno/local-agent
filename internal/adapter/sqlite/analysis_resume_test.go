@@ -92,7 +92,7 @@ func runAnalysisToCompletion(t *testing.T, ctx context.Context, steps *AnalysisS
 		for _, s := range children {
 			byID[s.StepID] = s
 		}
-		var childSteps []port.AnalysisStep
+		childSteps := make([]port.AnalysisStep, 0, len(claimed.ChildStepIDs))
 		for _, id := range claimed.ChildStepIDs {
 			childSteps = append(childSteps, byID[id])
 		}
@@ -140,10 +140,7 @@ func (f *fakeTrustedResultSourceStore) ReadRange(_ context.Context, resultID str
 	if offsetBytes >= int64(len(f.content)) {
 		return domain.ResultChunk{OffsetBytes: offsetBytes, NextOffsetBytes: offsetBytes, EOF: true, SHA256: f.identity.SHA256}, nil
 	}
-	end := offsetBytes + maxBytes
-	if end > int64(len(f.content)) {
-		end = int64(len(f.content))
-	}
+	end := min(offsetBytes+maxBytes, int64(len(f.content)))
 	return domain.ResultChunk{Content: f.content[offsetBytes:end], OffsetBytes: offsetBytes, NextOffsetBytes: end, EOF: end >= int64(len(f.content)), SHA256: f.identity.SHA256}, nil
 }
 
@@ -172,7 +169,7 @@ func setupResumeFixture(t *testing.T) (*AnalysisStepStore, *AnalysisEvidenceStor
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { dbStore.Close() })
+	t.Cleanup(func() { _ = dbStore.Close() })
 
 	content := "aaaaaaaa" + "bbbbbbbb" // two 8-byte segments
 	sourceID := strings.Repeat("a", 64)

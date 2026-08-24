@@ -165,108 +165,127 @@ func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 	if content == nil {
 		return convertedContent{}, ErrUnsupportedPart
 	}
+	parts, err := collectContentParts(content)
+	if err != nil {
+		return convertedContent{}, err
+	}
+	if len(parts.functionCalls) > 0 && len(parts.functionResponses) > 0 {
+		return convertedContent{}, errors.New("content cannot mix function calls and responses")
+	}
+	if len(parts.imageParts) > 0 && (len(parts.functionCalls) > 0 || len(parts.functionResponses) > 0) {
+		return convertedContent{}, errors.New("content cannot mix images with function calls or responses")
+	}
+	if len(parts.audioParts) > 0 && (len(parts.functionCalls) > 0 || len(parts.functionResponses) > 0) {
+		return convertedContent{}, errors.New("content cannot mix audio with function calls or responses")
+	}
+	if len(parts.imageParts) > 0 && len(parts.audioParts) > 0 {
+		return convertedContent{}, errors.New("content cannot mix images and audio")
+	}
+	if len(parts.functionCalls) > 0 {
+		return functionCallMessages(content, parts.texts, parts.functionCalls)
+	}
+	if len(parts.functionResponses) > 0 {
+		return functionResponseMessages(content, parts.texts, parts.functionResponses)
+	}
+	return mediaOrTextMessages(content, parts)
+}
 
-	var texts []string
-	var functionCalls []*genai.FunctionCall
-	var functionResponses []*genai.FunctionResponse
-	var imageParts []*genai.Part
-	var audioParts []*genai.Part
-	var orderedContentParts []*genai.Part
+type contentParts struct {
+	texts             []string
+	functionCalls     []*genai.FunctionCall
+	functionResponses []*genai.FunctionResponse
+	imageParts        []*genai.Part
+	audioParts        []*genai.Part
+	ordered           []*genai.Part
+}
 
+func collectContentParts(content *genai.Content) (contentParts, error) {
+	var result contentParts
 	for _, part := range content.Parts {
 		if part == nil {
-			return convertedContent{}, ErrUnsupportedPart
+			return contentParts{}, ErrUnsupportedPart
 		}
 		switch {
 		case part.FunctionCall != nil:
-			functionCalls = append(functionCalls, part.FunctionCall)
+			result.functionCalls = append(result.functionCalls, part.FunctionCall)
 		case part.FunctionResponse != nil:
-			functionResponses = append(functionResponses, part.FunctionResponse)
+			result.functionResponses = append(result.functionResponses, part.FunctionResponse)
 		case part.InlineData != nil:
-			if supportedImageMIME(part.InlineData.MIMEType) {
-				imageParts = append(imageParts, part)
-				orderedContentParts = append(orderedContentParts, part)
-			} else if supportedAudioMIME(part.InlineData.MIMEType) {
-				audioParts = append(audioParts, part)
-				orderedContentParts = append(orderedContentParts, part)
-			} else {
-				return convertedContent{}, ErrUnsupportedPart
+			switch {
+			case supportedImageMIME(part.InlineData.MIMEType):
+				result.imageParts = append(result.imageParts, part)
+				result.ordered = append(result.ordered, part)
+			case supportedAudioMIME(part.InlineData.MIMEType):
+				result.audioParts = append(result.audioParts, part)
+				result.ordered = append(result.ordered, part)
+			default:
+				return contentParts{}, ErrUnsupportedPart
 			}
 		default:
 			if part.ToolCall != nil || part.ToolResponse != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
-				return convertedContent{}, ErrUnsupportedPart
+				return contentParts{}, ErrUnsupportedPart
 			}
-			texts = append(texts, part.Text)
-			orderedContentParts = append(orderedContentParts, part)
+			result.texts = append(result.texts, part.Text)
+			result.ordered = append(result.ordered, part)
 		}
 	}
+	return result, nil
+}
 
-	if len(functionCalls) > 0 && len(functionResponses) > 0 {
-		return convertedContent{}, errors.New("content cannot mix function calls and responses")
+func functionCallMessages(content *genai.Content, texts []string, calls []*genai.FunctionCall) (convertedContent, error) {
+	if content.Role != genai.RoleModel {
+		return convertedContent{}, fmt.Errorf("function calls require model role, got %q", content.Role)
 	}
-	if len(imageParts) > 0 && (len(functionCalls) > 0 || len(functionResponses) > 0) {
-		return convertedContent{}, errors.New("content cannot mix images with function calls or responses")
+	assistant := &openai.ChatCompletionAssistantMessageParam{
+		ToolCalls: make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(calls)),
 	}
-	if len(audioParts) > 0 && (len(functionCalls) > 0 || len(functionResponses) > 0) {
-		return convertedContent{}, errors.New("content cannot mix audio with function calls or responses")
-	}
-	if len(imageParts) > 0 && len(audioParts) > 0 {
-		return convertedContent{}, errors.New("content cannot mix images and audio")
-	}
-	if len(functionCalls) > 0 {
-		if content.Role != genai.RoleModel {
-			return convertedContent{}, fmt.Errorf("function calls require model role, got %q", content.Role)
+	for _, call := range calls {
+		if call == nil || strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
+			return convertedContent{}, errors.New("function call ID and name are required")
 		}
-		assistant := &openai.ChatCompletionAssistantMessageParam{
-			ToolCalls: make([]openai.ChatCompletionMessageToolCallUnionParam, 0, len(functionCalls)),
+		args := call.Args
+		if args == nil {
+			args = map[string]any{}
 		}
-		for _, call := range functionCalls {
-			if call == nil || strings.TrimSpace(call.ID) == "" || strings.TrimSpace(call.Name) == "" {
-				return convertedContent{}, errors.New("function call ID and name are required")
-			}
-			args := call.Args
-			if args == nil {
-				args = map[string]any{}
-			}
-			encoded, err := json.Marshal(args)
-			if err != nil {
-				return convertedContent{}, fmt.Errorf("encode function call arguments: %w", err)
-			}
-			assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
-				OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
-					ID:       call.ID,
-					Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{Name: call.Name, Arguments: string(encoded)},
-				},
-			})
+		encoded, err := json.Marshal(args)
+		if err != nil {
+			return convertedContent{}, fmt.Errorf("encode function call arguments: %w", err)
 		}
-		if len(texts) > 0 {
-			assistant.Content.OfString = param.NewOpt(strings.Join(texts, ""))
-		}
-		return convertedContent{real: []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}, countable: []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}}, nil
+		assistant.ToolCalls = append(assistant.ToolCalls, openai.ChatCompletionMessageToolCallUnionParam{
+			OfFunction: &openai.ChatCompletionMessageFunctionToolCallParam{
+				ID:       call.ID,
+				Function: openai.ChatCompletionMessageFunctionToolCallFunctionParam{Name: call.Name, Arguments: string(encoded)},
+			},
+		})
 	}
+	if len(texts) > 0 {
+		assistant.Content.OfString = param.NewOpt(strings.Join(texts, ""))
+	}
+	return convertedContent{real: []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}, countable: []openai.ChatCompletionMessageParamUnion{{OfAssistant: assistant}}}, nil
+}
 
-	if len(functionResponses) > 0 {
-		if content.Role != genai.RoleUser || len(texts) > 0 {
-			return convertedContent{}, errors.New("function responses require a user-role content with no text")
-		}
-		messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(functionResponses))
-		for _, response := range functionResponses {
-			if response == nil || strings.TrimSpace(response.ID) == "" || strings.TrimSpace(response.Name) == "" {
-				return convertedContent{}, errors.New("function response ID and name are required")
-			}
-			encoded, err := json.Marshal(response.Response)
-			if err != nil {
-				return convertedContent{}, fmt.Errorf("encode function response: %w", err)
-			}
-			messages = append(messages, openai.ToolMessage(string(encoded), response.ID))
-		}
-		return convertedContent{real: messages, countable: messages}, nil
+func functionResponseMessages(content *genai.Content, texts []string, responses []*genai.FunctionResponse) (convertedContent, error) {
+	if content.Role != genai.RoleUser || len(texts) > 0 {
+		return convertedContent{}, errors.New("function responses require a user-role content with no text")
 	}
+	messages := make([]openai.ChatCompletionMessageParamUnion, 0, len(responses))
+	for _, response := range responses {
+		if response == nil || strings.TrimSpace(response.ID) == "" || strings.TrimSpace(response.Name) == "" {
+			return convertedContent{}, errors.New("function response ID and name are required")
+		}
+		encoded, err := json.Marshal(response.Response)
+		if err != nil {
+			return convertedContent{}, fmt.Errorf("encode function response: %w", err)
+		}
+		messages = append(messages, openai.ToolMessage(string(encoded), response.ID))
+	}
+	return convertedContent{real: messages, countable: messages}, nil
+}
 
-	text := strings.Join(texts, "")
-	hasImages := len(imageParts) > 0
-	hasAudio := len(audioParts) > 0
-
+func mediaOrTextMessages(content *genai.Content, parts contentParts) (convertedContent, error) {
+	text := strings.Join(parts.texts, "")
+	hasImages := len(parts.imageParts) > 0
+	hasAudio := len(parts.audioParts) > 0
 	if !hasImages && !hasAudio {
 		if strings.TrimSpace(text) == "" {
 			return convertedContent{}, errors.New("content must have non-empty text")
@@ -282,15 +301,16 @@ func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 			return convertedContent{}, fmt.Errorf("unsupported ADK role %q", content.Role)
 		}
 	}
-
-	// Image and audio content parts: build a multipart user message.
 	if content.Role != genai.RoleUser && content.Role != "" {
 		if hasImages && !hasAudio {
 			return convertedContent{}, fmt.Errorf("image content requires user role, got %q", content.Role)
 		}
 		return convertedContent{}, fmt.Errorf("media content requires user role, got %q", content.Role)
 	}
+	return mediaMessages(parts.ordered, hasImages)
+}
 
+func mediaMessages(orderedContentParts []*genai.Part, hasImages bool) (convertedContent, error) {
 	parts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(orderedContentParts))
 	countableParts := make([]openai.ChatCompletionContentPartUnionParam, 0, len(orderedContentParts))
 	var media []port.ModelRequestMedia
@@ -302,17 +322,9 @@ func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 					return convertedContent{}, fmt.Errorf("image part %d is not a decodable image: %w", index, err)
 				}
 				dataURL := "data:" + part.InlineData.MIMEType + ";base64," + base64.StdEncoding.EncodeToString(part.InlineData.Data)
-				parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
-					URL: dataURL,
-				}))
-				countableParts = append(countableParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
-					URL: mediaMarker,
-				}))
-				media = append(media, port.ModelRequestMedia{
-					MIMEType: part.InlineData.MIMEType,
-					Width:    width,
-					Height:   height,
-				})
+				parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: dataURL}))
+				countableParts = append(countableParts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{URL: mediaMarker}))
+				media = append(media, port.ModelRequestMedia{MIMEType: part.InlineData.MIMEType, Width: width, Height: height})
 				continue
 			}
 			format, ok := audioFormat(part.InlineData.MIMEType)
@@ -320,14 +332,9 @@ func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 				return convertedContent{}, fmt.Errorf("audio MIME type %q is not supported by Chat Completions input_audio", part.InlineData.MIMEType)
 			}
 			encodedAudio := base64.StdEncoding.EncodeToString(part.InlineData.Data)
-			parts = append(parts, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
-				Data:   encodedAudio,
-				Format: format,
-			}))
-			countableParts = append(countableParts, openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{
-				Data:   encodedAudio,
-				Format: format,
-			}))
+			inputAudio := openai.InputAudioContentPart(openai.ChatCompletionContentPartInputAudioInputAudioParam{Data: encodedAudio, Format: format})
+			parts = append(parts, inputAudio)
+			countableParts = append(countableParts, inputAudio)
 			continue
 		}
 		if part.Text != "" {
@@ -339,12 +346,10 @@ func contentToMessageSets(content *genai.Content) (convertedContent, error) {
 	if len(parts) == 0 {
 		return convertedContent{}, errors.New("media content has no text or media")
 	}
-
 	return convertedContent{
 		real:      []openai.ChatCompletionMessageParamUnion{openai.UserMessage(parts)},
 		countable: []openai.ChatCompletionMessageParamUnion{openai.UserMessage(countableParts)},
-		media:     media,
-		hasImages: hasImages,
+		media:     media, hasImages: hasImages,
 	}, nil
 }
 

@@ -14,7 +14,7 @@ func TestMigrationV38FreshAndUpgradeRetireLegacyMemoryState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	for _, table := range []string{
 		"knowledge_claims", "knowledge_claim_revisions", "knowledge_evidence",
 		"knowledge_preferences", "knowledge_preference_revisions",
@@ -29,12 +29,12 @@ func TestMigrationV38FreshAndUpgradeRetireLegacyMemoryState(t *testing.T) {
 	path, raw := createSchemaAtVersion(t, 37)
 	if _, err := raw.ExecContext(t.Context(), `INSERT INTO memory_topics (id, slug, title, description, status, tags, bundle_path, owner_key, content, current_rev, created_at, updated_at)
 		VALUES ('mem_legacy1', 'legacy', 'Legacy', '', 'active', '[]', 'topics', '', 'content', 2, 1, 1)`); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if _, err := raw.ExecContext(t.Context(), `INSERT INTO memory_topic_revisions (topic_id, revision_number, content, change_reason, created_at)
 		VALUES ('mem_legacy1', 2, 'content', 'change', 1)`); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -44,7 +44,7 @@ func TestMigrationV38FreshAndUpgradeRetireLegacyMemoryState(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upgraded.Close()
+	defer func() { _ = upgraded.Close() }()
 	var legacyTopics int
 	if err := upgraded.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM sqlite_schema WHERE name = 'memory_topics'`).Scan(&legacyTopics); err != nil || legacyTopics != 0 {
 		t.Fatalf("legacy memory topics table present = %d, %v", legacyTopics, err)
@@ -102,7 +102,7 @@ func TestMigrationV38CrashRollsBackAndReopens(t *testing.T) {
 	}
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal("OpenExisting succeeded after injected v38 crash")
 	}
 	if err == nil || !strings.Contains(err.Error(), "injected v38 crash") {
@@ -112,7 +112,7 @@ func TestMigrationV38CrashRollsBackAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer check.Close()
+	defer func() { _ = check.Close() }()
 	var version, tables int
 	if err := check.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
@@ -130,7 +130,7 @@ func TestMigrationV38ConstraintNegatives(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	now := time.Now().UTC().UnixNano()
 
@@ -255,7 +255,7 @@ func TestMigrationV38TombstonesAndRevisionsAreImmutable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	now := time.Now().UTC().UnixNano()
 	if _, err := db.ExecContext(t.Context(), `INSERT INTO knowledge_tombstones (subject_digest, scope_kind, scope_id, forgotten_at, source_ref)

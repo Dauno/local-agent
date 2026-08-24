@@ -104,7 +104,7 @@ func (s *Service) handleStreamingTurn(
 		s.updateProgress(ctx, progress, domain.ProgressFailed)
 		if operation.MessageTS == "" && !createAttempted {
 			if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.publicModelError(deliveryErr)); err != nil {
-				return OutcomePublishFailed, nil
+				return OutcomePublishFailed, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
 			}
 			return OutcomeModelFailed, nil
 		}
@@ -116,7 +116,7 @@ func (s *Service) handleStreamingTurn(
 		if operation.MessageTS == "" {
 			_ = s.standardStore.AdvanceIncremental(ctx, operation.ID, domain.IncrementalInterrupted, operation.Sequence, operation.PrefixDigest, s.clock.Now().UTC())
 			if _, err := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.publicModelError(terminal.Err)); err != nil {
-				return OutcomePublishFailed, nil
+				return OutcomePublishFailed, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
 			}
 			return OutcomeModelFailed, nil
 		}
@@ -253,7 +253,7 @@ func (s *Service) finalizeIncrementalTurn(ctx context.Context, invocation domain
 	operation.UpdatedAt = s.clock.Now().UTC()
 	if err := s.incrementalPublisher.FinalizeIncremental(ctx, *operation, finalText, correlationID); err != nil {
 		_ = s.standardStore.AdvanceIncremental(ctx, operation.ID, domain.IncrementalUnknown, operation.Sequence, operation.PrefixDigest, operation.UpdatedAt)
-		return OutcomePublishFailed, nil
+		return OutcomePublishFailed, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
 	}
 	if err := s.persistAssistantTurn(ctx, metadata, operation.MessageTS, finalText, prepared); err != nil {
 		return "", err

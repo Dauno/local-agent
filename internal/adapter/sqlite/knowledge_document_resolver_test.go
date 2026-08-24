@@ -54,7 +54,7 @@ func TestKnowledgeDocumentResolverReadsVerifiedCuratedResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	resultID := strings.Repeat("a", 64)
 	content := "curated document content"
@@ -87,7 +87,7 @@ func TestKnowledgeDocumentResolverRejectsInvalidCuratedContent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{})
 	document := domain.KnowledgeDocument{
 		ContentDigest: strings.Repeat("a", 64), ContentHandle: "memory_topics:old:revision:1",

@@ -196,7 +196,7 @@ func (l AnalysisLimits) Validate() error {
 // exactly one definition.
 func AnalysisReductionTreeSatisfiable(fanIn, depth, leaves int) bool {
 	capacity := int64(1)
-	for i := 0; i < depth; i++ {
+	for range depth {
 		capacity *= int64(fanIn)
 		if capacity >= int64(leaves) {
 			return true

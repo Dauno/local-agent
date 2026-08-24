@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -58,12 +59,12 @@ func (s *Service) applyHumanWorkstreamCommand(ctx context.Context, invocation do
 	if command.Transition.Action == domain.WorkstreamActionCreateWorkstream {
 		if _, createErr := s.workstreams.CreateHuman(ctx, binding, command.WorkstreamID, command.Objective, "slack-human:"+invocation.EventID); createErr != nil {
 			if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Workstream creation rejected: "+createErr.Error())); publishErr != nil {
-				return OutcomePublishFailed, nil
+				return OutcomePublishFailed, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
 			}
 			return OutcomeResponded, nil
 		}
 		if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), "Workstream `"+command.WorkstreamID+"` created at revision `0`."); publishErr != nil {
-			return OutcomePublishFailed, nil
+			return OutcomePublishFailed, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
 		}
 		return OutcomeResponded, nil
 	}
@@ -71,13 +72,13 @@ func (s *Service) applyHumanWorkstreamCommand(ctx context.Context, invocation do
 	record, _, applyErr := s.workstreams.ApplyHuman(ctx, binding, command.Transition)
 	if applyErr != nil {
 		if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), s.sanitize("Workstream transition rejected: "+applyErr.Error())); publishErr != nil {
-			return OutcomePublishFailed, nil
+			return OutcomePublishFailed, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
 		}
 		return OutcomeResponded, nil
 	}
 	message := fmt.Sprintf("Workstream `%s` applied human action `%s` at revision `%d`.", record.WorkstreamID, record.Action, record.ToRevision)
 	if _, publishErr := s.publisher.Publish(ctx, invocation.ReplyTarget(), message); publishErr != nil {
-		return OutcomePublishFailed, nil
+		return OutcomePublishFailed, nil //nolint:nilerr // publish failure is reported via the Outcome sentinel, not err
 	}
 	return OutcomeResponded, nil
 }
@@ -114,13 +115,7 @@ func parseHumanWorkstreamCommand(text string) (humanWorkstreamCommand, bool, err
 			if !validSourceResultIdentity(command.SourceResultIdentity) {
 				return humanWorkstreamCommand{}, true, errors.New("source_result_identity must be a 64-character lowercase hex result ID")
 			}
-			duplicate := false
-			for _, input := range requiredInputs {
-				if input == command.SourceResultIdentity {
-					duplicate = true
-					break
-				}
-			}
+			duplicate := slices.Contains(requiredInputs, command.SourceResultIdentity)
 			if !duplicate {
 				requiredInputs = append(requiredInputs, command.SourceResultIdentity)
 			}

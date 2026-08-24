@@ -104,10 +104,10 @@ func newConfirmationPublisher(client confirmationBlockClient, botUserID string, 
 
 func (p *ConfirmationPublisher) PublishConfirmation(ctx context.Context, delivery port.ConfirmationDelivery) (port.ConfirmationPublishedResult, error) {
 	if p == nil || p.client == nil {
-		return port.ConfirmationPublishedResult{}, errors.New("Slack posting client is required for confirmation publishing")
+		return port.ConfirmationPublishedResult{}, errors.New("slack posting client is required for confirmation publishing")
 	}
 	if delivery.ChannelID == "" {
-		return port.ConfirmationPublishedResult{}, errors.New("Slack channel is required for confirmation publishing")
+		return port.ConfirmationPublishedResult{}, errors.New("slack channel is required for confirmation publishing")
 	}
 
 	fallbackText, blocks, err := compileConfirmationMessage(p.renderer, delivery)
@@ -132,14 +132,14 @@ func (p *ConfirmationPublisher) PublishConfirmation(ctx context.Context, deliver
 		return port.ConfirmationPublishedResult{}, fmt.Errorf("publish confirmation blocks: %w", safeErr)
 	}
 	if timestamp == "" {
-		return port.ConfirmationPublishedResult{}, errors.New("Slack published confirmation without a message timestamp")
+		return port.ConfirmationPublishedResult{}, errors.New("slack published confirmation without a message timestamp")
 	}
 	return port.ConfirmationPublishedResult{SlackMessageTS: timestamp}, nil
 }
 
 func (p *ConfirmationPublisher) RecoverConfirmation(ctx context.Context, delivery port.ConfirmationDelivery) (port.ConfirmationPublishedResult, bool, error) {
 	if p == nil || p.client == nil {
-		return port.ConfirmationPublishedResult{}, false, errors.New("Slack client is required for confirmation recovery")
+		return port.ConfirmationPublishedResult{}, false, errors.New("slack client is required for confirmation recovery")
 	}
 	if p.botUserID == "" || delivery.ChannelID == "" || delivery.CorrelationID == "" {
 		return port.ConfirmationPublishedResult{}, false, errors.New("invalid confirmation recovery input")
@@ -170,12 +170,12 @@ func (p *ConfirmationPublisher) RecoverConfirmation(ctx context.Context, deliver
 		contentDigest, _ := message.Metadata.EventPayload["content_sha256"].(string)
 		if timestamp != "" || message.User != p.botUserID || message.Hidden || message.Edited != nil || len(message.Files) != 0 ||
 			message.Timestamp == "" || renderMode != confirmationRenderMode || contentDigest != expectedDigest {
-			return port.ConfirmationPublishedResult{}, false, errors.New("Slack confirmation recovery evidence is ambiguous or invalid")
+			return port.ConfirmationPublishedResult{}, false, errors.New("slack confirmation recovery evidence is ambiguous or invalid")
 		}
 		timestamp = message.Timestamp
 	}
 	if hasMore {
-		return port.ConfirmationPublishedResult{}, false, errors.New("Slack confirmation recovery history is incomplete")
+		return port.ConfirmationPublishedResult{}, false, errors.New("slack confirmation recovery history is incomplete")
 	}
 	if timestamp == "" {
 		return port.ConfirmationPublishedResult{}, false, nil
@@ -185,13 +185,13 @@ func (p *ConfirmationPublisher) RecoverConfirmation(ctx context.Context, deliver
 
 func (p *ConfirmationPublisher) UpdateConfirmation(ctx context.Context, delivery port.ConfirmationDelivery, terminalText string) error {
 	if p == nil || p.client == nil {
-		return errors.New("Slack update client is required for confirmation update")
+		return errors.New("slack update client is required for confirmation update")
 	}
 	if delivery.SlackMessageTS == "" {
-		return errors.New("Slack message timestamp is required for confirmation update")
+		return errors.New("slack message timestamp is required for confirmation update")
 	}
 	if delivery.ChannelID == "" {
-		return errors.New("Slack channel is required for confirmation update")
+		return errors.New("slack channel is required for confirmation update")
 	}
 
 	summary := delivery.Summary
@@ -284,10 +284,7 @@ func confirmationPayloadChunks(value string, maxRunes int) []string {
 	}
 	chunks := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
 	for len(runes) > 0 {
-		end := maxRunes
-		if end > len(runes) {
-			end = len(runes)
-		}
+		end := min(maxRunes, len(runes))
 		chunks = append(chunks, string(runes[:end]))
 		runes = runes[end:]
 	}

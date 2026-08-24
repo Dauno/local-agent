@@ -684,16 +684,16 @@ func (s *KnowledgeStore) ForgetSubject(ctx context.Context, subject string, scop
 	for forgottenDocIDs.Next() {
 		var docID string
 		if scanErr := forgottenDocIDs.Scan(&docID); scanErr != nil {
-			forgottenDocIDs.Close()
+			_ = forgottenDocIDs.Close()
 			return false, fmt.Errorf("%w: scan forgotten document: %v", port.ErrKnowledgeUnavailable, scanErr)
 		}
 		docIDs = append(docIDs, docID)
 	}
 	if err := forgottenDocIDs.Err(); err != nil {
-		forgottenDocIDs.Close()
+		_ = forgottenDocIDs.Close()
 		return false, fmt.Errorf("%w: list forgotten documents: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	forgottenDocIDs.Close()
+	_ = forgottenDocIDs.Close()
 	for _, docID := range docIDs {
 		if err := releaseCuratedDocumentResult(ctx, tx, docID, now); err != nil {
 			return false, err
@@ -967,7 +967,7 @@ func (s *KnowledgeStore) ListPreferencesForOwner(ctx context.Context, ownerKey s
 	if err != nil {
 		return nil, fmt.Errorf("%w: list preferences: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var preferences []domain.KnowledgePreference
 	for rows.Next() {
 		preference, scanErr := scanKnowledgePreference(rows)
@@ -1253,7 +1253,7 @@ func (s *KnowledgeStore) ListClaimsInScopes(ctx context.Context, scopes []domain
 	if err != nil {
 		return nil, fmt.Errorf("%w: list claims: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var claims []domain.KnowledgeClaim
 	for rows.Next() {
 		claim, scanErr := scanKnowledgeClaim(rows)
@@ -1278,7 +1278,7 @@ func (s *KnowledgeStore) ListDocumentsInScopes(ctx context.Context, scopes []dom
 	if err != nil {
 		return nil, fmt.Errorf("%w: list documents: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var documents []domain.KnowledgeDocument
 	for rows.Next() {
 		document, scanErr := scanKnowledgeDocument(rows)
@@ -1427,110 +1427,6 @@ func (s *KnowledgeStore) EnqueueProjection(ctx context.Context) error {
 		return fmt.Errorf("%w: enqueue knowledge projection: %v", port.ErrKnowledgeUnavailable, err)
 	}
 	return nil
-}
-
-// readKnowledgeProjectionSnapshot loads all content-bearing knowledge rows
-// inside the caller's read-only transaction: archived, disputed, and
-// superseded records included, tombstones excluded. Evidence rows are joined
-// to their claim revisions so projections carry only claim linkage, kind,
-// and the safe temporal reference.
-func (s *Store) readKnowledgeProjectionSnapshot(ctx context.Context, tx *sql.Tx) (port.KnowledgeSnapshot, error) {
-	var snapshot port.KnowledgeSnapshot
-
-	claimRows, err := tx.QueryContext(ctx, `
-		SELECT `+knowledgeClaimColumns+` FROM knowledge_claims
-		ORDER BY scope_kind, scope_id, subject, source_ref, id`)
-	if err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("list knowledge claims for snapshot: %v", err)
-	}
-	for claimRows.Next() {
-		claim, scanErr := scanKnowledgeClaim(claimRows)
-		if scanErr != nil {
-			_ = claimRows.Close()
-			return port.KnowledgeSnapshot{}, fmt.Errorf("scan knowledge claim for snapshot: %v", scanErr)
-		}
-		snapshot.Claims = append(snapshot.Claims, claim)
-	}
-	if err := claimRows.Err(); err != nil {
-		_ = claimRows.Close()
-		return port.KnowledgeSnapshot{}, fmt.Errorf("iterate knowledge claims for snapshot: %v", err)
-	}
-	if err := claimRows.Close(); err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("close knowledge claim snapshot rows: %v", err)
-	}
-
-	preferenceRows, err := tx.QueryContext(ctx, `
-		SELECT `+knowledgePreferenceColumns+` FROM knowledge_preferences
-		ORDER BY key, id`)
-	if err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("list knowledge preferences for snapshot: %v", err)
-	}
-	for preferenceRows.Next() {
-		preference, scanErr := scanKnowledgePreference(preferenceRows)
-		if scanErr != nil {
-			_ = preferenceRows.Close()
-			return port.KnowledgeSnapshot{}, fmt.Errorf("scan knowledge preference for snapshot: %v", scanErr)
-		}
-		snapshot.Preferences = append(snapshot.Preferences, preference)
-	}
-	if err := preferenceRows.Err(); err != nil {
-		_ = preferenceRows.Close()
-		return port.KnowledgeSnapshot{}, fmt.Errorf("iterate knowledge preferences for snapshot: %v", err)
-	}
-	if err := preferenceRows.Close(); err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("close knowledge preference snapshot rows: %v", err)
-	}
-
-	documentRows, err := tx.QueryContext(ctx, `
-		SELECT `+knowledgeDocumentColumns+` FROM knowledge_documents
-		ORDER BY subject, scope_kind, scope_id, id`)
-	if err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("list knowledge documents for snapshot: %v", err)
-	}
-	for documentRows.Next() {
-		document, scanErr := scanKnowledgeDocument(documentRows)
-		if scanErr != nil {
-			_ = documentRows.Close()
-			return port.KnowledgeSnapshot{}, fmt.Errorf("scan knowledge document for snapshot: %v", scanErr)
-		}
-		snapshot.Documents = append(snapshot.Documents, document)
-	}
-	if err := documentRows.Err(); err != nil {
-		_ = documentRows.Close()
-		return port.KnowledgeSnapshot{}, fmt.Errorf("iterate knowledge documents for snapshot: %v", err)
-	}
-	if err := documentRows.Close(); err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("close knowledge document snapshot rows: %v", err)
-	}
-
-	evidenceRows, err := tx.QueryContext(ctx, `
-		SELECT r.claim_id, r.revision_number, e.kind, e.exchange_ts
-		FROM knowledge_evidence e
-		JOIN knowledge_claim_revisions r ON r.id = e.claim_revision
-		ORDER BY r.claim_id, r.revision_number, e.exchange_ts`)
-	if err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("list knowledge evidence for snapshot: %v", err)
-	}
-	for evidenceRows.Next() {
-		var ref port.KnowledgeEvidenceRef
-		var claimID, kind string
-		if scanErr := evidenceRows.Scan(&claimID, &ref.RevisionNumber, &kind, &ref.ExchangeTS); scanErr != nil {
-			_ = evidenceRows.Close()
-			return port.KnowledgeSnapshot{}, fmt.Errorf("scan knowledge evidence for snapshot: %v", scanErr)
-		}
-		ref.ClaimID = domain.KnowledgeClaimID(claimID)
-		ref.Kind = domain.KnowledgeEvidenceKind(kind)
-		snapshot.Evidence = append(snapshot.Evidence, ref)
-	}
-	if err := evidenceRows.Err(); err != nil {
-		_ = evidenceRows.Close()
-		return port.KnowledgeSnapshot{}, fmt.Errorf("iterate knowledge evidence for snapshot: %v", err)
-	}
-	if err := evidenceRows.Close(); err != nil {
-		return port.KnowledgeSnapshot{}, fmt.Errorf("close knowledge evidence snapshot rows: %v", err)
-	}
-
-	return snapshot, nil
 }
 
 // knowledgeProjectionBatchLimit bounds one coalesced batch so a pathological

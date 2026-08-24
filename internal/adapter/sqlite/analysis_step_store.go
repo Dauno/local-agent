@@ -362,7 +362,7 @@ func (s *AnalysisStepStore) List(ctx context.Context, analysisID string, afterSt
 	if err != nil {
 		return nil, wrapAnalysisCanceled(err, fmt.Errorf("%w: list analysis steps: %v", domain.ErrAnalysisUnavailable, err))
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var steps []port.AnalysisStep
 	for rows.Next() {
 		step, err := scanAnalysisStepRow(rows)
@@ -451,7 +451,7 @@ func loadAnalysisStepChildren(ctx context.Context, q analysisStepQuerier, analys
 	if err != nil {
 		return nil, wrapAnalysisCanceled(err, fmt.Errorf("%w: read analysis step children: %v", domain.ErrAnalysisUnavailable, err))
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var children []string
 	for rows.Next() {
 		var childID string

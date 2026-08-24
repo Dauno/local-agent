@@ -224,7 +224,7 @@ func TestOpenExistingUpgradesV25WithGrandfatheredFileRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting v25 with grandfathered rows: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -249,7 +249,7 @@ func TestOpenExistingUpgradesV30WithGrandfatheredFileRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting v30 with grandfathered rows: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -292,7 +292,7 @@ func TestMigrationV32RollsBackEntirelyWithGrandfatheredRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	var version int
 	if err := raw.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -352,7 +352,7 @@ func TestMigrationV32RetriesAfterRollbackWithGrandfatheredRows(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting retry: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)

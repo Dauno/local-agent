@@ -19,7 +19,7 @@ func newAnalysisStepStoreFixture(t *testing.T) (*AnalysisStepStore, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	now := time.Now().UTC().Unix()
 	hex64 := strings.Repeat("a", 64)
 	if _, err := store.DB().ExecContext(t.Context(), `INSERT INTO result_analyses (
@@ -93,7 +93,7 @@ func TestAnalysisStepStoreReductionNotClaimableUntilChildrenComplete(t *testing.
 	// Only the two leaves are claimable; three ClaimNext calls exhaust them
 	// and the fourth finds nothing (never the reduction step).
 	seen := map[string]bool{}
-	for i := 0; i < 2; i++ {
+	for i := range 2 {
 		claimed, ok, err := store.ClaimNext(t.Context(), analysisID, now, time.Minute)
 		if err != nil || !ok {
 			t.Fatalf("claim %d: ok=%v err=%v", i, ok, err)

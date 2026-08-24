@@ -67,12 +67,12 @@ func newDBUpgradeCommand(backend Backend, streams Streams) *cobra.Command {
 				return &ExitError{Code: schemaRangeExitCode(err), Cause: err}
 			}
 			if preview.Kind == rollout.UpgradeAlreadyComplete {
-				fmt.Fprintln(streams.Out, databaseAlreadyCompleteText)
+				_, _ = fmt.Fprintln(streams.Out, databaseAlreadyCompleteText)
 				return nil
 			}
 			printUpgradeSummary(streams.Out, preview)
 			if !assumeYes && !confirmUpgrade(streams, preview) {
-				fmt.Fprintln(streams.Out, upgradeCancelledText)
+				_, _ = fmt.Fprintln(streams.Out, upgradeCancelledText)
 				return nil
 			}
 			report, err := upgrader.ApplyDatabaseUpgrade(ctx, opts, preview)
@@ -83,15 +83,15 @@ func newDBUpgradeCommand(backend Backend, streams Streams) *cobra.Command {
 				// The re-read under the lock found a different row than the
 				// preview observed: another process advanced or replaced the
 				// state concurrently. Nothing was mutated.
-				fmt.Fprintf(streams.Out, "database changed concurrently during db upgrade; it now classifies %s; nothing was done\n", upgradeKindLabel(report.Kind))
+				_, _ = fmt.Fprintf(streams.Out, "database changed concurrently during db upgrade; it now classifies %s; nothing was done\n", upgradeKindLabel(report.Kind))
 				return nil
 			}
 			if report.Backup.Path != "" {
-				fmt.Fprintf(streams.Out, "backup verified: %s\n", report.Backup.Path)
+				_, _ = fmt.Fprintf(streams.Out, "backup verified: %s\n", report.Backup.Path)
 			}
-			fmt.Fprintf(streams.Out, "jobs completed without result identity: baseline %d, post %d\n", report.BaselineJobsWithoutIdentity, report.PostJobsWithoutIdentity)
-			fmt.Fprintf(streams.Out, "activations without content: baseline %d, post %d\n", report.BaselineActivationsWithoutContent, report.PostActivationsWithoutContent)
-			fmt.Fprintln(streams.Out, "run local-agent jobs quarantine-legacy-identity")
+			_, _ = fmt.Fprintf(streams.Out, "jobs completed without result identity: baseline %d, post %d\n", report.BaselineJobsWithoutIdentity, report.PostJobsWithoutIdentity)
+			_, _ = fmt.Fprintf(streams.Out, "activations without content: baseline %d, post %d\n", report.BaselineActivationsWithoutContent, report.PostActivationsWithoutContent)
+			_, _ = fmt.Fprintln(streams.Out, "run local-agent jobs quarantine-legacy-identity")
 			return nil
 		},
 	}
@@ -127,11 +127,11 @@ func confirmUpgrade(streams Streams, preview rollout.UpgradePreview) bool {
 func printUpgradeSummary(out io.Writer, preview rollout.UpgradePreview) {
 	switch preview.Kind {
 	case rollout.UpgradeFreshUpgrade:
-		fmt.Fprintf(out, freshUpgradeSummaryFormat+"\n", preview.FromVersion, preview.ResolvedBackupDir)
+		_, _ = fmt.Fprintf(out, freshUpgradeSummaryFormat+"\n", preview.FromVersion, preview.ResolvedBackupDir)
 	case rollout.UpgradeAdoption:
-		fmt.Fprintf(out, adoptionSummaryFormat+"\n", preview.ResolvedBackupDir)
+		_, _ = fmt.Fprintf(out, adoptionSummaryFormat+"\n", preview.ResolvedBackupDir)
 	default:
-		fmt.Fprintln(out, resumeNeededSummaryText)
+		_, _ = fmt.Fprintln(out, resumeNeededSummaryText)
 	}
 }
 
@@ -174,12 +174,12 @@ func newDBRollbackCheckCommand(backend Backend, streams Streams) *cobra.Command 
 				return &ExitError{Code: 1, Cause: err}
 			}
 			if status.Clear {
-				fmt.Fprintln(streams.Out, "rollback drain clear: 0 sessions have a pending discovery marker; safe to run a schema-v41-compatible binary at or before 3cfe091")
+				_, _ = fmt.Fprintln(streams.Out, "rollback drain clear: 0 sessions have a pending discovery marker; safe to run a schema-v41-compatible binary at or before 3cfe091")
 				return nil
 			}
-			fmt.Fprintf(streams.Out, "rollback blocked: %d sessions have a pending discovery marker; let the current binary drain them or cancel them explicitly before rolling back to a binary at or before 3cfe091\n", len(status.PendingSessionIdentities))
+			_, _ = fmt.Fprintf(streams.Out, "rollback blocked: %d sessions have a pending discovery marker; let the current binary drain them or cancel them explicitly before rolling back to a binary at or before 3cfe091\n", len(status.PendingSessionIdentities))
 			for _, identity := range status.PendingSessionIdentities {
-				fmt.Fprintln(streams.Out, identity)
+				_, _ = fmt.Fprintln(streams.Out, identity)
 			}
 			return &ExitError{Code: 1}
 		},

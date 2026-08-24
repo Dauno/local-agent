@@ -137,7 +137,7 @@ func TestAppendEventRevisionEqualsEventCountEqualsMaxOrdinalPlusOne(t *testing.T
 
 	const eventCount = 7
 	current := created.Session
-	for i := 0; i < eventCount; i++ {
+	for i := range eventCount {
 		event := session.NewEvent(ctx, "invocation")
 		event.ID = fmt.Sprintf("evt-%d", i)
 		event.Timestamp = time.Now()

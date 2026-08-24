@@ -16,12 +16,12 @@ func TestMigrationV36FreshAndUpgradePreserveSessions(t *testing.T) {
 	if _, err := store.DB().ExecContext(t.Context(), `SELECT 1 FROM context_epochs`); err != nil {
 		t.Fatalf("fresh context epoch table unavailable: %v", err)
 	}
-	store.Close()
+	_ = store.Close()
 
 	path, raw := createSchemaAtVersion(t, 35)
 	if _, err := raw.ExecContext(t.Context(), `INSERT INTO adk_sessions (app_name, user_id, session_id, state, create_time, update_time)
 		VALUES ('app', 'user', 'session', '{}', 1, 1)`); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -31,7 +31,7 @@ func TestMigrationV36FreshAndUpgradePreserveSessions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upgraded.Close()
+	defer func() { _ = upgraded.Close() }()
 	var count int
 	if err := upgraded.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM adk_sessions`).Scan(&count); err != nil || count != 1 {
 		t.Fatalf("preserved ADK sessions = %d, %v", count, err)
@@ -57,7 +57,7 @@ func TestMigrationV36CrashRollsBackAndReopens(t *testing.T) {
 	}
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal("OpenExisting succeeded after injected v36 crash")
 	}
 	if err == nil || !strings.Contains(err.Error(), "injected v36 crash") {
@@ -67,7 +67,7 @@ func TestMigrationV36CrashRollsBackAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer check.Close()
+	defer func() { _ = check.Close() }()
 	var version, tables int
 	if err := check.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
@@ -83,7 +83,7 @@ func TestMigrationV36CrashRollsBackAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after v36 crash: %v", err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	if err := reopened.DB().QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("reopened version = %d, %v", version, err)
 	}

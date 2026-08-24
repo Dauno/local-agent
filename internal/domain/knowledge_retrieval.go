@@ -2,6 +2,7 @@ package domain
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -358,7 +359,7 @@ func RankKnowledgeCandidates(candidates []KnowledgeRankCandidate) ([]KnowledgeRa
 				candidate.FusedScore += knowledgeRRFScale / (knowledgeRRFConstant + rank)
 			}
 		}
-		sort.Slice(candidate.Reasons, func(i, j int) bool { return candidate.Reasons[i] < candidate.Reasons[j] })
+		slices.Sort(candidate.Reasons)
 		ranked = append(ranked, candidate)
 	}
 	sort.Slice(ranked, func(i, j int) bool {
@@ -441,12 +442,7 @@ func (c KnowledgeRankCandidate) validate() error {
 }
 
 func hasKnowledgeRetrievalReason(reasons []KnowledgeRetrievalReason, target KnowledgeRetrievalReason) bool {
-	for _, reason := range reasons {
-		if reason == target {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(reasons, target)
 }
 
 type identityKey struct {

@@ -108,7 +108,7 @@ func (e *realExecutor) Version(ctx context.Context) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	for _, line := range strings.Split(output, "\n") {
+	for line := range strings.SplitSeq(output, "\n") {
 		if trimmed := strings.TrimSpace(line); trimmed != "" {
 			return trimmed, nil
 		}
@@ -225,10 +225,7 @@ func newBoundedCapture(limit int) *boundedCapture {
 
 func (b *boundedCapture) Write(data []byte) (int, error) {
 	b.total += int64(len(data))
-	remaining := b.limit - len(b.data)
-	if remaining > len(data) {
-		remaining = len(data)
-	}
+	remaining := min(b.limit-len(b.data), len(data))
 	if remaining > 0 {
 		b.data = append(b.data, data[:remaining]...)
 	}
@@ -244,8 +241,7 @@ func (b *boundedCapture) Summary() ProcessDiagnostics {
 }
 
 func processFailure(err error) string {
-	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
+	if exitErr, ok := errors.AsType[*exec.ExitError](err); ok {
 		if code := exitErr.ExitCode(); code >= 0 {
 			return fmt.Sprintf("exited with code %d", code)
 		}

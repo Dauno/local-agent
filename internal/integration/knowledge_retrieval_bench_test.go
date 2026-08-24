@@ -163,19 +163,19 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 	e3 := []float32{0, 0, 1, 0, 0, 0, 0, 0}
 	deadDigest := strings.Repeat("deadbeef", 8)
 
-	stats := knowledgeBenchStats{}
-	stats.claimsAuthorized = knowledgeBenchClaimsAuth
-	stats.claimsUnauthorized = knowledgeBenchClaimsTotal - knowledgeBenchClaimsAuth
-	stats.prefsAuthorized = knowledgeBenchPrefsAuth
-	stats.prefsUnauthorized = knowledgeBenchPrefsTotal - knowledgeBenchPrefsAuth
-	stats.docsAuthorized = knowledgeBenchDocsAuth
-	stats.docsUnauthorized = knowledgeBenchDocsTotal - knowledgeBenchDocsAuth
-	stats.exactSubjectRows = 500
+	stats := knowledgeBenchStats{
+		claimsAuthorized:   knowledgeBenchClaimsAuth,
+		claimsUnauthorized: knowledgeBenchClaimsTotal - knowledgeBenchClaimsAuth,
+		prefsAuthorized:    knowledgeBenchPrefsAuth,
+		prefsUnauthorized:  knowledgeBenchPrefsTotal - knowledgeBenchPrefsAuth,
+		docsAuthorized:     knowledgeBenchDocsAuth,
+		docsUnauthorized:   knowledgeBenchDocsTotal - knowledgeBenchDocsAuth,
+		exactSubjectRows:   500}
 
 	db := store.DB()
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	defer func() { _ = tx.Rollback() }()
@@ -186,21 +186,21 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 			status, valid_from, valid_until, supersedes_id, current_rev, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?, ?, '', ?, ?, ?, '', 1, ?, ?)`)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	stmtFTS, err := tx.PrepareContext(ctx, `
 		INSERT INTO knowledge_retrieval_fts (item_kind, item_id, item_revision, source_digest, subject, body)
 		VALUES (?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	stmtEmbedding, err := tx.PrepareContext(ctx, `
 		INSERT INTO knowledge_embeddings (item_kind, item_id, item_revision, source_digest, model_fingerprint, dimensions, vector, created_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 
@@ -214,7 +214,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 	// and open validity windows. The first 500 share one exact subject;
 	// every 4th carries a deliberately stale FTS/vector digest; every 10th
 	// carries the semantic query vector.
-	for i := 0; i < knowledgeBenchClaimsAuth; i++ {
+	for i := range knowledgeBenchClaimsAuth {
 		scopeKind, scopeID, sourceClass := domain.KnowledgeScopeProject, knowledgeBenchProject, domain.KnowledgeSourceHuman
 		switch i % 10 {
 		case 4, 5, 6:
@@ -243,7 +243,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		if _, err := stmtClaim.ExecContext(ctx, id, subject, string(predicate), string(valueKind), valueText,
 			valueReference, string(scopeKind), scopeID, string(sourceClass), sourceRef, string(status),
 			0, 0, nowUnix, nowUnix); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("claim %d: %w", i, err))
 		}
 		item := port.KnowledgeAuthoritativeItem{
@@ -257,7 +257,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		text, err := knowledgeusecase.BuildKnowledgeIndexText(domain.KnowledgeRetrievalClaim, item, "", nil)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("claim %d canonical text: %w", i, err))
 		}
 		digest := text.SourceDigest
@@ -266,7 +266,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 			stats.staleFTS++
 		}
 		if _, err := stmtFTS.ExecContext(ctx, string(domain.KnowledgeRetrievalClaim), id, 1, digest, text.Subject, text.Body); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("claim %d FTS: %w", i, err))
 		}
 		vector := e2
@@ -276,11 +276,11 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		encoded, err := encode(vector)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("claim %d vector: %w", i, err))
 		}
 		if _, err := stmtEmbedding.ExecContext(ctx, string(domain.KnowledgeRetrievalClaim), id, 1, digest, fingerprint, knowledgeBenchDims, encoded, nowUnix); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("claim %d embedding: %w", i, err))
 		}
 	}
@@ -289,7 +289,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 	// index — other-team scopes, archived/superseded/expired/future
 	// statuses, all carrying the broad lexical token so the FTS match set
 	// is far larger than the eligible set.
-	for i := 0; i < knowledgeBenchClaimsTotal-knowledgeBenchClaimsAuth; i++ {
+	for i := range knowledgeBenchClaimsTotal - knowledgeBenchClaimsAuth {
 		scopeKind, scopeID := domain.KnowledgeScopeTeam, knowledgeBenchOtherTeam
 		status := domain.KnowledgeClaimAsserted
 		validFrom, validUntil := int64(0), int64(0)
@@ -311,7 +311,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 			fmt.Sprintf("operational note %s other %05d", knowledgeBenchLexicalToken, i), "",
 			string(scopeKind), scopeID, string(domain.KnowledgeSourceHuman), "bench-src-unauth", string(status),
 			validFrom, validUntil, nowUnix, nowUnix); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("unauthorized claim %d: %w", i, err))
 		}
 		item := port.KnowledgeAuthoritativeItem{
@@ -325,20 +325,20 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		text, err := knowledgeusecase.BuildKnowledgeIndexText(domain.KnowledgeRetrievalClaim, item, "", nil)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("unauthorized claim %d canonical text: %w", i, err))
 		}
 		if _, err := stmtFTS.ExecContext(ctx, string(domain.KnowledgeRetrievalClaim), id, 1, text.SourceDigest, text.Subject, text.Body); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("unauthorized claim %d FTS: %w", i, err))
 		}
 		encoded, err := encode(e3)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("unauthorized claim %d vector: %w", i, err))
 		}
 		if _, err := stmtEmbedding.ExecContext(ctx, string(domain.KnowledgeRetrievalClaim), id, 1, text.SourceDigest, fingerprint, knowledgeBenchDims, encoded, nowUnix); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("unauthorized claim %d embedding: %w", i, err))
 		}
 	}
@@ -347,11 +347,11 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		INSERT INTO knowledge_preferences (owner_key, key, value_kind, value_text, value_number, value_boolean, status, source_ref, current_rev, created_at, updated_at)
 		VALUES (?, ?, ?, ?, 0, 0, 'active', 'bench-pref-src', 1, ?, ?)`)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	// Preferences: 300 owned by the trusted actor, 700 owned by others.
-	for j := 0; j < knowledgeBenchPrefsTotal; j++ {
+	for j := range knowledgeBenchPrefsTotal {
 		prefOwner := owner
 		authorized := j < knowledgeBenchPrefsAuth
 		if !authorized {
@@ -361,12 +361,12 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		valueText := fmt.Sprintf("%s preference %05d", knowledgeBenchLexicalToken, j)
 		result, err := stmtPref.ExecContext(ctx, prefOwner, key, string(domain.KnowledgeValueString), valueText, nowUnix, nowUnix)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("preference %d: %w", j, err))
 		}
 		rowID, err := result.LastInsertId()
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("preference %d row id: %w", j, err))
 		}
 		identity := fmt.Sprintf("preference:%d", rowID)
@@ -380,11 +380,11 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		text, err := knowledgeusecase.BuildKnowledgeIndexText(domain.KnowledgeRetrievalPreference, item, "", nil)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("preference %d canonical text: %w", j, err))
 		}
 		if _, err := stmtFTS.ExecContext(ctx, string(domain.KnowledgeRetrievalPreference), identity, 1, text.SourceDigest, text.Subject, text.Body); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("preference %d FTS: %w", j, err))
 		}
 		vector := e3
@@ -397,11 +397,11 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		encoded, err := encode(vector)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("preference %d vector: %w", j, err))
 		}
 		if _, err := stmtEmbedding.ExecContext(ctx, string(domain.KnowledgeRetrievalPreference), identity, 1, text.SourceDigest, fingerprint, knowledgeBenchDims, encoded, nowUnix); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("preference %d embedding: %w", j, err))
 		}
 	}
@@ -410,13 +410,13 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		INSERT INTO knowledge_documents (id, subject, scope_kind, scope_id, content_digest, content_handle, source_id, source_rev, provenance, status, current_rev, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, '', 0, 'curated', ?, 1, ?, ?)`)
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	documentContent := make(map[string][]byte, knowledgeBenchDocsTotal)
 	// Documents: 250 authorized (project scope, active), 750 unauthorized
 	// (other-team active or archived), each with a bounded result handle.
-	for k := 0; k < knowledgeBenchDocsTotal; k++ {
+	for k := range knowledgeBenchDocsTotal {
 		content := fmt.Sprintf("curated note %s %05d", knowledgeBenchLexicalToken, k)
 		authorized := k < knowledgeBenchDocsAuth
 		scopeKind, scopeID, status := domain.KnowledgeScopeProject, knowledgeBenchProject, domain.KnowledgeDocumentActive
@@ -434,7 +434,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		subject := fmt.Sprintf("bench doc %05d", k)
 		documentContent[id] = []byte(content)
 		if _, err := stmtDoc.ExecContext(ctx, id, subject, string(scopeKind), scopeID, digest, handle, string(status), nowUnix, nowUnix); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("document %d: %w", k, err))
 		}
 		item := port.KnowledgeAuthoritativeItem{
@@ -447,11 +447,11 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		text, err := knowledgeusecase.BuildKnowledgeIndexText(domain.KnowledgeRetrievalDocument, item, content, nil)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("document %d canonical text: %w", k, err))
 		}
 		if _, err := stmtFTS.ExecContext(ctx, string(domain.KnowledgeRetrievalDocument), id, 1, text.SourceDigest, text.Subject, text.Body); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("document %d FTS: %w", k, err))
 		}
 		vector := e3
@@ -464,17 +464,17 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		}
 		encoded, err := encode(vector)
 		if err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("document %d vector: %w", k, err))
 		}
 		if _, err := stmtEmbedding.ExecContext(ctx, string(domain.KnowledgeRetrievalDocument), id, 1, text.SourceDigest, fingerprint, knowledgeBenchDims, encoded, nowUnix); err != nil {
-			store.Close()
+			_ = store.Close()
 			return fail(fmt.Errorf("document %d embedding: %w", k, err))
 		}
 	}
 
 	if err := tx.Commit(); err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(fmt.Errorf("commit corpus: %w", err))
 	}
 
@@ -506,7 +506,7 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		Redact:   func(value string) string { return value },
 	})
 	if err != nil {
-		store.Close()
+		_ = store.Close()
 		return fail(err)
 	}
 	request := domain.KnowledgeRetrievalRequest{

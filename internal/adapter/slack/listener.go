@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 
 	"github.com/slack-go/slack"
@@ -144,7 +145,7 @@ func (l *Listener) WithDispatcher(dispatcher *InteractiveDispatcher) *Listener {
 // after composition has supplied its handlers and dependencies.
 func (l *Listener) BuildInteractiveDispatcher() (*InteractiveDispatcher, error) {
 	if l == nil {
-		return nil, errors.New("Slack listener is required for dispatcher construction")
+		return nil, errors.New("slack listener is required for dispatcher construction")
 	}
 	return newListenerDispatcher(l)
 }
@@ -153,13 +154,13 @@ func (l *Listener) BuildInteractiveDispatcher() (*InteractiveDispatcher, error) 
 // receiving Socket Mode events.
 func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog) error {
 	if l == nil {
-		return errors.New("Slack listener is required for template validation")
+		return errors.New("slack listener is required for template validation")
 	}
 	if l.dispatcherErr != nil {
 		return fmt.Errorf("initialize Slack interactive dispatcher: %w", l.dispatcherErr)
 	}
 	if l.dispatcher == nil {
-		return errors.New("Slack interactive dispatcher is required")
+		return errors.New("slack interactive dispatcher is required")
 	}
 	return catalog.ValidateDispatcher(l.dispatcher)
 }
@@ -174,13 +175,13 @@ func (l *Listener) Run(ctx context.Context, handler func(context.Context, domain
 // already admitted handlers to remain alive under handlerCtx during drain.
 func (l *Listener) RunWithHandlerContext(intakeCtx, handlerCtx context.Context, handler func(context.Context, domain.Invocation)) error {
 	if l == nil || l.client == nil {
-		return errors.New("Socket Mode client is required")
+		return errors.New("socket Mode client is required")
 	}
 	if handler == nil {
-		return errors.New("Slack invocation handler is required")
+		return errors.New("slack invocation handler is required")
 	}
 	if intakeCtx == nil || handlerCtx == nil {
-		return errors.New("Slack intake and handler contexts are required")
+		return errors.New("slack intake and handler contexts are required")
 	}
 
 	runCtx, cancel := context.WithCancel(intakeCtx)
@@ -278,13 +279,11 @@ func (l *Listener) handleViewSubmission(ctx, handlerCtx context.Context, request
 	if result.Response != nil || result.Effect == nil {
 		return
 	}
-	handlers.Add(1)
-	go func() {
-		defer handlers.Done()
+	handlers.Go(func() {
 		if err := result.Effect(handlerCtx); err != nil {
 			l.logger.Warn("builder preview processing failed", "error", err)
 		}
-	}()
+	})
 }
 
 func (l *Listener) handleBlockActions(ctx, handlerCtx context.Context, request socketmode.Request, callback slack.InteractionCallback, handlers *sync.WaitGroup) {
@@ -307,9 +306,7 @@ func (l *Listener) handleBlockActions(ctx, handlerCtx context.Context, request s
 			return
 		}
 	}
-	handlers.Add(1)
-	go func() {
-		defer handlers.Done()
+	handlers.Go(func() {
 		if err := l.dispatcher.HandleAction(handlerCtx, actionID, callback); err != nil {
 			if errors.Is(err, ErrUnsupportedInteractive) {
 				l.logger.Warn("unsupported Slack interactive action ignored")
@@ -317,7 +314,7 @@ func (l *Listener) handleBlockActions(ctx, handlerCtx context.Context, request s
 			}
 			l.logger.Warn("Slack interactive action handler failed", "error", err)
 		}
-	}()
+	})
 }
 
 func (l *Listener) dispatchActionID(callback slack.InteractionCallback) (string, bool) {
@@ -502,12 +499,7 @@ func (l *Listener) isAllowedBuilderUser(userID string) bool {
 	if len(l.allowedUserIDs) == 0 {
 		return true
 	}
-	for _, allowed := range l.allowedUserIDs {
-		if allowed == userID {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(l.allowedUserIDs, userID)
 }
 
 func (l *Listener) ackInteractive(ctx context.Context, request socketmode.Request, payload any) error {
@@ -529,13 +521,11 @@ func (l *Listener) publishBuilderModalFallback(ctx context.Context, callback sla
 		}
 		return
 	}
-	handlers.Add(1)
-	go func() {
-		defer handlers.Done()
+	handlers.Go(func() {
 		if err := l.builderHandler.publishModalFallback(ctx, callback); err != nil {
 			l.logger.Warn("builder modal fallback failed", "error", err)
 		}
-	}()
+	})
 }
 
 func (l *Listener) handleEventsAPI(ctx, handlerCtx context.Context, event socketmode.Event, handlers *sync.WaitGroup, handler func(context.Context, domain.Invocation)) {
@@ -562,9 +552,7 @@ func (l *Listener) handleEventsAPI(ctx, handlerCtx context.Context, event socket
 		return
 	}
 
-	handlers.Add(1)
-	go func() {
-		defer handlers.Done()
+	handlers.Go(func() {
 		handler(handlerCtx, invocation)
-	}()
+	})
 }

@@ -249,29 +249,29 @@ func TestClassifyRolloutBindsRowTwoToLiveSchema(t *testing.T) {
 }
 
 func TestClassifyRolloutFailsClosedOnPartialStates(t *testing.T) {
-	baselineOnly := RolloutState{}
-	baselineOnly.BaselinePresent = true
-	baselineOnly.BaselineValid = true
-	cutoffOnly := RolloutState{}
-	cutoffOnly.CutoffPresent = true
-	cutoffOnly.CutoffValid = true
-	malformedBaseline := RolloutState{}
-	malformedBaseline.BaselinePresent = true
-	malformedBaseline.BaselineValid = false
-	malformedCutoff := RolloutState{}
-	malformedCutoff.CutoffPresent = true
-	malformedCutoff.CutoffValid = false
+	baselineOnly := RolloutState{
+		BaselinePresent: true,
+		BaselineValid:   true}
+	cutoffOnly := RolloutState{
+		CutoffPresent: true,
+		CutoffValid:   true}
+	malformedBaseline := RolloutState{
+		BaselinePresent: true,
+		BaselineValid:   false}
+	malformedCutoff := RolloutState{
+		CutoffPresent: true,
+		CutoffValid:   false}
 
-	statusWithoutDetail := RolloutState{}
-	statusWithoutDetail.PostflightPresent = true
-	statusWithoutDetail.PostflightValid = true
-	statusWithoutDetail.PostflightStatus = PostflightPassed
-	detailWithoutStatus := RolloutState{}
-	detailWithoutStatus.PostflightDetailPresent = true
-	detailWithoutStatus.PostflightDetail = "orphan"
-	unknownStatus := RolloutState{}
-	unknownStatus.PostflightPresent = true
-	unknownStatus.PostflightValid = false
+	statusWithoutDetail := RolloutState{
+		PostflightPresent: true,
+		PostflightValid:   true,
+		PostflightStatus:  PostflightPassed}
+	detailWithoutStatus := RolloutState{
+		PostflightDetailPresent: true,
+		PostflightDetail:        "orphan"}
+	unknownStatus := RolloutState{
+		PostflightPresent: true,
+		PostflightValid:   false}
 
 	cases := []struct {
 		name     string
@@ -328,9 +328,9 @@ func TestIsRolloutCompletePropagatesErrorsUnchanged(t *testing.T) {
 	if _, err := IsRolloutComplete(10, RolloutState{}); !errors.Is(err, ErrUnsupportedSourceSchema) {
 		t.Fatalf("err = %v, want ErrUnsupportedSourceSchema propagated", err)
 	}
-	corruptState := RolloutState{}
-	corruptState.BaselinePresent = true
-	corruptState.BaselineValid = true
+	corruptState := RolloutState{
+		BaselinePresent: true,
+		BaselineValid:   true}
 	if _, err := IsRolloutComplete(41, corruptState); !errors.Is(err, ErrRolloutStateCorrupt) {
 		t.Fatalf("err = %v, want Corrupt propagated", err)
 	}

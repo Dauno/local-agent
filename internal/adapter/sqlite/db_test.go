@@ -94,7 +94,7 @@ func TestMigrationV21CreatesContextSummaryTables(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	for _, table := range []string{"adk_context_summaries", "adk_context_summary_jobs"} {
 		var name string
 		if err := store.db.QueryRowContext(context.Background(), "SELECT name FROM sqlite_schema WHERE type = 'table' AND name = ?", table).Scan(&name); err != nil || name != table {
@@ -108,13 +108,13 @@ func TestMigrationV24CreatesRecoverableResultCleanupClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(recoverable_results)`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns := make(map[string]bool)
 	for rows.Next() {
 		var cid, notNull, primaryKey int
@@ -147,7 +147,7 @@ func TestOpenExistingUpgradesV21ToV26AndPreservesLegacyNotification(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var policy string
 	if err := store.db.QueryRowContext(ctx, `SELECT policy_version FROM external_agent_job_notifications WHERE job_id = 'migration-job'`).Scan(&policy); err != nil {
 		t.Fatal(err)
@@ -187,7 +187,7 @@ func TestOpenExistingUpgradesV28WithoutBackfillingActivations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -199,7 +199,7 @@ func TestOpenExistingUpgradesV28WithoutBackfillingActivations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var sources []string
 	for rows.Next() {
 		var role, source string
@@ -245,7 +245,7 @@ func TestOpenExistingUpgradesV25ToV26PreservesLegacyRowsAndAddsEvidenceTriggers(
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var count int
 	if err := store.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_notifications WHERE job_id = 'migration-job' AND policy_version = 'legacy_v1'`).Scan(&count); err != nil {
 		t.Fatal(err)
@@ -338,7 +338,7 @@ func createSchemaAtVersion(t *testing.T, version int) (string, *sql.DB) {
 	}
 	tx, err := raw.BeginTx(ctx, nil)
 	if err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	for current := 1; current <= version; current++ {
@@ -447,7 +447,7 @@ func TestOpenExistingRejectsFutureSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rawDB.Close()
+	defer func() { _ = rawDB.Close() }()
 	var version int
 	if err := rawDB.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -501,7 +501,7 @@ func TestOpenExistingUpgradesV14WithoutReset(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting() error = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if err := store.EnsureDMIdentityMode(ctx, false); err != nil {
 		t.Fatalf("EnsureDMIdentityMode(false) error = %v", err)
 	}
@@ -799,7 +799,7 @@ func TestMigrationV31ChainAppliesOnFreshSchema(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting on fresh schema: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -908,7 +908,7 @@ func TestMigrationV31RepairsForegroundInlineIdentityMatrix(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting v30: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -982,7 +982,7 @@ func TestMigrationV31RetiresForegroundActivationsByState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting v30: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -1100,7 +1100,7 @@ func TestMigrationV31RollsBackEntirelyOnError(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	var version int
 	if err := raw.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -1130,7 +1130,7 @@ func TestMigrationV31RollsBackEntirelyOnError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting after restore: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
@@ -1167,12 +1167,12 @@ func TestMigrationV32AddsExplicitRouteAndIdentityColumnsOnFreshSchema(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	rows, err := store.db.QueryContext(context.Background(), `PRAGMA table_info(external_agent_job_notifications)`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	columns := make(map[string]bool)
 	for rows.Next() {
 		var cid, notNull, primaryKey int
@@ -1271,7 +1271,7 @@ func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -1413,7 +1413,7 @@ func TestMigrationV32ScopesIdentityBackfillToCompatibleSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting v30: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)

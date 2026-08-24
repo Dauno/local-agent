@@ -793,7 +793,6 @@ func validateWorkflowTools(defs *Definitions) []string {
 			if !agentNamePattern.MatchString(id) {
 				errs = append(errs, fmt.Sprintf("%s: workflow tool id %q is not a valid identifier", prefix, id))
 			}
-
 		}
 	}
 

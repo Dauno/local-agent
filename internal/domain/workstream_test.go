@@ -62,7 +62,7 @@ func TestWorkstreamLimitsAndDependencyGraphAreValidated(t *testing.T) {
 	for i := range workstream.Tasks {
 		workstream.Tasks[i].Status = domain.TaskCompleted
 	}
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		workstream.Tasks = append(workstream.Tasks, domain.WorkstreamTask{
 			ID:          fmt.Sprintf("open-%d", i),
 			Project:     workstream.Project,
@@ -219,7 +219,7 @@ func TestWorkstreamTaskCanBeRejectedWithoutACPExecution(t *testing.T) {
 
 func TestWorkstreamTransitionUsesConfiguredTaskLimit(t *testing.T) {
 	workstream := testWorkstream()
-	for i := 0; i < 33; i++ {
+	for i := range 33 {
 		workstream.Tasks = append(workstream.Tasks, domain.WorkstreamTask{
 			ID: fmt.Sprintf("task-%d", i), Project: workstream.Project, Description: "configured-limit task", Status: domain.TaskProposed,
 		})

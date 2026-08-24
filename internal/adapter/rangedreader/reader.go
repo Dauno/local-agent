@@ -88,7 +88,7 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 	if strings.HasPrefix(cleanPath, ".."+string(os.PathSeparator)) || cleanPath == ".." {
 		return domain.SourceRange{}, fmt.Errorf("path must be relative: %q", req.Path)
 	}
-	for _, segment := range strings.Split(cleanPath, string(os.PathSeparator)) {
+	for segment := range strings.SplitSeq(cleanPath, string(os.PathSeparator)) {
 		switch segment {
 		case ".env", ".git":
 			return domain.SourceRange{}, fmt.Errorf("path %q is unavailable", req.Path)
@@ -100,7 +100,7 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 	if err != nil {
 		return domain.SourceRange{}, fmt.Errorf("path %q is unavailable", req.Path)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	info, err := file.Stat()
 	if err != nil || !info.Mode().IsRegular() {
 		return domain.SourceRange{}, fmt.Errorf("path %q is not a supported text file", req.Path)
@@ -135,10 +135,7 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 	lineStarts := buildLineStarts(data)
 
 	// 10. StartLine is 1-based; clamp to valid range.
-	startLine := req.StartLine
-	if startLine < 1 {
-		startLine = 1
-	}
+	startLine := max(req.StartLine, 1)
 
 	if startLine > len(lineStarts) {
 		// Beyond end of file.
@@ -169,10 +166,7 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 		}, nil
 	}
 	requestedEndLine := startLine + req.MaxLines
-	endLine := requestedEndLine
-	if endLine > len(lineStarts)+1 {
-		endLine = len(lineStarts) + 1
-	}
+	endLine := min(requestedEndLine, len(lineStarts)+1)
 	overRequested := requestedEndLine > len(lineStarts)+1
 
 	startIdx := startLine - 1 // zero-based index into lineStarts
@@ -276,7 +270,7 @@ func buildLineStarts(data []byte) []int64 {
 		return nil
 	}
 	starts := []int64{0}
-	for i := 0; i < len(data); i++ {
+	for i := range data {
 		if data[i] == '\n' {
 			starts = append(starts, int64(i+1))
 		}
@@ -315,10 +309,7 @@ func textPrefix(data []byte, maxBytes int) (string, bool, bool) {
 	if maxBytes <= 0 {
 		return "", len(data) > 0, true
 	}
-	limit := len(data)
-	if limit > maxBytes {
-		limit = maxBytes
-	}
+	limit := min(len(data), maxBytes)
 	// Walk runes up to maxBytes, stopping at the last valid rune boundary.
 	lastValid := 0
 	for offset := 0; offset < limit; {

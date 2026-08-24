@@ -102,7 +102,7 @@ func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return fmt.Errorf("read external-agent notification identities: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	update, err := tx.PrepareContext(ctx, `UPDATE external_agent_job_notifications SET
 		notification_sha256 = ?, notification_bytes = ?, result_sha256 = ?,
 		result_bytes = ?,
@@ -111,7 +111,7 @@ func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return fmt.Errorf("prepare external-agent notification identity backfill: %w", err)
 	}
-	defer update.Close()
+	defer func() { _ = update.Close() }()
 	for rows.Next() {
 		var jobID, kind, terminalStatus, markdown, jobMode, jobStatus, jobResultSHA string
 		var revision, jobRevision int

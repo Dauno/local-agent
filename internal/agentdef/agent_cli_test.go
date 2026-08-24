@@ -303,8 +303,8 @@ func TestRejectCLIFieldsOnOpenAIProvider(t *testing.T) {
 	base := t.TempDir()
 	agentsDir := filepath.Join(base, "agents")
 	providersDir := filepath.Join(base, "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
 type: openai_compatible
@@ -340,8 +340,8 @@ func TestRejectExplicitEmptyCLIFieldsOnOpenAIProvider(t *testing.T) {
 	base := t.TempDir()
 	agentsDir := filepath.Join(base, "agents")
 	providersDir := filepath.Join(base, "providers")
-	os.MkdirAll(agentsDir, 0o755)
-	os.MkdirAll(providersDir, 0o755)
+	_ = os.MkdirAll(agentsDir, 0o755)
+	_ = os.MkdirAll(providersDir, 0o755)
 	writeFile(t, providersDir, "deepseek.yaml", `
 name: deepseek
 type: openai_compatible

@@ -18,7 +18,7 @@ func newKnowledgeTestStore(t *testing.T) (*KnowledgeStore, *Store) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	return NewKnowledgeStore(store), store
 }
 
@@ -300,7 +300,7 @@ func TestKnowledgeStoreTransitionsAndEvidenceEnqueueProjection(t *testing.T) {
 	if err != nil || len(items) != 3 {
 		t.Fatalf("projection batch after transition/evidence = %d items, %v; want 3", len(items), err)
 	}
-	var ids []int
+	ids := make([]int, 0, len(items))
 	for _, item := range items {
 		ids = append(ids, item.ID)
 	}
@@ -1360,7 +1360,7 @@ func TestKnowledgeStoreForgetHonorsConfiguredSubjectLimits(t *testing.T) {
 func TestKnowledgeStoreSubjectListingEscapesGlobalBound(t *testing.T) {
 	store, _ := newKnowledgeTestStore(t)
 	limits := domain.DefaultKnowledgeLimits()
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		claim := testKnowledgeStoreClaim()
 		claim.Subject = "same-subject"
 		claim.Value = domain.KnowledgeValue{Kind: domain.KnowledgeValueString, Text: fmt.Sprintf("value-%d", i)}

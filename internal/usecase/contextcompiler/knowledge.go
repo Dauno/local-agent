@@ -101,7 +101,7 @@ func (c *Compiler) applyKnowledgeSelection(ctx context.Context, state *compilati
 	if err != nil {
 		// A source counter failure omits all knowledge rather than failing
 		// the root request. Final request admission remains authoritative.
-		return nil
+		return nil //nolint:nilerr
 	}
 	state.knowledgeCards = selected
 	if len(selected) > 0 {
@@ -208,10 +208,7 @@ func (state compilationState) knowledgeResultFields() ([]string, int, int) {
 	}
 	sort.Strings(identities)
 	selected := len(state.knowledgeCards)
-	omitted := len(state.request.Knowledge) - selected
-	if omitted < 0 {
-		omitted = 0
-	}
+	omitted := max(len(state.request.Knowledge)-selected, 0)
 	return identities, selected, omitted
 }
 

@@ -31,7 +31,7 @@ func (FileSchemaWriter) RecordBaselineAndCutoff(
 	if err != nil {
 		return fmt.Errorf("open database for rollout write: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin baseline/cutoff transaction: %w", err)
@@ -83,7 +83,7 @@ func (FileSchemaWriter) RecordPostflight(ctx context.Context, path string, statu
 	if err != nil {
 		return fmt.Errorf("open database for postflight write: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("begin postflight transaction: %w", err)

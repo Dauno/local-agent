@@ -138,11 +138,11 @@ func TestListDirectorySortsEntries(t *testing.T) {
 	root := t.TempDir()
 	dirs := []string{"zzz-dir", "aaa-dir", "bbb-dir"}
 	for _, d := range dirs {
-		os.MkdirAll(filepath.Join(root, d), 0o755)
+		_ = os.MkdirAll(filepath.Join(root, d), 0o755)
 	}
 	files := []string{"zzz.txt", "aaa.txt", "bbb.txt"}
 	for _, f := range files {
-		os.WriteFile(filepath.Join(root, f), []byte("content"), 0o600)
+		_ = os.WriteFile(filepath.Join(root, f), []byte("content"), 0o600)
 	}
 	executor, err := New(map[string]string{"project": root}, 4096)
 	if err != nil {
@@ -167,8 +167,8 @@ func TestListDirectorySortsEntries(t *testing.T) {
 
 func TestListDirectoryTrailingSlashForDirs(t *testing.T) {
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "mydir"), 0o755)
-	os.WriteFile(filepath.Join(root, "myfile.txt"), []byte("hi"), 0o600)
+	_ = os.MkdirAll(filepath.Join(root, "mydir"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "myfile.txt"), []byte("hi"), 0o600)
 	executor, err := New(map[string]string{"project": root}, 4096)
 	if err != nil {
 		t.Fatal(err)
@@ -197,13 +197,13 @@ func TestListDirectoryTrailingSlashForDirs(t *testing.T) {
 
 func TestListDirectoryHiddenRestrictedEntries(t *testing.T) {
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, ".git"), 0o755)
-	os.WriteFile(filepath.Join(root, ".env"), []byte("secret"), 0o600)
-	os.MkdirAll(filepath.Join(root, ".local-agent"), 0o755)
-	os.WriteFile(filepath.Join(root, "visible.txt"), []byte("ok"), 0o600)
-	os.WriteFile(filepath.Join(root, ".env.example"), []byte("template"), 0o600)
-	os.WriteFile(filepath.Join(root, ".gitignore"), []byte("ignored"), 0o600)
-	os.MkdirAll(filepath.Join(root, ".github"), 0o755)
+	_ = os.MkdirAll(filepath.Join(root, ".git"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, ".env"), []byte("secret"), 0o600)
+	_ = os.MkdirAll(filepath.Join(root, ".local-agent"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "visible.txt"), []byte("ok"), 0o600)
+	_ = os.WriteFile(filepath.Join(root, ".env.example"), []byte("template"), 0o600)
+	_ = os.WriteFile(filepath.Join(root, ".gitignore"), []byte("ignored"), 0o600)
+	_ = os.MkdirAll(filepath.Join(root, ".github"), 0o755)
 	executor, err := New(map[string]string{"project": root}, 4096)
 	if err != nil {
 		t.Fatal(err)
@@ -230,7 +230,7 @@ func TestListDirectoryHiddenRestrictedEntries(t *testing.T) {
 
 func TestReadFileRejectsDirectory(t *testing.T) {
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "mydir"), 0o755)
+	_ = os.MkdirAll(filepath.Join(root, "mydir"), 0o755)
 	executor, err := New(map[string]string{"project": root}, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -245,7 +245,7 @@ func TestReadFileRejectsDirectory(t *testing.T) {
 
 func TestReadFileRejectsRestrictedPath(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, ".env"), []byte("secret"), 0o600)
+	_ = os.WriteFile(filepath.Join(root, ".env"), []byte("secret"), 0o600)
 	executor, err := New(map[string]string{"project": root}, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -260,8 +260,8 @@ func TestReadFileRejectsRestrictedPath(t *testing.T) {
 
 func TestReadFileRejectsNestedRestrictedPath(t *testing.T) {
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "services", "api"), 0o755)
-	os.WriteFile(filepath.Join(root, "services", "api", ".env"), []byte("secret"), 0o600)
+	_ = os.MkdirAll(filepath.Join(root, "services", "api"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "services", "api", ".env"), []byte("secret"), 0o600)
 	executor, err := New(map[string]string{"project": root}, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -276,7 +276,7 @@ func TestReadFileRejectsNestedRestrictedPath(t *testing.T) {
 
 func TestReadFileRejectsBinaryData(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, "binary.bin"), []byte{0x00, 0xFF, 0xFE, 0xFD}, 0o600)
+	_ = os.WriteFile(filepath.Join(root, "binary.bin"), []byte{0x00, 0xFF, 0xFE, 0xFD}, 0o600)
 	executor, err := New(map[string]string{"project": root}, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -292,7 +292,7 @@ func TestReadFileRejectsBinaryData(t *testing.T) {
 func TestReadFileRejectsInvalidUTF8(t *testing.T) {
 	root := t.TempDir()
 	invalid := []byte{'h', 'e', 'l', 'l', 'o', 0xFF, 0xFE}
-	os.WriteFile(filepath.Join(root, "bad.txt"), invalid, 0o600)
+	_ = os.WriteFile(filepath.Join(root, "bad.txt"), invalid, 0o600)
 	executor, err := New(map[string]string{"project": root}, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -307,7 +307,7 @@ func TestReadFileRejectsInvalidUTF8(t *testing.T) {
 
 func TestReadFileRejectsNULByte(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, "nul.txt"), []byte{0x00}, 0o600)
+	_ = os.WriteFile(filepath.Join(root, "nul.txt"), []byte{0x00}, 0o600)
 	executor, err := New(map[string]string{"project": root}, 1024)
 	if err != nil {
 		t.Fatal(err)
@@ -323,9 +323,9 @@ func TestReadFileRejectsNULByte(t *testing.T) {
 func TestListDirectoryRejectsSymlinkOutsideRoot(t *testing.T) {
 	root := t.TempDir()
 	outside := filepath.Join(t.TempDir(), "outside")
-	os.MkdirAll(outside, 0o755)
-	os.Symlink(outside, filepath.Join(root, "escape-link"))
-	os.WriteFile(filepath.Join(root, "safe.txt"), []byte("ok"), 0o600)
+	_ = os.MkdirAll(outside, 0o755)
+	_ = os.Symlink(outside, filepath.Join(root, "escape-link"))
+	_ = os.WriteFile(filepath.Join(root, "safe.txt"), []byte("ok"), 0o600)
 	executor, err := New(map[string]string{"project": root}, 4096)
 	if err != nil {
 		t.Fatal(err)
@@ -352,9 +352,9 @@ func TestListDirectoryRejectsSymlinkOutsideRoot(t *testing.T) {
 
 func TestReadFileRejectsSymlinkToRestricted(t *testing.T) {
 	root := t.TempDir()
-	os.WriteFile(filepath.Join(root, ".env"), []byte("secret"), 0o600)
-	os.Symlink(filepath.Join(root, ".env"), filepath.Join(root, "alias.env"))
-	os.WriteFile(filepath.Join(root, "safe.txt"), []byte("ok"), 0o600)
+	_ = os.WriteFile(filepath.Join(root, ".env"), []byte("secret"), 0o600)
+	_ = os.Symlink(filepath.Join(root, ".env"), filepath.Join(root, "alias.env"))
+	_ = os.WriteFile(filepath.Join(root, "safe.txt"), []byte("ok"), 0o600)
 	executor, err := New(map[string]string{"project": root}, 4096)
 	if err != nil {
 		t.Fatal(err)
@@ -403,9 +403,9 @@ func TestListDirectoryRejectsSymlinkToRestrictedDirectory(t *testing.T) {
 
 func TestListDirectoryAcceptsSymlinkWithinRoot(t *testing.T) {
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "sub"), 0o755)
-	os.WriteFile(filepath.Join(root, "sub", "target.txt"), []byte("hello"), 0o600)
-	os.Symlink(filepath.Join(root, "sub", "target.txt"), filepath.Join(root, "link.txt"))
+	_ = os.MkdirAll(filepath.Join(root, "sub"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "sub", "target.txt"), []byte("hello"), 0o600)
+	_ = os.Symlink(filepath.Join(root, "sub", "target.txt"), filepath.Join(root, "link.txt"))
 	executor, err := New(map[string]string{"project": root}, 4096)
 	if err != nil {
 		t.Fatal(err)
@@ -457,8 +457,8 @@ func TestListDirectoryBoundaryNoTruncation(t *testing.T) {
 
 func TestListDirectoryTruncatesOutput(t *testing.T) {
 	root := t.TempDir()
-	for i := 0; i < 10; i++ {
-		os.WriteFile(filepath.Join(root, fmt.Sprintf("file-with-long-name-%d.txt", i)), []byte("x"), 0o600)
+	for i := range 10 {
+		_ = os.WriteFile(filepath.Join(root, fmt.Sprintf("file-with-long-name-%d.txt", i)), []byte("x"), 0o600)
 	}
 	executor, err := New(map[string]string{"project": root}, 50)
 	if err != nil {
@@ -477,8 +477,8 @@ func TestListDirectoryTruncatesOutput(t *testing.T) {
 
 func TestListDirectoryNonRecursive(t *testing.T) {
 	root := t.TempDir()
-	os.MkdirAll(filepath.Join(root, "dir", "nested"), 0o755)
-	os.WriteFile(filepath.Join(root, "dir", "nested", "deep.txt"), []byte("deep"), 0o600)
+	_ = os.MkdirAll(filepath.Join(root, "dir", "nested"), 0o755)
+	_ = os.WriteFile(filepath.Join(root, "dir", "nested", "deep.txt"), []byte("deep"), 0o600)
 	executor, err := New(map[string]string{"project": root}, 4096)
 	if err != nil {
 		t.Fatal(err)

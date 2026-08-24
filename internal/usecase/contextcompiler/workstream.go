@@ -74,14 +74,14 @@ func (c *Compiler) applyWorkstreamSelection(ctx context.Context, state *compilat
 	rendered, err := domain.RenderWorkstreamSnapshot(*state.request.Workstream)
 	if err != nil || rendered == "" {
 		state.workstreamOmissionReason = workstreamOmissionNoSnapshot
-		return nil
+		return nil //nolint:nilerr // omission reason carries the cause; see state.workstreamOmissionReason
 	}
 	candidate := workstreamBlockContents(rendered)
 	cost := c.workstreamCostFunc(ctx, state)
 	delta, err := cost(candidate)
 	if err != nil || delta < 0 || delta > state.request.WorkstreamBudgetTokens {
 		state.workstreamOmissionReason = workstreamOmissionSourceBudget
-		return nil
+		return nil //nolint:nilerr // omission reason carries the cause; see state.workstreamOmissionReason
 	}
 	state.workstream = candidate
 	state.workstreamSourceTokens = delta

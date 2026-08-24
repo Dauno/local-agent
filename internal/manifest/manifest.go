@@ -74,16 +74,16 @@ func RenderCreationURL(identity Identity) (string, error) {
 
 func (i Identity) validate() error {
 	if strings.TrimSpace(i.AppName) == "" {
-		return errors.New("Slack app name is required")
+		return errors.New("slack app name is required")
 	}
 	if strings.TrimSpace(i.BotDisplayName) == "" {
-		return errors.New("Slack bot display name is required")
+		return errors.New("slack bot display name is required")
 	}
 	if strings.ContainsAny(i.AppName, "\r\n\x00") {
-		return errors.New("Slack app name must be a single line")
+		return errors.New("slack app name must be a single line")
 	}
 	if strings.ContainsAny(i.BotDisplayName, "\r\n\x00") {
-		return errors.New("Slack bot display name must be a single line")
+		return errors.New("slack bot display name must be a single line")
 	}
 	return nil
 }

@@ -223,7 +223,7 @@ func newKnowledgeEvalHarnessWithFingerprint(t *testing.T, dataset evalDataset, f
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	limits := domain.DefaultKnowledgeRetrievalLimits()
 	if fingerprint != "" {
 		limits.EmbeddingDimensions = knowledgeEvalEmbeddingDims
@@ -486,12 +486,7 @@ func (h *knowledgeEvalHarness) runCase(t *testing.T, testCase evalCase) (identit
 // runCaseOn executes one dataset case through the given retriever.
 func (h *knowledgeEvalHarness) runCaseOn(t *testing.T, testCase evalCase, retriever port.KnowledgeRetriever) (identities []string, reasons []string, cards []domain.KnowledgeFrameCard) {
 	t.Helper()
-	var workstream *domain.WorkstreamSnapshot
-	// Every case binds the registered project through the active
-	// actor-bound workstream ws-1: project-scoped claims are only readable
-	// through it, and the binding contract requires the snapshot whenever
-	// the binding carries project scope.
-	workstream = &domain.WorkstreamSnapshot{
+	var workstream = &domain.WorkstreamSnapshot{
 		ID:              knowledgeEvalWorkstream,
 		Project:         knowledgeEvalProject,
 		OwnerActor:      knowledgeEvalActor,
@@ -562,16 +557,6 @@ func equalStringSlice(a, b []string) bool {
 		}
 	}
 	return true
-}
-
-func evalCasesByGate(dataset evalDataset, gate string) []evalCase {
-	var cases []evalCase
-	for _, testCase := range dataset.Cases {
-		if testCase.Gate == gate {
-			cases = append(cases, testCase)
-		}
-	}
-	return cases
 }
 
 // TestKnowledgeRetrievalEvaluationAuthorizedResultsAreExactAndAttributed

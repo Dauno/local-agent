@@ -19,7 +19,7 @@ func newAnalysisEvidenceStoreFixture(t *testing.T) (*AnalysisEvidenceStore, *Ana
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { dbStore.Close() })
+	t.Cleanup(func() { _ = dbStore.Close() })
 	now := time.Now().UTC().Unix()
 	hex64 := strings.Repeat("a", 64)
 	if _, err := dbStore.DB().ExecContext(t.Context(), `INSERT INTO result_analyses (

@@ -46,7 +46,7 @@ var ErrSummaryDiscoveryMarkersExhausted = errors.New("summary discovery markers 
 // target_ordinal > 0 CHECK constraint or, worse, silently collide with a
 // low, concrete ordinal (FIND-135).
 func NextSummaryDiscoveryMarker(maxUsed int64) (int64, error) {
-	if maxUsed >= math.MaxInt64 {
+	if maxUsed == math.MaxInt64 {
 		return 0, ErrSummaryDiscoveryMarkersExhausted
 	}
 	return maxUsed + 1, nil

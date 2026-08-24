@@ -79,7 +79,7 @@ func TestSummaryStoreCoalescesPendingTargetsAndStopsAfterMaxAttempts(t *testing.
 	if scheduled, err := store.ScheduleSummaryJob(ctx, "coalesce", 3, time.Now()); err != nil || scheduled {
 		t.Fatalf("older schedule = %v, %v", scheduled, err)
 	}
-	for attempt := 0; attempt < maxSummaryAttempts; attempt++ {
+	for attempt := range maxSummaryAttempts {
 		job, err := store.ClaimSummaryJob(ctx, time.Now().Add(time.Duration(attempt)*time.Minute))
 		if err != nil {
 			t.Fatal(err)
@@ -234,7 +234,7 @@ func TestSummaryStoreDiscoveryMarkerRequestsCoalesceToOneRow(t *testing.T) {
 	const session = "discovery-coalesce"
 
 	const requests = 50
-	for i := 0; i < requests; i++ {
+	for i := range requests {
 		if _, err := store.ScheduleSummaryJob(ctx, session, domain.SummaryDiscoveryTargetFloor, time.Now().Add(-time.Second)); err != nil {
 			t.Fatalf("schedule request %d: %v", i, err)
 		}

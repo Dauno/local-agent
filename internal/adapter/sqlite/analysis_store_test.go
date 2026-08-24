@@ -20,7 +20,7 @@ func newAnalysisStoreFixture(t *testing.T) (*AnalysisStore, string, string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 	sourceID := strings.Repeat("a", 64)
 	sourceSHA := strings.Repeat("b", 64)
 	if _, err := store.DB().ExecContext(t.Context(), `INSERT INTO result_records (result_id, producer_kind, producer_id, producer_revision, storage_kind, storage_key,

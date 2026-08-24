@@ -116,7 +116,8 @@ func TestAnalysisReductionTreeSatisfiableIsTheOneSharedRule(t *testing.T) {
 
 func TestAnalysisLimitsDigestDeterministic(t *testing.T) {
 	limits := validAnalysisLimits()
-	if limits.Digest() != limits.Digest() {
+	first, second := limits.Digest(), limits.Digest()
+	if first != second {
 		t.Fatal("digest must be stable across repeated calls")
 	}
 	other := limits

@@ -502,7 +502,6 @@ func TestParseRejectsMalformedDocuments(t *testing.T) {
 		"wrong typed value":  "context:\n  max_messages: many\n",
 	}
 	for name, input := range tests {
-		name, input := name, input
 		t.Run(name, func(t *testing.T) {
 			t.Parallel()
 			if _, err := config.Parse([]byte(input)); err == nil {
@@ -1230,7 +1229,6 @@ func TestSaveAndLoadPreserveFileModeAndExtensions(t *testing.T) {
 	if !strings.Contains(string(data), "value: retained") || strings.Contains("\n"+string(data), "\nagent:\n") {
 		t.Fatalf("saved data lost extensions or retained legacy agent config:\n%s", data)
 	}
-
 }
 
 func TestSaveCreatesParentAndUsesNonSensitiveMode(t *testing.T) {
@@ -1547,7 +1545,6 @@ func TestValidateRecoverableResultsBounds(t *testing.T) {
 	}
 
 	for _, tt := range tests {
-		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			t.Parallel()
 			cfg := config.Default()

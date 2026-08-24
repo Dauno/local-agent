@@ -194,7 +194,7 @@ func (s *ConfirmationStore) ListPending(ctx context.Context) ([]port.Confirmatio
 	if err != nil {
 		return nil, fmt.Errorf("list pending confirmations: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var deliveries []port.ConfirmationDelivery
 	for rows.Next() {

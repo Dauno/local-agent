@@ -13,13 +13,13 @@ func TestShutdownQueriesHonorContextWhenSQLiteConnectionIsOccupied(t *testing.T)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	store.DB().SetMaxOpenConns(1)
 	conn, err := store.DB().Conn(t.Context())
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 
 	jobs := NewExternalAgentJobStore(store)
 	for _, name := range []string{"job stats", "activation health"} {

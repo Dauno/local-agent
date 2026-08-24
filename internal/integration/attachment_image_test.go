@@ -127,7 +127,7 @@ func newVisualFixtureServer(t *testing.T) *visualFixtureServer {
 func mustReadAll(request *http.Request) []byte {
 	var buffer bytes.Buffer
 	_, _ = buffer.ReadFrom(request.Body)
-	request.Body.Close()
+	_ = request.Body.Close()
 	return buffer.Bytes()
 }
 
@@ -142,8 +142,8 @@ func artifactNameFromBody(body []byte) string {
 	}
 	for _, message := range decoded.Messages {
 		if text, ok := message.Content.(string); ok {
-			if start := strings.Index(text, `named "`); start >= 0 {
-				name := text[start+len(`named "`):]
+			if _, after, ok := strings.Cut(text, `named "`); ok {
+				name := after
 				if end := strings.Index(name, `"`); end > 0 {
 					return name[:end]
 				}

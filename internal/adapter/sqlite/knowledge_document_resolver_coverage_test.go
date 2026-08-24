@@ -53,7 +53,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := &KnowledgeDocumentResolver{db: store.DB(), payload: nil}
 		if _, err := resolver.Resolve(t.Context(), fixture.document(), domain.DefaultKnowledgeRetrievalLimits()); !errors.Is(err, port.ErrKnowledgeUnavailable) {
@@ -66,7 +66,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: fixture.storage, content: fixture.content})
 		document := fixture.document()
@@ -81,7 +81,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: fixture.storage, content: fixture.content})
 		document := fixture.document()
@@ -96,7 +96,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: fixture.storage, content: fixture.content})
 		document := fixture.document()
@@ -111,7 +111,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		if _, err := store.DB().ExecContext(t.Context(), `UPDATE result_records SET state = 'quarantined' WHERE result_id = ?`, fixture.resultID); err != nil {
 			t.Fatal(err)
@@ -127,7 +127,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: fixture.storage, content: fixture.content})
 		document := fixture.document()
@@ -142,7 +142,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: fixture.storage, content: fixture.content})
 		limits := domain.DefaultKnowledgeRetrievalLimits()
@@ -157,7 +157,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{
 			storage: fixture.storage, content: fixture.content, storageForOverride: &otherStorage,
@@ -172,7 +172,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: fixture.storage, content: fixture.content, truncate: true})
 		if _, err := resolver.Resolve(t.Context(), fixture.document(), domain.DefaultKnowledgeRetrievalLimits()); !errors.Is(err, port.ErrKnowledgeUnavailable) {
@@ -185,7 +185,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		altered := make([]byte, len(fixture.content))
 		copy(altered, fixture.content)
@@ -201,7 +201,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		invalid := string([]byte{0xff, 0xfe})
 		digest := sha256Sum([]byte(invalid))
 		storage := domain.ResultStorage{Kind: domain.ResultStorageArtifact, Key: "result-key"}
@@ -229,7 +229,7 @@ func TestKnowledgeDocumentResolverRejectsEveryIdentityFailure(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer store.Close()
+		defer func() { _ = store.Close() }()
 		fixture := newResolverCoverageFixture(t, store)
 		resolver := NewKnowledgeDocumentResolver(store, documentResolverPayload{storage: fixture.storage, content: fixture.content, readErr: context.Canceled})
 		if _, err := resolver.Resolve(t.Context(), fixture.document(), domain.DefaultKnowledgeRetrievalLimits()); !errors.Is(err, context.Canceled) {

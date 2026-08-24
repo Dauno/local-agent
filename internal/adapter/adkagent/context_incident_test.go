@@ -55,7 +55,7 @@ func TestOriginalIncidentReproducesContextOverflow(t *testing.T) {
 
 	// Model content carries 7 read_file function calls.
 	modelCalls := make([]domain.ContentPart, 7)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		modelCalls[i] = domain.ContentPart{
 			FunctionCall: &domain.FunctionCall{
 				ID:   idForIndex(i),
@@ -68,7 +68,7 @@ func TestOriginalIncidentReproducesContextOverflow(t *testing.T) {
 
 	// 7 large function responses.
 	responses := make([]domain.Content, 7)
-	for i := 0; i < 7; i++ {
+	for i := range 7 {
 		responses[i] = domain.Content{
 			Role: domain.ContentRoleUser,
 			Parts: []domain.ContentPart{{
@@ -89,9 +89,7 @@ func TestOriginalIncidentReproducesContextOverflow(t *testing.T) {
 	contents = append(contents, completed2...)
 	contents = append(contents, activeUser)
 	contents = append(contents, activeModel)
-	for _, r := range responses {
-		contents = append(contents, r)
-	}
+	contents = append(contents, responses...)
 
 	// Measure the active suffix cost starting from the active user content.
 	activeStart := len(completed1) + len(completed2)
@@ -130,8 +128,7 @@ func TestOriginalIncidentReproducesContextOverflow(t *testing.T) {
 	if !errors.Is(err, domain.ErrActiveContextTooLarge) {
 		t.Fatalf("expected ActiveContextTooLargeError, got: %v", err)
 	}
-	var tooLarge *domain.ActiveContextTooLargeError
-	if errors.As(err, &tooLarge) {
+	if tooLarge, ok := errors.AsType[*domain.ActiveContextTooLargeError](err); ok {
 		t.Logf("got expected error: chars=%d budget=%d", tooLarge.Chars, tooLarge.Budget)
 		if tooLarge.Chars <= tooLarge.Budget {
 			t.Errorf("error reports chars=%d <= budget=%d", tooLarge.Chars, tooLarge.Budget)
@@ -148,7 +145,7 @@ func TestLongConversationContinuityFixture(t *testing.T) {
 	const recentTurns = 8
 
 	contents := make([]domain.Content, 0, numCompleted*2+2)
-	for i := 0; i < numCompleted; i++ {
+	for i := range numCompleted {
 		contents = append(contents, domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "message " + itoa(i)}}})
 		contents = append(contents, domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "response " + itoa(i)}}})
 	}

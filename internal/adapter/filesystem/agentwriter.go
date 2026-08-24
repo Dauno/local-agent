@@ -70,16 +70,16 @@ func (w *AgentWriter) Write(name string, yamlBytes []byte) error {
 	cleanup := true
 	defer func() {
 		if cleanup {
-			os.Remove(tmpName)
+			_ = os.Remove(tmpName)
 		}
 	}()
 
 	if _, err := tmp.Write(yamlBytes); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("write temp file: %w", err)
 	}
 	if err := tmp.Sync(); err != nil {
-		tmp.Close()
+		_ = tmp.Close()
 		return fmt.Errorf("sync temp file: %w", err)
 	}
 	if err := tmp.Close(); err != nil {
@@ -111,7 +111,7 @@ func (w *AgentWriter) Write(name string, yamlBytes []byte) error {
 	if err != nil {
 		return fmt.Errorf("agent file %q created but open agents directory: %w", target, err)
 	}
-	defer dir.Close()
+	defer func() { _ = dir.Close() }()
 	if err := dir.Sync(); err != nil {
 		log.Printf("agent writer: agent file %q created but sync agents directory failed: %v", target, err)
 		return fmt.Errorf("agent file %q created but sync agents directory: %w", target, err)

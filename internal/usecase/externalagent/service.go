@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,9 +26,9 @@ type Config struct {
 	PollInterval   time.Duration
 	Concurrency    int
 	MaxAttempts    int
-	// ProgressWarningSeconds controls passive health derivation and one-warning
+	// ProgressWarningTimeout controls passive health derivation and one-warning
 	// per silent-episode emission. It never cancels or mutates a job.
-	ProgressWarningSeconds time.Duration
+	ProgressWarningTimeout time.Duration
 }
 
 type Dependencies struct {
@@ -101,13 +102,10 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		deps.MaxResultBytes = domain.MaxExternalAgentResultBytes
 	}
 	if deps.MaxResultChunkBytes <= 0 || deps.MaxResultChunkBytes > deps.MaxResultBytes {
-		deps.MaxResultChunkBytes = defaultResultChunkBytes
-		if deps.MaxResultChunkBytes > deps.MaxResultBytes {
-			deps.MaxResultChunkBytes = deps.MaxResultBytes
-		}
+		deps.MaxResultChunkBytes = min(defaultResultChunkBytes, deps.MaxResultBytes)
 	}
-	if cfg.ProgressWarningSeconds <= 0 {
-		cfg.ProgressWarningSeconds = 900 * time.Second
+	if cfg.ProgressWarningTimeout <= 0 {
+		cfg.ProgressWarningTimeout = 900 * time.Second
 	}
 	logger := deps.Logger
 	if logger == nil {
@@ -368,7 +366,7 @@ func (s *Service) StatusProjection(ctx context.Context, jobID, actor string, con
 		alive = s.processRegistry.ProcessAlive(jobID, progress.Attempt)
 	}
 	now := s.clock.Now().UTC()
-	view.Health = DeriveProgressHealth(*progress, now, s.cfg.ProgressWarningSeconds, alive, isTerminalStatus(job.Status))
+	view.Health = DeriveProgressHealth(*progress, now, s.cfg.ProgressWarningTimeout, alive, isTerminalStatus(job.Status))
 	view.Phase = progress.Phase
 	view.LastEventKind = progress.LastEventKind
 	view.LastTransportActivityAt = progress.LastTransportActivityAt
@@ -379,10 +377,7 @@ func (s *Service) StatusProjection(ctx context.Context, jobID, actor string, con
 	view.StopReason = progress.StopReason
 	view.ProcessAlive = alive
 	if !progress.PromptStartedAt.IsZero() {
-		elapsed := now.Sub(progress.PromptStartedAt)
-		if elapsed < 0 {
-			elapsed = 0
-		}
+		elapsed := max(now.Sub(progress.PromptStartedAt), 0)
 		view.PromptElapsedSeconds = int64(elapsed / time.Second)
 	}
 	return &view, nil
@@ -810,8 +805,7 @@ func (s *Service) claimAvailable(ctx context.Context, sem chan struct{}, workers
 func (s *Service) execute(parent context.Context, job *domain.ExternalAgentJob) {
 	if !job.TimeoutAt.After(s.clock.Now().UTC()) {
 		now := s.clock.Now().UTC()
-		if err := s.transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, domain.JobFailed, nil, "acp_job_timeout", now); err == nil {
-		}
+		_ = s.transition(context.WithoutCancel(parent), job.ID, job.LeaseOwner, job.Attempt, domain.JobFailed, nil, "acp_job_timeout", now)
 		return
 	}
 	ctx := parent
@@ -999,10 +993,5 @@ func randomID() string {
 }
 
 func stringsEmpty(values ...string) bool {
-	for _, value := range values {
-		if value == "" {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(values, "")
 }

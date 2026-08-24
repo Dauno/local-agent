@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"unicode/utf8"
 
@@ -122,9 +123,7 @@ func (s *turnSessionService) AppendEvent(ctx context.Context, current session.Se
 			event.CustomMetadata = make(map[string]any, len(s.metadata))
 		}
 		delete(event.CustomMetadata, port.AgentTurnActivationIDMetadataKey)
-		for key, value := range s.metadata {
-			event.CustomMetadata[key] = value
-		}
+		maps.Copy(event.CustomMetadata, s.metadata)
 	}
 	return s.Service.AppendEvent(ctx, current, event)
 }

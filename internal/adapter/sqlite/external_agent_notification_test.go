@@ -580,7 +580,7 @@ func TestOpenReadOnlyDoesNotMigrateOrWrite(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer readOnly.Close()
+	defer func() { _ = readOnly.Close() }()
 	var version int
 	if err := readOnly.DB().QueryRowContext(t.Context(), "PRAGMA user_version").Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("read-only schema version=%d err=%v", version, err)

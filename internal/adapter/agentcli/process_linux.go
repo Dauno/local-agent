@@ -62,7 +62,7 @@ func linuxDescendants(rootPID int) []int {
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(data), "\n") {
+		for line := range strings.SplitSeq(string(data), "\n") {
 			if !strings.HasPrefix(line, "PPid:") {
 				continue
 			}

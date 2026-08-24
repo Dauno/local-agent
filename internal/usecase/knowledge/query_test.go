@@ -49,7 +49,7 @@ func TestExtractKnowledgeQueryGroundsShortMessagesWithWorkstream(t *testing.T) {
 	first := strings.Index(query, "migrate the api")
 	second := strings.Index(query, "planning")
 	third := strings.Index(query, "audit connection pool")
-	if !(first > 0 && first < second && second < third) {
+	if first <= 0 || first >= second || second >= third {
 		t.Fatalf("grounding order diverged: %q", query)
 	}
 	// Budget caps grounding without truncating any part.
@@ -113,7 +113,7 @@ func TestExtractKnowledgeTokensScansPastOversizedPrefixes(t *testing.T) {
 	// 64 oversized matches must not suppress later valid tokens: the scan
 	// continues past every oversized match until 64 valid tokens exist.
 	var builder strings.Builder
-	for i := 0; i < MaxKnowledgeQueryTokens+2; i++ {
+	for range MaxKnowledgeQueryTokens + 2 {
 		builder.WriteString(strings.Repeat("a", MaxKnowledgeQueryTokenRunes+1))
 		builder.WriteString(" ")
 	}

@@ -240,7 +240,7 @@ func wordLikeFrameCardCost(selected []domain.KnowledgeFrameCard) (int, error) {
 // never trigger it.
 func variedSizeKnowledgeFrameCards(n int) []domain.KnowledgeFrameCard {
 	cards := make([]domain.KnowledgeFrameCard, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		if i%3 == 0 {
 			claim := domain.CardFromClaim(domain.KnowledgeClaim{
 				ID: domain.KnowledgeClaimID(fmt.Sprintf("kclaim_%024x", i)), Subject: fmt.Sprintf("topic%d", i),
@@ -253,7 +253,7 @@ func variedSizeKnowledgeFrameCards(n int) []domain.KnowledgeFrameCard {
 		}
 		words := (i%7 + 1) * 15
 		var b strings.Builder
-		for w := 0; w < words; w++ {
+		for w := range words {
 			fmt.Fprintf(&b, "word%d ", w)
 		}
 		doc := domain.KnowledgeDocumentCard{
@@ -333,7 +333,7 @@ var skewedWordCounts = []int{1, 2, 1, 400, 1, 3, 1200, 2, 1, 60}
 // corpus a test author happens to build; do not narrow its variance.
 func skewedKnowledgeFrameCards(n int) []domain.KnowledgeFrameCard {
 	cards := make([]domain.KnowledgeFrameCard, n)
-	for i := 0; i < n; i++ {
+	for i := range n {
 		words := skewedWordCounts[i%len(skewedWordCounts)]
 		if words <= 3 {
 			claim := domain.CardFromClaim(domain.KnowledgeClaim{
@@ -346,7 +346,7 @@ func skewedKnowledgeFrameCards(n int) []domain.KnowledgeFrameCard {
 			continue
 		}
 		var b strings.Builder
-		for w := 0; w < words; w++ {
+		for w := range words {
 			fmt.Fprintf(&b, "word%d ", w)
 		}
 		doc := domain.KnowledgeDocumentCard{
@@ -555,37 +555,6 @@ func TestFitKnowledgeFrameCardsOracleAnchors(t *testing.T) {
 			t.Fatalf("cards=%d budget=%d: oracle admits %d, want %d", a.cards, a.budget, len(oracle), a.oracle)
 		}
 	}
-}
-
-func compileFitManyCards(n int) []domain.KnowledgeFrameCard {
-	cards := make([]domain.KnowledgeFrameCard, n)
-	for i := 0; i < n; i++ {
-		claim := domain.CardFromClaim(domain.KnowledgeClaim{
-			ID: domain.KnowledgeClaimID("kclaim_" + strings.Repeat("a", 18) + padDigits(i)), Subject: "subject",
-			Predicate: domain.KnowledgePredicateRunsOn, Value: domain.KnowledgeValue{Kind: domain.KnowledgeValueString, Text: "v"},
-			ScopeKind: domain.KnowledgeScopeProject, ScopeID: "local-agent",
-			SourceClass: domain.KnowledgeSourceHuman, SourceRef: "slack-human:evt-1", Status: domain.KnowledgeClaimAsserted,
-		}, "lexical", frameTestNow())
-		cards[i] = domain.KnowledgeFrameCard{Kind: domain.KnowledgeRetrievalClaim, Claim: &claim}
-	}
-	return cards
-}
-
-func padDigits(i int) string {
-	s := "000000" + itoa(i)
-	return s[len(s)-6:]
-}
-
-func itoa(i int) string {
-	if i == 0 {
-		return "0"
-	}
-	digits := ""
-	for i > 0 {
-		digits = string(rune('0'+i%10)) + digits
-		i /= 10
-	}
-	return digits
 }
 
 func sameKnowledgeFrameCardIdentities(a, b []domain.KnowledgeFrameCard) bool {

@@ -127,7 +127,7 @@ func (s *KnowledgeVectorIndexStore) ListVector(ctx context.Context, kind domain.
 	if err != nil {
 		return nil, fmt.Errorf("%w: list vector index rows: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := make([]port.KnowledgeVectorIndexRow, 0, limit)
 	for rows.Next() {
 		var row port.KnowledgeVectorIndexRow

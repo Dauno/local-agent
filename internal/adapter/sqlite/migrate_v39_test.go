@@ -14,7 +14,7 @@ func TestMigrationV39FreshObjectsAndConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 
 	for _, object := range []string{
@@ -128,7 +128,7 @@ func TestMigrationV39UpgradePreservesStateAndSeedsQueues(t *testing.T) {
 	insert := func(statement string, args ...any) {
 		t.Helper()
 		if _, err := raw.ExecContext(t.Context(), statement, args...); err != nil {
-			raw.Close()
+			_ = raw.Close()
 			t.Fatalf("seed v38 row: %v", err)
 		}
 	}
@@ -156,7 +156,7 @@ func TestMigrationV39UpgradePreservesStateAndSeedsQueues(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upgraded.Close()
+	defer func() { _ = upgraded.Close() }()
 	db := upgraded.DB()
 
 	var version int
@@ -221,7 +221,7 @@ func TestKnowledgeRetrievalQueueEnqueueOnMutations(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	now := time.Now().UTC().UnixNano()
 
@@ -329,7 +329,7 @@ func TestKnowledgeRetrievalQueueEnqueueRollsBackWithTruth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	now := time.Now().UTC().UnixNano()
 
@@ -365,7 +365,7 @@ func TestMigrationV39CrashRollsBackAndReopens(t *testing.T) {
 	now := time.Now().UTC().UnixNano()
 	if _, err := raw.ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
 		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -382,7 +382,7 @@ func TestMigrationV39CrashRollsBackAndReopens(t *testing.T) {
 	}
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal("OpenExisting succeeded after injected v39 crash")
 	}
 	if err == nil || !strings.Contains(err.Error(), "injected v39 crash") {
@@ -392,7 +392,7 @@ func TestMigrationV39CrashRollsBackAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer check.Close()
+	defer func() { _ = check.Close() }()
 	var version, objects int
 	if err := check.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
@@ -409,7 +409,7 @@ func TestMigrationV39CrashRollsBackAndReopens(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after crash: %v", err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	if err := reopened.DB().QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("reopened version = %d, %v", version, err)
 	}
@@ -438,7 +438,7 @@ func TestMigrationV39ReopenPreservesRows(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	var claims, queueRows int
 	if err := reopened.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM knowledge_claims`).Scan(&claims); err != nil || claims != 1 {
 		t.Fatalf("reopened claims = %d, %v", claims, err)

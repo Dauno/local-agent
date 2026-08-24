@@ -130,8 +130,7 @@ func classifyError(ctx context.Context, err error) error {
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return &Error{Category: "canceled", cause: ctxErr}
 	}
-	var apiErr *openai.Error
-	if errors.As(err, &apiErr) {
+	if apiErr, ok := errors.AsType[*openai.Error](err); ok {
 		status := apiErr.StatusCode
 		if status == 0 && apiErr.Response != nil {
 			status = apiErr.Response.StatusCode

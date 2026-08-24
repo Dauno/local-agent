@@ -69,7 +69,7 @@ func TestMigrationV33RollbackLeavesV32DatabaseRetryable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenExisting retry: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if err := store.DB().QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
@@ -83,5 +83,4 @@ func TestMigrationV33RollbackLeavesV32DatabaseRetryable(t *testing.T) {
 	if conversationCount != 1 {
 		t.Fatalf("pre-v33 conversation count = %d, want 1", conversationCount)
 	}
-
 }

@@ -31,7 +31,7 @@ func TestConversationContextSurvivesRestartAndRemainsIsolated(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	secondRuntime := &recordingRuntime{responses: []string{"second answer", "isolated answer"}}
 	secondService := integrationService(t, reopened, secondRuntime)
 	if outcome, err := secondService.Handle(t.Context(), dmInvocation("Ev2", "D12345678", "1700000001.000002", "second question")); err != nil || outcome != botusecase.OutcomeResponded {
@@ -91,7 +91,7 @@ func TestThreadedDMContextSurvivesRestartAndIsolatesRoots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	if err := reopened.EnsureDMIdentityMode(t.Context(), true); err != nil {
 		t.Fatal(err)
 	}

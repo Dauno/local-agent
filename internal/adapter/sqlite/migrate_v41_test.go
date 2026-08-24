@@ -14,7 +14,7 @@ func TestMigrationV41FreshObjectsAndConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 
 	for _, object := range []string{"recoverable_result_refs", "recoverable_result_refs_by_ref"} {
@@ -74,7 +74,7 @@ func seedV40BackfillFixture(t *testing.T) (path string, refs struct{ embedded, c
 	insert := func(statement string, args ...any) {
 		t.Helper()
 		if _, err := raw.ExecContext(ctx, statement, args...); err != nil {
-			raw.Close()
+			_ = raw.Close()
 			t.Fatalf("seed v40 row: %v", err)
 		}
 	}
@@ -115,7 +115,7 @@ func TestMigrationV41UpgradeBackfillsExistingRefs(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer upgraded.Close()
+	defer func() { _ = upgraded.Close() }()
 	db := upgraded.DB()
 
 	var version int
@@ -187,7 +187,7 @@ func TestMigrationV41UpgradeAbortsOnInjectedCoverageMismatch(t *testing.T) {
 
 	store, err := OpenExisting(t.Context(), path)
 	if store != nil {
-		store.Close()
+		_ = store.Close()
 		t.Fatal("OpenExisting succeeded despite an injected coverage mismatch")
 	}
 	if err == nil || !strings.Contains(err.Error(), "refusing to migrate without proven coverage") {
@@ -198,7 +198,7 @@ func TestMigrationV41UpgradeAbortsOnInjectedCoverageMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer check.Close()
+	defer func() { _ = check.Close() }()
 	var version, objects int
 	if err := check.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
@@ -215,7 +215,7 @@ func TestMigrationV41UpgradeAbortsOnInjectedCoverageMismatch(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen with the real migration after the injected failure: %v", err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	if err := reopened.DB().QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("reopened version = %d, %v", version, err)
 	}
@@ -238,7 +238,7 @@ func TestOpenExistingUpgradesV40ToV41WithoutStateReset(t *testing.T) {
 		}
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.DB().QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil || version != SchemaVersion {
 		t.Fatalf("upgraded version = %d, %v", version, err)

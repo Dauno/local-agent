@@ -57,7 +57,7 @@ func (p *builderLauncherPublisher) PublishBuilderLauncher(ctx context.Context, r
 		return fmt.Errorf("resolve builder launcher target: %w", err)
 	}
 	if p == nil || p.client == nil {
-		return fmt.Errorf("Slack client is required")
+		return fmt.Errorf("slack client is required")
 	}
 	var claim port.BuilderLauncherDeliveryClaim
 	if p.store != nil {
@@ -102,7 +102,7 @@ func (p *builderLauncherPublisher) PublishBuilderLauncher(ctx context.Context, r
 		return err
 	}
 	if timestamp == "" {
-		return errors.New("Slack published builder launcher without a message timestamp")
+		return errors.New("slack published builder launcher without a message timestamp")
 	}
 	if p.store != nil {
 		if err := p.store.MarkBuilderLauncherPublished(ctx, claim, timestamp, time.Now().UTC()); err != nil {

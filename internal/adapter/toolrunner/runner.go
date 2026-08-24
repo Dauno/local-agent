@@ -22,12 +22,9 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/tooldef"
 )
 
-const (
-	maxStderrBytes = 4096
-	// exitNoMatches is the conventional grep-family exit code meaning "no
-	// matches"; the executor treats it as an empty success result.
-	exitNoMatches = 1
-)
+// exitNoMatches is the conventional grep-family exit code meaning "no
+// matches"; the executor treats it as an empty success result.
+const exitNoMatches = 1
 
 // Executor runs registered declarative tools inside registered project roots.
 type Executor struct {
@@ -200,9 +197,7 @@ func restrictedEnvironment() []string {
 // defaults.
 func applyDefaults(def tooldef.ToolDef, args map[string]any) map[string]any {
 	result := make(map[string]any, len(args)+2)
-	for key, value := range args {
-		result[key] = value
-	}
+	maps.Copy(result, args)
 	properties, _ := schemaProperties(def.InputSchema)
 	for name, raw := range properties {
 		if _, present := result[name]; present {
@@ -293,7 +288,7 @@ func enforcePathPolicy(def tooldef.ToolDef, args map[string]any) error {
 		if !ok || strings.TrimSpace(value) == "" {
 			continue
 		}
-		for _, segment := range strings.Split(strings.ReplaceAll(value, "\\", "/"), "/") {
+		for segment := range strings.SplitSeq(strings.ReplaceAll(value, "\\", "/"), "/") {
 			if slices.Contains(def.Policy.ExcludedPaths, segment) {
 				return fmt.Errorf("%q may not reference excluded path segment %q", name, segment)
 			}

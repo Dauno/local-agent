@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"sync"
 	"time"
@@ -58,9 +59,7 @@ func (c sdkPostClient) PostMessage(ctx context.Context, req postRequest) (string
 			"part_count":     req.partCount,
 			"content_sha256": req.contentSHA256,
 		}
-		for key, value := range req.extraMetadata {
-			payload[key] = value
-		}
+		maps.Copy(payload, req.extraMetadata)
 		eventType := assistantMetadataEventType
 		if req.eventType != "" {
 			eventType = req.eventType
@@ -111,13 +110,13 @@ func newPublisher(client postClient, timeout time.Duration, logger port.Logger, 
 
 func (p *Publisher) Publish(ctx context.Context, target domain.ReplyTarget, text string) (port.PublishedResponse, error) {
 	if p == nil || p.client == nil {
-		return port.PublishedResponse{}, errors.New("Slack posting client is required")
+		return port.PublishedResponse{}, errors.New("slack posting client is required")
 	}
 	if target.ChannelID == "" {
-		return port.PublishedResponse{}, errors.New("Slack response channel is required")
+		return port.PublishedResponse{}, errors.New("slack response channel is required")
 	}
 	if strings.TrimSpace(text) == "" {
-		return port.PublishedResponse{}, errors.New("Slack response text is required")
+		return port.PublishedResponse{}, errors.New("slack response text is required")
 	}
 
 	chunks := renderMarkdownV1(text, p.partLabels)
@@ -172,7 +171,7 @@ func (p *Publisher) waitForChannel(ctx context.Context, channel *channelPace) er
 }
 
 func (p *Publisher) postWithRetry(ctx context.Context, req postRequest) (string, error) {
-	for attempt := 0; attempt < 2; attempt++ {
+	for attempt := range 2 {
 		callCtx, cancel := slackTimeout(ctx, p.timeout)
 		timestamp, err := p.client.PostMessage(callCtx, req)
 		cancel()
@@ -189,7 +188,7 @@ func (p *Publisher) postWithRetry(ctx context.Context, req postRequest) (string,
 			return "", err
 		}
 	}
-	return "", errors.New("Slack response retry exhausted")
+	return "", errors.New("slack response retry exhausted")
 }
 
 func sleepContext(ctx context.Context, duration time.Duration) error {

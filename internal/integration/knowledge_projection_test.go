@@ -174,7 +174,7 @@ func TestKnowledgeProjectionForgetRemovesContentAndTombstones(t *testing.T) {
 	})
 	// The forgotten subject and its tombstone must never surface anywhere in
 	// the projection.
-	filepath.WalkDir(memoryDir, func(path string, d os.DirEntry, err error) error {
+	if err := filepath.WalkDir(memoryDir, func(path string, d os.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
 		}
@@ -186,7 +186,9 @@ func TestKnowledgeProjectionForgetRemovesContentAndTombstones(t *testing.T) {
 			t.Fatalf("forgotten subject projected in %s", path)
 		}
 		return nil
-	})
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestKnowledgeProjectionManualEditIsReplacedFromAuthority(t *testing.T) {

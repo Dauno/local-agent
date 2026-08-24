@@ -180,7 +180,7 @@ func TestOpenExistingUpgradesV19WithAgentDrafts(t *testing.T) {
 	}
 	tx, err := raw.BeginTx(ctx, nil)
 	if err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	for version := 1; version <= 19; version++ {
@@ -207,7 +207,7 @@ func TestOpenExistingUpgradesV19WithAgentDrafts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var version int
 	if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -283,7 +283,7 @@ func TestOpenExistingUpgradesDraftSchemaFromV19ThroughV22(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			defer store.Close()
+			defer func() { _ = store.Close() }()
 			var gotVersion int
 			if err := store.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&gotVersion); err != nil {
 				t.Fatal(err)

@@ -48,13 +48,13 @@ func TestIndexRecoverableResultRefsUsesConstantStatementBound(t *testing.T) {
 	// liveStart appears twice (duplicate window) and must still yield one row.
 	text.WriteString(liveStart)
 	text.WriteString(" ")
-	for i := 0; i < unrelatedCount; i++ {
-		text.WriteString(fmt.Sprintf("%064x ", i))
+	for i := range unrelatedCount {
+		fmt.Fprintf(&text, "%064x ", i)
 	}
 	text.WriteString(liveMiddle)
 	text.WriteString(" ")
-	for i := 0; i < unrelatedCount; i++ {
-		text.WriteString(fmt.Sprintf("%064x ", unrelatedCount+i))
+	for i := range unrelatedCount {
+		fmt.Fprintf(&text, "%064x ", unrelatedCount+i)
 	}
 	text.WriteString(liveEnd)
 
@@ -79,7 +79,7 @@ func TestIndexRecoverableResultRefsUsesConstantStatementBound(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var got []string
 	for rows.Next() {
 		var ref string

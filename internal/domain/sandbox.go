@@ -27,23 +27,23 @@ func (c Capability) IsReadOnly() bool {
 
 // ToolAuditRecord is the domain representation of a tool execution audit entry.
 type ToolAuditRecord struct {
-	OriginalCallID     string
-	Capability         Capability
-	Actor              string
+	OriginalCallID      string
+	Capability          Capability
+	Actor               string
 	AuthorizationResult string
-	IdempotencyKey     string
-	LifecycleState     ToolLifecycleState
-	CreatedAt          time.Time
-	CompletedAt        time.Time
+	IdempotencyKey      string
+	LifecycleState      ToolLifecycleState
+	CreatedAt           time.Time
+	CompletedAt         time.Time
 }
 
 type ToolLifecycleState string
 
 const (
-	ToolStateRequested   ToolLifecycleState = "requested"
-	ToolStateAuthorized  ToolLifecycleState = "authorized"
-	ToolStateRunning     ToolLifecycleState = "running"
-	ToolStateCompleted   ToolLifecycleState = "completed"
-	ToolStateFailed      ToolLifecycleState = "failed"
-	ToolStateRejected    ToolLifecycleState = "rejected"
+	ToolStateRequested  ToolLifecycleState = "requested"
+	ToolStateAuthorized ToolLifecycleState = "authorized"
+	ToolStateRunning    ToolLifecycleState = "running"
+	ToolStateCompleted  ToolLifecycleState = "completed"
+	ToolStateFailed     ToolLifecycleState = "failed"
+	ToolStateRejected   ToolLifecycleState = "rejected"
 )

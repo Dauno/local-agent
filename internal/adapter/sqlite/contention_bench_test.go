@@ -25,7 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -75,7 +75,7 @@ func buildContentionSeedDB(tb testing.TB) string {
 	if err != nil {
 		tb.Fatal(err)
 	}
-	for i := 0; i < contentionBenchTurnEvents; i++ {
+	for i := range contentionBenchTurnEvents {
 		content := fmt.Sprintf(`{"role":"model","parts":[{"text":"event %d %s"}]}`, i, filler)
 		if _, err := stmt.ExecContext(ctx, fmt.Sprintf("%s-evt-%d", sessionID, i),
 			sessionReadBenchApp, sessionReadBenchUser, sessionID, i, "bench-invocation", "model",
@@ -155,11 +155,9 @@ func BenchmarkReadContention(b *testing.B) {
 
 					stop := make(chan struct{})
 					var wg sync.WaitGroup
-					var bgOps int64
-					for i := 0; i < bgReaders; i++ {
-						wg.Add(1)
-						go func() {
-							defer wg.Done()
+					var bgOps atomic.Int64
+					for range bgReaders {
+						wg.Go(func() {
 							for {
 								select {
 								case <-stop:
@@ -169,9 +167,9 @@ func BenchmarkReadContention(b *testing.B) {
 								if _, err := service.LatestEventOrdinal(ctx, sessionReadBenchApp, sessionReadBenchUser, "turn-session"); err != nil {
 									return
 								}
-								atomic.AddInt64(&bgOps, 1)
+								bgOps.Add(1)
 							}
-						}()
+						})
 					}
 
 					// Warm the page cache before measuring, as the baseline
@@ -187,7 +185,7 @@ func BenchmarkReadContention(b *testing.B) {
 
 					samples := make([]time.Duration, 0, foregroundReps)
 					var lockWaitTotal time.Duration
-					for i := 0; i < foregroundReps; i++ {
+					for range foregroundReps {
 						start := time.Now()
 						resp, err := service.Get(ctx, &adksession.GetRequest{
 							AppName: sessionReadBenchApp, UserID: sessionReadBenchUser, SessionID: "turn-session",
@@ -209,14 +207,14 @@ func BenchmarkReadContention(b *testing.B) {
 					close(stop)
 					wg.Wait()
 
-					sort.Slice(samples, func(i, j int) bool { return samples[i] < samples[j] })
+					slices.Sort(samples)
 					p50 := percentile(samples, 0.50)
 					p95 := percentile(samples, 0.95)
 					p99 := percentile(samples, 0.99)
 					b.ReportMetric(float64(p50.Microseconds()), "p50-us")
 					b.ReportMetric(float64(p95.Microseconds()), "p95-us")
 					b.ReportMetric(float64(p99.Microseconds()), "p99-us")
-					b.ReportMetric(float64(atomic.LoadInt64(&bgOps)), "bg-ops")
+					b.ReportMetric(float64(bgOps.Load()), "bg-ops")
 					_ = lockWaitTotal // no per-statement lock-wait counter is exposed by database/sql; see report.
 				})
 			}

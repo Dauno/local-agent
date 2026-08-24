@@ -112,7 +112,7 @@ func TestProgressApplyUsageGating(t *testing.T) {
 func TestProgressToolAccountingOverflow(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-	for index := 0; index < maxTrackedActiveTools+5; index++ {
+	for index := range maxTrackedActiveTools + 5 {
 		callID := "tool-" + strconv.Itoa(index)
 		progress.Apply(ACPProgressEvent{Kind: ACPEventToolCall, Tool: &ACPToolProgress{CallID: callID, Kind: ACPToolKindExecute, Status: ACPToolStatusPending}}, base)
 	}

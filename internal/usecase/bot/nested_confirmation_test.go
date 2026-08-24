@@ -24,7 +24,7 @@ func TestResumePendingConfirmationIsPersistedAndPublishedInsteadOfApprovalFallba
 		WrapperCallID: "second", OriginalCallID: "original-second", Actor: invocation.UserID,
 		Summary: "second action", Expiry: time.Now().Add(time.Hour),
 	}
-	confirmations := &recordingConfirmationStore{fakeConfirmationStore: fakeConfirmationStore{delivery: first}}
+	confirmations := &recordingConfirmationStore{delivery: first}
 	runtime := &fakeRuntime{resumeTurn: port.AgentTurn{PendingConfirmation: second}}
 	publisher := &fakePublisher{}
 	service := newTestServiceWithConfirmations(t, &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}, runtime, &fakeHistory{}, publisher, confirmations, nil)

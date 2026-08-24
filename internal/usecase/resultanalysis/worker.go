@@ -315,16 +315,10 @@ func (w *Worker) drainAnalysis(ctx context.Context, record port.AnalysisRecord, 
 	}
 	rootManifest := domain.AnalysisSegmentManifest{SourceSHA256: identity.SHA256, SourceBytes: identity.Bytes, Segments: segments}
 
-	width := limits.MaxConcurrentLeaves
-	if width < 1 {
-		width = 1
-	}
+	width := max(limits.MaxConcurrentLeaves, 1)
 	sem := make(chan struct{}, width)
 	var wg sync.WaitGroup
-	for {
-		if ctx.Err() != nil {
-			break
-		}
+	for ctx.Err() == nil {
 		claimed, ok, err := w.deps.Steps.ClaimNext(ctx, record.AnalysisID, w.deps.Clock.Now().UTC(), w.cfg.Lease)
 		if err != nil {
 			if ctx.Err() == nil {

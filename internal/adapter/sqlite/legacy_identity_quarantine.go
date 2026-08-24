@@ -111,7 +111,7 @@ func (FileLegacyIdentityQuarantine) ReadCutoff(ctx context.Context, path string)
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	nanos, present, err := legacyIdentityCutoff(ctx, store.DB())
 	if err != nil || !present {
 		return time.Time{}, false, err
@@ -124,7 +124,7 @@ func (FileLegacyIdentityQuarantine) ReadAppliedAt(ctx context.Context, path stri
 	if err != nil {
 		return time.Time{}, false, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return legacyIdentityAppliedAt(ctx, store.DB())
 }
 
@@ -133,7 +133,7 @@ func (FileLegacyIdentityQuarantine) CountMatches(ctx context.Context, path strin
 	if err != nil {
 		return 0, 0, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	jobs, err := countLegacyIdentityJobs(ctx, store.DB(), cutoff.UnixNano())
 	if err != nil {
 		return 0, 0, err
@@ -182,7 +182,7 @@ func (FileLegacyIdentityQuarantine) Apply(ctx context.Context, path string, expe
 	if err != nil {
 		return rollout.LegacyIdentityQuarantineReport{}, fmt.Errorf("open database for legacy identity quarantine: %w", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	tx, err := store.DB().BeginTx(ctx, nil)
 	if err != nil {
 		return rollout.LegacyIdentityQuarantineReport{}, fmt.Errorf("begin legacy identity quarantine transaction: %w", err)

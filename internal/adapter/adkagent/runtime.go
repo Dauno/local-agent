@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -314,7 +315,7 @@ func (r *epochRecorder) capture(_ agent.Context, request *model.LLMRequest) (*mo
 func (r *Runtime) recordEpoch(recorder *epochRecorder) llmagent.AfterModelCallback {
 	return func(ctx agent.Context, response *model.LLMResponse, responseErr error) (*model.LLMResponse, error) {
 		if responseErr != nil || response == nil || response.Partial || ctx == nil {
-			return nil, nil
+			return nil, nil //nolint:nilerr // ADK callback contract: nil,nil means "no override", not an error
 		}
 		headReader, ok := r.sessionService.(epochEventHeadReader)
 		if !ok {
@@ -394,7 +395,7 @@ func (r *resultCallReservation) Reset() {
 
 func (r *resultCallReservation) AfterModel(_ agent.Context, response *model.LLMResponse, responseErr error) (*model.LLMResponse, error) {
 	if r == nil || responseErr != nil || response == nil || response.Content == nil {
-		return nil, nil
+		return nil, nil //nolint:nilerr // ADK callback contract: nil,nil means "no override", not an error
 	}
 	allowedCallID := ""
 	for _, part := range response.Content.Parts {
@@ -836,7 +837,7 @@ func (r *Runtime) Resume(ctx context.Context, decision domain.ConfirmationDecisi
 				FunctionResponse: &genai.FunctionResponse{
 					ID:           decision.WrapperCallID,
 					Name:         toolconfirmation.FunctionCallName,
-					WillContinue: boolPointer(false),
+					WillContinue: new(false),
 					Response: map[string]any{
 						"confirmed": decision.Approved,
 						"payload":   payload,
@@ -912,8 +913,6 @@ func (r *Runtime) RecoverActivation(ctx context.Context, conversationKey domain.
 	}
 	return port.AgentTurn{Text: recovered}, true, nil
 }
-
-func boolPointer(value bool) *bool { return &value }
 
 // sessionExistenceChecker is a lightweight get-or-create primitive: it
 // reports whether a session row exists, and returns its state, without
@@ -1274,9 +1273,9 @@ func cloneWorkstreamSnapshot(snapshot *domain.WorkstreamSnapshot) *domain.Workst
 }
 
 func latestActor(req port.AgentRequest) string {
-	for i := len(req.Messages) - 1; i >= 0; i-- {
-		if req.Messages[i].UserID != "" {
-			return req.Messages[i].UserID
+	for _, v := range slices.Backward(req.Messages) {
+		if v.UserID != "" {
+			return v.UserID
 		}
 	}
 	return ""

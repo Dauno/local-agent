@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"iter"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -222,8 +223,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := activationWorker.ProcessOne(t.Context()); err != nil {
-		var classified *port.ActivationProcessError
-		if errors.As(err, &classified) {
+		if classified, ok := errors.AsType[*port.ActivationProcessError](err); ok {
 			t.Fatalf("activation processing: %s: %v", classified.Code, classified.Err)
 		}
 		t.Fatal(err)
@@ -478,8 +478,7 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := activationWorker.ProcessOne(t.Context()); err != nil {
-		var classified *port.ActivationProcessError
-		if errors.As(err, &classified) {
+		if classified, ok := errors.AsType[*port.ActivationProcessError](err); ok {
 			t.Fatalf("activation processing: %s: %v", classified.Code, classified.Err)
 		}
 		t.Fatal(err)
@@ -1191,12 +1190,6 @@ func (m *activationRootModel) chunkStats() (chunkCalls int, reconstructed string
 	return m.chunkCalls, m.reconstructed.String(), m.verified, append([]string(nil), m.failures...)
 }
 
-func (m *activationRootModel) statusRevisionSnapshot() int {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.revision
-}
-
 // functionCallResponse builds one complete model turn that requests a tool.
 func functionCallResponse(id, name string, args map[string]any) *model.LLMResponse {
 	return &model.LLMResponse{Content: &genai.Content{
@@ -1213,8 +1206,7 @@ func lastFunctionResponse(request *model.LLMRequest, name string) (map[string]an
 	if request == nil {
 		return nil, false
 	}
-	for index := len(request.Contents) - 1; index >= 0; index-- {
-		content := request.Contents[index]
+	for _, content := range slices.Backward(request.Contents) {
 		if content == nil {
 			continue
 		}

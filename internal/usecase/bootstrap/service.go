@@ -446,10 +446,10 @@ func validateSecrets(secrets Secrets, modelAPIKeyEnv string) error {
 	}
 
 	if !strings.HasPrefix(secrets.SlackBotToken, "xoxb-") || len(secrets.SlackBotToken) == len("xoxb-") {
-		return errors.New("Slack bot token must start with xoxb-")
+		return errors.New("slack bot token must start with xoxb-")
 	}
 	if !strings.HasPrefix(secrets.SlackAppToken, "xapp-") || len(secrets.SlackAppToken) == len("xapp-") {
-		return errors.New("Slack app token must start with xapp-")
+		return errors.New("slack app token must start with xapp-")
 	}
 	return nil
 }

@@ -39,7 +39,7 @@ func newFutureSchemaError(found int) *versionRangeError {
 }
 
 func newTerminalSchemaError(sentinel error, found int) *versionRangeError {
-	var typed error = fmt.Errorf("%w: found v%d", sentinel, found)
+	var typed = fmt.Errorf("%w: found v%d", sentinel, found)
 	if errors.Is(sentinel, rollout.ErrUnsupportedSourceSchema) {
 		typed = rollout.UnsupportedSourceSchemaError{Found: found, MinSupported: rollout.MinSourceVersion, MaxSupported: rollout.MaxSourceVersion}
 	}
@@ -53,8 +53,7 @@ func newTerminalSchemaError(sentinel error, found int) *versionRangeError {
 }
 
 func versionRangeFound(err error) (int, bool) {
-	var typed *versionRangeError
-	if errors.As(err, &typed) {
+	if typed, ok := errors.AsType[*versionRangeError](err); ok {
 		return typed.found, true
 	}
 	return 0, false
@@ -441,7 +440,7 @@ func (a *Application) CheckRollbackDrain(ctx context.Context) (rollout.SummaryDi
 	if err != nil {
 		return rollout.SummaryDiscoveryDrainStatus{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	const pendingStates = `status IN ('pending', 'failed', 'running')`
 	var count int
 	if err := store.DB().QueryRowContext(ctx,
@@ -459,7 +458,7 @@ func (a *Application) CheckRollbackDrain(ctx context.Context) (rollout.SummaryDi
 	if err != nil {
 		return rollout.SummaryDiscoveryDrainStatus{}, fmt.Errorf("list pending discovery sessions: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var identity string
 		if err := rows.Scan(&identity); err != nil {

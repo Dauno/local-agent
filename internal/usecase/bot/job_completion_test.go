@@ -792,7 +792,7 @@ func (s *fakeActivationFallbackStore) CompleteActivationFallback(_ context.Conte
 		return s.completeErr
 	}
 	s.lastMarkedTS = slackTS
-	s.fakeActivationStore.activation.FallbackSlackTS = slackTS
+	s.activation.FallbackSlackTS = slackTS
 	return nil
 }
 
@@ -1094,7 +1094,7 @@ func TestExpiredConfirmationResumeSharesConversationCoordinatorWithReconciliatio
 		Actor: activation.Actor, ConversationKey: activation.ConversationKey, Status: port.ConfirmationPublished,
 		Expiry: now.Add(-time.Minute),
 	}
-	confirmations := &expiredConfirmationStore{fakeConfirmationStore: fakeConfirmationStore{delivery: &delivery}}
+	confirmations := &expiredConfirmationStore{delivery: &delivery}
 	runtime := &blockingResumeRuntime{started: make(chan struct{}), release: make(chan struct{})}
 	publisher := &fakePublisher{}
 	service := completionService(t, activationStore, &fakeRuntime{}, publisher)
@@ -1223,7 +1223,7 @@ func TestExpiredConfirmationRemainsRetryableWhenResponseReconciliationOwnsCoordi
 		Actor: activation.Actor, ConversationKey: activation.ConversationKey, Status: port.ConfirmationPublished,
 		Expiry: now.Add(-time.Minute),
 	}
-	confirmations := &expiredConfirmationStore{fakeConfirmationStore: fakeConfirmationStore{delivery: &delivery}}
+	confirmations := &expiredConfirmationStore{delivery: &delivery}
 	runtime := &blockingResumeRuntime{started: make(chan struct{}), release: make(chan struct{})}
 	service.runtime = runtime
 	service.confirmationStore = confirmations
@@ -1303,11 +1303,11 @@ func TestExpiredConfirmationKeepsCoordinatorThroughPostResumePublication(t *test
 	publisher := &fakePublisher{}
 	service := completionService(t, activationStore, &fakeRuntime{}, publisher)
 	service.runtime = runtime
-	service.confirmationStore = &expiredConfirmationStore{fakeConfirmationStore: fakeConfirmationStore{delivery: &port.ConfirmationDelivery{
+	service.confirmationStore = &expiredConfirmationStore{delivery: &port.ConfirmationDelivery{
 		WrapperCallID: "post-resume-expired-wrapper", OriginalCallID: "original", SessionID: "adk:" + string(activation.ConversationKey),
 		Actor: activation.Actor, ConversationKey: activation.ConversationKey, Status: port.ConfirmationPublished,
 		Expiry: now.Add(-time.Minute),
-	}}}
+	}}
 	service.clock = fakeClock{now: now}
 	var interleaved error
 	publisher.onPublish = func() {

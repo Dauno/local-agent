@@ -181,10 +181,7 @@ func (c *Compiler) reduceCompilation(ctx context.Context, state compilationState
 
 	if state.count.Tokens > state.allocationLimit && len(reducibleForAlloc) > 0 {
 		optionalCost := sumCosts([]int{turnCost(state.summary), turnCost(state.recent), turnCost(state.capsule)})
-		available := state.allocationLimit - state.request.FixedRequestTokens - state.protectedCost - state.totalMinimumCost - optionalCost
-		if available < 0 {
-			available = 0
-		}
+		available := max(state.allocationLimit-state.request.FixedRequestTokens-state.protectedCost-state.totalMinimumCost-optionalCost, 0)
 		allocations := allocateResponseBudgets(reducibleForAlloc, minEnvForAlloc, available)
 		planned, planErr := planProjections(reducibleForAlloc, allocations)
 		if planErr != nil {
@@ -264,10 +261,7 @@ func allocateResponseBudgets(parts []reduciblePart, minimums []int, available in
 	demands := make([]int, len(parts))
 	active := make([]int, 0, len(parts))
 	for i, part := range parts {
-		minimum := minimums[i]
-		if minimum < 0 {
-			minimum = 0
-		}
+		minimum := max(minimums[i], 0)
 		allocations[i] = minimum
 		if part.cost > minimum {
 			demands[i] = part.cost - minimum
@@ -293,10 +287,7 @@ func allocateResponseBudgets(parts []reduciblePart, minimums []int, available in
 		spent := 0
 		for _, index := range active {
 			need := demands[index] - (allocations[index] - minimums[index])
-			add := share
-			if add > need {
-				add = need
-			}
+			add := min(share, need)
 			allocations[index] += add
 			spent += add
 			if add == need {
@@ -394,10 +385,7 @@ func validateProjectedContents(contents []domain.Content, openInvocationIDs map[
 	if len(turns) == 0 {
 		return nil
 	}
-	activeIndex := turnIndexForContentStart(turns, activeStart)
-	if activeIndex < 0 {
-		activeIndex = 0
-	}
+	activeIndex := max(turnIndexForContentStart(turns, activeStart), 0)
 	if activeIndex > 0 {
 		if err := domain.ValidateContentProtocol(domain.FlattenTurns(turns[:activeIndex]), domain.ProtocolValidationOptions{
 			RequireComplete:            true,

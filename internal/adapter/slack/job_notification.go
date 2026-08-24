@@ -43,17 +43,16 @@ func NewDurableJobNotificationPublisher(publisher *Publisher, history *HistoryRe
 }
 
 func (p *JobNotificationPublisher) Publish(ctx context.Context, notification domain.ExternalAgentJobNotification) (port.PublishedResponse, error) {
-	parts, err := validateJobNotification(notification)
-	if err != nil {
+	if _, err := validateJobNotification(notification); err != nil {
 		return port.PublishedResponse{}, invalidNotificationError(err)
 	}
 	if p == nil || p.publisher == nil || p.publisher.client == nil {
-		return port.PublishedResponse{}, invalidNotificationError(errors.New("Slack job notification publisher is required"))
+		return port.PublishedResponse{}, invalidNotificationError(errors.New("slack job notification publisher is required"))
 	}
 	if notification.DeliveryMode == domain.JobResultDeliveryFile {
 		return p.publishFile(ctx, notification)
 	}
-	parts = renderMarkdownV1(notification.CanonicalMarkdown, p.partLabels)
+	parts := renderMarkdownV1(notification.CanonicalMarkdown, p.partLabels)
 	if notification.MaxMarkdownParts > 0 && len(parts) > notification.MaxMarkdownParts {
 		return port.PublishedResponse{}, invalidNotificationError(errors.New("job notification exceeds its persisted Markdown part policy"))
 	}
@@ -104,7 +103,7 @@ func (p *JobNotificationPublisher) Reconcile(ctx context.Context, notification d
 		return "", false, invalidNotificationError(err)
 	}
 	if p == nil || p.history == nil || p.history.client == nil {
-		return "", false, invalidNotificationError(errors.New("Slack job notification history is required"))
+		return "", false, invalidNotificationError(errors.New("slack job notification history is required"))
 	}
 	if notification.DeliveryMode == domain.JobResultDeliveryFile && notification.SlackFileID == "" {
 		// No durable Slack identity exists yet, so there is nothing to
@@ -153,25 +152,25 @@ func (p *JobNotificationPublisher) Reconcile(ctx context.Context, notification d
 		count, _ := metadataInt(payload["part_count"])
 		if jobID != notification.JobID || kind != notification.Kind || renderer != notification.RendererVersion || !notificationEvidenceDigestMatch(payload, notification) || (mode != "" && mode != string(notification.DeliveryMode)) || (policy != "" && policy != notification.PolicyVersion) {
 			if jobID == notification.JobID {
-				return "", false, invalidNotificationError(errors.New("Slack job notification metadata is inconsistent"))
+				return "", false, invalidNotificationError(errors.New("slack job notification metadata is inconsistent"))
 			}
 			continue
 		}
 		if message.User != p.history.botUserID || message.Edited != nil || message.Hidden || len(message.Files) != 0 || revision != notification.StatusRevision || count != len(parts) || index < 1 || index > len(parts) || partDigest != contentSHA256(parts[index-1]) || message.Timestamp == "" || seen[index] {
-			return "", false, invalidNotificationError(errors.New("Slack job notification delivery evidence is inconsistent"))
+			return "", false, invalidNotificationError(errors.New("slack job notification delivery evidence is inconsistent"))
 		}
 		seen[index] = true
 		matched[index-1] = message
 	}
 	if len(seen) != len(parts) {
 		if len(seen) > 0 {
-			return "", false, invalidNotificationError(errors.New("Slack job notification delivery is incomplete"))
+			return "", false, invalidNotificationError(errors.New("slack job notification delivery is incomplete"))
 		}
 		return "", false, nil
 	}
 	for index := 1; index < len(matched); index++ {
 		if !parseSlackTimestamp(matched[index-1].Timestamp).Before(parseSlackTimestamp(matched[index].Timestamp)) {
-			return "", false, invalidNotificationError(errors.New("Slack job notification delivery order is inconsistent"))
+			return "", false, invalidNotificationError(errors.New("slack job notification delivery order is inconsistent"))
 		}
 	}
 	return matched[len(matched)-1].Timestamp, true, nil
@@ -499,8 +498,7 @@ func (p *JobNotificationPublisher) publishParts(ctx context.Context, notificatio
 }
 
 func classifyUploadError(code string, err error, retryDefinitive bool) error {
-	var uploadErr *port.GeneratedFileUploadError
-	if errors.As(err, &uploadErr) {
+	if uploadErr, ok := errors.AsType[*port.GeneratedFileUploadError](err); ok {
 		if uploadErr.Ambiguous {
 			return port.NewNotificationPublishError(code, true, retryDefinitive, errors.New(code))
 		}
@@ -541,7 +539,7 @@ func classifyHistoryError(err error) error {
 	if slackPermanentError(err) {
 		return invalidNotificationError(err)
 	}
-	return port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("Slack notification history lookup is ambiguous"))
+	return port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("slack notification history lookup is ambiguous"))
 }
 
 func classifyMarkdownPostError(err error) error {
@@ -551,19 +549,17 @@ func classifyMarkdownPostError(err error) error {
 	if slackPermanentError(err) {
 		return invalidNotificationError(err)
 	}
-	return port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("Slack job notification publication outcome is ambiguous"))
+	return port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("slack job notification publication outcome is ambiguous"))
 }
 
 func slackPermanentError(err error) bool {
-	var slackErr slackapi.SlackErrorResponse
-	if errors.As(err, &slackErr) {
+	if slackErr, ok := errors.AsType[slackapi.SlackErrorResponse](err); ok {
 		switch strings.ToLower(slackErr.Err) {
 		case "channel_not_found", "conversation_not_found", "not_in_channel", "is_archived", "invalid_auth", "account_inactive", "token_revoked", "missing_scope", "restricted_action", "not_allowed_token_type", "msg_too_long", "invalid_arguments", "thread_not_found", "metadata_too_long":
 			return true
 		}
 	}
-	var statusErr slackapi.StatusCodeError
-	if errors.As(err, &statusErr) {
+	if statusErr, ok := errors.AsType[slackapi.StatusCodeError](err); ok {
 		return statusErr.Code >= 400 && statusErr.Code < 500 && statusErr.Code != 429
 	}
 	return false

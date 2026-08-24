@@ -19,7 +19,7 @@ func newAnalysisCompletionStoreFixture(t *testing.T) (store *AnalysisCompletionS
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { dbStore.Close() })
+	t.Cleanup(func() { _ = dbStore.Close() })
 
 	sourceID = strings.Repeat("a", 64)
 	sourceSHA = strings.Repeat("b", 64)

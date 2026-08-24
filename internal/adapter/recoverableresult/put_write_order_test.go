@@ -44,7 +44,7 @@ func TestPutInsertsResultRowBeforeReturning(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer other.Close()
+	defer func() { _ = other.Close() }()
 
 	var count int
 	if err := other.QueryRowContext(ctx, `SELECT COUNT(*) FROM recoverable_results WHERE ref = ?`, result.Ref).Scan(&count); err != nil {

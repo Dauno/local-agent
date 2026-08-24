@@ -1029,7 +1029,7 @@ func TestHandleInteractiveConfirmationUpdateFailureDoesNotReplayDecision(t *test
 	runtime := &fakeRuntime{resumeTurn: port.AgentTurn{Text: "completed"}}
 	publisher := &fakePublisher{}
 	service := newTestServiceWithConfirmations(t, &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}, runtime, &fakeHistory{}, publisher, confirmations, nil)
-	service.confirmationPublisher = &fakeConfirmationPublisher{updateErr: errors.New("Slack update failed")}
+	service.confirmationPublisher = &fakeConfirmationPublisher{updateErr: errors.New("slack update failed")}
 
 	if err := service.HandleConfirmationInteractive(t.Context(), richConfirmationAction(delivery)); err != nil {
 		t.Fatal(err)
@@ -1399,7 +1399,7 @@ func TestModelFailureKeepsOnlyUserMessage(t *testing.T) {
 func TestPublishFailureDoesNotPersistAssistant(t *testing.T) {
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}
-	publisher := &fakePublisher{err: errors.New("Slack unavailable")}
+	publisher := &fakePublisher{err: errors.New("slack unavailable")}
 	service := newTestService(t, store, runtime, &fakeHistory{}, publisher, nil)
 	outcome, err := service.Handle(t.Context(), botInvocation())
 	if err != nil || outcome != OutcomePublishFailed {

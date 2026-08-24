@@ -157,7 +157,7 @@ func (s *Store) Get(ctx context.Context, ownerID, reference, expectedSHA256 stri
 	if err != nil {
 		return nil, artifactError(domain.ResultErrorArtifactMissing, "open result artifact failed")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	data, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		return nil, artifactError(domain.ResultErrorArtifactMissing, "read result artifact failed")
@@ -229,7 +229,7 @@ func (s *Store) ReadChunk(ctx context.Context, req domain.ResultArtifactChunkReq
 	if err != nil {
 		return domain.ResultChunk{}, artifactError(domain.ResultErrorArtifactMissing, "open result artifact failed")
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	openedInfo, err := file.Stat()
 	if err != nil || !openedInfo.Mode().IsRegular() || !os.SameFile(info, openedInfo) {
 		return domain.ResultChunk{}, artifactError(domain.ResultErrorArtifactMissing, "result artifact changed during open")
@@ -417,7 +417,7 @@ func syncDirectory(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	return file.Sync()
 }
 

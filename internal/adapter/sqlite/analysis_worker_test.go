@@ -34,7 +34,7 @@ func setupWorkerFixture(t *testing.T, content string) (dbStore *Store, analysisI
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { dbStore.Close() })
+	t.Cleanup(func() { _ = dbStore.Close() })
 
 	sourceID = strings.Repeat("a", 64)
 	sum := sha256.Sum256([]byte(content))
@@ -254,7 +254,7 @@ func TestWorkerGateDisabledTouchesNoV40Table(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { dbStore.Close() })
+	t.Cleanup(func() { _ = dbStore.Close() })
 	var count int
 	if err := dbStore.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM result_analyses`).Scan(&count); err != nil {
 		t.Fatalf("count result_analyses: %v", err)

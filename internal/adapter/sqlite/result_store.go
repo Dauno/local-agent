@@ -41,7 +41,7 @@ func (s *ResultStore) Materialize(ctx context.Context, request port.ResultMateri
 	if s == nil || s.catalog == nil || s.catalog.db == nil || s.payload == nil {
 		return domain.ResultHandle{}, domain.ErrResultUnavailable
 	}
-	for attempts := 0; attempts < 3; attempts++ {
+	for range 3 {
 		reservation, err := s.reserve(ctx, request.Producer)
 		if err != nil {
 			return domain.ResultHandle{}, err

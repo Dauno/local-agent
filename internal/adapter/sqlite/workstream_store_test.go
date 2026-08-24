@@ -20,7 +20,7 @@ func TestWorkstreamStoreFreshSchemaAndSQLConstraints(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var version int
 	if err := store.DB().QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -66,7 +66,7 @@ func TestWorkstreamStoreStartTaskPersistsRunningBindingAndJournal(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	workstreams := NewWorkstreamStore(store)
 	workstream := testSQLiteWorkstream("ws-1", "slack:T12345678:dm:D12345678")
 	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-1"); err != nil {
@@ -164,7 +164,7 @@ func TestWorkstreamStoreCASJournalAndRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	got, err = NewWorkstreamStore(store).Get(ctx, workstream.ID)
 	if err != nil {
 		t.Fatal(err)
@@ -180,7 +180,7 @@ func TestWorkstreamStoreRejectsInvalidTaskConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	workstreams := NewWorkstreamStore(store)
 	workstream := testSQLiteWorkstream("ws-1", "slack:T12345678:dm:D12345678")
 	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-1"); err != nil {
@@ -210,7 +210,7 @@ func TestWorkstreamResultLinkCommitIsAtomicAndBindsVerifiedIdentity(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -285,7 +285,7 @@ func TestWorkstreamResultLinkCommitRejectsCrossScopeRequest(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -341,7 +341,7 @@ func TestWorkstreamStoreJournalIsReconstructibleAndTransitionsAreIdempotent(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	workstreams := NewWorkstreamStore(store)
 	workstream := testSQLiteWorkstream("ws-1", "slack:T12345678:dm:D12345678")
 	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-1"); err != nil {
@@ -388,7 +388,7 @@ func TestWorkstreamStoreCreationReplayIgnoresRetryTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	workstreams := NewWorkstreamStore(store)
 	workstream := testSQLiteWorkstream("ws-1", "slack:T12345678:dm:D12345678")
 	workstream.CreatedAt = time.Time{}
@@ -407,7 +407,7 @@ func TestWorkstreamStorePersistsDecisionQuestionAndTaskTerminalActions(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	workstreams := NewWorkstreamStore(store)
 	workstream := testSQLiteWorkstream("ws-1", "slack:T12345678:dm:D12345678")
 	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-1"); err != nil {
@@ -462,7 +462,7 @@ func TestWorkstreamStoreConcurrentCASHasOneWinner(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	workstreams := NewWorkstreamStore(store)
 	workstream := testSQLiteWorkstream("ws-1", "slack:T12345678:dm:D12345678")
 	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-1"); err != nil {
@@ -473,16 +473,14 @@ func TestWorkstreamStoreConcurrentCASHasOneWinner(t *testing.T) {
 	errorsCh := make(chan error, 2)
 	var wg sync.WaitGroup
 	for index := range 2 {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
+		wg.Go(func() {
 			<-start
 			transition := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionRecordConstraint, 0)
 			transition.SourceID = fmt.Sprintf("concurrent-%d", index)
 			transition.Constraint = &domain.WorkstreamConstraint{ID: fmt.Sprintf("constraint-%d", index), Text: "concurrent correction"}
 			_, err := workstreams.Apply(ctx, transition, domain.DefaultWorkstreamLimits(), time.Unix(10, 0).UTC())
 			errorsCh <- err
-		}()
+		})
 	}
 	close(start)
 	wg.Wait()

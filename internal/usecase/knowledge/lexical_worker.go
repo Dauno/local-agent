@@ -237,8 +237,7 @@ func (w *LexicalWorker) processItem(ctx context.Context, item domain.KnowledgeQu
 			// and a later run recovers it.
 			return
 		}
-		var sourceErr *sourceInvalidError
-		if errors.As(err, &sourceErr) {
+		if _, ok := errors.AsType[*sourceInvalidError](err); ok {
 			if failErr := w.queue.Fail(ctx, claim, domain.KnowledgeQueueFailureSourceInvalid); failErr != nil {
 				w.logger.Warn("knowledge lexical terminal failure transition failed", "error", w.sanitize(failErr.Error()))
 			}

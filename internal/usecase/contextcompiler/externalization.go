@@ -86,10 +86,7 @@ func newProjectionMutation(part reduciblePart, budget int, reason string) (proje
 		sourceCost:   part.cost,
 	}
 
-	inlineBudget := budget - part.minimumCost
-	if inlineBudget < 0 {
-		inlineBudget = 0
-	}
+	inlineBudget := max(budget-part.minimumCost, 0)
 	projection.excerpt = truncateToCodePoints(extractResponseText(response.Response), inlineBudget)
 	return projection, nil
 }

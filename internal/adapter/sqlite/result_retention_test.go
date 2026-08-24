@@ -54,7 +54,7 @@ func TestCheckResultRetentionReportsBoundedCandidateCounts(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	now := time.Now().UTC()
 	old := now.Add(-10 * 24 * time.Hour)

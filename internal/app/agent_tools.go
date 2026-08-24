@@ -344,9 +344,7 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 		combined = append(combined, workflowTool)
 	}
 
-	for _, raw := range baseRaw {
-		combined = append(combined, raw)
-	}
+	combined = append(combined, baseRaw...)
 	return combined, nil
 }
 

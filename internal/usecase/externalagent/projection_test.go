@@ -24,8 +24,8 @@ func TestStatusProjectionMergesLiveProgress(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 1, ProgressWarningSeconds: 10 * time.Second},
-		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, ProgressStore: jobStore, ProcessRegistry: &projectionRegistry{alive: boolPtr(true)}})
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 1, ProgressWarningTimeout: 10 * time.Second},
+		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, ProgressStore: jobStore, ProcessRegistry: &projectionRegistry{alive: new(true)}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -84,7 +84,7 @@ func TestStatusProjectionAuthorizationHidesIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	jobStore.AssignACPSession(t.Context(), job.ID, "worker_x", 1, "ses_secret_identity")
+	_ = jobStore.AssignACPSession(t.Context(), job.ID, "worker_x", 1, "ses_secret_identity")
 	view, err := service.StatusProjection(t.Context(), job.ID, "intruder", job.ConversationKey)
 	if err == nil {
 		t.Fatal("unauthorized projection must fail")

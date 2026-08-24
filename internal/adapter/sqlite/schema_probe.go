@@ -22,7 +22,7 @@ func (FileSchemaProbe) CurrentVersion(ctx context.Context, path string) (int, er
 	if err != nil {
 		return 0, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return currentUserVersion(ctx, store.DB())
 }
 
@@ -52,7 +52,7 @@ func (FileSchemaProbe) IdentityHealth(ctx context.Context, path string) (domain.
 	if err != nil {
 		return domain.ExternalAgentJobIdentityHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return NewExternalAgentJobStore(store).IdentityHealth(ctx)
 }
 
@@ -63,7 +63,7 @@ func (FileSchemaProbe) ReadRolloutState(ctx context.Context, path string) (rollo
 	if err != nil {
 		return rollout.RolloutState{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	reader := rolloutStateReader{db: store.DB(), ctx: ctx}
 	state := rollout.RolloutState{}

@@ -717,7 +717,7 @@ func TestExecuteSerializesCommandsPerConversation(t *testing.T) {
 	service := newTestService(t, store, coordinator)
 	var wg sync.WaitGroup
 	var busy, ok int64
-	for i := 0; i < 8; i++ {
+	for i := range 8 {
 		wg.Add(1)
 		go func(seq int) {
 			defer wg.Done()
@@ -1086,7 +1086,7 @@ func TestInspectSubjectSelectorEscapesGlobalListingBound(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := testBinding()
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		subject := fmt.Sprintf("subject-%d", i)
 		if _, _, err := service.Execute(t.Context(), binding, fmt.Sprintf("evt-s%d", i), rememberText(subject)); err != nil {
 			t.Fatal(err)
@@ -1094,7 +1094,7 @@ func TestInspectSubjectSelectorEscapesGlobalListingBound(t *testing.T) {
 	}
 	// Three claims of the SAME subject are created via three events: the
 	// subject selector must list all of them, not the global-bound prefix.
-	for i := 0; i < 3; i++ {
+	for i := range 3 {
 		if _, _, err := service.Execute(t.Context(), binding, fmt.Sprintf("evt-same-%d", i),
 			HumanCommandPrefix+`{"action":"remember","subject":"same","predicate":"is","value_kind":"string","value_text":"x"}`); err != nil {
 			t.Fatal(err)

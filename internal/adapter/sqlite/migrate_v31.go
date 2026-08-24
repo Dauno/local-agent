@@ -41,7 +41,7 @@ func repairV31ForegroundInlineIdentity(ctx context.Context, tx *sql.Tx) error {
 	if err != nil {
 		return fmt.Errorf("read historical foreground inline results: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var jobID, summary, sha string
 		var bytes int64

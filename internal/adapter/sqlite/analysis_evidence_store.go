@@ -85,7 +85,7 @@ func (s *AnalysisEvidenceStore) ListByLeafStep(ctx context.Context, analysisID s
 	if err != nil {
 		return nil, wrapAnalysisCanceled(err, fmt.Errorf("%w: list analysis evidence: %v", domain.ErrAnalysisUnavailable, err))
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []port.AnalysisEvidenceExcerpt
 	for rows.Next() {
 		var e port.AnalysisEvidenceExcerpt

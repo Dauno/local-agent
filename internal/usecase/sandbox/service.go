@@ -218,8 +218,8 @@ func validateRelativePath(path string) error {
 	if strings.Contains(path, "~") || strings.ContainsRune(path, '\x00') {
 		return errors.New("path traversal not allowed")
 	}
-	segs := strings.Split(filepath.ToSlash(path), "/")
-	for _, seg := range segs {
+	segs := strings.SplitSeq(filepath.ToSlash(path), "/")
+	for seg := range segs {
 		if seg == ".." {
 			return errors.New("path traversal not allowed")
 		}

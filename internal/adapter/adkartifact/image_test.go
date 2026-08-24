@@ -22,8 +22,8 @@ import (
 func testJPEG(t *testing.T, width, height int) []byte {
 	t.Helper()
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
+	for y := range height {
+		for x := range width {
 			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 7), G: uint8(y * 5), B: 120, A: 255})
 		}
 	}
@@ -37,8 +37,8 @@ func testJPEG(t *testing.T, width, height int) []byte {
 func testPNG(t *testing.T, width, height int, alpha bool) []byte {
 	t.Helper()
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
+	for y := range height {
+		for x := range width {
 			a := uint8(255)
 			if alpha {
 				a = uint8((x*17 + y*31) % 256)
@@ -60,8 +60,8 @@ func testNoiseRGBA(t *testing.T, width, height int, bits16 bool) []byte {
 	rng := rand.New(rand.NewSource(42))
 	if bits16 {
 		img := image.NewNRGBA64(image.Rect(0, 0, width, height))
-		for y := 0; y < height; y++ {
-			for x := 0; x < width; x++ {
+		for y := range height {
+			for x := range width {
 				img.SetNRGBA64(x, y, color.NRGBA64{R: uint16(rng.Intn(1 << 16)), G: uint16(rng.Intn(1 << 16)), B: uint16(rng.Intn(1 << 16)), A: uint16(rng.Intn(1 << 16))})
 			}
 		}
@@ -72,8 +72,8 @@ func testNoiseRGBA(t *testing.T, width, height int, bits16 bool) []byte {
 		return buffer.Bytes()
 	}
 	img := image.NewNRGBA(image.Rect(0, 0, width, height))
-	for y := 0; y < height; y++ {
-		for x := 0; x < width; x++ {
+	for y := range height {
+		for x := range width {
 			img.SetNRGBA(x, y, color.NRGBA{R: uint8(rng.Intn(256)), G: uint8(rng.Intn(256)), B: uint8(rng.Intn(256)), A: uint8(rng.Intn(256))})
 		}
 	}
@@ -95,10 +95,10 @@ func testGIF(t *testing.T, frames int, transparent bool) []byte {
 	}
 	rect := image.Rect(0, 0, 8, 6)
 	animation := &gif.GIF{LoopCount: 0}
-	for frame := 0; frame < frames; frame++ {
+	for frame := range frames {
 		canvas := image.NewPaletted(rect, palette)
-		for y := 0; y < 6; y++ {
-			for x := 0; x < 8; x++ {
+		for y := range 6 {
+			for x := range 8 {
 				index := uint8((x + y + frame) % 2)
 				if transparent && (x+y)%3 == 0 {
 					index = 2

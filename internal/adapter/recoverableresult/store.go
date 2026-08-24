@@ -543,7 +543,7 @@ func syncDirectory(dir string) error {
 	if err != nil {
 		return err
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 	return f.Sync()
 }
 
@@ -559,7 +559,7 @@ func readAndVerifyFile(baseDir, locator string, expectedSize int64, expectedSHA2
 	if err != nil {
 		return nil, "", fmt.Errorf("open storage file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {
@@ -595,7 +595,7 @@ func verifyFileExists(baseDir, locator string) error {
 	if err != nil {
 		return fmt.Errorf("open storage file: %w", err)
 	}
-	defer f.Close()
+	defer func() { _ = f.Close() }()
 
 	info, err := f.Stat()
 	if err != nil {

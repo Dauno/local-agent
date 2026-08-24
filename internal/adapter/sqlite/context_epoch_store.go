@@ -144,7 +144,7 @@ func (s *ContextEpochStore) Range(ctx context.Context, appName, userID, sessionI
 	if err != nil {
 		return nil, fmt.Errorf("%w: query epoch range: %v", port.ErrContextEpochUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	var epochs []domain.ContextEpoch
 	for rows.Next() {

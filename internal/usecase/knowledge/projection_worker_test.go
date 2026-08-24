@@ -491,7 +491,7 @@ func TestProjectionWorkerCleanupRetriesNeverExhaustBudget(t *testing.T) {
 	// terminal. Cleanup deferrals must cycle at the same budget value
 	// until the backup can actually be removed.
 	worker, clock := newWorkerUnderTest(t, store, projector, 1, nil)
-	for i := 0; i < 4; i++ {
+	for i := range 4 {
 		worker.tick(t.Context())
 		snap := store.snapshot()
 		if snap.failed != nil {

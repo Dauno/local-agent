@@ -95,12 +95,12 @@ func ParseRunEvents(reader io.Reader, bounds Bounds, onActivity func(name, statu
 			if event.Item == nil {
 				return ParsedRun{}, fmt.Errorf("codex emitted a malformed item.completed event")
 			}
-			switch {
-			case event.Item.Type == "agent_message":
+			switch event.Item.Type {
+			case "agent_message":
 				if strings.TrimSpace(event.Item.Text) != "" {
 					candidate = event.Item.Text
 				}
-			case event.Item.Type == "reasoning":
+			case "reasoning":
 				// Reasoning must never become final ADK text.
 			default:
 				if _, known := activityItemTypes[event.Item.Type]; known && onActivity != nil {

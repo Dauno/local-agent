@@ -118,7 +118,6 @@ func Update(path string, allowedKeys []string, updates map[string]string) error 
 // Render applies allowlisted updates in memory without touching the filesystem.
 // It preserves every unrelated line, comment, ordering choice, and newline style.
 func Render(existing []byte, allowedKeys []string, updates map[string]string) ([]byte, error) {
-
 	allowed := make(map[string]struct{}, len(allowedKeys))
 	for _, key := range allowedKeys {
 		if !envKeyPattern.MatchString(key) {
@@ -254,11 +253,11 @@ func apply(existing []byte, updates map[string]string) []byte {
 
 func assignmentEnd(lines []line, start int) int {
 	body := lines[start].body
-	equals := strings.IndexByte(body, '=')
-	if equals < 0 {
+	_, after, ok := strings.Cut(body, "=")
+	if !ok {
 		return start
 	}
-	right := strings.TrimLeft(body[equals+1:], " \t\v\f\r")
+	right := strings.TrimLeft(after, " \t\v\f\r")
 	if len(right) == 0 || (right[0] != '\'' && right[0] != '"') {
 		return start
 	}
@@ -310,8 +309,8 @@ func splitLines(data []byte) ([]line, string) {
 
 		body := text[:index]
 		ending := "\n"
-		if strings.HasSuffix(body, "\r") {
-			body = strings.TrimSuffix(body, "\r")
+		if before, ok := strings.CutSuffix(body, "\r"); ok {
+			body = before
 			ending = "\r\n"
 		}
 		lines = append(lines, line{body: body, ending: ending})

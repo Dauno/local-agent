@@ -258,10 +258,7 @@ func (r *ProgressRecorder) maintenance(immediate bool) {
 	switch {
 	case health == domain.ACPHealthPossiblyStalled && !r.warned:
 		r.warned = true
-		idle := now.Sub(r.proj.LastTransportActivityAt)
-		if idle < 0 {
-			idle = 0
-		}
+		idle := max(now.Sub(r.proj.LastTransportActivityAt), 0)
 		r.logger.Warn("external-agent ACP possibly stalled",
 			"job_id", r.jobID, "attempt", r.attempt, "acp_session_id", r.sessionID,
 			"phase", r.proj.Phase, "last_event_kind", r.proj.LastEventKind,

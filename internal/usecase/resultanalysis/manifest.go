@@ -69,10 +69,7 @@ func readFullRange(ctx context.Context, store port.TrustedResultStore, resultID 
 	var assembled []byte
 	for int64(len(assembled)) < length {
 		remaining := length - int64(len(assembled))
-		chunkMax := remaining
-		if chunkMax > readChunkMaxBytes {
-			chunkMax = readChunkMaxBytes
-		}
+		chunkMax := min(remaining, readChunkMaxBytes)
 		chunk, err := store.ReadRange(ctx, resultID, scope, offset+int64(len(assembled)), chunkMax)
 		if err != nil {
 			return "", err

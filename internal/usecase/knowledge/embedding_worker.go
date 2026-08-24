@@ -454,15 +454,13 @@ func (w *EmbeddingWorker) settle(ctx context.Context, item domain.KnowledgeQueue
 	if ctx.Err() != nil {
 		return
 	}
-	var providerErr *providerOutputError
-	if errors.As(err, &providerErr) {
+	if _, ok := errors.AsType[*providerOutputError](err); ok {
 		if failErr := w.queue.Fail(ctx, claim, domain.KnowledgeQueueFailureProviderInvalid); failErr != nil {
 			w.logger.Warn("knowledge embedding terminal failure transition failed", "error", w.sanitize(failErr.Error()))
 		}
 		return
 	}
-	var sourceErr *sourceInvalidError
-	if errors.As(err, &sourceErr) {
+	if _, ok := errors.AsType[*sourceInvalidError](err); ok {
 		if failErr := w.queue.Fail(ctx, claim, domain.KnowledgeQueueFailureSourceInvalid); failErr != nil {
 			w.logger.Warn("knowledge embedding terminal failure transition failed", "error", w.sanitize(failErr.Error()))
 		}

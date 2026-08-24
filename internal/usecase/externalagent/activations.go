@@ -421,10 +421,7 @@ func (w *ActivationWorker) retryDelay(attempt int) time.Duration {
 	if attempt < 1 {
 		attempt = 1
 	}
-	shift := attempt - 1
-	if shift > 20 {
-		shift = 20
-	}
+	shift := min(attempt-1, 20)
 	delay := float64(w.cfg.RetryBase) * math.Pow(2, float64(shift))
 	if delay >= float64(w.cfg.RetryMax) {
 		return w.cfg.RetryMax
@@ -436,8 +433,7 @@ func classifyActivationError(err error) (string, bool) {
 	if err == nil {
 		return "activation_retryable", true
 	}
-	var classified *port.ActivationProcessError
-	if errors.As(err, &classified) {
+	if classified, ok := errors.AsType[*port.ActivationProcessError](err); ok {
 		code := safeActivationErrorCode(classified.Code, classified.Retryable)
 		return code, classified.Retryable
 	}

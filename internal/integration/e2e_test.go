@@ -276,7 +276,7 @@ func TestE2E_BusyMessage(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 
 	started := make(chan struct{}, 1)
 	unblock := make(chan struct{})
@@ -420,7 +420,7 @@ func TestE2E_ContextSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { reopened.Close() })
+	t.Cleanup(func() { _ = reopened.Close() })
 
 	textLLM2 := newFakeLLMTextServer("second answer")
 	t.Cleanup(textLLM2.Close)
@@ -495,11 +495,11 @@ func TestE2E_ContextSurvivesRestart(t *testing.T) {
 
 func extractWrapperCallID(text string) string {
 	prefix := "approve "
-	idx := strings.Index(text, prefix)
-	if idx < 0 {
+	_, after0, ok := strings.Cut(text, prefix)
+	if !ok {
 		return ""
 	}
-	after := text[idx+len(prefix):]
+	after := after0
 	end := strings.Index(after, "`")
 	if end < 0 {
 		end = strings.IndexAny(after, " \n")

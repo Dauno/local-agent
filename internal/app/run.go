@@ -90,14 +90,8 @@ func (a *Application) Run(ctx context.Context) error {
 		afterStats, afterStatsErr := composition.ExternalShutdownStats(afterStatsCtx)
 		cancelAfterStats()
 		if beforeStatsErr == nil && afterStatsErr == nil {
-			drained := beforeStats.Running - afterStats.Running
-			if drained < 0 {
-				drained = 0
-			}
-			ambiguous := afterStats.CompletionUnknown - beforeStats.CompletionUnknown
-			if ambiguous < 0 {
-				ambiguous = 0
-			}
+			drained := max(beforeStats.Running-afterStats.Running, 0)
+			ambiguous := max(afterStats.CompletionUnknown-beforeStats.CompletionUnknown, 0)
 			models.logger.Info("external-agent shutdown", "queued", afterStats.Queued, "running", afterStats.Running, "drained", drained, "ambiguous", ambiguous)
 		}
 		healthCtx, cancelHealth := context.WithTimeout(context.Background(), shutdownStatsTimeout)

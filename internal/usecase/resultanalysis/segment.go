@@ -59,13 +59,7 @@ func Segment(version string, source []byte, limits domain.AnalysisLimits) (domai
 // actual length, so it is the same value for every boundary in one
 // manifest, as the TRD requires.
 func overlapBytesFor(nominal int64, limits domain.AnalysisLimits) int64 {
-	overlap := nominal * int64(limits.OverlapBasisPoints) / 10000
-	if overlap > limits.OverlapMaxBytes {
-		overlap = limits.OverlapMaxBytes
-	}
-	if overlap < 0 {
-		overlap = 0
-	}
+	overlap := max(min(nominal*int64(limits.OverlapBasisPoints)/10000, limits.OverlapMaxBytes), 0)
 	return overlap
 }
 
@@ -83,13 +77,7 @@ func buildManifest(source []byte, version string, bounds []int, limits domain.An
 		var overlapPrev int64
 		if i > 0 {
 			floor := int(segments[i-1].OffsetBytes) + 1
-			proposed := baseStart - int(overlap)
-			if proposed < floor {
-				proposed = floor
-			}
-			if proposed < 0 {
-				proposed = 0
-			}
+			proposed := max(max(baseStart-int(overlap), floor), 0)
 			finalStart = advanceToRuneBoundary(source, proposed, baseStart)
 			overlapPrev = int64(baseStart - finalStart)
 		}
@@ -131,10 +119,7 @@ func buildManifest(source []byte, version string, bounds []int, limits domain.An
 // finalStart closer to baseStart, which can only shrink OverlapPrevBytes
 // below the requested overlap, never grow it past the cap.
 func advanceToRuneBoundary(source []byte, proposed, ceiling int) int {
-	pos := proposed
-	if pos < 0 {
-		pos = 0
-	}
+	pos := max(proposed, 0)
 	for pos < ceiling && !utf8.RuneStart(source[pos]) {
 		pos++
 	}

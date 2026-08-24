@@ -155,7 +155,7 @@ func verifyBackupArtifact(ctx context.Context, path string, wantSourceVersion in
 	if err != nil {
 		return 0, "", fmt.Errorf("%w: open backup %q as SQLite: %v", rollout.ErrBackupVerificationFailed, path, err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var outcome string
 	if err := store.DB().QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&outcome); err != nil {
 		return 0, "", fmt.Errorf("%w: integrity check on %q: %v", rollout.ErrBackupVerificationFailed, path, err)
@@ -190,7 +190,7 @@ func vacuumInto(ctx context.Context, srcPath, destPath string) error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if _, err := store.DB().ExecContext(ctx, "VACUUM INTO ?", destPath); err != nil {
 		return fmt.Errorf("VACUUM INTO %q: %w", destPath, err)
 	}
@@ -202,7 +202,7 @@ func readUserVersion(ctx context.Context, path string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	version, err := currentUserVersion(ctx, store.DB())
 	if err != nil {
 		return 0, err

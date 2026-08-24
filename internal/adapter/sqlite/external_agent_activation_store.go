@@ -181,7 +181,8 @@ func (s *ExternalAgentJobStore) claimActivation(ctx context.Context, now time.Ti
 		return nil, port.ErrActivationClaimConflict
 	}
 	leaseExpiry := now.Add(leaseTTL)
-	updateArgs := []any{domain.ActivationPending, domain.ActivationProcessing, owner, leaseExpiry.UnixNano(), now.UnixNano(), jobID, revision, kind}
+	updateArgs := make([]any, 0, 8+len(args))
+	updateArgs = append(updateArgs, domain.ActivationPending, domain.ActivationProcessing, owner, leaseExpiry.UnixNano(), now.UnixNano(), jobID, revision, kind)
 	updateArgs = append(updateArgs, args...)
 	changed, err := tx.ExecContext(ctx, `UPDATE external_agent_job_activations AS a SET
 		state = CASE WHEN state = ? THEN ? ELSE state END,

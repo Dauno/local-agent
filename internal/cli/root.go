@@ -119,14 +119,13 @@ func Execute(ctx context.Context, root *cobra.Command, args []string, stderr io.
 	if err == nil {
 		return 0
 	}
-	var exit *ExitError
-	if errors.As(err, &exit) {
+	if exit, ok := errors.AsType[*ExitError](err); ok {
 		if exit.Cause != nil {
-			fmt.Fprintln(stderr, exit.Cause)
+			_, _ = fmt.Fprintln(stderr, exit.Cause)
 		}
 		return exit.Code
 	}
-	fmt.Fprintln(stderr, err)
+	_, _ = fmt.Fprintln(stderr, err)
 	return 2
 }
 
@@ -143,7 +142,7 @@ func newInitCommand(backend Backend, streams Streams) *cobra.Command {
 					return &ExitError{Code: 1, Cause: err}
 				}
 				if !confirmed {
-					fmt.Fprintln(streams.Out, "Restablecimiento cancelado.")
+					_, _ = fmt.Fprintln(streams.Out, "Restablecimiento cancelado.")
 					return nil
 				}
 				if err := backend.ResetState(command.Context()); err != nil {
@@ -180,9 +179,9 @@ func newDoctorCommand(backend Backend, streams Streams) *cobra.Command {
 				case doctor.StatusSkipped:
 					label = "SKIP"
 				}
-				fmt.Fprintf(streams.Out, "%s %-24s %s\n", label, result.Name, result.Detail)
+				_, _ = fmt.Fprintf(streams.Out, "%s %-24s %s\n", label, result.Name, result.Detail)
 				if result.Remediation != "" {
-					fmt.Fprintf(streams.Out, "     Fix: %s\n", result.Remediation)
+					_, _ = fmt.Fprintf(streams.Out, "     Fix: %s\n", result.Remediation)
 				}
 			}
 			if code := report.ExitCode(); code != 0 {
@@ -221,12 +220,12 @@ func newManifestCommand(backend Backend, streams Streams) *cobra.Command {
 				return &ExitError{Code: 1, Cause: err}
 			}
 			if write {
-				fmt.Fprintf(streams.Out, "Slack manifest written to %s\n", path)
+				_, _ = fmt.Fprintf(streams.Out, "Slack manifest written to %s\n", path)
 				return nil
 			}
-			fmt.Fprint(streams.Out, content)
+			_, _ = fmt.Fprint(streams.Out, content)
 			if !strings.HasSuffix(content, "\n") {
-				fmt.Fprintln(streams.Out)
+				_, _ = fmt.Fprintln(streams.Out)
 			}
 			return nil
 		},
@@ -241,7 +240,7 @@ func newVersionCommand(backend Backend, streams Streams) *cobra.Command {
 		Short: "Print version and Go runtime details",
 		Args:  cobra.NoArgs,
 		Run: func(*cobra.Command, []string) {
-			fmt.Fprintln(streams.Out, backend.Version())
+			_, _ = fmt.Fprintln(streams.Out, backend.Version())
 		},
 	}
 }
@@ -277,10 +276,10 @@ func newKnowledgeRebuildIndexCommand(backend Backend, streams Streams) *cobra.Co
 				return &ExitError{Code: 1, Cause: err}
 			}
 			if result.LexicalRebuilt {
-				fmt.Fprintln(streams.Out, "Lexical index cleared and re-enqueued. Reindexing will drain through the running agent's normal lexical worker poll loop.")
+				_, _ = fmt.Fprintln(streams.Out, "Lexical index cleared and re-enqueued. Reindexing will drain through the running agent's normal lexical worker poll loop.")
 			}
 			if result.EmbeddingSkippedReason != "" {
-				fmt.Fprintf(streams.Out, "Embedding index: %s\n", result.EmbeddingSkippedReason)
+				_, _ = fmt.Fprintf(streams.Out, "Embedding index: %s\n", result.EmbeddingSkippedReason)
 			}
 			return nil
 		},
@@ -351,7 +350,7 @@ func newJobsQuarantineLegacyIdentityCommand(backend Backend, streams Streams) *c
 					return &ExitError{Code: 1, Cause: err}
 				}
 				if !confirmed {
-					fmt.Fprintln(streams.Out, "Operacion cancelada.")
+					_, _ = fmt.Fprintln(streams.Out, "Operacion cancelada.")
 					return nil
 				}
 			}
@@ -361,10 +360,10 @@ func newJobsQuarantineLegacyIdentityCommand(backend Backend, streams Streams) *c
 				return &ExitError{Code: 1, Cause: err}
 			}
 			if report.AlreadyApplied {
-				fmt.Fprintf(streams.Out, "already_applied: true\napplied_at: %s\n", inspectionTime(report.AppliedAt))
+				_, _ = fmt.Fprintf(streams.Out, "already_applied: true\napplied_at: %s\n", inspectionTime(report.AppliedAt))
 				return nil
 			}
-			fmt.Fprintf(streams.Out, "jobs_marked: %d\nactivations_marked: %d\napplied_at: %s\n", report.JobsMarked, report.ActivationsMarked, inspectionTime(report.AppliedAt))
+			_, _ = fmt.Fprintf(streams.Out, "jobs_marked: %d\nactivations_marked: %d\napplied_at: %s\n", report.JobsMarked, report.ActivationsMarked, inspectionTime(report.AppliedAt))
 			return nil
 		},
 	}
@@ -380,14 +379,14 @@ func newJobsQuarantineLegacyIdentityCommand(backend Backend, streams Streams) *c
 // match queries.
 func printQuarantinePreview(out io.Writer, preview rollout.LegacyIdentityQuarantinePreview) {
 	if preview.AlreadyApplied {
-		fmt.Fprintf(out, "already_applied: true\napplied_at: %s\njobs_matched: 0\nactivations_matched: 0\n", inspectionTime(preview.AppliedAt))
+		_, _ = fmt.Fprintf(out, "already_applied: true\napplied_at: %s\njobs_matched: 0\nactivations_matched: 0\n", inspectionTime(preview.AppliedAt))
 		return
 	}
-	fmt.Fprintf(out, "cutoff: %s\n", inspectionTime(preview.Cutoff))
-	fmt.Fprintf(out, "jobs_matched: %d\n", preview.JobsMatched)
-	fmt.Fprintf(out, "activations_matched: %d\n", preview.ActivationsMatched)
-	fmt.Fprintln(out, quarantineJobsPredicateText)
-	fmt.Fprintln(out, quarantineActivationsPredicateText)
+	_, _ = fmt.Fprintf(out, "cutoff: %s\n", inspectionTime(preview.Cutoff))
+	_, _ = fmt.Fprintf(out, "jobs_matched: %d\n", preview.JobsMatched)
+	_, _ = fmt.Fprintf(out, "activations_matched: %d\n", preview.ActivationsMatched)
+	_, _ = fmt.Fprintln(out, quarantineJobsPredicateText)
+	_, _ = fmt.Fprintln(out, quarantineActivationsPredicateText)
 }
 
 func newJobsReconcileCommand(backend Backend, streams Streams) *cobra.Command {
@@ -409,12 +408,12 @@ func newJobsReconcileCommand(backend Backend, streams Streams) *cobra.Command {
 			if err != nil {
 				return &ExitError{Code: 1, Cause: err}
 			}
-			fmt.Fprintf(streams.Out, "job_id: %s\nstatus: %s\nstatus_revision: %d\nresult_available: %t\n", view.JobID, view.Status, view.StatusRevision, view.ResultAvailable)
-			fmt.Fprintf(streams.Out, "acp_session_id: %s\n", inspectionSessionID(view.ACPSessionID))
+			_, _ = fmt.Fprintf(streams.Out, "job_id: %s\nstatus: %s\nstatus_revision: %d\nresult_available: %t\n", view.JobID, view.Status, view.StatusRevision, view.ResultAvailable)
+			_, _ = fmt.Fprintf(streams.Out, "acp_session_id: %s\n", inspectionSessionID(view.ACPSessionID))
 			if view.ErrorCode != "" {
-				fmt.Fprintf(streams.Out, "error_code: %s\n", view.ErrorCode)
+				_, _ = fmt.Fprintf(streams.Out, "error_code: %s\n", view.ErrorCode)
 			}
-			fmt.Fprintln(streams.Out, "next_action: inspect the durable notification or Slack thread")
+			_, _ = fmt.Fprintln(streams.Out, "next_action: inspect the durable notification or Slack thread")
 			return nil
 		},
 	}
@@ -439,7 +438,7 @@ func newJobsInspectCommand(backend Backend, streams Streams) *cobra.Command {
 				return &ExitError{Code: 1, Cause: errors.New("could not inspect durable job")}
 			}
 			if view == nil {
-				fmt.Fprintln(streams.Out, "job: not found")
+				_, _ = fmt.Fprintln(streams.Out, "job: not found")
 				return nil
 			}
 			writeJobInspection(streams.Out, *view)
@@ -449,55 +448,55 @@ func newJobsInspectCommand(backend Backend, streams Streams) *cobra.Command {
 }
 
 func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
-	fmt.Fprintf(out, "job_id: %s\n", view.JobID)
-	fmt.Fprintf(out, "status: %s\n", view.Status)
-	fmt.Fprintf(out, "status_revision: %d\n", view.StatusRevision)
-	fmt.Fprintf(out, "acp_session_id: %s\n", inspectionSessionID(view.ACPSessionID))
+	_, _ = fmt.Fprintf(out, "job_id: %s\n", view.JobID)
+	_, _ = fmt.Fprintf(out, "status: %s\n", view.Status)
+	_, _ = fmt.Fprintf(out, "status_revision: %d\n", view.StatusRevision)
+	_, _ = fmt.Fprintf(out, "acp_session_id: %s\n", inspectionSessionID(view.ACPSessionID))
 	if view.Phase != "" || view.Health != "" || view.ProcessAlive != nil {
-		fmt.Fprintf(out, "phase: %s\n", view.Phase)
-		fmt.Fprintf(out, "health: %s\n", view.Health)
-		fmt.Fprintf(out, "last_event: %s\n", view.LastEventKind)
-		fmt.Fprintf(out, "last_acp_activity: %s\n", inspectionAge(view.LastTransportActivityAt))
-		fmt.Fprintf(out, "prompt_elapsed: %s\n", inspectionDuration(view.PromptElapsedSeconds))
-		fmt.Fprintf(out, "active_tools: %d\n", view.ActiveToolCount)
-		fmt.Fprintf(out, "pending_permission: %t\n", view.PendingPermission)
-		fmt.Fprintf(out, "process: %s\n", inspectionProcess(view.ProcessAlive))
+		_, _ = fmt.Fprintf(out, "phase: %s\n", view.Phase)
+		_, _ = fmt.Fprintf(out, "health: %s\n", view.Health)
+		_, _ = fmt.Fprintf(out, "last_event: %s\n", view.LastEventKind)
+		_, _ = fmt.Fprintf(out, "last_acp_activity: %s\n", inspectionAge(view.LastTransportActivityAt))
+		_, _ = fmt.Fprintf(out, "prompt_elapsed: %s\n", inspectionDuration(view.PromptElapsedSeconds))
+		_, _ = fmt.Fprintf(out, "active_tools: %d\n", view.ActiveToolCount)
+		_, _ = fmt.Fprintf(out, "pending_permission: %t\n", view.PendingPermission)
+		_, _ = fmt.Fprintf(out, "process: %s\n", inspectionProcess(view.ProcessAlive))
 		if view.StopReason != "" {
-			fmt.Fprintf(out, "stop_reason: %s\n", view.StopReason)
+			_, _ = fmt.Fprintf(out, "stop_reason: %s\n", view.StopReason)
 		}
 	}
-	fmt.Fprintf(out, "finished_at: %s\n", inspectionTime(view.FinishedAt))
+	_, _ = fmt.Fprintf(out, "finished_at: %s\n", inspectionTime(view.FinishedAt))
 	if len(view.Deliveries) == 0 {
-		fmt.Fprintln(out, "delivery_mode:")
-		fmt.Fprintln(out, "notification_kind:")
-		fmt.Fprintln(out, "publish_state:")
-		fmt.Fprintln(out, "attempts: 0")
-		fmt.Fprintln(out, "lease_owner:")
-		fmt.Fprintln(out, "lease_owner_present: false")
-		fmt.Fprintln(out, "lease_expiry:")
-		fmt.Fprintln(out, "last_error_code:")
-		fmt.Fprintln(out, "next_attempt_at:")
-		fmt.Fprintln(out, "recovered_slack_ts:")
+		_, _ = fmt.Fprintln(out, "delivery_mode:")
+		_, _ = fmt.Fprintln(out, "notification_kind:")
+		_, _ = fmt.Fprintln(out, "publish_state:")
+		_, _ = fmt.Fprintln(out, "attempts: 0")
+		_, _ = fmt.Fprintln(out, "lease_owner:")
+		_, _ = fmt.Fprintln(out, "lease_owner_present: false")
+		_, _ = fmt.Fprintln(out, "lease_expiry:")
+		_, _ = fmt.Fprintln(out, "last_error_code:")
+		_, _ = fmt.Fprintln(out, "next_attempt_at:")
+		_, _ = fmt.Fprintln(out, "recovered_slack_ts:")
 		return
 	}
 	for index, delivery := range view.Deliveries {
 		if len(view.Deliveries) > 1 {
-			fmt.Fprintf(out, "delivery_%d:\n", index+1)
+			_, _ = fmt.Fprintf(out, "delivery_%d:\n", index+1)
 		}
-		fmt.Fprintf(out, "delivery_revision: %d\n", delivery.StatusRevision)
-		fmt.Fprintf(out, "delivery_mode: %s\n", delivery.DeliveryMode)
-		fmt.Fprintf(out, "notification_kind: %s\n", delivery.NotificationKind)
-		fmt.Fprintf(out, "publish_state: %s\n", delivery.PublishState)
-		fmt.Fprintf(out, "attempts: %d\n", delivery.Attempts)
-		fmt.Fprintf(out, "lease_owner: %s\n", delivery.LeaseOwner)
-		fmt.Fprintf(out, "lease_owner_present: %t\n", delivery.LeaseOwnerPresent)
-		fmt.Fprintf(out, "lease_expiry: %s\n", inspectionTime(delivery.LeaseExpiry))
-		fmt.Fprintf(out, "last_error_code: %s\n", delivery.LastErrorCode)
-		fmt.Fprintf(out, "next_attempt_at: %s\n", inspectionTime(delivery.NextAttemptAt))
-		fmt.Fprintf(out, "recovered_slack_ts: %s\n", delivery.RecoveredSlackTS)
+		_, _ = fmt.Fprintf(out, "delivery_revision: %d\n", delivery.StatusRevision)
+		_, _ = fmt.Fprintf(out, "delivery_mode: %s\n", delivery.DeliveryMode)
+		_, _ = fmt.Fprintf(out, "notification_kind: %s\n", delivery.NotificationKind)
+		_, _ = fmt.Fprintf(out, "publish_state: %s\n", delivery.PublishState)
+		_, _ = fmt.Fprintf(out, "attempts: %d\n", delivery.Attempts)
+		_, _ = fmt.Fprintf(out, "lease_owner: %s\n", delivery.LeaseOwner)
+		_, _ = fmt.Fprintf(out, "lease_owner_present: %t\n", delivery.LeaseOwnerPresent)
+		_, _ = fmt.Fprintf(out, "lease_expiry: %s\n", inspectionTime(delivery.LeaseExpiry))
+		_, _ = fmt.Fprintf(out, "last_error_code: %s\n", delivery.LastErrorCode)
+		_, _ = fmt.Fprintf(out, "next_attempt_at: %s\n", inspectionTime(delivery.NextAttemptAt))
+		_, _ = fmt.Fprintf(out, "recovered_slack_ts: %s\n", delivery.RecoveredSlackTS)
 		if delivery.DeliveryMode == domain.JobResultDeliveryFile {
-			fmt.Fprintf(out, "upload_state: %s\n", delivery.UploadState)
-			fmt.Fprintf(out, "slack_file_id_present: %t\n", delivery.SlackFileIDPresent)
+			_, _ = fmt.Fprintf(out, "upload_state: %s\n", delivery.UploadState)
+			_, _ = fmt.Fprintf(out, "slack_file_id_present: %t\n", delivery.SlackFileIDPresent)
 		}
 	}
 }
@@ -534,10 +533,7 @@ func inspectionAge(value time.Time) string {
 	if value.IsZero() {
 		return ""
 	}
-	elapsed := time.Since(value)
-	if elapsed < 0 {
-		elapsed = 0
-	}
+	elapsed := max(time.Since(value), 0)
 	return formatHumanDuration(elapsed)
 }
 

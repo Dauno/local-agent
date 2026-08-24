@@ -16,7 +16,7 @@ func TestCreateRecordsAdoptionAtCreationState(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	state, err := FileSchemaProbe{}.ReadRolloutState(ctx, path)
 	if err != nil {
@@ -64,7 +64,7 @@ func TestCreateRecordsAdoptionAtCreationState(t *testing.T) {
 func TestCrashWindowBetweenCreateTransactionsClassifiesAdoption(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 
 	state, err := FileSchemaProbe{}.ReadRolloutState(ctx, path)
 	if err != nil {
@@ -90,7 +90,7 @@ func TestAdoptionTransactionNeverRewritesExistingKeys(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	type snapshot struct {
 		value     string

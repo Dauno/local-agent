@@ -59,10 +59,7 @@ func PrepareSteps(analysisID string, manifest domain.AnalysisSegmentManifest, li
 	for {
 		var next []string
 		for i := 0; i < len(current); i += fanIn {
-			end := i + fanIn
-			if end > len(current) {
-				end = len(current)
-			}
+			end := min(i+fanIn, len(current))
 			children := append([]string{}, current[i:end]...)
 			id := fmt.Sprintf("reduce-%d-%d", level, len(next))
 			steps = append(steps, port.AnalysisStep{

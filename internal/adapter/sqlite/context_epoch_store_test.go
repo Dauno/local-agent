@@ -18,7 +18,7 @@ func TestContextEpochStoreCASBoundedRangeAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if _, err := NewAdkSessionService(store).Create(t.Context(), &session.CreateRequest{
 		AppName: "app", UserID: "user", SessionID: "session",
 	}); err != nil {
@@ -79,7 +79,7 @@ func TestContextEpochStoreCASBoundedRangeAndReopen(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer reopened.Close()
+	defer func() { _ = reopened.Close() }()
 	reopenedLatest, err := NewContextEpochStore(reopened).Latest(t.Context(), "app", "user", "session")
 	if err != nil || reopenedLatest.EpochNumber != 2 || reopenedLatest.ResultIdentities[0] != second.ResultIdentities[0] {
 		t.Fatalf("reopened latest = %+v, %v", reopenedLatest, err)
@@ -91,7 +91,7 @@ func TestContextEpochStoreRequiresExistingSessionAndValidIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	epochs := NewContextEpochStore(store)
 	if err := epochs.Append(t.Context(), testContextEpoch(1, "epoch-1", time.Unix(10, 0).UTC()), 0); !errors.Is(err, port.ErrContextEpochSessionMissing) {
 		t.Fatalf("missing session error = %v", err)

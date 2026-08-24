@@ -448,7 +448,7 @@ func (c sdkPostClient) PostBlocks(ctx context.Context, channelID, fallbackText s
 
 func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.ReplyTarget, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) error {
 	if p == nil || p.client == nil {
-		return errors.New("Slack posting client is required")
+		return errors.New("slack posting client is required")
 	}
 	renderer, err := NewEmbeddedTemplateRenderer()
 	if err != nil {
@@ -470,21 +470,9 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 		return err
 	}
 	if timestamp == "" {
-		return errors.New("Slack published agent preview without a message timestamp")
+		return errors.New("slack published agent preview without a message timestamp")
 	}
 	return nil
-}
-
-func renderBuilderPreviewBlocks(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) []slackapi.Block {
-	renderer, err := NewEmbeddedTemplateRenderer()
-	if err != nil {
-		return nil
-	}
-	_, blocks, err := compileBuilderPreviewMessage(renderer, draft, definition, yaml, sha256, draftID)
-	if err != nil {
-		return nil
-	}
-	return blocks
 }
 
 func compileBuilderPreviewMessage(renderer *TemplateRenderer, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) (string, []slackapi.Block, error) {

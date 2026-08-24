@@ -685,7 +685,7 @@ func parseBlock(data []byte, templateName, fieldPath string) (templateBlock, err
 			return templateBlock{}, err
 		}
 	case "actions":
-		if raw.Elements == nil || len(raw.Elements) == 0 {
+		if len(raw.Elements) == 0 {
 			return templateBlock{}, fmt.Errorf("%s.elements must not be empty", fieldPath)
 		}
 		if len(raw.Elements) > maxRendererActionElements {
@@ -778,22 +778,9 @@ func parseElement(data []byte, templateName, fieldPath string) (*templateElement
 	if raw.Type == "" {
 		return nil, fmt.Errorf("%s.type is required", fieldPath)
 	}
-	allowed := map[string]struct{}{"type": {}, "action_id": {}}
-	switch raw.Type {
-	case "plain_text_input":
-		for _, key := range []string{"placeholder", "initial_value", "multiline", "min_length", "max_length", "dispatch_action_config", "focus_on_load"} {
-			allowed[key] = struct{}{}
-		}
-	case "static_select":
-		for _, key := range []string{"placeholder", "options", "initial_option", "focus_on_load"} {
-			allowed[key] = struct{}{}
-		}
-	case "button":
-		for _, key := range []string{"text", "value", "url", "style"} {
-			allowed[key] = struct{}{}
-		}
-	default:
-		return nil, fmt.Errorf("%s has unsupported element type %q", fieldPath, raw.Type)
+	allowed, err := elementAllowedKeys(raw.Type, fieldPath)
+	if err != nil {
+		return nil, err
 	}
 	if err := rejectUnknownObjectKeys(keys, allowed); err != nil {
 		return nil, fmt.Errorf("%s: %w", fieldPath, err)
@@ -810,125 +797,167 @@ func parseElement(data []byte, templateName, fieldPath string) (*templateElement
 
 	switch raw.Type {
 	case "plain_text_input":
-		if raw.ActionID == "" {
-			return nil, fmt.Errorf("%s.action_id is required", fieldPath)
-		}
-		if len(raw.Placeholder) > 0 {
-			element.Placeholder, err = parseText(raw.Placeholder, templateName, fieldPath+".placeholder")
-			if err != nil {
-				return nil, err
-			}
-		}
-		if len(raw.InitialValue) > 0 {
-			if err := decodeStrictJSON(raw.InitialValue, &element.InitialValue); err != nil {
-				return nil, fmt.Errorf("%s.initial_value: %w", fieldPath, err)
-			}
-			element.InitialValuePresent = true
-			if err := validateTemplateString(templateName, fieldPath+".initial_value", element.InitialValue, true, false); err != nil {
-				return nil, err
-			}
-		}
-		if element.MinLength < 0 || element.MaxLength < 0 {
-			return nil, fmt.Errorf("%s input lengths must not be negative", fieldPath)
-		}
-		if element.MaxLength > maxRendererPlainTextInputLength {
-			return nil, fmt.Errorf("%s.max_length exceeds %d", fieldPath, maxRendererPlainTextInputLength)
-		}
-		if element.MinLength > 0 && element.MaxLength > 0 && element.MinLength > element.MaxLength {
-			return nil, fmt.Errorf("%s.min_length exceeds max_length", fieldPath)
-		}
-		if len(raw.DispatchActionConfig) > 0 {
-			var config rawDispatchActionConfig
-			if err := decodeStrictJSON(raw.DispatchActionConfig, &config); err != nil {
-				return nil, fmt.Errorf("%s.dispatch_action_config: %w", fieldPath, err)
-			}
-			element.DispatchActionConfig = &templateDispatchActionConfig{TriggerActionsOn: slices.Clone(config.TriggerActionsOn)}
+		if err := parsePlainTextInput(element, raw, templateName, fieldPath); err != nil {
+			return nil, err
 		}
 	case "static_select":
-		if raw.ActionID == "" {
-			return nil, fmt.Errorf("%s.action_id is required", fieldPath)
-		}
-		if len(raw.Placeholder) > 0 {
-			element.Placeholder, err = parseText(raw.Placeholder, templateName, fieldPath+".placeholder")
-			if err != nil {
-				return nil, err
-			}
-		}
-		if len(raw.Options) == 0 {
-			return nil, fmt.Errorf("%s.options is required", fieldPath)
-		}
-		var optionsToken string
-		if err := decodeStrictJSON(raw.Options, &optionsToken); err == nil {
-			token, ok, tokenErr := parseTemplateString(optionsToken)
-			if tokenErr != nil {
-				return nil, fmt.Errorf("%s.options: %w", fieldPath, tokenErr)
-			}
-			if !ok || token.Kind != tokenOptions || token.Key != "model" || templateName != "builder_modal" {
-				return nil, fmt.Errorf("%s.options must be the exact registered token {{options.model}}", fieldPath)
-			}
-			element.OptionsToken = optionsToken
-		} else {
-			var rawOptions []json.RawMessage
-			if err := decodeStrictJSON(raw.Options, &rawOptions); err != nil {
-				return nil, fmt.Errorf("%s.options must be an array or {{options.model}}: %w", fieldPath, err)
-			}
-			element.Options = make([]templateOption, 0, len(rawOptions))
-			for index, rawOptionData := range rawOptions {
-				option, parseErr := parseOption(rawOptionData, templateName, fmt.Sprintf("%s.options[%d]", fieldPath, index))
-				if parseErr != nil {
-					return nil, parseErr
-				}
-				element.Options = append(element.Options, option)
-			}
-		}
-		if len(element.Options) > maxRendererStaticSelectOptions {
-			return nil, fmt.Errorf("%s.options exceeds %d items", fieldPath, maxRendererStaticSelectOptions)
-		}
-		if len(raw.InitialOption) > 0 {
-			element.InitialOptionPresent = true
-			var tokenString string
-			if err := decodeStrictJSON(raw.InitialOption, &tokenString); err == nil {
-				token, ok, tokenErr := parseTemplateString(tokenString)
-				if tokenErr != nil {
-					return nil, fmt.Errorf("%s.initial_option: %w", fieldPath, tokenErr)
-				}
-				if !ok || token.Kind != tokenValue {
-					return nil, fmt.Errorf("%s.initial_option must be an exact scalar token or option object", fieldPath)
-				}
-				if _, allowed := scalarKeysByTemplate[templateName][token.Key]; !allowed {
-					return nil, fmt.Errorf("%s.initial_option uses unknown scalar token %q", fieldPath, token.Key)
-				}
-				element.InitialOptionToken = tokenString
-			} else {
-				option, parseErr := parseOption(raw.InitialOption, templateName, fieldPath+".initial_option")
-				if parseErr != nil {
-					return nil, parseErr
-				}
-				element.InitialOption = &option
-			}
+		if err := parseStaticSelect(element, raw, templateName, fieldPath); err != nil {
+			return nil, err
 		}
 	case "button":
-		if raw.ActionID == "" {
-			return nil, fmt.Errorf("%s.action_id is required", fieldPath)
-		}
-		if len(raw.Text) == 0 {
-			return nil, fmt.Errorf("%s.text is required", fieldPath)
-		}
-		element.Text, err = parseText(raw.Text, templateName, fieldPath+".text")
-		if err != nil {
+		if err := parseButton(element, raw, templateName, fieldPath); err != nil {
 			return nil, err
-		}
-		if err := validateTemplateString(templateName, fieldPath+".value", raw.Value, true, false); err != nil {
-			return nil, err
-		}
-		if err := validateTemplateString(templateName, fieldPath+".url", raw.URL, false, false); err != nil {
-			return nil, err
-		}
-		if raw.Style != "" && raw.Style != "primary" && raw.Style != "danger" {
-			return nil, fmt.Errorf("%s.style must be primary or danger", fieldPath)
 		}
 	}
 	return element, nil
+}
+
+func elementAllowedKeys(elementType, fieldPath string) (map[string]struct{}, error) {
+	allowed := map[string]struct{}{"type": {}, "action_id": {}}
+	keysByType := map[string][]string{
+		"plain_text_input": {"placeholder", "initial_value", "multiline", "min_length", "max_length", "dispatch_action_config", "focus_on_load"},
+		"static_select":    {"placeholder", "options", "initial_option", "focus_on_load"},
+		"button":           {"text", "value", "url", "style"},
+	}
+	keys, ok := keysByType[elementType]
+	if !ok {
+		return nil, fmt.Errorf("%s has unsupported element type %q", fieldPath, elementType)
+	}
+	for _, key := range keys {
+		allowed[key] = struct{}{}
+	}
+	return allowed, nil
+}
+
+func parsePlainTextInput(element *templateElement, raw rawElement, templateName, fieldPath string) error {
+	if raw.ActionID == "" {
+		return fmt.Errorf("%s.action_id is required", fieldPath)
+	}
+	var err error
+	if len(raw.Placeholder) > 0 {
+		element.Placeholder, err = parseText(raw.Placeholder, templateName, fieldPath+".placeholder")
+		if err != nil {
+			return err
+		}
+	}
+	if len(raw.InitialValue) > 0 {
+		if err := decodeStrictJSON(raw.InitialValue, &element.InitialValue); err != nil {
+			return fmt.Errorf("%s.initial_value: %w", fieldPath, err)
+		}
+		element.InitialValuePresent = true
+		if err := validateTemplateString(templateName, fieldPath+".initial_value", element.InitialValue, true, false); err != nil {
+			return err
+		}
+	}
+	if element.MinLength < 0 || element.MaxLength < 0 {
+		return fmt.Errorf("%s input lengths must not be negative", fieldPath)
+	}
+	if element.MaxLength > maxRendererPlainTextInputLength {
+		return fmt.Errorf("%s.max_length exceeds %d", fieldPath, maxRendererPlainTextInputLength)
+	}
+	if element.MinLength > 0 && element.MaxLength > 0 && element.MinLength > element.MaxLength {
+		return fmt.Errorf("%s.min_length exceeds max_length", fieldPath)
+	}
+	if len(raw.DispatchActionConfig) > 0 {
+		var config rawDispatchActionConfig
+		if err := decodeStrictJSON(raw.DispatchActionConfig, &config); err != nil {
+			return fmt.Errorf("%s.dispatch_action_config: %w", fieldPath, err)
+		}
+		element.DispatchActionConfig = &templateDispatchActionConfig{TriggerActionsOn: slices.Clone(config.TriggerActionsOn)}
+	}
+	return nil
+}
+
+func parseStaticSelect(element *templateElement, raw rawElement, templateName, fieldPath string) error {
+	if raw.ActionID == "" {
+		return fmt.Errorf("%s.action_id is required", fieldPath)
+	}
+	if len(raw.Placeholder) > 0 {
+		placeholder, err := parseText(raw.Placeholder, templateName, fieldPath+".placeholder")
+		if err != nil {
+			return err
+		}
+		element.Placeholder = placeholder
+	}
+	if len(raw.Options) == 0 {
+		return fmt.Errorf("%s.options is required", fieldPath)
+	}
+	var optionsToken string
+	if err := decodeStrictJSON(raw.Options, &optionsToken); err == nil {
+		token, ok, tokenErr := parseTemplateString(optionsToken)
+		if tokenErr != nil {
+			return fmt.Errorf("%s.options: %w", fieldPath, tokenErr)
+		}
+		if !ok || token.Kind != tokenOptions || token.Key != "model" || templateName != "builder_modal" {
+			return fmt.Errorf("%s.options must be the exact registered token {{options.model}}", fieldPath)
+		}
+		element.OptionsToken = optionsToken
+	} else {
+		var rawOptions []json.RawMessage
+		if err := decodeStrictJSON(raw.Options, &rawOptions); err != nil {
+			return fmt.Errorf("%s.options must be an array or {{options.model}}: %w", fieldPath, err)
+		}
+		element.Options = make([]templateOption, 0, len(rawOptions))
+		for index, rawOptionData := range rawOptions {
+			option, parseErr := parseOption(rawOptionData, templateName, fmt.Sprintf("%s.options[%d]", fieldPath, index))
+			if parseErr != nil {
+				return parseErr
+			}
+			element.Options = append(element.Options, option)
+		}
+	}
+	if len(element.Options) > maxRendererStaticSelectOptions {
+		return fmt.Errorf("%s.options exceeds %d items", fieldPath, maxRendererStaticSelectOptions)
+	}
+	if len(raw.InitialOption) == 0 {
+		return nil
+	}
+	element.InitialOptionPresent = true
+	var tokenString string
+	if err := decodeStrictJSON(raw.InitialOption, &tokenString); err == nil {
+		token, ok, tokenErr := parseTemplateString(tokenString)
+		if tokenErr != nil {
+			return fmt.Errorf("%s.initial_option: %w", fieldPath, tokenErr)
+		}
+		if !ok || token.Kind != tokenValue {
+			return fmt.Errorf("%s.initial_option must be an exact scalar token or option object", fieldPath)
+		}
+		if _, allowed := scalarKeysByTemplate[templateName][token.Key]; !allowed {
+			return fmt.Errorf("%s.initial_option uses unknown scalar token %q", fieldPath, token.Key)
+		}
+		element.InitialOptionToken = tokenString
+		return nil
+	}
+	option, err := parseOption(raw.InitialOption, templateName, fieldPath+".initial_option")
+	if err != nil {
+		return err
+	}
+	element.InitialOption = &option
+	return nil
+}
+
+func parseButton(element *templateElement, raw rawElement, templateName, fieldPath string) error {
+	if raw.ActionID == "" {
+		return fmt.Errorf("%s.action_id is required", fieldPath)
+	}
+	if len(raw.Text) == 0 {
+		return fmt.Errorf("%s.text is required", fieldPath)
+	}
+	text, err := parseText(raw.Text, templateName, fieldPath+".text")
+	if err != nil {
+		return err
+	}
+	element.Text = text
+	if err := validateTemplateString(templateName, fieldPath+".value", raw.Value, true, false); err != nil {
+		return err
+	}
+	if err := validateTemplateString(templateName, fieldPath+".url", raw.URL, false, false); err != nil {
+		return err
+	}
+	if raw.Style != "" && raw.Style != "primary" && raw.Style != "danger" {
+		return fmt.Errorf("%s.style must be primary or danger", fieldPath)
+	}
+	return nil
 }
 
 func validateTemplateDocument(doc templateDocument) error {

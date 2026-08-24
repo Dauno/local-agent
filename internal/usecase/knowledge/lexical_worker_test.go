@@ -282,10 +282,6 @@ func workerTestDependencies(queue *workerFakeQueue, source *workerFakeSource, in
 	}
 }
 
-func workerTestClaim(item domain.KnowledgeQueueItem) domain.KnowledgeQueueClaim {
-	return domain.KnowledgeQueueClaim{Kind: item.Kind, ID: item.ID, Generation: item.Generation, LeaseUntil: item.LeaseUntil}
-}
-
 func workerTestProjectClaim(id, subject, valueText string, status domain.KnowledgeClaimStatus, revision int) port.KnowledgeAuthoritativeItem {
 	return port.KnowledgeAuthoritativeItem{
 		Kind: domain.KnowledgeRetrievalClaim, ID: id,

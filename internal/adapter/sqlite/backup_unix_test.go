@@ -42,7 +42,7 @@ func TestVacuumIntoAcceptsPrecreatedEmptyFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open backup: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var outcome string
 	if err := store.DB().QueryRow("PRAGMA integrity_check").Scan(&outcome); err != nil || outcome != "ok" {
 		t.Fatalf("backup integrity=%q err=%v", outcome, err)

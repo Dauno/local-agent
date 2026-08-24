@@ -62,7 +62,7 @@ func (a *Application) RebuildKnowledgeIndexes(ctx context.Context) (domain.Knowl
 	if err != nil {
 		return domain.KnowledgeIndexRebuildResult{}, schemaOpenFailure(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	retrieval := cfg.Orchestration.Knowledge.Retrieval
 	limits, err := knowledgeRetrievalLimits(cfg)

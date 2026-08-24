@@ -8,6 +8,7 @@ package agentdef
 import (
 	"fmt"
 	"regexp"
+	"slices"
 	"unicode/utf8"
 
 	"gopkg.in/yaml.v3"
@@ -196,12 +197,7 @@ func (t ToolScope) MarshalYAML() (any, error) {
 
 // Contains reports whether the scope list includes value.
 func (t ToolScope) Contains(value string) bool {
-	for _, entry := range t {
-		if entry == value {
-			return true
-		}
-	}
-	return false
+	return slices.Contains(t, value)
 }
 
 type AgentDef struct {

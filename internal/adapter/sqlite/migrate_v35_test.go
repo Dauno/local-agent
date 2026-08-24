@@ -18,7 +18,7 @@ func TestMigrationV35PreservesJournalAndExtendsActionConstraint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	assertV35Journal(t, store.DB())
 	if _, err := store.DB().ExecContext(t.Context(), `INSERT INTO workstream_transitions
@@ -96,7 +96,7 @@ func TestMigrationV35CrashRollsBackJournalRebuild(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after v35 crash: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	assertV35Journal(t, store.DB())
 }
 
@@ -123,7 +123,7 @@ func assertV35Journal(t *testing.T, db *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	want := [][5]string{
 		{"create-v35", "create-digest", "create-payload", "state-0-digest", "state-0"},
 		{"revise-v35", "revise-digest", "revise-payload", "state-1-digest", "state-1"},

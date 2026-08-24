@@ -43,11 +43,11 @@ func TestMutationLockContentionIsNonBlocking(t *testing.T) {
 	}
 
 	if second, err := locker.AcquireExclusive(dbPath); err == nil {
-		second.Release()
-		first.Release()
+		_ = second.Release()
+		_ = first.Release()
 		t.Fatal("second acquire succeeded while the first lock was held")
 	} else if !errors.Is(err, rollout.ErrMutationLockHeld) {
-		first.Release()
+		_ = first.Release()
 		t.Fatalf("second acquire err = %v, want ErrMutationLockHeld", err)
 	}
 
@@ -58,7 +58,7 @@ func TestMutationLockContentionIsNonBlocking(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire after release: %v", err)
 	}
-	defer again.Release()
+	defer func() { _ = again.Release() }()
 	if err := first.Release(); err == nil {
 		t.Fatal("double release must fail")
 	}
@@ -85,7 +85,7 @@ func TestMutationLockCanonicalizesSymlinkedParent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire through symlinked parent: %v", err)
 	}
-	defer lock.Release()
+	defer func() { _ = lock.Release() }()
 	if _, err := os.Stat(filepath.Join(real, "local-agent.db.lock")); err != nil {
 		t.Fatalf("lock file not in canonical parent: %v", err)
 	}
@@ -107,7 +107,7 @@ func TestMutationLockRefusesSymlinkAtLockPath(t *testing.T) {
 
 	lock, err := (FileSchemaLocker{}).AcquireExclusive(dbPath)
 	if err == nil {
-		lock.Release()
+		_ = lock.Release()
 		t.Fatal("acquire followed a symlink placed at the lock path")
 	}
 	var errno sysunix.Errno
@@ -126,7 +126,7 @@ func TestMutationLockRefusesSymlinkAtLockPath(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire after removing symlink: %v", err)
 	}
-	held.Release()
+	_ = held.Release()
 }
 
 // TestMutationLockFilesArePerDatabase proves the filename comes from the
@@ -142,12 +142,12 @@ func TestMutationLockFilesArePerDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("acquire main: %v", err)
 	}
-	defer mainLock.Release()
+	defer func() { _ = mainLock.Release() }()
 	stagingLock, err := locker.AcquireExclusive(stagingPath)
 	if err != nil {
 		t.Fatalf("locking one database must never block the other: %v", err)
 	}
-	defer stagingLock.Release()
+	defer func() { _ = stagingLock.Release() }()
 	for _, name := range []string{"local-agent.db.lock", "staging.db.lock"} {
 		if _, err := os.Stat(filepath.Join(dir, name)); err != nil {
 			t.Fatalf("expected distinct lock file %s: %v", name, err)

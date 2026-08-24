@@ -39,7 +39,7 @@ func TestTranscriberSendsMultipartAudioOnce(t *testing.T) {
 			t.Errorf("file part: %v", err)
 			return
 		}
-		defer file.Close()
+		defer func() { _ = file.Close() }()
 		data, err := io.ReadAll(file)
 		if err != nil {
 			t.Errorf("read file: %v", err)

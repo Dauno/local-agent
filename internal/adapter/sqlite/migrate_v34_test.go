@@ -16,7 +16,7 @@ func TestMigrationV34FreshCreatesResultCatalog(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var version int
 	if err := store.DB().QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
@@ -51,7 +51,7 @@ func TestMigrationV34UpgradesV33WithoutRewritingLegacyResultLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var identity string
 	if err := store.DB().QueryRowContext(ctx, `SELECT result_identity FROM workstream_result_links
@@ -123,7 +123,7 @@ func TestMigrationV34RollbackAndReopenPreserveV33(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after v34 crash: %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	if err := store.DB().QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
 	}
@@ -138,7 +138,7 @@ func TestMigrationV34CatalogConstraintsIndexesAndReservationCAS(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	resultID := strings.Repeat("a", 64)
 	secondID := strings.Repeat("b", 64)
@@ -222,7 +222,7 @@ func TestMigrationV34ResultIdentitiesAndRepresentationsAreImmutable(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	resultID := strings.Repeat("a", 64)
 	representationID := strings.Repeat("b", 64)
@@ -261,7 +261,7 @@ func TestMigrationV34WorkstreamBindingRequiresExactParentIdentity(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	resultID := strings.Repeat("a", 64)
 	otherID := strings.Repeat("b", 64)
@@ -302,7 +302,7 @@ func TestMigrationV34MaterializationStateMachine(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	resultID := strings.Repeat("a", 64)
 
@@ -358,7 +358,7 @@ func TestMigrationV34ReferenceLifecycleIsBoundAndMonotonic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 	resultID := strings.Repeat("a", 64)
 	otherID := strings.Repeat("b", 64)

@@ -70,7 +70,7 @@ type ContextEnricher struct {
 }
 
 type cacheEntry struct {
-	value     interface{}
+	value     any
 	expiresAt time.Time
 }
 

@@ -5,6 +5,7 @@ package app
 import (
 	"context"
 	"errors"
+	"maps"
 	"os"
 	"strconv"
 	"strings"
@@ -145,12 +146,8 @@ func corruptFixtureCases() []struct {
 
 func merge(base, overlay map[string]string) map[string]string {
 	out := map[string]string{}
-	for k, v := range base {
-		out[k] = v
-	}
-	for k, v := range overlay {
-		out[k] = v
-	}
+	maps.Copy(out, base)
+	maps.Copy(out, overlay)
 	return out
 }
 
@@ -338,7 +335,7 @@ func TestRunPreflightRejectsFailedPostflightBeforeOpenCurrent(t *testing.T) {
 	if plainErr != nil {
 		t.Fatal(plainErr)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var mode string
 	if err := plain.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "delete" {
 		t.Fatalf("journal_mode=%q err=%v, want delete untouched by the refusal", mode, err)

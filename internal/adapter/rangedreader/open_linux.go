@@ -13,7 +13,7 @@ func openSecure(root, relative string) (*os.File, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer unix.Close(dirFD)
+	defer func() { _ = unix.Close(dirFD) }()
 	fd, err := unix.Openat2(dirFD, relative, &unix.OpenHow{
 		Flags:   unix.O_RDONLY | unix.O_CLOEXEC | unix.O_NOFOLLOW,
 		Resolve: unix.RESOLVE_BENEATH | unix.RESOLVE_NO_MAGICLINKS | unix.RESOLVE_NO_SYMLINKS,

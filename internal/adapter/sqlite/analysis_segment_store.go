@@ -78,7 +78,7 @@ func (s *AnalysisSegmentStore) ListSegments(ctx context.Context, analysisID stri
 	if err != nil {
 		return nil, wrapAnalysisCanceled(err, fmt.Errorf("%w: list analysis segments: %v", domain.ErrAnalysisUnavailable, err))
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var segments []domain.AnalysisSegment
 	for rows.Next() {
 		var segment domain.AnalysisSegment

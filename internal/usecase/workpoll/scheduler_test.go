@@ -131,7 +131,7 @@ func TestRecoveryBackoffCeilingAndResets(t *testing.T) {
 		t.Fatalf("delay after work = %v, want 10s", got)
 	}
 
-	timer, done = runWait(t, scheduler, t.Context(), nil, false)
+	_, done = runWait(t, scheduler, t.Context(), nil, false)
 	scheduler.Wake()
 	if !<-done {
 		t.Fatal("wake reset stopped worker")

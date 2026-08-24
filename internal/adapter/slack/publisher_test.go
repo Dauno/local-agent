@@ -371,7 +371,7 @@ func TestPublisherRetriesRateLimitOnlyOnceAndStops(t *testing.T) {
 
 func TestPublisherStopsAfterChunkFailureAndReturnsLastPublishedTimestamp(t *testing.T) {
 	t.Parallel()
-	wantErr := errors.New("Slack unavailable xoxb-123456789-secret")
+	wantErr := errors.New("slack unavailable xoxb-123456789-secret")
 	client := &fakePostClient{responses: []postResponse{{timestamp: "3.1"}, {err: wantErr}, {timestamp: "unexpected"}}}
 	publisher := newPublisher(client, time.Second, nil, true)
 	publisher.sleep = func(context.Context, time.Duration) error { return nil }

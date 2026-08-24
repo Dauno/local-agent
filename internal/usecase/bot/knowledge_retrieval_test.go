@@ -393,7 +393,7 @@ func TestKnowledgeRetrievalLogsBoundedDiagnostics(t *testing.T) {
 		t.Fatalf("outcome = %q, err = %v", outcome, err)
 	}
 	var diagnosticsLine string
-	for _, line := range strings.Split(logOutput.String(), "\n") {
+	for line := range strings.SplitSeq(logOutput.String(), "\n") {
 		if strings.Contains(line, "knowledge retrieval diagnostics") {
 			diagnosticsLine = line
 			break

@@ -64,10 +64,10 @@ func (p *knowledgeBotPublisher) snapshot() []knowledgeBotPublishCall {
 	return append([]knowledgeBotPublishCall(nil), p.calls...)
 }
 
-var knowledgeBotEventSequence int64
+var knowledgeBotEventSequence atomic.Int64
 
 func knowledgeBotDMInvocation(eventID, text string) domain.Invocation {
-	sequence := atomic.AddInt64(&knowledgeBotEventSequence, 1)
+	sequence := knowledgeBotEventSequence.Add(1)
 	return domain.Invocation{
 		EventID: eventID, EventType: "message.im", TeamID: "T12345678",
 		ChannelID: "D12345678", ChannelKind: domain.ChannelDM, UserID: "U12345678",
@@ -103,7 +103,7 @@ func (r knowledgeBotBindingResolver) ResolveKnowledgeBinding(ctx context.Context
 		return domain.KnowledgeWriteBinding{}, err
 	}
 	if err := active.ValidateBinding(actor, conversationKey, active.Project); err != nil {
-		return binding, nil
+		return binding, nil //nolint:nilerr // fake mirrors production's graceful degradation on binding mismatch
 	}
 	if active.Status != domain.WorkstreamActive {
 		return binding, nil
@@ -165,7 +165,7 @@ func TestKnowledgeBotRememberAndInspectViaSlackCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	service, publisher, _ := newKnowledgeBotService(t, store, true, nil, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 
 	outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"pg-01"}`))
@@ -200,7 +200,7 @@ func TestKnowledgeBotRememberAndForgetViaSlackCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	service, publisher, _ := newKnowledgeBotService(t, store, true, nil, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 
 	if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"secret-plan","predicate":"is","value_kind":"string","value_text":"classified"}`)); err != nil || outcome != botusecase.OutcomeResponded {
@@ -229,7 +229,7 @@ func TestKnowledgeBotDisabledGateMutatesNothingAndSkipsModel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	runtime := &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}}
 	service, publisher, _ := newKnowledgeBotService(t, store, false, nil, runtime)
 
@@ -255,7 +255,7 @@ func TestKnowledgeBotProjectBindingAndUnregisteredSelectorRejection(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
 	workstreamStore := adaptersqlite.NewWorkstreamStore(store)
 	workstreams, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: workstreamStore})
@@ -309,20 +309,18 @@ func TestKnowledgeBotBusyWhileTurnHoldsConversationDoesNotMutate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	block := make(chan struct{})
 	started := make(chan struct{}, 1)
 	runtime := &knowledgeBotRuntime{turn: port.AgentTurn{Text: "long answer"}, started: started, block: block}
 	service, publisher, _ := newKnowledgeBotService(t, store, true, nil, runtime)
 
 	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
+	wg.Go(func() {
 		if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK1", "hello")); err != nil || outcome != botusecase.OutcomeResponded {
 			t.Errorf("turn outcome = %q, err = %v", outcome, err)
 		}
-	}()
+	})
 	<-started
 
 	outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK2", `memory-human {"action":"remember","subject":"database","predicate":"is","value_kind":"string","value_text":"pg-01"}`))
@@ -351,7 +349,7 @@ func TestKnowledgeBotRegisteredProjectSelectorWithoutWorkstream(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	resolver := knowledgeBotBindingResolver{allowed: map[string]struct{}{"workspace": {}}}
 	service, publisher, _ := newKnowledgeBotService(t, store, true, resolver, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 
@@ -388,7 +386,7 @@ func TestKnowledgeBotPersistedActiveWorkstreamBindsWithoutWorkstreamCommands(t *
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
 	workstreamStore := adaptersqlite.NewWorkstreamStore(store)
 	workstreams, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: workstreamStore})
@@ -426,7 +424,7 @@ func TestKnowledgeBotResolverFailureRejectsEnabledRememberWithoutMutation(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	resolver := knowledgeBotBindingResolver{allowed: map[string]struct{}{"workspace": {}}, err: errors.New("workstream store unavailable")}
 	service, publisher, _ := newKnowledgeBotService(t, store, true, resolver, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 
@@ -449,7 +447,7 @@ func TestKnowledgeBotResolverFailureRejectsEnabledForgetWithoutMutation(t *testi
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	direct, err := knowledge.New(knowledge.Config{Enabled: true}, knowledge.Dependencies{
 		Store: adaptersqlite.NewKnowledgeStore(store), Coordinator: newKnowledgeTestCoordinator(),
 	})
@@ -487,7 +485,7 @@ func TestKnowledgeBotResolverFailureWithDisabledGatePublishesDisabled(t *testing
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	resolver := knowledgeBotBindingResolver{allowed: map[string]struct{}{"workspace": {}}, err: errors.New("workstream store unavailable")}
 	service, publisher, _ := newKnowledgeBotService(t, store, false, resolver, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 

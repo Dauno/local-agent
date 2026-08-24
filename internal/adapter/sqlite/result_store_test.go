@@ -22,7 +22,7 @@ func TestResultStoreMaterializesOneHandleAcrossRetryAndRecovery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -113,7 +113,7 @@ func TestResultStoreConcurrentCommitReturnsOneHandle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -169,7 +169,7 @@ func TestResultStoreQuarantineRequiresDurableStateChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -197,7 +197,7 @@ func TestResultStoreQuarantinesTamperedPayloadBeforeExpose(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -228,7 +228,7 @@ func TestResultStoreInvalidRangeDoesNotQuarantineResult(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -253,7 +253,7 @@ func TestResultStoreVerifyForWorkstreamRejectsForeignScopeBeforePayloadRead(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	payloads := &memoryResultPayloadStore{payloads: make(map[string]string)}
 	results, err := NewResultStore(store, payloads)
 	if err != nil {
@@ -296,7 +296,7 @@ func TestResultStoreVerifyForWorkstreamRejectsACPProducerScopeMismatch(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	now := time.Now().UTC()
 	jobs := NewExternalAgentJobStore(store)
 	job := testExternalAgentJob(now)
@@ -409,10 +409,7 @@ func (s *memoryResultPayloadStore) ReadRange(ctx context.Context, storage domain
 	if offsetBytes < 0 || offsetBytes > int64(len(payload)) || maxBytes <= 0 {
 		return domain.ResultChunk{}, domain.ErrResultInvalid
 	}
-	end := offsetBytes + maxBytes
-	if end > int64(len(payload)) {
-		end = int64(len(payload))
-	}
+	end := min(offsetBytes+maxBytes, int64(len(payload)))
 	return domain.ResultChunk{Content: payload[offsetBytes:end], OffsetBytes: offsetBytes, NextOffsetBytes: end, EOF: end == int64(len(payload)), SHA256: expectedSHA256}, nil
 }
 

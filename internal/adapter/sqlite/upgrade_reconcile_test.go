@@ -132,10 +132,9 @@ func TestUpgradeV30ToV32ReconcilesPreV32MarkdownEvidence(t *testing.T) {
 
 	store := upgradeV30Database(t, path, raw)
 	jobStore := NewExternalAgentJobStore(store)
-	evidence := slackapi.Message{Msg: slackapi.Msg{
+	evidence := slackapi.Message{
 		User: "B12345678", Timestamp: "1710000000.000001",
-		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-markdown", 1, markdown, resultDigest, "markdown", "")},
-	}}
+		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-markdown", 1, markdown, resultDigest, "markdown", "")}}
 	server := newSlackHistoryServer(t, evidence)
 
 	claimed, err := jobStore.ClaimNextNotification(ctx, time.Now().UTC(), "test-worker", time.Minute)
@@ -177,10 +176,9 @@ func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 
 	store := upgradeV30Database(t, path, raw)
 	jobStore := NewExternalAgentJobStore(store)
-	evidence := slackapi.Message{Msg: slackapi.Msg{
+	evidence := slackapi.Message{
 		User: "B12345678", Timestamp: "1710000000.000001",
-		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-file", 1, markdown, resultDigest, "file", "F123")},
-	}}
+		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-file", 1, markdown, resultDigest, "file", "F123")}}
 	server := newSlackHistoryServer(t, evidence)
 	server.fileInfo = `{"ok":true,"file":{"id":"F123","name":"opencode-upgrade-file.md","size":` + fmt.Sprint(len(resultContent)) + `,"user":"B12345678","channels":["D12345678"]}}`
 	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.BaseURL()))
@@ -239,10 +237,9 @@ func TestUpgradeV30ToV32V32EvidenceStillVerifiedStrictly(t *testing.T) {
 			if scenario.tampered {
 				notificationDigest = strings.Repeat("a", 64)
 			}
-			evidence := slackapi.Message{Msg: slackapi.Msg{
+			evidence := slackapi.Message{
 				User: "B12345678", Timestamp: "1710000000.000001",
-				Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v32EraEvidencePayload("upgrade-strict", 1, markdown, resultDigest, notificationDigest, "markdown", "")},
-			}}
+				Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v32EraEvidencePayload("upgrade-strict", 1, markdown, resultDigest, notificationDigest, "markdown", "")}}
 			server := newSlackHistoryServer(t, evidence)
 
 			claimed, err := jobStore.ClaimNextNotification(ctx, time.Now().UTC(), "test-worker", time.Minute)
@@ -328,22 +325,5 @@ func assertPublishedDelivery(t *testing.T, store *Store, jobID, wantTS string) {
 	}
 	if state != string(domain.NotificationPublished) || recovered != wantTS {
 		t.Fatalf("delivery after publication = %q/%q", state, recovered)
-	}
-}
-
-func assertActivationIdentity(t *testing.T, store *Store, jobID, deliveryMode, notificationDigest string, contentBytes int64) {
-	t.Helper()
-	var activationID, terminal, mode string
-	var bytes int64
-	if err := store.db.QueryRowContext(context.Background(), `SELECT activation_id, terminal_status, delivery_mode, content_bytes
-		FROM external_agent_job_activations WHERE job_id = ?`, jobID).Scan(&activationID, &terminal, &mode, &bytes); err != nil {
-		t.Fatal(err)
-	}
-	wantID := domain.ExternalAgentJobActivationID(jobID, 1, domain.JobNotificationTerminal)
-	if activationID != wantID || terminal != "completed" || mode != deliveryMode || bytes != contentBytes {
-		t.Fatalf("activation identity = %q/%q/%q/%d, want %q/completed/%q/%d", activationID, terminal, mode, bytes, wantID, deliveryMode, contentBytes)
-	}
-	if bytes <= 0 {
-		t.Fatal("activation content bytes are not positive")
 	}
 }

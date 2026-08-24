@@ -36,7 +36,7 @@ func runtimeStateValue(t *testing.T, db *sql.DB, key string) string {
 func TestRecordBaselineAndCutoffConflictSemantics(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 33)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	writer := FileSchemaWriter{}
 
 	first := backupIdentityFor("/tmp/first.db", writerSHA1)
@@ -80,7 +80,7 @@ func TestRecordBaselineAndCutoffConflictSemantics(t *testing.T) {
 func TestFileSchemaWriterMigrateRunsChainToCurrent(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 33)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	migrateErr := (FileSchemaWriter{}).Migrate(ctx, path)
 	if migrateErr != nil {
 		t.Fatalf("Migrate: %v", migrateErr)
@@ -111,7 +111,7 @@ func installPostflightFaultTrigger(t *testing.T, db interface {
 func TestRecordPostflightAtomicityUnderInjectedFailure(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	writer := FileSchemaWriter{}
 	baseline := rollout.IdentityBaseline{JobsCompletedWithoutResultIdentity: 2, ActivationsWithoutContent: 3}
 	if err := writer.RecordBaselineAndCutoff(ctx, path, baseline, 7, backupIdentityFor("/tmp/resume.db", writerSHA1)); err != nil {
@@ -154,7 +154,7 @@ func TestRecordPostflightAtomicityUnderInjectedFailure(t *testing.T) {
 func TestRecordPostflightAtomicityFromAbsentKeys(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, rollout.TargetVersion)
-	defer raw.Close()
+	defer func() { _ = raw.Close() }()
 	writer := FileSchemaWriter{}
 
 	restore := installPostflightFaultTrigger(t, raw)

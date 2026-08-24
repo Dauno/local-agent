@@ -114,7 +114,7 @@ func runShimWithBounds(t *testing.T, exec codexshim.Executor, request cliprotoco
 func decodeResponses(t *testing.T, data []byte) []cliprotocol.Response {
 	t.Helper()
 	var responses []cliprotocol.Response
-	for _, line := range bytes.Split(bytes.TrimSpace(data), []byte("\n")) {
+	for line := range bytes.SplitSeq(bytes.TrimSpace(data), []byte("\n")) {
 		if len(bytes.TrimSpace(line)) == 0 {
 			continue
 		}

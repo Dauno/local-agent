@@ -799,7 +799,7 @@ func terminalNotificationRowsForJob(t *testing.T, store *Store, jobID string) []
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []terminalNotificationRow
 	for rows.Next() {
 		var row terminalNotificationRow

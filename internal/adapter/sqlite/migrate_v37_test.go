@@ -13,7 +13,7 @@ func TestMigrationV37AddsCompletionBindingColumns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	var version int
 	if err := store.DB().QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
@@ -80,7 +80,7 @@ func TestMigrationV37PreservesJournalAndExtendsStartTask(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	if _, err := store.DB().ExecContext(t.Context(), `INSERT INTO workstream_transitions
 		(workstream_id, from_revision, to_revision, source, source_id, actor, action,
@@ -132,7 +132,7 @@ func TestMigrationV37FailureRollsBackWithoutPartialSchema(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer check.Close()
+	defer func() { _ = check.Close() }()
 	var version, columns int
 	if err := check.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)

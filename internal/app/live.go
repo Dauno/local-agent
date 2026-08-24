@@ -41,10 +41,10 @@ type liveChecker struct{}
 func (liveChecker) CheckSlackBot(ctx context.Context, botToken string) error {
 	response, err := slackapi.New(botToken).AuthTestContext(ctx)
 	if err != nil {
-		return fmt.Errorf("Slack auth.test failed: %w", err)
+		return fmt.Errorf("slack auth.test failed: %w", err)
 	}
 	if response == nil || response.UserID == "" {
-		return errors.New("Slack auth.test returned no bot user ID")
+		return errors.New("slack auth.test returned no bot user ID")
 	}
 	return nil
 }
@@ -53,10 +53,10 @@ func (liveChecker) CheckSlackApp(ctx context.Context, botToken, appToken string)
 	api := slackapi.New(botToken, slackapi.OptionAppLevelToken(appToken))
 	_, websocketURL, err := socketmode.New(api).OpenContext(ctx)
 	if err != nil {
-		return fmt.Errorf("Slack apps.connections.open failed: %w", err)
+		return fmt.Errorf("slack apps.connections.open failed: %w", err)
 	}
 	if strings.TrimSpace(websocketURL) == "" {
-		return errors.New("Slack apps.connections.open returned no WebSocket URL")
+		return errors.New("slack apps.connections.open returned no WebSocket URL")
 	}
 	return nil
 }
@@ -65,13 +65,13 @@ func (liveChecker) CheckSlackContext(ctx context.Context, botToken string) error
 	api := slackapi.New(botToken)
 	auth, err := api.AuthTestContext(ctx)
 	if err != nil {
-		return fmt.Errorf("Slack auth.test for context check failed: %w", err)
+		return fmt.Errorf("slack auth.test for context check failed: %w", err)
 	}
 	if auth == nil || auth.UserID == "" {
-		return errors.New("Slack auth.test for context check returned no bot user ID")
+		return errors.New("slack auth.test for context check returned no bot user ID")
 	}
 	if _, err := api.GetUserInfoContext(ctx, auth.UserID); err != nil {
-		return fmt.Errorf("Slack users.info failed: %w", err)
+		return fmt.Errorf("slack users.info failed: %w", err)
 	}
 	return nil
 }
@@ -92,16 +92,16 @@ func checkSlackBotScope(ctx context.Context, botToken, requiredScope, subject st
 		}
 	}))
 	if _, err := api.AuthTestContext(ctx); err != nil {
-		return fmt.Errorf("Slack auth.test for %s check failed: %w", subject, err)
+		return fmt.Errorf("slack auth.test for %s check failed: %w", subject, err)
 	}
 	if hasSlackScope(grantedScopes, requiredScope) {
 		return nil
 	}
-	return fmt.Errorf("Slack bot token is missing %s", requiredScope)
+	return fmt.Errorf("slack bot token is missing %s", requiredScope)
 }
 
 func hasSlackScope(grantedScopes, required string) bool {
-	for _, scope := range strings.Split(grantedScopes, ",") {
+	for scope := range strings.SplitSeq(grantedScopes, ",") {
 		if strings.TrimSpace(scope) == required {
 			return true
 		}

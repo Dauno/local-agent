@@ -15,6 +15,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -111,7 +112,7 @@ func newSpikeModelServer(t *testing.T) *httptest.Server {
 					},
 				},
 			}
-			json.NewEncoder(w).Encode(resp)
+			_ = json.NewEncoder(w).Encode(resp)
 			return
 		}
 
@@ -132,7 +133,7 @@ func newSpikeModelServer(t *testing.T) *httptest.Server {
 				},
 			},
 		}
-		json.NewEncoder(w).Encode(resp)
+		_ = json.NewEncoder(w).Encode(resp)
 	}))
 }
 
@@ -216,11 +217,11 @@ func findConfirmationEvent(events []*session.Event) *session.Event {
 
 // lastTextFromEvents returns the text content from the last event with a text part.
 func lastTextFromEvents(events []*session.Event) string {
-	for i := len(events) - 1; i >= 0; i-- {
-		if events[i].Content == nil {
+	for _, event := range slices.Backward(events) {
+		if event.Content == nil {
 			continue
 		}
-		for _, part := range events[i].Content.Parts {
+		for _, part := range event.Content.Parts {
 			if part.Text != "" {
 				return part.Text
 			}

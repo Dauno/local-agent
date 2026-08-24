@@ -59,7 +59,7 @@ func (r workstreamKnowledgeBindingResolver) ResolveKnowledgeBinding(ctx context.
 		return domain.KnowledgeWriteBinding{}, fmt.Errorf("resolve active workstream for knowledge binding: %w", err)
 	}
 	if err := workstream.ValidateBinding(actor, conversationKey, workstream.Project); err != nil {
-		return binding, nil
+		return binding, nil //nolint:nilerr // invalid binding degrades to the unscoped default, consistent with the other early returns above
 	}
 	if workstream.Status != domain.WorkstreamActive {
 		return binding, nil
@@ -92,7 +92,7 @@ func (r workstreamKnowledgeBindingResolver) ResolveRetrievalBinding(ctx context.
 		return port.KnowledgeRetrievalBinding{}, fmt.Errorf("resolve active workstream for retrieval binding: %w", err)
 	}
 	if err := workstream.ValidateBinding(actor, conversation, workstream.Project); err != nil {
-		return port.KnowledgeRetrievalBinding{Binding: binding, ExchangeTS: exchangeTS}, nil
+		return port.KnowledgeRetrievalBinding{Binding: binding, ExchangeTS: exchangeTS}, nil //nolint:nilerr // invalid binding degrades to the unscoped default, consistent with the other early returns above
 	}
 	if workstream.Status != domain.WorkstreamActive {
 		return port.KnowledgeRetrievalBinding{Binding: binding, ExchangeTS: exchangeTS}, nil

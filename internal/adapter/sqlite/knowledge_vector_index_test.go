@@ -216,7 +216,7 @@ func vectorRows(t *testing.T, store *Store, id string) []vectorRow {
 	if err != nil {
 		t.Fatalf("query vector rows: %v", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var result []vectorRow
 	for rows.Next() {
 		var row vectorRow

@@ -95,7 +95,7 @@ func seedQuarantineActivationRow(t *testing.T, plain *sql.DB, id string, created
 func seedFind110Rows(t *testing.T, dbPath string, includeFreshDefects bool) {
 	t.Helper()
 	plain := openPlainDB(t, dbPath)
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	seedQuarantineJobRow(t, plain, "legacy-job-1", quarantineLegacyAt)
 	seedQuarantineJobRow(t, plain, "legacy-job-2", quarantineLegacyAt)
 	for _, id := range []string{"legacy-act-1", "legacy-act-2", "legacy-act-3"} {
@@ -262,7 +262,7 @@ func TestApplyQuarantineMarksRowsAndCompletesOnce(t *testing.T) {
 	if err := reopen.QueryRow(`SELECT COUNT(*) FROM external_agent_job_activations WHERE last_error_code = 'legacy_activation_content'`).Scan(&stamped); err != nil {
 		t.Fatal(err)
 	}
-	reopen.Close()
+	_ = reopen.Close()
 	if events != quarantineWantJobs || stamped != quarantineWantActive {
 		t.Fatalf("marks = events:%d stamped:%d, want %d/%d", events, stamped, quarantineWantJobs, quarantineWantActive)
 	}
@@ -328,7 +328,7 @@ func TestApplyQuarantineMismatchFailsClosedWritingNothing(t *testing.T) {
 func assertZeroQuarantineRowWrites(t *testing.T, dbPath string) {
 	t.Helper()
 	plain := openPlainDB(t, dbPath)
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var events, stamped, markers int
 	if err := plain.QueryRow(`SELECT COUNT(*) FROM external_agent_job_events WHERE event_kind = 'legacy_result_identity'`).Scan(&events); err != nil {
 		t.Fatal(err)
@@ -625,7 +625,7 @@ func buildDispositionRunFixture(t *testing.T, dbPath string, marker bool) string
 		t.Fatal(err)
 	}
 	plain := openPlainDB(t, dbPath)
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	if _, err := plain.Exec(`DELETE FROM runtime_state`); err != nil {
 		t.Fatal(err)
 	}
@@ -653,7 +653,7 @@ func buildDispositionRunFixture(t *testing.T, dbPath string, marker bool) string
 func assertJournalMode(t *testing.T, dbPath, want string) {
 	t.Helper()
 	plain := openPlainDB(t, dbPath)
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var mode string
 	if err := plain.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != want {
 		t.Fatalf("journal_mode=%q err=%v, want %s untouched", mode, err, want)

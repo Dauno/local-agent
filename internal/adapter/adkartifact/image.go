@@ -205,10 +205,7 @@ func validateSourceDimensions(width, height int) error {
 // followed by every retry level below it (FR-06, FR-08).
 func effectiveAttemptEdges(width, height int) []int {
 	maxEdge := max(width, height)
-	first := maxOutputEdgePixels
-	if maxEdge < first {
-		first = maxEdge
-	}
+	first := min(maxEdge, maxOutputEdgePixels)
 	edges := make([]int, 0, maxDerivedAttempts+1)
 	edges = append(edges, first)
 	for _, edge := range retryEdges {

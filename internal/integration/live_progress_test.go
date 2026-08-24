@@ -111,7 +111,7 @@ func TestDurableJobLiveProjectionWithScriptedACPProcess(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer restarted.Close()
+	defer func() { _ = restarted.Close() }()
 	persisted, err := adaptersqlite.NewExternalAgentJobStore(restarted).ReadJobProgress(t.Context(), job.ID)
 	if err != nil || persisted == nil {
 		t.Fatalf("persisted projection after restart: %v %v", persisted, err)

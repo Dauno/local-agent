@@ -74,7 +74,7 @@ func TestKnowledgeRetrievalEndToEndEphemeralBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { store.Close() })
+	t.Cleanup(func() { _ = store.Close() })
 
 	// One user-scoped active claim that the exact channel can match.
 	claimID := "kclaim_0000000000000000000000e2"
@@ -202,7 +202,7 @@ func TestKnowledgeRetrievalEndToEndEphemeralBoundary(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	if rows.Next() {
 		t.Fatal("conversation message carries the knowledge block")
 	}

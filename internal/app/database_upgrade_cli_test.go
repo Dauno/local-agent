@@ -165,7 +165,7 @@ func TestRollbackCheckClearAndBlocked(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		defer plain.Close()
+		defer func() { _ = plain.Close() }()
 		for _, session := range []string{"sess-a", "sess-b"} {
 			if _, err := plain.Exec(`INSERT INTO adk_context_summary_jobs
 				(session_identity, target_ordinal, status, next_attempt, created_at, updated_at)
@@ -354,7 +354,6 @@ func TestDBUpgradeBoundaryMatrix(t *testing.T) {
 			if backupMade != testCase.backup {
 				t.Fatalf("backup made=%v, want %v", backupMade, testCase.backup)
 			}
-
 		})
 	}
 }

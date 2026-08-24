@@ -176,9 +176,8 @@ func TestCheckResultAnalysisStateReportsExactCounts(t *testing.T) {
 // struct with a string type (a place a leaked digest or excerpt could hide)
 // fails this test even before any test data exercises it.
 func TestResultAnalysisHealthCarriesOnlyBoundedCounts(t *testing.T) {
-	typ := reflect.TypeOf(domain.ResultAnalysisHealth{})
-	for i := 0; i < typ.NumField(); i++ {
-		field := typ.Field(i)
+	typ := reflect.TypeFor[domain.ResultAnalysisHealth]()
+	for field := range typ.Fields() {
 		if field.Type.Kind() != reflect.Int {
 			t.Fatalf("domain.ResultAnalysisHealth.%s has kind %s, want a bounded int count; the doctor view must never carry content", field.Name, field.Type.Kind())
 		}

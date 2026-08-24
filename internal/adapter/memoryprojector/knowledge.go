@@ -190,23 +190,23 @@ func writeKnowledgeClaims(dir string, claims []domain.KnowledgeClaim, now time.T
 	b.WriteString("# Knowledge Claims\n\n")
 	b.WriteString("Scoped claims projected from the durable SQLite authority. Manual edits are replaced, never read back.\n\n")
 	for index, claim := range ordered {
-		b.WriteString(fmt.Sprintf("## %d. %s\n\n", index+1, escapeKnowledgeText(claim.Subject)))
-		b.WriteString(fmt.Sprintf("- id: `%s`\n", claim.ID))
-		b.WriteString(fmt.Sprintf("- predicate: `%s`\n", claim.Predicate))
-		b.WriteString(fmt.Sprintf("- value: %s\n", knowledgeValueLabel(claim.Value)))
-		b.WriteString(fmt.Sprintf("- scope: %s\n", knowledgeScopeLabel(claim.ScopeKind, claim.ScopeID)))
-		b.WriteString(fmt.Sprintf("- source: `%s` / %s\n", claim.SourceClass, escapeKnowledgeText(claim.SourceRef)))
-		b.WriteString(fmt.Sprintf("- status: `%s`\n", claim.EffectiveStatus(now)))
+		fmt.Fprintf(&b, "## %d. %s\n\n", index+1, escapeKnowledgeText(claim.Subject))
+		fmt.Fprintf(&b, "- id: `%s`\n", claim.ID)
+		fmt.Fprintf(&b, "- predicate: `%s`\n", claim.Predicate)
+		fmt.Fprintf(&b, "- value: %s\n", knowledgeValueLabel(claim.Value))
+		fmt.Fprintf(&b, "- scope: %s\n", knowledgeScopeLabel(claim.ScopeKind, claim.ScopeID))
+		fmt.Fprintf(&b, "- source: `%s` / %s\n", claim.SourceClass, escapeKnowledgeText(claim.SourceRef))
+		fmt.Fprintf(&b, "- status: `%s`\n", claim.EffectiveStatus(now))
 		if !claim.ValidFrom.IsZero() {
-			b.WriteString(fmt.Sprintf("- valid_from: %s\n", claim.ValidFrom.Format(time.RFC3339)))
+			fmt.Fprintf(&b, "- valid_from: %s\n", claim.ValidFrom.Format(time.RFC3339))
 		}
 		if !claim.ValidUntil.IsZero() {
-			b.WriteString(fmt.Sprintf("- valid_until: %s\n", claim.ValidUntil.Format(time.RFC3339)))
+			fmt.Fprintf(&b, "- valid_until: %s\n", claim.ValidUntil.Format(time.RFC3339))
 		}
 		if claim.SupersedesID != "" {
-			b.WriteString(fmt.Sprintf("- supersedes: `%s`\n", claim.SupersedesID))
+			fmt.Fprintf(&b, "- supersedes: `%s`\n", claim.SupersedesID)
 		}
-		b.WriteString(fmt.Sprintf("- revision: %d\n\n", claim.Revision))
+		fmt.Fprintf(&b, "- revision: %d\n\n", claim.Revision)
 	}
 	return atomicWrite(filepath.Join(dir, "claims.md"), b.String())
 }
@@ -224,10 +224,10 @@ func writeKnowledgePreferences(dir string, preferences []domain.KnowledgePrefere
 	b.WriteString("# Knowledge Preferences\n\n")
 	b.WriteString("Scoped preferences projected from the durable SQLite authority. Owner identity is never projected.\n\n")
 	for index, preference := range ordered {
-		b.WriteString(fmt.Sprintf("## %d. %s\n\n", index+1, escapeKnowledgeText(preference.Key)))
-		b.WriteString(fmt.Sprintf("- value: %s\n", knowledgeValueLabel(preference.Value)))
-		b.WriteString(fmt.Sprintf("- status: `%s`\n", preference.Status))
-		b.WriteString(fmt.Sprintf("- revision: %d\n\n", preference.Revision))
+		fmt.Fprintf(&b, "## %d. %s\n\n", index+1, escapeKnowledgeText(preference.Key))
+		fmt.Fprintf(&b, "- value: %s\n", knowledgeValueLabel(preference.Value))
+		fmt.Fprintf(&b, "- status: `%s`\n", preference.Status)
+		fmt.Fprintf(&b, "- revision: %d\n\n", preference.Revision)
 	}
 	return atomicWrite(filepath.Join(dir, "preferences.md"), b.String())
 }
@@ -251,16 +251,16 @@ func writeKnowledgeDocuments(dir string, documents []domain.KnowledgeDocument) e
 	b.WriteString("# Knowledge Documents\n\n")
 	b.WriteString("Document references projected from the durable SQLite authority. Content handles are never projected.\n\n")
 	for index, document := range ordered {
-		b.WriteString(fmt.Sprintf("## %d. %s\n\n", index+1, escapeKnowledgeText(document.Subject)))
-		b.WriteString(fmt.Sprintf("- id: `%s`\n", document.ID))
-		b.WriteString(fmt.Sprintf("- scope: %s\n", knowledgeScopeLabel(document.ScopeKind, document.ScopeID)))
-		b.WriteString(fmt.Sprintf("- digest: `%s`\n", document.ContentDigest))
-		b.WriteString(fmt.Sprintf("- provenance: `%s`\n", document.Provenance))
+		fmt.Fprintf(&b, "## %d. %s\n\n", index+1, escapeKnowledgeText(document.Subject))
+		fmt.Fprintf(&b, "- id: `%s`\n", document.ID)
+		fmt.Fprintf(&b, "- scope: %s\n", knowledgeScopeLabel(document.ScopeKind, document.ScopeID))
+		fmt.Fprintf(&b, "- digest: `%s`\n", document.ContentDigest)
+		fmt.Fprintf(&b, "- provenance: `%s`\n", document.Provenance)
 		if document.SourceRev > 0 {
-			b.WriteString(fmt.Sprintf("- source_revision: %d\n", document.SourceRev))
+			fmt.Fprintf(&b, "- source_revision: %d\n", document.SourceRev)
 		}
-		b.WriteString(fmt.Sprintf("- status: `%s`\n", document.Status))
-		b.WriteString(fmt.Sprintf("- revision: %d\n\n", document.Revision))
+		fmt.Fprintf(&b, "- status: `%s`\n", document.Status)
+		fmt.Fprintf(&b, "- revision: %d\n\n", document.Revision)
 	}
 	return atomicWrite(filepath.Join(dir, "documents.md"), b.String())
 }
@@ -284,7 +284,7 @@ func writeKnowledgeEvidence(dir string, evidence []port.KnowledgeEvidenceRef) er
 	b.WriteString("# Knowledge Evidence\n\n")
 	b.WriteString("Episodic references to the conversation ledger. No ledger content is copied; conversation and author identity are never projected.\n\n")
 	for _, ref := range ordered {
-		b.WriteString(fmt.Sprintf("- claim `%s` revision %d: `%s` %s\n", ref.ClaimID, ref.RevisionNumber, ref.Kind, ref.ExchangeTS))
+		fmt.Fprintf(&b, "- claim `%s` revision %d: `%s` %s\n", ref.ClaimID, ref.RevisionNumber, ref.Kind, ref.ExchangeTS)
 	}
 	return atomicWrite(filepath.Join(dir, "evidence.md"), b.String())
 }
@@ -297,7 +297,7 @@ func writeKnowledgeIndex(dir string) error {
 		if name == "index.md" {
 			continue
 		}
-		b.WriteString(fmt.Sprintf("- [%s](%s)\n", strings.TrimSuffix(name, ".md"), name))
+		fmt.Fprintf(&b, "- [%s](%s)\n", strings.TrimSuffix(name, ".md"), name)
 	}
 	b.WriteString("\nSee the [root index](../index.md) for the bundle entry point.\n")
 	return atomicWrite(filepath.Join(dir, "index.md"), b.String())

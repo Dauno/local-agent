@@ -54,9 +54,10 @@ func (m Message) WithInferredSource() Message {
 	if m.Source != "" {
 		return m
 	}
-	if m.Role == RoleAssistant {
+	switch m.Role {
+	case RoleAssistant:
 		m.Source = MessageSourceAssistant
-	} else if m.Role == RoleUser {
+	case RoleUser:
 		m.Source = MessageSourceHuman
 	}
 	return m

@@ -72,12 +72,12 @@ func (i Invocation) Validate() error {
 		return fmt.Errorf("invalid Slack thread timestamp %q", i.ThreadTS)
 	}
 	if strings.TrimSpace(i.EventType) == "" {
-		return fmt.Errorf("Slack event type is required")
+		return fmt.Errorf("slack event type is required")
 	}
 	hasText := strings.TrimSpace(i.Text) != ""
 	hasAttachments := len(i.Attachments) > 0
 	if !hasText && !hasAttachments {
-		return fmt.Errorf("Slack message must have text or at least one attachment")
+		return fmt.Errorf("slack message must have text or at least one attachment")
 	}
 	for idx, a := range i.Attachments {
 		if strings.TrimSpace(a.ID) == "" {

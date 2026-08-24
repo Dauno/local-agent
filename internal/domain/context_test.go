@@ -50,7 +50,7 @@ func TestRenderContextReference_StableKeyOrder(t *testing.T) {
 		t.Fatalf("missing facts: %q", rendered)
 	}
 	// Facts appear in insertion order: team, user, channel
-	if !(teamIdx < userIdx && userIdx < channelIdx) {
+	if teamIdx >= userIdx || userIdx >= channelIdx {
 		t.Fatalf("facts not in insertion order: team=%d user=%d channel=%d", teamIdx, userIdx, channelIdx)
 	}
 }

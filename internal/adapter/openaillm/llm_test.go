@@ -124,7 +124,7 @@ func TestGenerateContentSendsConfiguredChatCompletionAndReturnsOnlyAssistantText
 		},
 	}
 
-	response, generateErr, yields := collect(llm.GenerateContent(context.Background(), request, false))
+	response, yields, generateErr := collect(llm.GenerateContent(context.Background(), request, false))
 	if generateErr != nil {
 		t.Fatalf("GenerateContent() error = %v", generateErr)
 	}
@@ -230,10 +230,10 @@ func TestGenerateContentStreamsTrueTextDeltasAndAuthoritativeFinal(t *testing.T)
 		}
 		requestBody <- body
 		writer.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":\"\"}]}\n\n")
-		fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"\"}]}\n\n")
-		fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
-		fmt.Fprint(writer, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(server.Close)
 	llm, err := New(WithAPIKey("test-api-key"), WithBaseURL(server.URL+"/v1"), WithModel("configured-model"))
@@ -268,14 +268,14 @@ func TestGenerateContentIgnoresSSEKeepAliveAndRetryBlocks(t *testing.T) {
 		if !ok {
 			t.Fatal("test server does not support flushing")
 		}
-		fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
+		_, _ = fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
 		flusher.Flush()
-		fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"\"}]}\n\n")
-		fmt.Fprint(writer, ": one\n\n: two\n\nretry: 3000\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(writer, ": one\n\n: two\n\nretry: 3000\n\n")
 		flusher.Flush()
-		fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" after keep-alive\"},\"finish_reason\":\"\"}]}\n\n")
-		fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
-		fmt.Fprint(writer, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" after keep-alive\"},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(server.Close)
 	llm := mustTestLLM(t, server.URL)
@@ -295,18 +295,18 @@ func TestGenerateContentIgnoresSSEKeepAliveAndRetryBlocks(t *testing.T) {
 func TestGenerateContentAccumulatesToolCallChunksAfterEmptySSEBlocks(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
+		_, _ = fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
 		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": 0, "id": "call-1", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{"query":"sta`}}}}, "finish_reason": ""}}})
-		fmt.Fprint(writer, ": gap\n\n: gap2\n\n")
+		_, _ = fmt.Fprint(writer, ": gap\n\n: gap2\n\n")
 		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"index": 0, "function": map[string]any{"arguments": `tus"}`}}}}, "finish_reason": ""}}})
 		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}})
-		fmt.Fprint(writer, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(server.Close)
 	llm := mustTestLLM(t, server.URL)
 	request := textRequest()
 	request.Config = &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "lookup"}}}}}
-	response, err, yields := collect(llm.GenerateContent(context.Background(), request, true))
+	response, yields, err := collect(llm.GenerateContent(context.Background(), request, true))
 	if err != nil || yields != 1 || response == nil || response.Content == nil || len(response.Content.Parts) != 1 {
 		t.Fatalf("tool stream = %#v, %v, yields=%d", response, err, yields)
 	}
@@ -319,11 +319,11 @@ func TestGenerateContentAccumulatesToolCallChunksAfterEmptySSEBlocks(t *testing.
 func TestGenerateContentMalformedNonEmptySSEFailsClosed(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(writer, "data: {\"id\":\"truncated\"\n\n")
+		_, _ = fmt.Fprint(writer, "data: {\"id\":\"truncated\"\n\n")
 	}))
 	t.Cleanup(server.Close)
 	llm := mustTestLLM(t, server.URL)
-	_, err, yields := collect(llm.GenerateContent(context.Background(), textRequest(), true))
+	_, yields, err := collect(llm.GenerateContent(context.Background(), textRequest(), true))
 	if err == nil || yields != 1 {
 		t.Fatalf("malformed SSE = err %v, yields %d", err, yields)
 	}
@@ -338,11 +338,11 @@ func TestGenerateContentEmptySSEDataIsTerminalWithoutReplay(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		requests.Add(1)
 		writer.Header().Set("Content-Type", "text/event-stream")
-		fmt.Fprint(writer, "data: \n\n")
-		fmt.Fprint(writer, "data: [DONE]\n\n")
+		_, _ = fmt.Fprint(writer, "data: \n\n")
+		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(server.Close)
-	_, err, yields := collect(mustTestLLM(t, server.URL).GenerateContent(context.Background(), textRequest(), true))
+	_, yields, err := collect(mustTestLLM(t, server.URL).GenerateContent(context.Background(), textRequest(), true))
 	if err == nil || yields != 1 || requests.Load() != 1 {
 		t.Fatalf("empty SSE data = err %v, yields %d, requests %d", err, yields, requests.Load())
 	}
@@ -356,7 +356,7 @@ func TestGenerateContentCancellationAndTransportErrorsAreTerminal(t *testing.T) 
 		t.Cleanup(server.Close)
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
-		_, err, yields := collect(mustTestLLM(t, server.URL).GenerateContent(ctx, textRequest(), true))
+		_, yields, err := collect(mustTestLLM(t, server.URL).GenerateContent(ctx, textRequest(), true))
 		if err == nil || yields != 1 {
 			t.Fatalf("cancellation = err %v, yields %d", err, yields)
 		}
@@ -376,7 +376,7 @@ func TestGenerateContentCancellationAndTransportErrorsAreTerminal(t *testing.T) 
 			_ = connection.Close()
 		}))
 		t.Cleanup(server.Close)
-		_, err, yields := collect(mustTestLLM(t, server.URL).GenerateContent(context.Background(), textRequest(), true))
+		_, yields, err := collect(mustTestLLM(t, server.URL).GenerateContent(context.Background(), textRequest(), true))
 		if err == nil || yields != 1 {
 			t.Fatalf("transport EOF = err %v, yields %d", err, yields)
 		}
@@ -562,7 +562,7 @@ func TestGuardRejectsMediaOverBudgetBeforeHTTP(t *testing.T) {
 			genai.NewPartFromBytes(realTestPNG(t), "image/png"),
 		},
 	}}}
-	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), request, false))
+	_, _, gotErr := collect(llm.GenerateContent(context.Background(), request, false))
 	if !errors.Is(gotErr, domain.ErrIrreducibleContext) {
 		t.Fatalf("GenerateContent() error = %v, want irreducible context", gotErr)
 	}
@@ -590,7 +590,7 @@ func TestGuardRejectsMediaWithByteBoundBeforeHTTP(t *testing.T) {
 		Role:  genai.RoleUser,
 		Parts: []*genai.Part{genai.NewPartFromBytes(realTestPNG(t), "image/png")},
 	}}}
-	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), request, false))
+	_, _, gotErr := collect(llm.GenerateContent(context.Background(), request, false))
 	if gotErr == nil || !strings.Contains(gotErr.Error(), "request_token_count_unavailable") {
 		t.Fatalf("GenerateContent() error = %v, want request_token_count_unavailable", gotErr)
 	}
@@ -632,7 +632,7 @@ func TestGuardRejectsLargeInputAudioBeforeHTTP(t *testing.T) {
 	if strings.Contains(converted.envelope.Serialized, mediaMarker) {
 		t.Fatal("audio countable projection replaced real bytes with media marker")
 	}
-	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), request, false))
+	_, _, gotErr := collect(llm.GenerateContent(context.Background(), request, false))
 	if !errors.Is(gotErr, domain.ErrIrreducibleContext) {
 		t.Fatalf("GenerateContent() error = %v, want irreducible context", gotErr)
 	}
@@ -722,7 +722,7 @@ func TestGenerateContentReturnsProviderAndEmptyResponseErrors(t *testing.T) {
 		}))
 		t.Cleanup(server.Close)
 		llm := mustTestLLM(t, server.URL)
-		_, err, yields := collect(llm.GenerateContent(context.Background(), textRequest(), false))
+		_, yields, err := collect(llm.GenerateContent(context.Background(), textRequest(), false))
 		if err == nil || !strings.Contains(err.Error(), "Chat Completions request failed") || yields != 1 {
 			t.Fatalf("GenerateContent() = err %v, yields %d", err, yields)
 		}
@@ -736,7 +736,7 @@ func TestGenerateContentReturnsProviderAndEmptyResponseErrors(t *testing.T) {
 		}))
 		t.Cleanup(server.Close)
 		llm := mustTestLLM(t, server.URL)
-		_, err, yields := collect(llm.GenerateContent(context.Background(), textRequest(), false))
+		_, yields, err := collect(llm.GenerateContent(context.Background(), textRequest(), false))
 		if !errors.Is(err, ErrNoAssistantText) || yields != 1 {
 			t.Fatalf("GenerateContent() = err %v, yields %d", err, yields)
 		}
@@ -771,7 +771,7 @@ func TestGenerateContentTranslatesFunctionToolsAndCalls(t *testing.T) {
 	t.Cleanup(server.Close)
 
 	llm := mustTestLLM(t, server.URL)
-	response, err, yields := collect(llm.GenerateContent(context.Background(), &model.LLMRequest{
+	response, yields, err := collect(llm.GenerateContent(context.Background(), &model.LLMRequest{
 		Contents: []*genai.Content{
 			genai.NewContentFromText("status", genai.RoleUser),
 			{Role: genai.RoleModel, Parts: []*genai.Part{
@@ -880,7 +880,7 @@ func TestGenerateContentRejectsUnsupportedRequestsBeforeHTTP(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err, yields := collect(llm.GenerateContent(context.Background(), tt.req, tt.stream))
+			_, yields, err := collect(llm.GenerateContent(context.Background(), tt.req, tt.stream))
 			if !errors.Is(err, tt.want) || yields != 1 {
 				t.Fatalf("GenerateContent() = err %v, yields %d; want %v", err, yields, tt.want)
 			}
@@ -925,8 +925,8 @@ func TestNewValidatesOptionsWithoutExposingValues(t *testing.T) {
 func realTestPNG(t *testing.T) []byte {
 	t.Helper()
 	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
-	for y := 0; y < 4; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 4 {
+		for x := range 4 {
 			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 60), G: uint8(y * 60), B: 120, A: 255})
 		}
 	}
@@ -941,8 +941,8 @@ func realTestPNG(t *testing.T) []byte {
 func realTestJPEG(t *testing.T) []byte {
 	t.Helper()
 	img := image.NewNRGBA(image.Rect(0, 0, 4, 4))
-	for y := 0; y < 4; y++ {
-		for x := 0; x < 4; x++ {
+	for y := range 4 {
+		for x := range 4 {
 			img.SetNRGBA(x, y, color.NRGBA{R: uint8(x * 60), G: uint8(y * 60), B: 120, A: 255})
 		}
 	}
@@ -1076,8 +1076,7 @@ func TestProviderFrameCountMatchesFinalGuardEnvelope(t *testing.T) {
 				guardErr = err
 				break
 			}
-			var irreducible *domain.IrreducibleContextError
-			if !errors.As(guardErr, &irreducible) {
+			if _, ok := errors.AsType[*domain.IrreducibleContextError](guardErr); !ok {
 				t.Fatalf("GenerateContent() error = %v, want final guard rejection", guardErr)
 			}
 			if len(counter.envelopes) != 2 {
@@ -1128,7 +1127,7 @@ func TestFinalRequestGuardRejectsBeforeProviderCall(t *testing.T) {
 	if err := llm.ConfigureRequestGuard(fixedRequestCounter(11), domain.RequestBudget{HardTokens: 10}, "test/profile"); err != nil {
 		t.Fatal(err)
 	}
-	_, gotErr, _ := collect(llm.GenerateContent(context.Background(), textRequest(), false))
+	_, _, gotErr := collect(llm.GenerateContent(context.Background(), textRequest(), false))
 	if !errors.Is(gotErr, domain.ErrIrreducibleContext) {
 		t.Fatalf("GenerateContent() error = %v", gotErr)
 	}
@@ -1209,7 +1208,7 @@ func textRequest() *model.LLMRequest {
 	return &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("hello", genai.RoleUser)}}
 }
 
-func collect(sequence iter.Seq2[*model.LLMResponse, error]) (*model.LLMResponse, error, int) {
+func collect(sequence iter.Seq2[*model.LLMResponse, error]) (*model.LLMResponse, int, error) {
 	var response *model.LLMResponse
 	var resultErr error
 	count := 0
@@ -1218,7 +1217,7 @@ func collect(sequence iter.Seq2[*model.LLMResponse, error]) (*model.LLMResponse,
 		response = current
 		resultErr = err
 	}
-	return response, resultErr, count
+	return response, count, resultErr
 }
 
 func writeJSON(t *testing.T, writer http.ResponseWriter, status int, value any) {

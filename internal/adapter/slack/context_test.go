@@ -29,7 +29,6 @@ type slackUserProfile struct {
 	title       string
 	timezone    string
 	locale      string
-	err         error
 }
 
 type slackChannelInfo struct {
@@ -408,7 +407,7 @@ func TestContextEnricher_FactOrder_IsDeterministic(t *testing.T) {
 
 	// Run multiple times and verify same order
 	var prevKeys []string
-	for i := 0; i < 5; i++ {
+	for range 5 {
 		ctx, err := enricher.Enrich(context.Background(), channelInvocation())
 		if err != nil {
 			t.Fatalf("enrich failed: %v", err)

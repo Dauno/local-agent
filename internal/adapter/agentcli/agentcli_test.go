@@ -369,9 +369,8 @@ func TestRequestToolsRejectedBeforeLaunch(t *testing.T) {
 }
 
 func TestEveryUnsupportedGenerateConfigFieldRejectedBeforeLaunch(t *testing.T) {
-	configType := reflect.TypeOf(genai.GenerateContentConfig{})
-	for index := 0; index < configType.NumField(); index++ {
-		field := configType.Field(index)
+	configType := reflect.TypeFor[genai.GenerateContentConfig]()
+	for field := range configType.Fields() {
 		switch field.Name {
 		case "SystemInstruction", "ResponseMIMEType", "Tools", "ToolConfig":
 			continue
@@ -480,7 +479,7 @@ func TestLongSessionBoundedBeforeLaunch(t *testing.T) {
 		limits: domain.ContextLimits{MaxMessages: 3, MaxChars: 40},
 	})
 	texts := []string{}
-	for i := 0; i < 20; i++ {
+	for range 20 {
 		texts = append(texts, strings.Repeat("x", 30))
 	}
 	// Ensure the final turn is a user message.

@@ -31,7 +31,7 @@ func TestMigrationV42RemovesLegacyProvenanceFromSchemaAndQueuesProjection(t *tes
 		protectedResultID, protectedDigest, len(protectedContent), now,
 		userResultID, userDigest, len(userContent), now,
 		userMismatchResultID, userDigest, len(userContent), now); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if _, err := raw.ExecContext(t.Context(), `
@@ -47,7 +47,7 @@ func TestMigrationV42RemovesLegacyProvenanceFromSchemaAndQueuesProjection(t *tes
 		protectedDigest, protectedResultID, now, now,
 		userDigest, userResultID, now, now,
 		userDigest, userMismatchResultID, now, now); err != nil {
-		raw.Close()
+		_ = raw.Close()
 		t.Fatal(err)
 	}
 	if err := raw.Close(); err != nil {
@@ -58,7 +58,7 @@ func TestMigrationV42RemovesLegacyProvenanceFromSchemaAndQueuesProjection(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	db := store.DB()
 
 	// The legacy-provenance document, the global-scope curated document with

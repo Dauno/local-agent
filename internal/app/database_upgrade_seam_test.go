@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -164,7 +165,7 @@ func journalModeOf(path string) string {
 	if err != nil {
 		return ""
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var mode string
 	if err := plain.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
 		return ""
@@ -207,7 +208,7 @@ func (w *recordingWriter) Migrate(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	_, err = plain.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version = %d", rollout.TargetVersion))
 	return err
 }
@@ -240,7 +241,7 @@ func replaceFixture(t *testing.T, dbPath string, version int, seed map[string]st
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	if _, err := plain.Exec("DELETE FROM runtime_state"); err != nil {
 		t.Fatal(err)
 	}
@@ -272,12 +273,12 @@ func dumpRuntimeState(t *testing.T, dbPath string) string {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	rows, err := plain.Query(`SELECT state_key || '=' || state_value FROM runtime_state ORDER BY state_key`)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var lines []string
 	for rows.Next() {
 		var line string
@@ -295,7 +296,7 @@ func queryUserVersion(t *testing.T, dbPath string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var version int
 	if err := plain.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)
@@ -311,7 +312,7 @@ func seedFatalJobField(t *testing.T, dbPath, field string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	ctx := context.Background()
 	jobInsert := func(jobID, mode, status string) {
 		query := `INSERT INTO external_agent_jobs (
@@ -374,9 +375,9 @@ func seedActivationRow(t *testing.T, plain *sql.DB, jobID, terminalStatus, notif
 }
 
 func (l *upgradeLog) lastWithPrefix(prefix string) string {
-	for i := len(l.events) - 1; i >= 0; i-- {
-		if strings.HasPrefix(l.events[i], prefix) {
-			return l.events[i]
+	for _, v := range slices.Backward(l.events) {
+		if strings.HasPrefix(v, prefix) {
+			return v
 		}
 	}
 	return ""

@@ -260,8 +260,7 @@ func validateCanvasTables(content string) error {
 }
 
 func isAmbiguous(err error) bool {
-	var createErr *port.CanvasCreateError
-	if errors.As(err, &createErr) {
+	if createErr, ok := errors.AsType[*port.CanvasCreateError](err); ok {
 		return createErr.Ambiguous
 	}
 	if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {

@@ -108,7 +108,7 @@ func (s *KnowledgeIndexSourceStore) ListTruthIdentities(ctx context.Context, kin
 	if err != nil {
 		return nil, fmt.Errorf("%w: list truth identities: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	identities := make([]port.KnowledgeTruthIdentity, 0, limit)
 	for rows.Next() {
 		var identity port.KnowledgeTruthIdentity

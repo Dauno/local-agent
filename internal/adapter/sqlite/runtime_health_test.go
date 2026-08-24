@@ -36,7 +36,7 @@ func TestCheckSQLiteRuntimeReadOnlyDoesNotChangeJournalMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("OpenReadOnly() = %v", err)
 	}
-	defer ro.Close()
+	defer func() { _ = ro.Close() }()
 
 	health, err := ro.CheckSQLiteRuntime(ctx)
 	if err != nil {
@@ -53,7 +53,7 @@ func TestCheckSQLiteRuntimeReadOnlyDoesNotChangeJournalMode(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open verification connection: %v", err)
 	}
-	defer verify.Close()
+	defer func() { _ = verify.Close() }()
 	var finalMode string
 	if err := verify.QueryRowContext(ctx, `PRAGMA journal_mode`).Scan(&finalMode); err != nil {
 		t.Fatalf("read final journal_mode: %v", err)
@@ -72,7 +72,7 @@ func TestCheckSQLiteRuntimeReportsPoolAndPragmas(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Create() = %v", err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 
 	health, err := store.CheckSQLiteRuntime(ctx)
 	if err != nil {

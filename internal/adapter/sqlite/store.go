@@ -135,7 +135,7 @@ func (s *Store) RecentMessages(
 	if err != nil {
 		return nil, fmt.Errorf("read recent conversation messages: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 
 	messages := make([]domain.Message, 0, limit)
 	for rows.Next() {
@@ -386,7 +386,7 @@ func (s *Store) ReconcileAssistantExchanges(ctx context.Context, finder port.Ass
 	if err != nil {
 		return fmt.Errorf("select prepared assistant exchange intents: %w", err)
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var intentIDs []string
 	for rows.Next() {
 		var intentID string
@@ -535,10 +535,6 @@ func decodeSourceMessages(sourceMessagesJSON string, assistant domain.Message) (
 	}
 	source[len(source)-1] = assistant
 	return source, nil
-}
-
-func (i assistantExchangeIntent) sourceWithAssistant(assistant domain.Message) ([]domain.Message, error) {
-	return decodeSourceMessages(i.SourceMessages, assistant)
 }
 
 func appendMessageTx(ctx context.Context, tx *sql.Tx, metadata domain.ConversationMetadata, message domain.Message, retain int) error {

@@ -555,7 +555,7 @@ func (r *Retriever) buildFrameCard(ctx context.Context, request domain.Knowledge
 			// are excluded and cleaned up; they never fall back to mutable
 			// content.
 			_, _ = r.queue.Enqueue(ctx, domain.KnowledgeRetrievalDocument, string(document.ID))
-			return nil, "", nil
+			return nil, "", nil //nolint:nilerr // documents are excluded on failure, not treated as request errors
 		}
 		redacted := content
 		if r.redact != nil {

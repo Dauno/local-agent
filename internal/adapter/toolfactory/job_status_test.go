@@ -14,8 +14,6 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
-func boolPtr(value bool) *bool { return &value }
-
 // projectionExternalJobReader is a stub external-agent reader that also
 // implements the optional status projection contract.
 type projectionExternalJobReader struct {
@@ -35,7 +33,7 @@ func TestJobStatusJSONContract(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 41, 2, 0, time.UTC)
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
 	reader := &projectionExternalJobReader{
-		stubExternalJobReader: stubExternalJobReader{job: &domain.ExternalAgentJob{ID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1, ACPSessionID: "ses_full_identity_0123456789"}},
+		job: &domain.ExternalAgentJob{ID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1, ACPSessionID: "ses_full_identity_0123456789"},
 		view: &domain.ExternalAgentJobStatusView{
 			JobID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1,
 			ACPSessionID: "ses_full_identity_0123456789",
@@ -174,7 +172,7 @@ func TestJobResultToolsSurfaceOnlyBoundedResultErrorCodes(t *testing.T) {
 				},
 			} {
 				t.Run(testCase.name, func(t *testing.T) {
-					reader := resultErrorExternalJobReader{stubExternalJobReader: stubExternalJobReader{job: &domain.ExternalAgentJob{ID: "job_tool", Status: domain.JobCompleted, StatusRevision: 4}}, err: testCase.err}
+					reader := resultErrorExternalJobReader{job: &domain.ExternalAgentJob{ID: "job_tool", Status: domain.JobCompleted, StatusRevision: 4}, err: testCase.err}
 					factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
 					tools, err := factory.ToolsForInvocation("U12345678", domain.ConversationKey("slack:T12345678:dm:D12345678"))
 					if err != nil {

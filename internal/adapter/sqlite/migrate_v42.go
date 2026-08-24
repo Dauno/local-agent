@@ -205,7 +205,7 @@ func v42ProtectOrRemoveCuratedDocuments(ctx context.Context, tx *sql.Tx) error {
 	for rows.Next() {
 		var row curatedDocumentRow
 		if scanErr := rows.Scan(&row.id, &row.scopeKind, &row.scopeID, &row.digest, &row.handle, &row.status); scanErr != nil {
-			rows.Close()
+			_ = rows.Close()
 			return fmt.Errorf("v42: scan curated document: %w", scanErr)
 		}
 		candidates = append(candidates, row)
@@ -213,7 +213,7 @@ func v42ProtectOrRemoveCuratedDocuments(ctx context.Context, tx *sql.Tx) error {
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("v42: list curated documents: %w", err)
 	}
-	rows.Close()
+	_ = rows.Close()
 
 	now := time.Now().UTC()
 	removedAny := false

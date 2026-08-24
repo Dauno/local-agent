@@ -212,7 +212,7 @@ func SerializeCSV(headers []string, rows [][]string) ([]byte, error) {
 	if err := writer.Write(headers); err != nil {
 		return nil, fmt.Errorf("write CSV headers: %w", err)
 	}
-	writer.WriteAll(rows)
+	_ = writer.WriteAll(rows)
 	if err := writer.Error(); err != nil {
 		return nil, fmt.Errorf("write CSV rows: %w", err)
 	}

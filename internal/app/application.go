@@ -130,15 +130,13 @@ func schemaLockFailure(err error) error {
 // outside [33, 42] maps to the terminal message that never recommends
 // db upgrade for a file db upgrade itself refuses (FIND-179).
 func schemaOpenFailure(err error) error {
-	var upgrade *adaptersqlite.SchemaUpgradeRequiredError
-	if errors.As(err, &upgrade) {
+	if upgrade, ok := errors.AsType[*adaptersqlite.SchemaUpgradeRequiredError](err); ok {
 		if upgrade.Found >= rollout.MinSourceVersion && upgrade.Found <= rollout.MaxSourceVersion {
 			return errors.New(schemaBehindMessage)
 		}
 		return newTerminalSchemaError(rollout.ErrUnsupportedSourceSchema, upgrade.Found)
 	}
-	var future *adaptersqlite.FutureSchemaError
-	if errors.As(err, &future) {
+	if future, ok := errors.AsType[*adaptersqlite.FutureSchemaError](err); ok {
 		return newTerminalSchemaError(rollout.ErrFutureSchema, future.Found)
 	}
 	return err
@@ -267,7 +265,7 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 	cfg, err := config.Load(configPath)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return "", "", errors.New("Configuration not found. Run: local-agent init")
+			return "", "", errors.New("configuration not found. Run: local-agent init")
 		}
 		return "", "", err
 	}
@@ -334,7 +332,7 @@ func (a *Application) InspectJob(ctx context.Context, jobID string) (*domain.Ext
 	if err != nil {
 		return nil, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	jobStore := adaptersqlite.NewExternalAgentJobStore(store)
 	view, err := jobStore.InspectJob(ctx, jobID)
 	if err != nil || view == nil {
@@ -352,10 +350,7 @@ func (a *Application) InspectJob(ctx context.Context, jobID string) (*domain.Ext
 			LastMeaningfulProgressAt: view.LastMeaningfulProgressAt, PromptStartedAt: view.PromptStartedAt,
 		}, now, time.Duration(cfg.ACP.ProgressWarningSeconds)*time.Second, nil, isTerminalInspectionStatus(view.Status))
 		if !view.PromptStartedAt.IsZero() {
-			elapsed := now.Sub(view.PromptStartedAt)
-			if elapsed < 0 {
-				elapsed = 0
-			}
+			elapsed := max(now.Sub(view.PromptStartedAt), 0)
 			view.PromptElapsedSeconds = int64(elapsed / time.Second)
 		}
 	}
@@ -433,7 +428,7 @@ func (a *Application) ResetState(ctx context.Context) error {
 		}
 	}
 
-	fmt.Fprintf(a.logOutput, "State reset complete. Fresh database initialized and memory projections deleted.\n")
+	_, _ = fmt.Fprintf(a.logOutput, "State reset complete. Fresh database initialized and memory projections deleted.\n")
 	return nil
 }
 
@@ -499,7 +494,7 @@ func (jobStoreChecker) CheckExternalAgentJobs(ctx context.Context, path string) 
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckExternalAgentJobStore(ctx)
 }
 
@@ -508,7 +503,7 @@ func (jobStoreChecker) CheckExternalAgentActivationHealth(ctx context.Context, p
 	if err != nil {
 		return domain.ExternalAgentJobActivationHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	return jobs.ActivationHealth(ctx, time.Now().UTC(), 5*time.Minute)
 }
@@ -518,7 +513,7 @@ func (jobStoreChecker) CheckExternalAgentResultIdentityHealth(ctx context.Contex
 	if err != nil {
 		return domain.ExternalAgentJobIdentityHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	return jobs.IdentityHealth(ctx)
 }
@@ -530,7 +525,7 @@ func (knowledgeChecker) CheckKnowledgeRetrievalState(ctx context.Context, path s
 	if err != nil {
 		return domain.KnowledgeRetrievalHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckKnowledgeRetrievalState(ctx)
 }
 
@@ -541,7 +536,7 @@ func (resultRetentionChecker) CheckResultRetention(ctx context.Context, path str
 	if err != nil {
 		return domain.ResultRetentionHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckResultRetention(ctx, ages, now)
 }
 
@@ -552,7 +547,7 @@ func (resultAnalysisChecker) CheckResultAnalysisState(ctx context.Context, path 
 	if err != nil {
 		return domain.ResultAnalysisHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckResultAnalysisState(ctx)
 }
 
@@ -566,7 +561,7 @@ func (sqliteRuntimeChecker) CheckSQLiteRuntime(ctx context.Context, path string)
 	if err != nil {
 		return domain.SQLiteRuntimeHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckSQLiteRuntime(ctx)
 }
 
@@ -577,7 +572,7 @@ func (recoverableReferenceChecker) CheckRecoverableReferenceHealth(ctx context.C
 	if err != nil {
 		return domain.RecoverableReferenceHealth{}, err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	return store.CheckRecoverableReferenceHealth(ctx)
 }
 
@@ -590,7 +585,7 @@ func (databaseChecker) CheckDatabase(ctx context.Context, path string) error {
 	if err != nil {
 		return err
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	var outcome string
 	if err := store.DB().QueryRowContext(ctx, "PRAGMA integrity_check").Scan(&outcome); err != nil {
 		return fmt.Errorf("SQLite integrity check: %w", err)

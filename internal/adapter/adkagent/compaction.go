@@ -158,7 +158,6 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 			}
 			if candidateChars <= remaining {
 				summary, summaryChars = candidate, candidateChars
-				remaining -= candidateChars
 				diagnostics.SummaryPresent = true
 				diagnostics.SummaryCoveredOrdinal = request.ExistingSummaryCoveredOrdinal
 			} else {

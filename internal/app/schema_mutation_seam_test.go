@@ -30,7 +30,7 @@ type seamLocker struct{ log *eventLog }
 
 func (l seamLocker) AcquireExclusive(databasePath string) (rollout.Lock, error) {
 	l.log.record("lock:" + filepath.Base(databasePath))
-	return seamLock{log: l.log}, nil
+	return seamLock(l), nil
 }
 
 type seamLock struct{ log *eventLog }
@@ -252,7 +252,7 @@ func TestSeamContentionRecordsNoDatabaseEvents(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	if err := plain.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil || mode != "delete" {
 		t.Fatalf("journal_mode=%q err=%v, want delete untouched on every refused path", mode, err)
 	}
@@ -390,7 +390,7 @@ func probeUserVersion(t *testing.T, dbPath string) int {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer plain.Close()
+	defer func() { _ = plain.Close() }()
 	var version int
 	if err := plain.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		t.Fatal(err)

@@ -111,7 +111,7 @@ func readKnowledgeProjectionSnapshot(ctx context.Context, tx *sql.Tx) (port.Know
 		var ref port.KnowledgeEvidenceRef
 		var claimID, kind string
 		if scanErr := evidenceRows.Scan(&claimID, &ref.RevisionNumber, &kind, &ref.ExchangeTS); scanErr != nil {
-			evidenceRows.Close()
+			_ = evidenceRows.Close()
 			return port.KnowledgeSnapshot{}, fmt.Errorf("scan knowledge evidence for snapshot: %v", scanErr)
 		}
 		ref.ClaimID = domain.KnowledgeClaimID(claimID)
@@ -119,7 +119,7 @@ func readKnowledgeProjectionSnapshot(ctx context.Context, tx *sql.Tx) (port.Know
 		snapshot.Evidence = append(snapshot.Evidence, ref)
 	}
 	if err := evidenceRows.Err(); err != nil {
-		evidenceRows.Close()
+		_ = evidenceRows.Close()
 		return port.KnowledgeSnapshot{}, fmt.Errorf("iterate knowledge evidence for snapshot: %v", err)
 	}
 	if err := evidenceRows.Close(); err != nil {

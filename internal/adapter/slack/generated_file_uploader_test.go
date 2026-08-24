@@ -31,7 +31,7 @@ func TestGeneratedFileUploaderUsesExternalUploadFlow(t *testing.T) {
 				t.Errorf("FormFile() error: %v", err)
 				return
 			}
-			defer file.Close()
+			defer func() { _ = file.Close() }()
 			uploaded, _ = io.ReadAll(file)
 			_, _ = w.Write([]byte("ok"))
 		case "/files.completeUploadExternal":

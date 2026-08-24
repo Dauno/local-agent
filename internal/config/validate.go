@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -62,81 +62,89 @@ func (e *ValidationError) Has(field string) bool {
 // Validate checks cfg without mutating it and reports all actionable problems.
 func Validate(cfg Config) error {
 	var problems []FieldError
-	add := func(field, problem string) {
-		problems = append(problems, FieldError{Field: field, Problem: problem})
-	}
-	requireText := func(field, value string) {
-		if strings.TrimSpace(value) == "" {
-			add(field, "must not be empty")
-		}
-	}
-
 	requirePath(&problems, "state.dir", cfg.State.Dir)
 	requirePath(&problems, "state.db", cfg.State.DB)
+	validateContext(&problems, cfg)
+	validateRuntimeAndSlack(&problems, cfg)
+	validateOrchestration(&problems, cfg)
 
+	if len(problems) > 0 {
+		return &ValidationError{Fields: problems}
+	}
+	return nil
+}
+
+func validateContext(problems *[]FieldError, cfg Config) {
 	if cfg.Context.MaxMessages <= 0 {
-		add("context.max_messages", "must be greater than zero")
+		addConfigProblem(problems, "context.max_messages", "must be greater than zero")
 	}
 	if cfg.Context.MaxChars <= 0 {
-		add("context.max_chars", "must be greater than zero")
+		addConfigProblem(problems, "context.max_chars", "must be greater than zero")
 	}
 	if cfg.Context.RetainMessagesPerConversation <= 0 {
-		add("context.retain_messages_per_conversation", "must be greater than zero")
+		addConfigProblem(problems, "context.retain_messages_per_conversation", "must be greater than zero")
 	}
 	if cfg.Context.ModelBudget != nil {
-		validateModelBudget(&problems, *cfg.Context.ModelBudget)
+		validateModelBudget(problems, *cfg.Context.ModelBudget)
 	} else {
-		add("context.model_budget", "must be configured")
+		addConfigProblem(problems, "context.model_budget", "must be configured")
 	}
 	if cfg.Context.RecoverableResults != nil {
-		validateRecoverableResults(&problems, *cfg.Context.RecoverableResults)
+		validateRecoverableResults(problems, *cfg.Context.RecoverableResults)
 	} else {
-		add("context.recoverable_results", "must be configured")
+		addConfigProblem(problems, "context.recoverable_results", "must be configured")
 	}
 	if cfg.Context.ContextFeatures == nil {
-		add("context.context_features", "must be configured")
+		addConfigProblem(problems, "context.context_features", "must be configured")
 	} else if cfg.Context.ContextFeatures.ModelBudgetEnabled && !cfg.Context.ContextFeatures.RecoverableResultsEnabled {
-		add("context.context_features.recoverable_results_enabled", "must be enabled when model_budget_enabled is enabled")
+		addConfigProblem(problems, "context.context_features.recoverable_results_enabled", "must be enabled when model_budget_enabled is enabled")
 	}
 	if cfg.Context.ADKCompaction != nil {
-		validateADKCompaction(&problems, *cfg.Context.ADKCompaction)
+		validateADKCompaction(problems, *cfg.Context.ADKCompaction)
 	}
 	if cfg.CodeIntelligence == nil {
-		add("code_intelligence", "must be configured")
+		addConfigProblem(problems, "code_intelligence", "must be configured")
 	} else if cfg.CodeIntelligence.Enabled {
 		if !cfg.Sandbox.Enabled {
-			add("code_intelligence.enabled", "requires sandbox.enabled")
+			addConfigProblem(problems, "code_intelligence.enabled", "requires sandbox.enabled")
 		}
 		if cfg.Context.ContextFeatures == nil || !cfg.Context.ContextFeatures.RecoverableResultsEnabled {
-			add("code_intelligence.enabled", "requires context.context_features.recoverable_results_enabled")
+			addConfigProblem(problems, "code_intelligence.enabled", "requires context.context_features.recoverable_results_enabled")
 		}
 		if cfg.CodeIntelligence.MaxProcesses <= 0 {
-			add("code_intelligence.max_processes", "must be greater than zero when enabled")
+			addConfigProblem(problems, "code_intelligence.max_processes", "must be greater than zero when enabled")
 		}
 		if cfg.CodeIntelligence.InitTimeoutSeconds <= 0 {
-			add("code_intelligence.initialization_timeout_seconds", "must be greater than zero when enabled")
+			addConfigProblem(problems, "code_intelligence.initialization_timeout_seconds", "must be greater than zero when enabled")
 		}
 		if cfg.CodeIntelligence.RequestTimeoutSeconds <= 0 {
-			add("code_intelligence.request_timeout_seconds", "must be greater than zero when enabled")
+			addConfigProblem(problems, "code_intelligence.request_timeout_seconds", "must be greater than zero when enabled")
 		}
 	}
+}
 
+func validateRuntimeAndSlack(problems *[]FieldError, cfg Config) {
+	requireText := func(field, value string) {
+		if strings.TrimSpace(value) == "" {
+			addConfigProblem(problems, field, "must not be empty")
+		}
+	}
 	switch cfg.Runtime.LogLevel {
 	case "debug", "info", "warn", "error":
 	default:
-		add("runtime.log_level", "must be one of debug, info, warn, or error")
+		addConfigProblem(problems, "runtime.log_level", "must be one of debug, info, warn, or error")
 	}
 	if cfg.Runtime.ModelTimeoutSeconds < 0 {
-		add("runtime.model_timeout_seconds", "must be non-negative (0 disables the application-level timeout)")
+		addConfigProblem(problems, "runtime.model_timeout_seconds", "must be non-negative (0 disables the application-level timeout)")
 	}
 	if cfg.Runtime.SlackAPITimeoutSeconds < 0 {
-		add("runtime.slack_api_timeout_seconds", "must be non-negative")
+		addConfigProblem(problems, "runtime.slack_api_timeout_seconds", "must be non-negative")
 	}
 	if cfg.Runtime.MaxConcurrentModelCalls <= 0 {
-		add("runtime.max_concurrent_model_calls", "must be greater than zero")
+		addConfigProblem(problems, "runtime.max_concurrent_model_calls", "must be greater than zero")
 	}
 	if cfg.Runtime.ShutdownGraceSeconds <= 0 || cfg.Runtime.ShutdownGraceSeconds > 3600 {
-		add("runtime.shutdown_grace_seconds", "must be between 1 and 3600")
+		addConfigProblem(problems, "runtime.shutdown_grace_seconds", "must be between 1 and 3600")
 	}
 	requireText("runtime.busy_message", cfg.Runtime.BusyMessage)
 	requireText("runtime.model_error_message", cfg.Runtime.ModelErrorMessage)
@@ -144,177 +152,174 @@ func Validate(cfg Config) error {
 	requireText("slack.app_name", cfg.Slack.AppName)
 	requireText("slack.bot_display_name", cfg.Slack.BotDisplayName)
 	requireText("slack.unauthorized_message", cfg.Slack.UnauthorizedMessage)
-	validateIDs(&problems, "slack.allowed_user_ids", cfg.Slack.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
-	validateIDs(&problems, "slack.allowed_team_ids", cfg.Slack.AllowedTeamIDs, slackTeamIDPattern, "a plausible Slack team ID beginning with T")
-	validateIDs(&problems, "slack.allowed_channel_ids", cfg.Slack.AllowedChannelIDs, slackChannelIDPattern, "a plausible Slack public or private channel ID beginning with C or G")
+	validateIDs(problems, "slack.allowed_user_ids", cfg.Slack.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
+	validateIDs(problems, "slack.allowed_team_ids", cfg.Slack.AllowedTeamIDs, slackTeamIDPattern, "a plausible Slack team ID beginning with T")
+	validateIDs(problems, "slack.allowed_channel_ids", cfg.Slack.AllowedChannelIDs, slackChannelIDPattern, "a plausible Slack public or private channel ID beginning with C or G")
 	if (cfg.Slack.StandardAgent.ProgressEnabled || cfg.Slack.StandardAgent.PromptsEnabled || cfg.Slack.StandardAgent.StreamingEnabled) && !cfg.Slack.StandardAgent.ThreadedDM {
-		add("slack.standard_agent.threaded_dm", "must be true when progress, prompts, or streaming are enabled")
+		addConfigProblem(problems, "slack.standard_agent.threaded_dm", "must be true when progress, prompts, or streaming are enabled")
 	}
 	if cfg.Slack.StandardAgent.UpdateIntervalSeconds < 3 {
-		add("slack.standard_agent.update_interval_seconds", "must be at least 3")
+		addConfigProblem(problems, "slack.standard_agent.update_interval_seconds", "must be at least 3")
 	}
 	if len(cfg.Slack.StandardAgent.SuggestedPrompts) > 5 {
-		add("slack.standard_agent.suggested_prompts", "must contain at most 5 prompts")
+		addConfigProblem(problems, "slack.standard_agent.suggested_prompts", "must contain at most 5 prompts")
 	}
 	if cfg.Slack.StandardAgent.PromptsEnabled && len(cfg.Slack.StandardAgent.SuggestedPrompts) == 0 {
-		add("slack.standard_agent.suggested_prompts", "must contain at least one prompt when prompts are enabled")
+		addConfigProblem(problems, "slack.standard_agent.suggested_prompts", "must contain at least one prompt when prompts are enabled")
 	}
 	for index, prompt := range cfg.Slack.StandardAgent.SuggestedPrompts {
 		field := fmt.Sprintf("slack.standard_agent.suggested_prompts[%d]", index)
 		if strings.TrimSpace(prompt) == "" {
-			add(field, "must not be empty")
+			addConfigProblem(problems, field, "must not be empty")
 		} else if len([]rune(prompt)) > 200 {
-			add(field, "must not exceed 200 Unicode code points")
+			addConfigProblem(problems, field, "must not exceed 200 Unicode code points")
 		}
 		if strings.ContainsAny(prompt, "\r\n\x00") {
-			add(field, "must be a single line without NUL bytes")
+			addConfigProblem(problems, field, "must be a single line without NUL bytes")
 		}
 	}
-	validateProgressLabels(&problems, cfg.Slack.StandardAgent.ProgressLabels)
-	validateIDs(&problems, "opencode.management.allowed_user_ids", cfg.OpenCode.Management.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
-	validateACP(&problems, cfg.ACP)
+	validateProgressLabels(problems, cfg.Slack.StandardAgent.ProgressLabels)
+	validateIDs(problems, "opencode.management.allowed_user_ids", cfg.OpenCode.Management.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
+	validateACP(problems, cfg.ACP)
 
 	const maxFileBytes = 5 * 1024 * 1024
 	const maxFileChars = 20_000
 	if cfg.Slack.Files.MaxBytesPerFile <= 0 {
-		add("slack.files.max_bytes_per_file", "must be greater than zero")
+		addConfigProblem(problems, "slack.files.max_bytes_per_file", "must be greater than zero")
 	} else if cfg.Slack.Files.MaxBytesPerFile > maxFileBytes {
-		add("slack.files.max_bytes_per_file", fmt.Sprintf("must not exceed %d", maxFileBytes))
+		addConfigProblem(problems, "slack.files.max_bytes_per_file", fmt.Sprintf("must not exceed %d", maxFileBytes))
 	}
 	if cfg.Slack.Files.MaxProcessedChars <= 0 {
-		add("slack.files.max_processed_chars", "must be greater than zero")
+		addConfigProblem(problems, "slack.files.max_processed_chars", "must be greater than zero")
 	} else if cfg.Slack.Files.MaxProcessedChars > maxFileChars {
-		add("slack.files.max_processed_chars", fmt.Sprintf("must not exceed %d", maxFileChars))
+		addConfigProblem(problems, "slack.files.max_processed_chars", fmt.Sprintf("must not exceed %d", maxFileChars))
 	}
 	if cfg.Slack.Files.TranscriptionProfile != "" && !validProviderProfileReference(cfg.Slack.Files.TranscriptionProfile) {
-		add("slack.files.transcription_profile", "must use provider/profile syntax without whitespace")
+		addConfigProblem(problems, "slack.files.transcription_profile", "must use provider/profile syntax without whitespace")
 	}
 	if cfg.Slack.Files.TranscriptionTimeoutSeconds <= 0 {
-		add("slack.files.transcription_timeout_seconds", "must be greater than zero")
+		addConfigProblem(problems, "slack.files.transcription_timeout_seconds", "must be greater than zero")
 	}
 
 	if cfg.Slack.Context.Enabled {
 		if cfg.Slack.Context.MaxChars <= 0 {
-			add("slack.context.max_chars", "must be greater than zero when enabled")
+			addConfigProblem(problems, "slack.context.max_chars", "must be greater than zero when enabled")
 		}
 		if cfg.Slack.Context.TimeoutSeconds <= 0 {
-			add("slack.context.timeout_seconds", "must be greater than zero when enabled")
+			addConfigProblem(problems, "slack.context.timeout_seconds", "must be greater than zero when enabled")
 		} else if cfg.Runtime.SlackAPITimeoutSeconds > 0 && cfg.Slack.Context.TimeoutSeconds > cfg.Runtime.SlackAPITimeoutSeconds {
-			add("slack.context.timeout_seconds", "must not exceed runtime.slack_api_timeout_seconds when that timeout is enabled")
+			addConfigProblem(problems, "slack.context.timeout_seconds", "must not exceed runtime.slack_api_timeout_seconds when that timeout is enabled")
 		}
 		if cfg.Slack.Context.ProfileCacheTTLMinutes <= 0 {
-			add("slack.context.profile_cache_ttl_minutes", "must be greater than zero when enabled")
+			addConfigProblem(problems, "slack.context.profile_cache_ttl_minutes", "must be greater than zero when enabled")
 		}
 		if cfg.Slack.Context.ConversationCacheTTLMinutes <= 0 {
-			add("slack.context.conversation_cache_ttl_minutes", "must be greater than zero when enabled")
+			addConfigProblem(problems, "slack.context.conversation_cache_ttl_minutes", "must be greater than zero when enabled")
 		}
 	} else {
 		if cfg.Slack.Context.MaxChars < 0 {
-			add("slack.context.max_chars", "must not be negative")
+			addConfigProblem(problems, "slack.context.max_chars", "must not be negative")
 		}
 		if cfg.Slack.Context.TimeoutSeconds < 0 {
-			add("slack.context.timeout_seconds", "must not be negative")
+			addConfigProblem(problems, "slack.context.timeout_seconds", "must not be negative")
 		}
 		if cfg.Slack.Context.ProfileCacheTTLMinutes < 0 {
-			add("slack.context.profile_cache_ttl_minutes", "must not be negative")
+			addConfigProblem(problems, "slack.context.profile_cache_ttl_minutes", "must not be negative")
 		}
 		if cfg.Slack.Context.ConversationCacheTTLMinutes < 0 {
-			add("slack.context.conversation_cache_ttl_minutes", "must not be negative")
+			addConfigProblem(problems, "slack.context.conversation_cache_ttl_minutes", "must not be negative")
 		}
 	}
+}
 
+func validateOrchestration(problems *[]FieldError, cfg Config) {
 	if cfg.Orchestration.Workstreams.MaxNonTerminalTasks <= 0 || cfg.Orchestration.Workstreams.MaxNonTerminalTasks > domain.HardMaxWorkstreamTasks {
-		add("orchestration.workstreams.max_non_terminal_tasks", fmt.Sprintf("must be between 1 and %d", domain.HardMaxWorkstreamTasks))
+		addConfigProblem(problems, "orchestration.workstreams.max_non_terminal_tasks", fmt.Sprintf("must be between 1 and %d", domain.HardMaxWorkstreamTasks))
 	}
 	if cfg.Orchestration.Workstreams.MaxDependenciesPerTask <= 0 || cfg.Orchestration.Workstreams.MaxDependenciesPerTask > domain.HardMaxWorkstreamDependencies {
-		add("orchestration.workstreams.max_dependencies_per_task", fmt.Sprintf("must be between 1 and %d", domain.HardMaxWorkstreamDependencies))
+		addConfigProblem(problems, "orchestration.workstreams.max_dependencies_per_task", fmt.Sprintf("must be between 1 and %d", domain.HardMaxWorkstreamDependencies))
 	}
 	if cfg.Orchestration.Workstreams.Enabled && len(cfg.Sandbox.Projects) == 0 {
-		add("orchestration.workstreams", "requires at least one registered sandbox project when enabled")
+		addConfigProblem(problems, "orchestration.workstreams", "requires at least one registered sandbox project when enabled")
 	}
 	if cfg.Orchestration.Workstreams.SnapshotBudgetTokens < 1 || cfg.Orchestration.Workstreams.SnapshotBudgetTokens > domain.HardWorkstreamSnapshotBudgetTokens {
-		add("orchestration.workstreams.snapshot_budget_tokens", fmt.Sprintf("must be between 1 and %d", domain.HardWorkstreamSnapshotBudgetTokens))
+		addConfigProblem(problems, "orchestration.workstreams.snapshot_budget_tokens", fmt.Sprintf("must be between 1 and %d", domain.HardWorkstreamSnapshotBudgetTokens))
 	}
 	if cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep != 1 {
-		add("orchestration.result_handles.max_producing_calls_per_step", "must equal 1")
+		addConfigProblem(problems, "orchestration.result_handles.max_producing_calls_per_step", "must equal 1")
 	}
 	if cfg.Orchestration.ResultHandles.ProducingCallReserveTokens <= 0 {
-		add("orchestration.result_handles.producing_call_reserve_tokens", "must be greater than zero")
+		addConfigProblem(problems, "orchestration.result_handles.producing_call_reserve_tokens", "must be greater than zero")
 	}
 	if cfg.Orchestration.ResultHandles.Retention.ContextDays < 1 || cfg.Orchestration.ResultHandles.Retention.ContextDays > domain.HardMaxResultRetentionDays {
-		add("orchestration.result_handles.retention.context_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+		addConfigProblem(problems, "orchestration.result_handles.retention.context_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
 	}
 	if cfg.Orchestration.ResultHandles.Retention.ConversationDays < 1 || cfg.Orchestration.ResultHandles.Retention.ConversationDays > domain.HardMaxResultRetentionDays {
-		add("orchestration.result_handles.retention.conversation_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+		addConfigProblem(problems, "orchestration.result_handles.retention.conversation_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
 	}
 	if cfg.Orchestration.ResultHandles.Retention.WorkstreamDays < 1 || cfg.Orchestration.ResultHandles.Retention.WorkstreamDays > domain.HardMaxResultRetentionDays {
-		add("orchestration.result_handles.retention.workstream_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+		addConfigProblem(problems, "orchestration.result_handles.retention.workstream_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
 	}
 	if cfg.Orchestration.ResultHandles.Retention.ExportedDays < 1 || cfg.Orchestration.ResultHandles.Retention.ExportedDays > domain.HardMaxResultRetentionDays {
-		add("orchestration.result_handles.retention.exported_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
+		addConfigProblem(problems, "orchestration.result_handles.retention.exported_days", fmt.Sprintf("must be between 1 and %d", domain.HardMaxResultRetentionDays))
 	}
 	if cfg.Orchestration.Knowledge.ProjectionIntervalSeconds <= 0 {
-		add("orchestration.knowledge.projection_interval_seconds", "must be greater than zero")
+		addConfigProblem(problems, "orchestration.knowledge.projection_interval_seconds", "must be greater than zero")
 	}
 	if cfg.Orchestration.Knowledge.ProjectionMaxRetries <= 0 {
-		add("orchestration.knowledge.projection_max_retries", "must be greater than zero")
+		addConfigProblem(problems, "orchestration.knowledge.projection_max_retries", "must be greater than zero")
 	}
 	if cfg.Orchestration.Knowledge.ProjectionRetentionDays <= 0 {
-		add("orchestration.knowledge.projection_retention_days", "must be greater than zero")
+		addConfigProblem(problems, "orchestration.knowledge.projection_retention_days", "must be greater than zero")
 	}
-	validateKnowledgeRetrieval(&problems, cfg)
-	validateResultAnalysis(&problems, cfg)
+	validateKnowledgeRetrieval(problems, cfg)
+	validateResultAnalysis(problems, cfg)
 	if cfg.Sandbox.Enabled {
 		if len(cfg.Sandbox.Projects) == 0 {
-			add("sandbox.projects", "must contain at least one registered project when enabled")
+			addConfigProblem(problems, "sandbox.projects", "must contain at least one registered project when enabled")
 		}
 		for name, path := range cfg.Sandbox.Projects {
 			if strings.TrimSpace(name) == "" || len(name) > 64 || !projectNamePattern.MatchString(name) {
-				add("sandbox.projects", "project names must use 1-64 letters, digits, dots, underscores, or hyphens")
+				addConfigProblem(problems, "sandbox.projects", "project names must use 1-64 letters, digits, dots, underscores, or hyphens")
 			}
-			requirePath(&problems, fmt.Sprintf("sandbox.projects[%q]", name), path)
+			requirePath(problems, fmt.Sprintf("sandbox.projects[%q]", name), path)
 		}
 		if cfg.Sandbox.CommandTimeoutSeconds <= 0 {
-			add("sandbox.command_timeout_seconds", "must be greater than zero when enabled")
+			addConfigProblem(problems, "sandbox.command_timeout_seconds", "must be greater than zero when enabled")
 		}
 		if cfg.Sandbox.MaxOutputBytes <= 0 {
-			add("sandbox.max_output_bytes", "must be greater than zero when enabled")
+			addConfigProblem(problems, "sandbox.max_output_bytes", "must be greater than zero when enabled")
 		}
 	}
 	if cfg.Canvases.Enabled {
 		if cfg.Canvases.MaxTitleChars <= 0 {
-			add("canvases.max_title_chars", "must be greater than zero when enabled")
+			addConfigProblem(problems, "canvases.max_title_chars", "must be greater than zero when enabled")
 		}
 		if cfg.Canvases.MaxContentChars <= 0 {
-			add("canvases.max_content_chars", "must be greater than zero when enabled")
+			addConfigProblem(problems, "canvases.max_content_chars", "must be greater than zero when enabled")
 		}
 		if cfg.Canvases.MaxContentBytes <= 0 {
-			add("canvases.max_content_bytes", "must be greater than zero when enabled")
+			addConfigProblem(problems, "canvases.max_content_bytes", "must be greater than zero when enabled")
 		}
 		if cfg.Canvases.TimeoutSeconds <= 0 {
-			add("canvases.timeout_seconds", "must be greater than zero when enabled")
+			addConfigProblem(problems, "canvases.timeout_seconds", "must be greater than zero when enabled")
 		}
 	}
 	if cfg.Exports.Enabled {
 		if cfg.Exports.MaxFilenameChars <= 0 {
-			add("exports.max_filename_chars", "must be greater than zero when enabled")
+			addConfigProblem(problems, "exports.max_filename_chars", "must be greater than zero when enabled")
 		} else if cfg.Exports.MaxFilenameChars > domain.MaxGeneratedFilenameRunes {
-			add("exports.max_filename_chars", fmt.Sprintf("must not exceed %d", domain.MaxGeneratedFilenameRunes))
+			addConfigProblem(problems, "exports.max_filename_chars", fmt.Sprintf("must not exceed %d", domain.MaxGeneratedFilenameRunes))
 		}
 		if cfg.Exports.MaxContentBytes <= 0 {
-			add("exports.max_content_bytes", "must be greater than zero when enabled")
+			addConfigProblem(problems, "exports.max_content_bytes", "must be greater than zero when enabled")
 		} else if cfg.Exports.MaxContentBytes > domain.MaxGeneratedFileBytes {
-			add("exports.max_content_bytes", fmt.Sprintf("must not exceed %d", domain.MaxGeneratedFileBytes))
+			addConfigProblem(problems, "exports.max_content_bytes", fmt.Sprintf("must not exceed %d", domain.MaxGeneratedFileBytes))
 		}
 		if cfg.Exports.TimeoutSeconds <= 0 {
-			add("exports.timeout_seconds", "must be greater than zero when enabled")
+			addConfigProblem(problems, "exports.timeout_seconds", "must be greater than zero when enabled")
 		}
 	}
-
-	if len(problems) > 0 {
-		return &ValidationError{Fields: problems}
-	}
-	return nil
 }
 
 func validProviderProfileReference(value string) bool {
@@ -577,7 +582,7 @@ func validateProgressLabels(problems *[]FieldError, labels map[domain.ProgressSt
 	for state := range labels {
 		states = append(states, state)
 	}
-	sort.Slice(states, func(i, j int) bool { return states[i] < states[j] })
+	slices.Sort(states)
 	for _, state := range states {
 		label := labels[state]
 		field := fmt.Sprintf("slack.standard_agent.progress_labels[%q]", state)
@@ -752,84 +757,6 @@ func requirePath(problems *[]FieldError, field, value string) {
 	if strings.ContainsRune(value, '\x00') {
 		*problems = append(*problems, FieldError{Field: field, Problem: "must not contain a NUL byte"})
 	}
-}
-
-func validateBaseURL(problems *[]FieldError, value string) {
-	parsed, err := url.Parse(value)
-	if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") {
-		*problems = append(*problems, FieldError{
-			Field:   "model.base_url",
-			Problem: "must be an absolute http or https URL",
-		})
-		return
-	}
-	if parsed.User != nil {
-		*problems = append(*problems, FieldError{
-			Field:   "model.base_url",
-			Problem: "must not contain credentials; configure secrets through environment variables",
-		})
-	}
-	if parsed.Fragment != "" {
-		*problems = append(*problems, FieldError{
-			Field:   "model.base_url",
-			Problem: "must not contain a URL fragment",
-		})
-	}
-	if strings.HasSuffix(strings.TrimRight(parsed.Path, "/"), "/chat/completions") {
-		*problems = append(*problems, FieldError{
-			Field:   "model.base_url",
-			Problem: "must be an API root, not a concrete /chat/completions operation URL",
-		})
-	}
-}
-
-func validateHeaders(problems *[]FieldError, headers map[string]string) {
-	names := make([]string, 0, len(headers))
-	for name := range headers {
-		names = append(names, name)
-	}
-	sort.Strings(names) // Stable validation output also keeps redacted diagnostics stable.
-	for _, name := range names {
-		value := headers[name]
-		field := fmt.Sprintf("model.headers[%q]", name)
-		if !validHeaderName(name) {
-			*problems = append(*problems, FieldError{Field: field, Problem: "must be a valid HTTP header name"})
-		}
-		if strings.ContainsAny(value, "\r\n") {
-			*problems = append(*problems, FieldError{Field: field, Problem: "must not contain a newline"})
-		}
-		if sensitiveHeader(name) {
-			*problems = append(*problems, FieldError{Field: field, Problem: "must not contain credentials; model.headers is non-sensitive"})
-		}
-	}
-}
-
-func sensitiveHeader(name string) bool {
-	switch strings.ToLower(name) {
-	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "api-key":
-		return true
-	default:
-		return false
-	}
-}
-
-func validHeaderName(value string) bool {
-	if value == "" {
-		return false
-	}
-	for i := 0; i < len(value); i++ {
-		char := value[i]
-		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
-			continue
-		}
-		switch char {
-		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
-			continue
-		default:
-			return false
-		}
-	}
-	return true
 }
 
 func validateIDs(problems *[]FieldError, field string, values []string, pattern *regexp.Regexp, expected string) {

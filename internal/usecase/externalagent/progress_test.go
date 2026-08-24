@@ -12,11 +12,10 @@ import (
 )
 
 type fakeProgressStore struct {
-	mu       sync.Mutex
-	writes   []domain.ExternalAgentJobProgress
-	read     *domain.ExternalAgentJobProgress
-	fail     bool
-	terminal bool
+	mu     sync.Mutex
+	writes []domain.ExternalAgentJobProgress
+	read   *domain.ExternalAgentJobProgress
+	fail   bool
 }
 
 func (s *fakeProgressStore) WriteJobProgress(_ context.Context, jobID, owner string, attempt int, progress domain.ExternalAgentJobProgress) error {
@@ -152,7 +151,7 @@ func TestRecorderCoalescesRepeatedChunks(t *testing.T) {
 	recorder := newTestRecorder(store, &fakeRegistry{}, clock, time.Hour)
 	recorder.Start(context.Background())
 	defer recorder.Close()
-	for index := 0; index < 200; index++ {
+	for range 200 {
 		clock.advance(time.Millisecond)
 		recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventMessageChunk})
 	}
@@ -179,7 +178,7 @@ func TestRecorderWarningOncePerSilentEpisode(t *testing.T) {
 	store := &fakeProgressStore{}
 	logger := &recorderLog{}
 	clock := &fakeClock{now: time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)}
-	registry := &fakeRegistry{alive: boolPtr(true)}
+	registry := &fakeRegistry{alive: new(true)}
 	recorder := NewProgressRecorder(store, registry, clock, logger, port.NoopMetricRecorder{}, nil, 2*time.Second, "job_1", "owner_1", 1)
 	recorder.Start(context.Background())
 	defer recorder.Close()
@@ -258,7 +257,7 @@ func TestRecorderNeverBlocksReaderOnSlowSQLite(t *testing.T) {
 	// While the durable write is stuck, the reader path must keep returning
 	// without waiting on SQLite.
 	started := time.Now()
-	for index := 0; index < 200; index++ {
+	for range 200 {
 		recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventMessageChunk})
 	}
 	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
@@ -328,31 +327,31 @@ func TestDeriveProgressHealthTable(t *testing.T) {
 		{
 			name:  "known dead process is disconnected",
 			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
-			alive: boolPtr(false),
+			alive: new(false),
 			want:  domain.ACPHealthDisconnected,
 		},
 		{
 			name:  "recent meaningful progress is active",
 			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastTransportActivityAt: now, LastMeaningfulProgressAt: now.Add(-2 * time.Second)},
-			alive: boolPtr(true),
+			alive: new(true),
 			want:  domain.ACPHealthActive,
 		},
 		{
 			name:  "silent live process is possibly stalled",
 			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseToolRunning, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
-			alive: boolPtr(true),
+			alive: new(true),
 			want:  domain.ACPHealthPossiblyStalled,
 		},
 		{
 			name:  "live process with no inbound frames ever is possibly stalled",
 			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastMeaningfulProgressAt: now.Add(-time.Minute)},
-			alive: boolPtr(true),
+			alive: new(true),
 			want:  domain.ACPHealthPossiblyStalled,
 		},
 		{
 			name:  "transport recent but progress stale is quiet",
 			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastTransportActivityAt: now.Add(-2 * time.Second), LastMeaningfulProgressAt: now.Add(-time.Minute)},
-			alive: boolPtr(true),
+			alive: new(true),
 			want:  domain.ACPHealthQuiet,
 		},
 		{
@@ -374,8 +373,6 @@ func TestDeriveProgressHealthTable(t *testing.T) {
 
 // ExternalAgentJobProgressTemplate keeps the table test self-documenting.
 type ExternalAgentJobProgressTemplate = domain.ExternalAgentJobProgress
-
-func boolPtr(value bool) *bool { return &value }
 
 func waitFor(t *testing.T, condition func() bool) {
 	t.Helper()

@@ -44,7 +44,7 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 	if err != nil {
 		return domain.ExternalAgentJobStatusView{}, schemaOpenFailure(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	jobStore := adaptersqlite.NewExternalAgentJobStore(store)
 	job, err := jobStore.GetJob(ctx, jobID)
 	if err != nil {
