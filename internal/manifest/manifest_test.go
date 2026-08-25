@@ -183,3 +183,19 @@ func TestRenderRejectsInvalidIdentity(t *testing.T) {
 		t.Fatal("CreationURL() accepted an empty manifest")
 	}
 }
+
+// files:write is the scope durable result delivery needs. It used to be gated
+// on the retired AcpAgent class, which left it always off once that class was
+// removed, and a deployment with exports disabled lost the scope silently.
+func TestDurableExternalAgentAloneGrantsFileWrite(t *testing.T) {
+	rendered, err := Render(Identity{
+		AppName: "Local Agent", BotDisplayName: "Dev Agent",
+		ExportsEnabled: false, DurableExternalAgentEnabled: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(rendered, "files:write") {
+		t.Fatalf("manifest without exports must still grant files:write:\n%s", rendered)
+	}
+}

@@ -325,7 +325,16 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	durableExternalAgent := false
 	if defs != nil {
 		for _, definition := range defs.Agents {
-			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
+			// A durable leaf is an external agent on an agent CLI provider. The
+			// retired AcpAgent class used to identify it; keeping that test
+			// after the class was removed left this always false, so the
+			// generated manifest silently dropped the files:write scope that
+			// durable result delivery needs.
+			if definition.ExecutionMode != agentdef.ExecutionModeDurableJob {
+				continue
+			}
+			resolved, resolveErr := defs.ResolveModel(definition.Model)
+			if resolveErr == nil && resolved.IsAgentCLI() {
 				durableExternalAgent = true
 				break
 			}
@@ -936,9 +945,6 @@ func (s *Service) checkDefinitions(report *Report, cfg config.Config, paths conf
 			break
 		}
 		modelRef := agentTool.Model
-		if agentTool.AgentClass == "AcpAgent" {
-			modelRef = agentTool.Runtime
-		}
 		agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
 		if resolveErr != nil {
 			defsErr = fmt.Errorf("resolve agent tool %q model: %w", agentToolName, resolveErr)
@@ -957,9 +963,6 @@ func (s *Service) checkDefinitions(report *Report, cfg config.Config, paths conf
 				continue
 			}
 			modelRef := agentTool.Model
-			if agentTool.AgentClass == "AcpAgent" {
-				modelRef = agentTool.Runtime
-			}
 			agentToolResolved, resolveErr := defs.ResolveModel(modelRef)
 			if resolveErr != nil {
 				defsErr = fmt.Errorf("resolve auto-discovered agent %q model: %w", name, resolveErr)

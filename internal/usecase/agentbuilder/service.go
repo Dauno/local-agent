@@ -39,7 +39,7 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 	switch kind {
 	case domain.AgentKindLLM:
 		if draft.TimeoutSeconds != 0 {
-			return nil, fmt.Errorf("timeout_seconds is only valid for ACP agents")
+			return nil, fmt.Errorf("timeout_seconds is only valid for agent_cli agents")
 		}
 		providerProfile := strings.TrimSpace(draft.ProviderProfile)
 		model := providerProfile
@@ -63,11 +63,11 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 		}
 	case domain.AgentKindAgentCLI:
 		if strings.TrimSpace(draft.Model) != "" {
-			return nil, fmt.Errorf("model is not valid for ACP agents")
+			return nil, fmt.Errorf("model is not valid for agent_cli agents")
 		}
 		runtime := strings.TrimSpace(draft.ProviderProfile)
 		if runtime == "" {
-			return nil, fmt.Errorf("provider_profile is required for ACP agents")
+			return nil, fmt.Errorf("provider_profile is required for agent_cli agents")
 		}
 		if err := validateProviderProfile(defs, kind, runtime); err != nil {
 			return nil, err
@@ -155,13 +155,13 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 	provider := providerName(reference)
 	if kind == domain.AgentKindAgentCLI {
 		if strings.TrimSpace(draft.Model) != "" {
-			return fmt.Errorf("model is not valid for ACP agents")
+			return fmt.Errorf("model is not valid for agent_cli agents")
 		}
 		if err := domain.ValidateExternalAgentAllowlist(provider); err != nil {
 			return err
 		}
 		if candidate.Model != "" || candidate.Confirmation != "required" {
-			return fmt.Errorf("canonical ACP agent has incompatible model or confirmation")
+			return fmt.Errorf("canonical agent_cli agent has incompatible model or confirmation")
 		}
 		expectedMode := defaultMode(draft)
 		if err := domain.ValidateExecutionMode(kind, expectedMode); err != nil {

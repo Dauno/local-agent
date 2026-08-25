@@ -279,7 +279,16 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 	}
 	if defs != nil {
 		for _, definition := range defs.Agents {
-			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
+			// A durable leaf is an external agent on an agent CLI provider. The
+			// retired AcpAgent class used to identify it; keeping that test
+			// after the class was removed left this always false, so the
+			// generated manifest silently dropped the files:write scope that
+			// durable result delivery needs.
+			if definition.ExecutionMode != agentdef.ExecutionModeDurableJob {
+				continue
+			}
+			resolved, resolveErr := defs.ResolveModel(definition.Model)
+			if resolveErr == nil && resolved.IsAgentCLI() {
 				durableExternalAgent = true
 				break
 			}
