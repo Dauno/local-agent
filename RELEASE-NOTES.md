@@ -1,5 +1,12 @@
 # Release Notes
 
+## v0.8.0 (2026-08-24)
+
+- Bumped the toolchain to Go 1.27.0 and updated module dependencies.
+- Bumped ADK to v2.2.0; the crash-boundary event ordering the pin protects is verified unchanged (byte-for-byte identical protocol fixtures against the new version).
+- Applied Go 1.27 modernize rewrites across the codebase and refactored the functions that exceeded the gocyclo complexity threshold.
+- Cleared the golangci-lint backlog (errcheck, unused, nilerr, staticcheck, ineffassign, prealloc); migrated `.golangci.yml` to the v2 config schema.
+
 ## v0.7.0 (2026-08-23)
 
 - Durable workstreams, native result handles, and bounded result analysis support long-running Slack orchestration with restart-safe state.
