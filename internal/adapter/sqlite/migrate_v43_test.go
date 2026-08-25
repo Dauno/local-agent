@@ -55,14 +55,20 @@ func TestTranscriptAssignmentUsesSessionLeaseCAS(t *testing.T) {
 		t.Fatalf("claim = %#v, err = %v", claimed, err)
 	}
 	path := "/home/operator/.codex/sessions/rollout-session-1.jsonl"
-	if err := jobs.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-1", path); err != nil {
+	if err := jobs.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobs.AssignTranscriptPath(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, path); err != nil {
 		t.Fatal(err)
 	}
 	loaded, err := jobs.GetJob(t.Context(), job.ID)
 	if err != nil || loaded == nil || loaded.TranscriptPath != path {
 		t.Fatalf("loaded = %#v, err = %v", loaded, err)
 	}
-	if err := jobs.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-2", strings.Replace(path, "1", "2", 1)); err == nil {
+	if err := jobs.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-2"); err == nil {
 		t.Fatal("a second session assignment bypassed the CAS")
+	}
+	if err := jobs.AssignTranscriptPath(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, strings.Replace(path, "1", "2", 1)); err == nil {
+		t.Fatal("a second transcript assignment bypassed the CAS")
 	}
 }

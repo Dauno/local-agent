@@ -16,6 +16,9 @@ const (
 	// ActivitySessionCreated reports host-owned recovery metadata captured from
 	// the descriptor's session event.
 	ActivitySessionCreated ActivityKind = "session_created"
+	// ActivityTranscriptResolved reports the transcript path once the CLI wrote
+	// it. It arrives after the process exits, never with the session event.
+	ActivityTranscriptResolved ActivityKind = "transcript_resolved"
 )
 
 // Activity is one reported step of a run. Step holds the descriptor-declared
@@ -25,8 +28,9 @@ type Activity struct {
 	Kind ActivityKind
 	Step string
 	PID  int
-	// SessionID and TranscriptPath are set only for ActivitySessionCreated.
-	// They never enter model-visible content.
+	// SessionID is set for ActivitySessionCreated and ActivityTranscriptResolved.
+	// TranscriptPath is set only for the latter. Neither enters model-visible
+	// content.
 	SessionID      string
 	TranscriptPath string
 }

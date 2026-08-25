@@ -404,13 +404,17 @@ type ExternalAgentJobDeliveryInspection struct {
 // locally authorized. Task, actor, conversation, paths, and result content
 // remain excluded.
 type ExternalAgentJobInspection struct {
-	JobID                  string                               `json:"job_id"`
-	Status                 ExternalAgentJobStatus               `json:"status"`
-	StatusRevision         int                                  `json:"status_revision"`
-	ExternalAgentSessionID string                               `json:"acp_session_id"`
-	TranscriptPath         string                               `json:"transcript_path"`
-	FinishedAt             time.Time                            `json:"finished_at"`
-	Deliveries             []ExternalAgentJobDeliveryInspection `json:"deliveries"`
+	JobID                  string                 `json:"job_id"`
+	Provider               string                 `json:"provider"`
+	Profile                string                 `json:"profile"`
+	Status                 ExternalAgentJobStatus `json:"status"`
+	StatusRevision         int                    `json:"status_revision"`
+	ExternalAgentSessionID string                 `json:"acp_session_id"`
+	// TranscriptPath is what the run recorded. An empty value is not proof of
+	// absence: a host that still holds the descriptor can derive the path.
+	TranscriptPath string                               `json:"transcript_path"`
+	FinishedAt     time.Time                            `json:"finished_at"`
+	Deliveries     []ExternalAgentJobDeliveryInspection `json:"deliveries"`
 	// Live projection fields; empty until the projection row exists.
 	Phase                    ExternalAgentProgressPhase  `json:"phase"`
 	Health                   ExternalAgentProgressHealth `json:"health"`

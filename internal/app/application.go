@@ -11,6 +11,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/agentcli"
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsproject"
@@ -317,6 +318,27 @@ func (*Application) Version() string { return buildinfo.String() }
 
 // InspectJob is a local, read-only administrative query. It deliberately
 // avoids runtime composition, Slack credentials, model calls, and migrations.
+// deriveTranscriptPath recovers a transcript the run never recorded, which is
+// every job that crashed before its CLI wrote the file.
+//
+// It is derived, not stored: the session identifier comes from durable state
+// and the glob from the current descriptor. A job whose definition was renamed
+// or removed reports nothing, because no honest source says where to look.
+func deriveTranscriptPath(paths config.Paths, view domain.ExternalAgentJobInspection) string {
+	if view.ExternalAgentSessionID == "" {
+		return ""
+	}
+	defs, err := agentdef.Load(paths.StateDir)
+	if err != nil || defs == nil {
+		return ""
+	}
+	_, resolved, found := durableAgentDescriptor(defs, view.Provider, view.Profile)
+	if !found || resolved.Session == nil {
+		return ""
+	}
+	return agentcli.ResolveTranscriptPath(resolved.Session.Transcript.PathGlob, view.ExternalAgentSessionID)
+}
+
 func (a *Application) InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error) {
 	if strings.TrimSpace(jobID) == "" {
 		return nil, errors.New("job ID is required")
@@ -345,6 +367,9 @@ func (a *Application) InspectJob(ctx context.Context, jobID string) (*domain.Ext
 	view, err := jobStore.InspectJob(ctx, jobID)
 	if err != nil || view == nil {
 		return view, err
+	}
+	if view.TranscriptPath == "" {
+		view.TranscriptPath = deriveTranscriptPath(paths, *view)
 	}
 	// Health and prompt elapsed are derived at read time only when the
 	// durable projection exists; a queued or pre-session job has no

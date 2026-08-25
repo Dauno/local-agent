@@ -101,7 +101,8 @@ func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain
 		}
 		var sessionErr error
 		runCtx := agentcli.WithActivityReporter(ctx, func(activity agentcli.Activity) {
-			if activity.Kind == agentcli.ActivitySessionCreated {
+			switch activity.Kind {
+			case agentcli.ActivitySessionCreated:
 				if recorder != nil {
 					recorder.SetSessionID(activity.SessionID)
 				}
@@ -109,11 +110,17 @@ func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain
 					sessionErr = errors.New("durable external-agent job store is unavailable")
 					return
 				}
-				sessionErr = d.store.AssignExternalAgentSession(ctx, job.ID, job.LeaseOwner, job.Attempt, activity.SessionID, activity.TranscriptPath)
-				return
-			}
-			if recorder != nil {
-				recorder.Record(agentCLIProgressEvent(activity))
+				sessionErr = d.store.AssignExternalAgentSession(ctx, job.ID, job.LeaseOwner, job.Attempt, activity.SessionID)
+			case agentcli.ActivityTranscriptResolved:
+				// Best effort. The path is derived data, so losing it never
+				// fails a run that already produced its result.
+				if d.store != nil {
+					_ = d.store.AssignTranscriptPath(ctx, job.ID, job.LeaseOwner, job.Attempt, activity.TranscriptPath)
+				}
+			default:
+				if recorder != nil {
+					recorder.Record(agentCLIProgressEvent(activity))
+				}
 			}
 		})
 		text, runErr := generateAgentCLIText(runCtx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, job.Task)

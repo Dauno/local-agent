@@ -84,7 +84,7 @@ func TestStatusProjectionAuthorizationHidesIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker_x", 1, "ses_secret_identity", "")
+	_ = jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker_x", 1, "ses_secret_identity")
 	view, err := service.StatusProjection(t.Context(), job.ID, "intruder", job.ConversationKey)
 	if err == nil {
 		t.Fatal("unauthorized projection must fail")

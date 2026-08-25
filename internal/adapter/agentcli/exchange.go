@@ -141,7 +141,21 @@ func (l *LLM) exchangeCommand(ctx context.Context, workingDir string, args []str
 	if err := cmd.Start(); err != nil {
 		return "", classifyStartError(l.command, err)
 	}
+	// The transcript file does not exist yet when the CLI announces its
+	// session, so the path is resolved after the process exits. The session
+	// itself is still reported the moment it arrives, because a crash must
+	// leave a recoverable job behind.
+	capturedSession := ""
 	report := activityReporterFrom(ctx)
+	if report != nil {
+		host := report
+		report = func(activity Activity) {
+			if activity.Kind == ActivitySessionCreated {
+				capturedSession = activity.SessionID
+			}
+			host(activity)
+		}
+	}
 	if report != nil && cmd.Process != nil {
 		report(Activity{Kind: ActivityProcessStarted, PID: cmd.Process.Pid})
 	}
@@ -167,7 +181,21 @@ func (l *LLM) exchangeCommand(ctx context.Context, workingDir string, args []str
 	if waitErr != nil {
 		return "", classifyProcessError(l.command, waitErr, diagnostic)
 	}
+	l.reportTranscript(report, capturedSession)
 	return text, nil
+}
+
+// reportTranscript resolves the transcript once the CLI wrote it. A missing or
+// ambiguous match is clean absence: the host derives the path again on demand.
+func (l *LLM) reportTranscript(report ActivityReporter, sessionID string) {
+	if report == nil || sessionID == "" || l.provider.Session == nil {
+		return
+	}
+	transcript := ResolveTranscriptPath(l.provider.Session.Transcript.PathGlob, sessionID)
+	if transcript == "" {
+		return
+	}
+	report(Activity{Kind: ActivityTranscriptResolved, SessionID: sessionID, TranscriptPath: transcript})
 }
 
 func (l *LLM) buildResumeArgs(workingDir, sessionID string) ([]string, error) {
@@ -359,7 +387,7 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter, expectedSess
 			}
 			capturedSessionID = sessionID
 			if report != nil {
-				report(Activity{Kind: ActivitySessionCreated, SessionID: sessionID, TranscriptPath: l.resolveTranscriptPath(sessionID)})
+				report(Activity{Kind: ActivitySessionCreated, SessionID: sessionID})
 			}
 		}
 		// An ignored type carries nothing this adapter reads. It is skipped
@@ -444,14 +472,17 @@ func validSessionID(value string) bool {
 	return true
 }
 
-// resolveTranscriptPath returns one canonical regular file below the literal
+// ResolveTranscriptPath returns one canonical regular file below the literal
 // root of the trusted descriptor glob. Missing or ambiguous matches are clean
-// absence and never fail the model call.
-func (l *LLM) resolveTranscriptPath(sessionID string) string {
-	if l == nil || l.provider.Session == nil || !validSessionID(sessionID) {
+// absence: two candidates are not evidence, so neither is reported.
+//
+// It is pure and takes no run state, so a host can derive the path long after
+// the run, from the persisted session identifier alone.
+func ResolveTranscriptPath(pathGlob, sessionID string) string {
+	if pathGlob == "" || !validSessionID(sessionID) {
 		return ""
 	}
-	pattern := strings.ReplaceAll(l.provider.Session.Transcript.PathGlob, "{{session_id}}", sessionID)
+	pattern := strings.ReplaceAll(pathGlob, "{{session_id}}", sessionID)
 	if strings.HasPrefix(pattern, "~/") {
 		home, err := os.UserHomeDir()
 		if err != nil {

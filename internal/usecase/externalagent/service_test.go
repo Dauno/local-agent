@@ -207,7 +207,7 @@ func TestExpiredRunningJobAutomaticallyReconcilesPersistedSession(t *testing.T) 
 	if err != nil || claimed == nil {
 		t.Fatalf("claim = %#v, err = %v", claimed, err)
 	}
-	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-automatic", ""); err != nil {
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-automatic"); err != nil {
 		t.Fatal(err)
 	}
 	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err != nil {
@@ -251,7 +251,7 @@ func TestCancelledJobIsNotAutomaticallyResumed(t *testing.T) {
 	if err != nil || claimed == nil {
 		t.Fatalf("claim = %#v, err = %v", claimed, err)
 	}
-	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-cancelled", ""); err != nil {
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-cancelled"); err != nil {
 		t.Fatal(err)
 	}
 	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err != nil {
@@ -1817,7 +1817,7 @@ func createCompletionUnknownJob(t *testing.T, service *Service, store port.Exter
 	if err != nil || claimed == nil {
 		t.Fatalf("claim = %#v, err=%v", claimed, err)
 	}
-	if err := store.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-1", ""); err != nil {
+	if err := store.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompletionUnknown, nil, "completion_unknown", now.Add(time.Millisecond)); err != nil {

@@ -121,19 +121,33 @@ func resolveReconciliationAgent(setup runtimeSetup, job domain.ExternalAgentJob)
 	if setup.defs == nil {
 		return agentdef.AgentDef{}, nil, errors.New("durable external-agent definitions are unavailable")
 	}
-	for _, definition := range setup.defs.Agents {
-		if definition.ExecutionMode != agentdef.ExecutionModeDurableJob || definition.Model != job.Profile {
+	definition, resolved, found := durableAgentDescriptor(setup.defs, job.Provider, job.Profile)
+	if !found {
+		return agentdef.AgentDef{}, nil, fmt.Errorf("durable job %q uses provider/profile %s/%s, but no current agent_cli definition matches it", job.ID, job.Provider, job.Profile)
+	}
+	return definition, resolved, nil
+}
+
+// durableAgentDescriptor finds the current durable definition for a job's
+// provider and profile. A job whose definition was renamed or removed matches
+// nothing, and the caller must report that rather than guess a replacement.
+func durableAgentDescriptor(defs *agentdef.Definitions, provider, profile string) (agentdef.AgentDef, *agentdef.ResolvedModel, bool) {
+	if defs == nil {
+		return agentdef.AgentDef{}, nil, false
+	}
+	for _, definition := range defs.Agents {
+		if definition.ExecutionMode != agentdef.ExecutionModeDurableJob || definition.Model != profile {
 			continue
 		}
-		resolved, err := setup.defs.ResolveModel(definition.Model)
+		resolved, err := defs.ResolveModel(definition.Model)
 		if err != nil {
-			return agentdef.AgentDef{}, nil, err
+			return agentdef.AgentDef{}, nil, false
 		}
-		if resolved.Provider.Name == job.Provider {
-			return definition, resolved, nil
+		if resolved.Provider.Name == provider {
+			return definition, resolved, true
 		}
 	}
-	return agentdef.AgentDef{}, nil, fmt.Errorf("durable job %q uses provider/profile %s/%s, but no current agent_cli definition matches it", job.ID, job.Provider, job.Profile)
+	return agentdef.AgentDef{}, nil, false
 }
 
 var _ interface {

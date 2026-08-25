@@ -111,10 +111,13 @@ func TestSessionEventCapturesIDAndCanonicalTranscriptBeforeIgnore(t *testing.T) 
 		agentdef.CLISessionResume{ResumeFlag: []string{"resume", "{{session_id}}"}},
 		filepath.Join(transcriptRoot, "**", "rollout-*-{{session_id}}.jsonl"),
 	)
-	var session agentcli.Activity
+	var session, resolvedTranscript agentcli.Activity
 	ctx := agentcli.WithActivityReporter(t.Context(), func(activity agentcli.Activity) {
-		if activity.Kind == agentcli.ActivitySessionCreated {
+		switch activity.Kind {
+		case agentcli.ActivitySessionCreated:
 			session = activity
+		case agentcli.ActivityTranscriptResolved:
+			resolvedTranscript = activity
 		}
 	})
 	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(delegate("workspace", "task"), genai.RoleUser)}}
@@ -123,8 +126,14 @@ func TestSessionEventCapturesIDAndCanonicalTranscriptBeforeIgnore(t *testing.T) 
 			t.Fatal(err)
 		}
 	}
-	if session.SessionID != "session-1234" || session.TranscriptPath != transcript {
-		t.Fatalf("session activity = %+v, want captured ID and transcript", session)
+	// The session arrives while the CLI runs, so a crash still leaves a
+	// recoverable job. The transcript arrives after it exits, because the file
+	// does not exist yet when the session is announced.
+	if session.SessionID != "session-1234" || session.TranscriptPath != "" {
+		t.Fatalf("session activity = %+v, want the ID alone", session)
+	}
+	if resolvedTranscript.SessionID != "session-1234" || resolvedTranscript.TranscriptPath != transcript {
+		t.Fatalf("transcript activity = %+v, want the resolved path", resolvedTranscript)
 	}
 }
 

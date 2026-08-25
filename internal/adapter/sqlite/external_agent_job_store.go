@@ -175,14 +175,14 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	var status string
 	var statusRevision int
 	var finishedAt int64
-	var sessionID, transcriptPath string
+	var sessionID, transcriptPath, provider, profile string
 	var phase string
 	var lastEventKind string
 	var transport, session, meaningful, promptStarted int64
 	var activeTools int
 	var pending int
 	var stopReason string
-	err := s.db.QueryRowContext(ctx, `SELECT j.status, j.status_revision, j.finished_at, j.acp_session_id, j.transcript_path,
+	err := s.db.QueryRowContext(ctx, `SELECT j.status, j.status_revision, j.finished_at, j.acp_session_id, j.transcript_path, j.provider, j.profile,
 		COALESCE(p.phase, ''), COALESCE(p.last_event_kind, ''), COALESCE(p.last_transport_activity_at, 0),
 		COALESCE(p.last_session_update_at, 0), COALESCE(p.last_meaningful_progress_at, 0),
 		COALESCE(p.prompt_started_at, 0), COALESCE(p.active_tool_count, 0),
@@ -190,7 +190,7 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 		FROM external_agent_jobs j
 		LEFT JOIN external_agent_job_progress p ON p.job_id = j.job_id
 		WHERE j.job_id = ?`, jobID).
-		Scan(&status, &statusRevision, &finishedAt, &sessionID, &transcriptPath, &phase, &lastEventKind,
+		Scan(&status, &statusRevision, &finishedAt, &sessionID, &transcriptPath, &provider, &profile, &phase, &lastEventKind,
 			&transport, &session, &meaningful, &promptStarted, &activeTools, &pending, &stopReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -199,7 +199,8 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 		return nil, fmt.Errorf("inspect external-agent job: %w", err)
 	}
 	view := &domain.ExternalAgentJobInspection{
-		JobID: jobID, Status: safeAdminJobStatus(status), StatusRevision: statusRevision,
+		JobID: jobID, Provider: provider, Profile: profile,
+		Status: safeAdminJobStatus(status), StatusRevision: statusRevision,
 		ExternalAgentSessionID: safeAdminSessionID(sessionID), FinishedAt: fromUnix(finishedAt),
 		TranscriptPath:           safeAdminTranscriptPath(transcriptPath),
 		Phase:                    domain.ExternalAgentProgressPhase(phase),
@@ -384,23 +385,42 @@ func (s *ExternalAgentJobStore) RenewLease(ctx context.Context, jobID, owner str
 	return nil
 }
 
-func (s *ExternalAgentJobStore) AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID, transcriptPath string) error {
+func (s *ExternalAgentJobStore) AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error {
 	if sessionID == "" {
 		return errors.New("external-agent session ID is required")
 	}
-	if transcriptPath != "" && safeAdminTranscriptPath(transcriptPath) == "" {
-		return errors.New("external-agent transcript path is invalid")
-	}
 	now := time.Now().UTC()
-	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_jobs SET acp_session_id = ?, transcript_path = ?, updated_at = ?
+	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_jobs SET acp_session_id = ?, updated_at = ?
 		WHERE job_id = ? AND lease_owner = ? AND attempt = ? AND status = ? AND acp_session_id = '' AND lease_expiry > ?`,
-		sessionID, transcriptPath, now.UnixNano(), jobID, owner, attempt, domain.JobRunning, now.UnixNano())
+		sessionID, now.UnixNano(), jobID, owner, attempt, domain.JobRunning, now.UnixNano())
 	if err != nil {
 		return fmt.Errorf("assign external-agent session: %w", err)
 	}
 	affected, _ := result.RowsAffected()
 	if affected != 1 {
 		return errors.New("external-agent session cannot be assigned to this job attempt")
+	}
+	return nil
+}
+
+// AssignTranscriptPath records where the CLI wrote this attempt's transcript.
+//
+// It is a separate write because the file does not exist when the session
+// arrives. The session is persisted first so a crash still leaves a
+// recoverable job; the path lands later, and its absence is not an error.
+func (s *ExternalAgentJobStore) AssignTranscriptPath(ctx context.Context, jobID, owner string, attempt int, transcriptPath string) error {
+	if safeAdminTranscriptPath(transcriptPath) == "" {
+		return errors.New("external-agent transcript path is invalid")
+	}
+	now := time.Now().UTC()
+	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_jobs SET transcript_path = ?, updated_at = ?
+		WHERE job_id = ? AND lease_owner = ? AND attempt = ? AND status = ? AND acp_session_id != '' AND transcript_path = '' AND lease_expiry > ?`,
+		transcriptPath, now.UnixNano(), jobID, owner, attempt, domain.JobRunning, now.UnixNano())
+	if err != nil {
+		return fmt.Errorf("assign external-agent transcript path: %w", err)
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return errors.New("external-agent transcript path assignment lost its lease")
 	}
 	return nil
 }

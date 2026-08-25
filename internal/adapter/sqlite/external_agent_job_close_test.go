@@ -104,11 +104,57 @@ func completionUnknownFixture(t *testing.T) (*ExternalAgentJobStore, domain.Exte
 	if err != nil || claimed == nil {
 		t.Fatalf("claimed = %#v, err = %v", claimed, err)
 	}
-	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker-1", 1, "session-1", ""); err != nil {
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker-1", 1, "session-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := jobStore.Transition(t.Context(), job.ID, "worker-1", 1, domain.JobCompletionUnknown, nil, "completion_unknown", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	return jobStore, job, now.Add(2 * time.Second)
+}
+
+// The transcript lands after the session, under the same lease. Its CAS pins
+// the attempt, so a late write from a lost lease cannot overwrite a newer run.
+func TestAssignTranscriptPathRequiresSessionLeaseAndOneWrite(t *testing.T) {
+	store, err := Initialize(context.Background(), filepath.Join(t.TempDir(), "transcript.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := NewExternalAgentJobStore(store)
+	now := time.Now().UTC().Truncate(time.Nanosecond)
+	job := testExternalAgentJob(now)
+	if _, _, err := jobStore.CreateIfAbsent(t.Context(), job); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), now, "worker-1", time.Minute)
+	if err != nil || claimed == nil {
+		t.Fatalf("claimed = %#v, err = %v", claimed, err)
+	}
+	const path = "/home/operator/.codex/sessions/rollout-session-1.jsonl"
+	// No session yet, so there is nothing to attach a transcript to.
+	if err := jobStore.AssignTranscriptPath(t.Context(), job.ID, "worker-1", 1, path); err == nil {
+		t.Fatal("a transcript was attached before any session")
+	}
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker-1", 1, "session-1"); err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []string{"", "relative/path.jsonl", "/home/op/../op/x.jsonl", "/home/op/x\nid.jsonl"} {
+		if err := jobStore.AssignTranscriptPath(t.Context(), job.ID, "worker-1", 1, invalid); err == nil {
+			t.Fatalf("transcript path %q was accepted", invalid)
+		}
+	}
+	if err := jobStore.AssignTranscriptPath(t.Context(), job.ID, "worker-1", 1, path); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := jobStore.GetJob(t.Context(), job.ID)
+	if err != nil || stored == nil || stored.TranscriptPath != path {
+		t.Fatalf("stored = %#v, err = %v", stored, err)
+	}
+	if err := jobStore.AssignTranscriptPath(t.Context(), job.ID, "worker-1", 1, "/home/operator/other.jsonl"); err == nil {
+		t.Fatal("a second transcript assignment bypassed the CAS")
+	}
+	if err := jobStore.AssignTranscriptPath(t.Context(), job.ID, "worker-2", 1, path); err == nil {
+		t.Fatal("a foreign lease owner wrote a transcript")
+	}
 }

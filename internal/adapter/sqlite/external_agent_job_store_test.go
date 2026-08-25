@@ -31,7 +31,7 @@ func TestExternalAgentJobStoreClaimsAndTerminalizesOneAttempt(t *testing.T) {
 	if claimed == nil || claimed.Status != domain.JobRunning || claimed.Attempt != 1 {
 		t.Fatalf("claimed = %#v", claimed)
 	}
-	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker-1", 1, "session-1", ""); err != nil {
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker-1", 1, "session-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, "worker-1", 1); err != nil {
@@ -355,7 +355,7 @@ func TestExternalAgentJobStoreRejectsEveryOwnerMutationAfterLeaseExpiry(t *testi
 	if err := jobStore.RenewLease(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, now, time.Minute); err == nil {
 		t.Fatal("expired lease was renewed")
 	}
-	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "late-session", ""); err == nil {
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "late-session"); err == nil {
 		t.Fatal("expired lease received an external-agent session")
 	}
 	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err == nil {

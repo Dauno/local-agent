@@ -188,8 +188,11 @@ func TestJobInspectionIncludesSessionAndProgress(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	const transcriptPath = "/home/operator/.codex/sessions/rollout-session.jsonl"
-	if err := store.AssignExternalAgentSession(ctx, "job-inspect", "owner-1", 1, "ses_full_identity_0123456789", transcriptPath); err != nil {
+	if err := store.AssignExternalAgentSession(ctx, "job-inspect", "owner-1", 1, "ses_full_identity_0123456789"); err != nil {
 		t.Fatalf("assign session: %v", err)
+	}
+	if err := store.AssignTranscriptPath(ctx, "job-inspect", "owner-1", 1, transcriptPath); err != nil {
+		t.Fatalf("assign transcript: %v", err)
 	}
 	progress := domain.ExternalAgentJobProgress{
 		JobID: "job-inspect", Attempt: 1, Phase: domain.ExternalAgentPhaseToolRunning,

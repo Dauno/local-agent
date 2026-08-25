@@ -491,6 +491,9 @@ func newJobsInspectCommand(backend Backend, streams Streams) *cobra.Command {
 
 func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
 	_, _ = fmt.Fprintf(out, "job_id: %s\n", view.JobID)
+	if view.Provider != "" {
+		_, _ = fmt.Fprintf(out, "provider: %s\nprofile: %s\n", view.Provider, view.Profile)
+	}
 	_, _ = fmt.Fprintf(out, "status: %s\n", view.Status)
 	_, _ = fmt.Fprintf(out, "status_revision: %d\n", view.StatusRevision)
 	_, _ = fmt.Fprintf(out, "acp_session_id: %s\n", inspectionSessionID(view.ExternalAgentSessionID))
