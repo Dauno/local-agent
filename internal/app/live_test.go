@@ -10,16 +10,39 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 )
 
-func TestCheckAuthenticationRejectsUnknownProviderIdentity(t *testing.T) {
+// The auth command comes from the descriptor, so a provider that declares none
+// must say so plainly instead of running a guessed command.
+func TestCheckAuthenticationRequiresADeclaredCommand(t *testing.T) {
 	checker := cliProviderChecker{}
-	for _, name := range []string{"", "unknown-cli", "opencode;rm -rf /"} {
-		_, err := checker.CheckAuthentication(context.Background(), nil, name)
-		if err == nil {
-			t.Fatalf("provider identity %q must be rejected", name)
-		}
-		if !strings.Contains(err.Error(), "not supported") {
-			t.Fatalf("unexpected error for %q: %v", name, err)
-		}
+	cases := map[string]*agentdef.ResolvedModel{
+		"no resolved model": nil,
+		"no auth block":     {Provider: agentdef.Provider{Name: "codex", Executable: "codex"}},
+		"empty auth command": {Provider: agentdef.Provider{
+			Name: "codex", Executable: "codex", Auth: &agentdef.CLIAuth{},
+		}},
+		"no executable": {Provider: agentdef.Provider{
+			Name: "codex", Auth: &agentdef.CLIAuth{Command: []string{"login", "status"}},
+		}},
+	}
+	for name, resolved := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := checker.CheckAuthentication(context.Background(), resolved, "codex"); err == nil {
+				t.Fatal("a provider with no declared auth command must be rejected")
+			}
+		})
+	}
+}
+
+// The executable is resolved through PATH and executed directly, never through
+// a shell, so a provider name that looks like a shell command cannot run one.
+func TestCheckAuthenticationNeverUsesAShell(t *testing.T) {
+	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{
+		Name: "codex", Executable: "codex;rm -rf /",
+		Auth: &agentdef.CLIAuth{Command: []string{"login", "status"}},
+	}}
+	_, err := cliProviderChecker{}.CheckAuthentication(context.Background(), resolved, "codex")
+	if err == nil || !strings.Contains(err.Error(), "not found") {
+		t.Fatalf("error = %v, want a PATH lookup failure rather than execution", err)
 	}
 }
 

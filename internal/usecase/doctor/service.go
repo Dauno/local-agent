@@ -531,7 +531,7 @@ func (s *Service) runLiveChecks(ctx context.Context, report *Report, state liveC
 			cancel()
 			if err != nil {
 				report.fail("agent CLI authentication ("+providerName+")", state.redactor.String(err.Error()),
-					"Log in to the agent CLI (for example: opencode auth login or codex login) so it can reuse its saved credentials.", false)
+					"Log in to the "+providerName+" CLI so it can reuse its saved credentials, and make sure its descriptor declares an auth command.", false)
 			} else {
 				report.pass("agent CLI authentication ("+providerName+")", detail)
 			}

@@ -176,3 +176,48 @@ confirmation: required
 		t.Fatalf("error = %v, want the execution_mode bound", err)
 	}
 }
+
+// The auth command runs from `doctor --live`, so it must be literal. A template
+// would let a runtime value reach an argv the host executes.
+func TestAuthCommandMustBeLiteralAndPresent(t *testing.T) {
+	tests := []struct{ name, block, want string }{
+		{"empty command", "auth:\n  command: []\n", "auth.command must not be empty"},
+		{"templated argument", "auth:\n  command: [login, \"{{workdir}}\"]\n", "must not use a template"},
+		{"blank argument", "auth:\n  command: [login, \"  \"]\n", "must be a non-empty single line"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			provider := strings.Replace(cliProvider, "profiles:", test.block+"profiles:", 1)
+			if err := loadCLI(t, provider); err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// A descriptor that declares a well-formed auth command loads, so adding a new
+// CLI stays a YAML-only change.
+func TestAuthCommandLoads(t *testing.T) {
+	provider := strings.Replace(cliProvider, "profiles:", "auth:\n  command: [login, status]\n  success: codex is logged in\nprofiles:", 1)
+	if err := loadCLI(t, provider); err != nil {
+		t.Fatalf("a declared auth command must load: %v", err)
+	}
+}
+
+// A version string is parsed the same way everywhere: the descriptor bound and
+// the live probe share one implementation.
+func TestSemanticVersionParsingIsStrict(t *testing.T) {
+	if _, ok := agentdef.ParseSemanticVersion(" 2.1.241 "); !ok {
+		t.Fatal("surrounding space must be tolerated")
+	}
+	for _, value := range []string{"2.1", "2.1.241-beta", "2.1.241abc", "v2.1.241", ""} {
+		if _, ok := agentdef.ParseSemanticVersion(value); ok {
+			t.Fatalf("%q must not parse as a semantic version", value)
+		}
+	}
+	older, _ := agentdef.ParseSemanticVersion("2.1.9")
+	newer, _ := agentdef.ParseSemanticVersion("2.1.10")
+	if agentdef.CompareSemanticVersions(older, newer) >= 0 {
+		t.Fatal("2.1.10 must compare above 2.1.9")
+	}
+}

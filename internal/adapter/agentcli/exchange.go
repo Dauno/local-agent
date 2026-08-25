@@ -17,29 +17,6 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
-type semanticVersion struct{ major, minor, patch int }
-
-func parseVersion(value string) (semanticVersion, bool) {
-	var version semanticVersion
-	if _, err := fmt.Sscanf(strings.TrimSpace(value), "%d.%d.%d", &version.major, &version.minor, &version.patch); err != nil {
-		return semanticVersion{}, false
-	}
-	if version.major < 0 || version.minor < 0 || version.patch < 0 {
-		return semanticVersion{}, false
-	}
-	return version, true
-}
-
-func compareVersion(left, right semanticVersion) int {
-	if left.major != right.major {
-		return left.major - right.major
-	}
-	if left.minor != right.minor {
-		return left.minor - right.minor
-	}
-	return left.patch - right.patch
-}
-
 func (l *LLM) probeVersion(ctx context.Context) (string, error) {
 	version := l.provider.Version
 	output, err := l.capture(ctx, l.command, version.Command)
@@ -55,13 +32,13 @@ func (l *LLM) probeVersion(ctx context.Context) (string, error) {
 	if match == nil || index < 0 || index >= len(match) {
 		return "", &CLIError{Code: CodeProcessFailed, Message: "descriptor version.pattern did not resolve version"}
 	}
-	installed, ok := parseVersion(match[index])
+	installed, ok := agentdef.ParseSemanticVersion(match[index])
 	if !ok {
 		return "", &CLIError{Code: CodeProcessFailed, Message: "descriptor version.pattern captured an invalid version"}
 	}
-	minimum, _ := parseVersion(version.Min)
-	maximum, hasMaximum := parseVersion(version.Max)
-	if compareVersion(installed, minimum) < 0 || (hasMaximum && compareVersion(installed, maximum) > 0) {
+	minimum, _ := agentdef.ParseSemanticVersion(version.Min)
+	maximum, hasMaximum := agentdef.ParseSemanticVersion(version.Max)
+	if agentdef.CompareSemanticVersions(installed, minimum) < 0 || (hasMaximum && agentdef.CompareSemanticVersions(installed, maximum) > 0) {
 		rangeText := ">=" + version.Min
 		if version.Max != "" {
 			rangeText += " and <=" + version.Max
@@ -243,15 +220,20 @@ func sortedOptionNames(options map[string]agentdef.CLIInvocationOption) []string
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	// Profile values change substitutions before templates use them.
-	for index, name := range names {
+	// An option with a value mapping can define substitutions that a later
+	// template reads, so every mapping option is applied before every plain
+	// one. The order inside each group stays alphabetical, which keeps argv
+	// stable across runs.
+	mapping := make([]string, 0, len(names))
+	plain := make([]string, 0, len(names))
+	for _, name := range names {
 		if len(options[name].Values) > 0 {
-			copy(names[1:index+1], names[:index])
-			names[0] = name
-			break
+			mapping = append(mapping, name)
+			continue
 		}
+		plain = append(plain, name)
 	}
-	return names
+	return append(mapping, plain...)
 }
 
 func (l *LLM) readStdout(reader io.Reader, report ActivityReporter) (string, error) {
@@ -323,8 +305,14 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter) (string, err
 			terminal = true
 		}
 	}
+	// bufio.Scanner reports an oversized line and a broken pipe through the
+	// same error. Reporting a read failure as a line-length violation sent the
+	// operator to the descriptor for a problem that was never there.
 	if err := scanner.Err(); err != nil {
-		return "", &ProtocolViolation{Reason: fmt.Sprintf("agent CLI emitted a line longer than %d bytes", l.maxLineBytes)}
+		if errors.Is(err, bufio.ErrTooLong) {
+			return "", &ProtocolViolation{Reason: fmt.Sprintf("agent CLI emitted a line longer than %d bytes", l.maxLineBytes)}
+		}
+		return "", &CLIError{Code: CodeProcessFailed, Message: "reading agent CLI output failed", Cause: err}
 	}
 	if failed {
 		return "", &CLIError{Code: CodeProcessFailed, Message: "agent CLI reported a failed turn"}

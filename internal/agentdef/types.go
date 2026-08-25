@@ -102,6 +102,7 @@ type Provider struct {
 	Invocation    *CLIInvocation    `yaml:"invocation,omitempty"`
 	Stream        *CLIStream        `yaml:"stream,omitempty"`
 	Session       *CLISession       `yaml:"session,omitempty"`
+	Auth          *CLIAuth          `yaml:"auth,omitempty"`
 
 	// ACP provider fields.
 	Command string   `yaml:"command,omitempty"`
@@ -112,6 +113,19 @@ type Provider struct {
 type ShimConfig struct {
 	Command string   `yaml:"command"`
 	Args    []string `yaml:"args,omitempty"`
+}
+
+// CLIAuth declares how a provider reports saved-login status without making a
+// model call. `doctor --live` runs it and reads only the exit status, because
+// native output can carry account identifiers.
+//
+// The command is literal. Templates are rejected, so no value from a
+// conversation can ever reach this argv.
+type CLIAuth struct {
+	Command []string `yaml:"command"`
+	// Success is the message a passing check reports. A default is used when
+	// the descriptor leaves it empty.
+	Success string `yaml:"success,omitempty"`
 }
 
 // CLIVersion declares the accepted native CLI version range.

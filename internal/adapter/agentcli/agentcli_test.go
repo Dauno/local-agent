@@ -456,3 +456,50 @@ func TestIgnoredTypeAfterTerminalEventIsNotAViolation(t *testing.T) {
 		t.Fatalf("text = %q, want the final text", response.Content.Parts[0].Text)
 	}
 }
+
+// An option with a value mapping can define substitutions a later template
+// reads, so every mapping option is applied before every plain one. The order
+// used to move only the first such option, which left a second one too late.
+func TestMappingOptionsAreAppliedBeforePlainOptions(t *testing.T) {
+	dumpArgv := filepath.Join(t.TempDir(), "argv")
+	dir := t.TempDir()
+	provider := agentdef.Provider{
+		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Version: &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
+		Invocation: &agentdef.CLIInvocation{
+			Prompt: "stdin",
+			// "model" sorts first and reads a substitution, while "variant"
+			// sorts last and defines it. Applying them in name order loses it.
+			Options: map[string]agentdef.CLIInvocationOption{
+				"model": {Flag: "--model"},
+				"variant": {Values: map[string]agentdef.CLIInvocationOptionValue{
+					"high": {Substitutions: map[string]string{"model": "mapped-model"}},
+				}},
+			},
+			Args: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=success", "dumpargv=" + dumpArgv},
+		},
+		Stream: &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}},
+	}
+	llm, err := agentcli.New(agentcli.Config{
+		Command: os.Args[0], Provider: provider,
+		Profile:    agentdef.Profile{Model: "profile-model", Variant: "high"},
+		Workspace:  domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}},
+		WorkingDir: dir,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := collect(t, llm); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	argv, err := os.ReadFile(dumpArgv)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(argv), "mapped-model") {
+		t.Fatalf("argv = %q, want the substitution the variant mapping defines", argv)
+	}
+	if strings.Contains(string(argv), "profile-model") {
+		t.Fatalf("argv = %q, want the mapping to have replaced the profile value", argv)
+	}
+}

@@ -369,26 +369,28 @@ func (acpProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.
 	return fmt.Sprintf("%s %s uses ACP v%s; single-project profile verified", description.AgentInfo.Name, description.AgentInfo.Version, description.ProtocolVersion), nil
 }
 
-// CheckAuthentication reports saved-login status for a known provider identity
-// without making a model call. The command is application-owned and selected
-// from the trusted descriptor; providers cannot supply authentication argv.
+// CheckAuthentication reports saved-login status without making a model call.
+// The command comes from the provider's own `auth` block, so a new CLI needs a
+// descriptor and no code change. The loader keeps that command literal, and it
+// is executed directly, never through a shell.
+//
 // Native output can contain account identifiers, so both streams are drained
-// and discarded.
-func (cliProviderChecker) CheckAuthentication(ctx context.Context, _ *agentdef.ResolvedModel, providerName string) (string, error) {
-	var (
-		executable string
-		args       []string
-		success    string
-	)
-	switch providerName {
-	case "opencode":
-		executable, args = "opencode", []string{"auth", "list"}
-		success = "opencode auth list succeeded; saved credentials are available"
-	case "codex":
-		executable, args = "codex", []string{"login", "status"}
-		success = "codex login status succeeded; saved credentials are available"
-	default:
-		return "", fmt.Errorf("authentication status for provider %q is not supported by this release", providerName)
+// and discarded. Only the exit status is read.
+func (cliProviderChecker) CheckAuthentication(ctx context.Context, model *agentdef.ResolvedModel, providerName string) (string, error) {
+	if model == nil || model.Provider.Auth == nil || len(model.Provider.Auth.Command) == 0 {
+		return "", fmt.Errorf("provider %q declares no auth command; add an auth block to its descriptor to check saved credentials", providerName)
+	}
+	executable := model.Provider.Executable
+	if strings.TrimSpace(executable) == "" {
+		executable = model.Provider.Command
+	}
+	if strings.TrimSpace(executable) == "" {
+		return "", fmt.Errorf("provider %q declares no executable to check", providerName)
+	}
+	args := model.Provider.Auth.Command
+	success := strings.TrimSpace(model.Provider.Auth.Success)
+	if success == "" {
+		success = fmt.Sprintf("%s %s succeeded; saved credentials are available", executable, strings.Join(args, " "))
 	}
 	resolved, err := exec.LookPath(executable)
 	if err != nil {

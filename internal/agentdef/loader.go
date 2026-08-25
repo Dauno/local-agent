@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -21,25 +22,33 @@ var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const maxContextWindowTokens = 10_000_000
 
-type semanticVersion struct {
+type SemanticVersion struct {
 	major int
 	minor int
 	patch int
 }
 
-func parseSemanticVersion(value string) (semanticVersion, bool) {
-	match := regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)$`).FindStringSubmatch(value)
+// semanticVersionPattern is compiled once. Version parsing runs for every
+// descriptor bound and again for every live version probe.
+var semanticVersionPattern = regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)$`)
+
+func ParseSemanticVersion(value string) (SemanticVersion, bool) {
+	match := semanticVersionPattern.FindStringSubmatch(strings.TrimSpace(value))
 	if match == nil {
-		return semanticVersion{}, false
+		return SemanticVersion{}, false
 	}
-	var version semanticVersion
-	if _, err := fmt.Sscanf(value, "%d.%d.%d", &version.major, &version.minor, &version.patch); err != nil {
-		return semanticVersion{}, false
+	var version SemanticVersion
+	for index, target := range []*int{&version.major, &version.minor, &version.patch} {
+		parsed, err := strconv.Atoi(match[index+1])
+		if err != nil {
+			return SemanticVersion{}, false
+		}
+		*target = parsed
 	}
 	return version, true
 }
 
-func compareSemanticVersions(left, right semanticVersion) int {
+func CompareSemanticVersions(left, right SemanticVersion) int {
 	if left.major != right.major {
 		return left.major - right.major
 	}
@@ -177,7 +186,7 @@ func validateProviderFieldPresence(data []byte, provider Provider) error {
 		providerForbidden = []string{"base_url", "api_key_env", "headers", "command", "args", "shim"}
 		profileForbidden = []string{"reasoning_effort", "extra_body", "generate_content_config", "config_options", "permission_option_kind"}
 	case ProviderTypeOpenAICompatible:
-		providerForbidden = []string{"executable", "version", "preconditions", "invocation", "stream", "session", "shim", "command", "args"}
+		providerForbidden = []string{"executable", "version", "preconditions", "invocation", "stream", "session", "auth", "shim", "command", "args"}
 		profileForbidden = []string{"agent", "approval", "variant", "config_options", "permission_option_kind"}
 	case ProviderTypeACP:
 		providerForbidden = []string{"base_url", "api_key_env", "headers", "executable", "version", "preconditions", "invocation", "stream", "session", "shim"}
@@ -473,6 +482,26 @@ func validateAgentCLIProvider(prefix string, p Provider) []string {
 	if p.Session != nil {
 		errs = append(errs, validateCLISession(prefix, *p.Session, p.Invocation)...)
 	}
+	if p.Auth != nil {
+		errs = append(errs, validateCLIAuth(prefix, *p.Auth)...)
+	}
+	return errs
+}
+
+// validateCLIAuth keeps the authentication command literal. A template would
+// let a runtime value reach an argv that `doctor --live` executes, and the
+// check needs no runtime value at all.
+func validateCLIAuth(prefix string, auth CLIAuth) []string {
+	var errs []string
+	if len(auth.Command) == 0 {
+		errs = append(errs, fmt.Sprintf("%s: auth.command must not be empty", prefix))
+	}
+	errs = append(errs, validateArgumentList(prefix+": auth.command", auth.Command)...)
+	for index, argument := range auth.Command {
+		if strings.Contains(argument, "{{") {
+			errs = append(errs, fmt.Sprintf("%s: auth.command[%d] must not use a template", prefix, index))
+		}
+	}
 	return errs
 }
 
@@ -482,6 +511,9 @@ func validateACPProvider(prefix string, p Provider) []string {
 		errs = append(errs, fmt.Sprintf("%s: shim is invalid for %s providers", prefix, ProviderTypeACP))
 	}
 	errs = append(errs, validateCommandArgs(prefix, "", p.Command, p.Args)...)
+	if p.Auth != nil {
+		errs = append(errs, validateCLIAuth(prefix, *p.Auth)...)
+	}
 	for profileName, profile := range p.Profiles {
 		profilePrefix := fmt.Sprintf("%s profile %q", prefix, profileName)
 		if len(profile.ConfigOptions) == 0 {
@@ -530,15 +562,15 @@ func validateCLIVersion(prefix string, version CLIVersion) []string {
 	if err != nil || pattern.SubexpIndex("version") < 0 {
 		errs = append(errs, fmt.Sprintf("%s: version.pattern must compile and define named group version", prefix))
 	}
-	if _, ok := parseSemanticVersion(version.Min); !ok {
+	if _, ok := ParseSemanticVersion(version.Min); !ok {
 		errs = append(errs, fmt.Sprintf("%s: version.min must be a semantic version", prefix))
 	}
 	if version.Max != "" {
-		maxVersion, maxOK := parseSemanticVersion(version.Max)
-		minVersion, minOK := parseSemanticVersion(version.Min)
+		maxVersion, maxOK := ParseSemanticVersion(version.Max)
+		minVersion, minOK := ParseSemanticVersion(version.Min)
 		if !maxOK {
 			errs = append(errs, fmt.Sprintf("%s: version.max must be a semantic version", prefix))
-		} else if minOK && compareSemanticVersions(maxVersion, minVersion) < 0 {
+		} else if minOK && CompareSemanticVersions(maxVersion, minVersion) < 0 {
 			errs = append(errs, fmt.Sprintf("%s: version.max must not be less than version.min", prefix))
 		}
 	}
