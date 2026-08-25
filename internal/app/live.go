@@ -335,8 +335,8 @@ func (cliProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.
 	}
 	if describe {
 		return doctor.CLIProviderCheck{
-			Detail:   fmt.Sprintf("shim %s (%s) maps CLI version %s; profile validated", description.Name, description.ShimVersion, description.CLIVersion),
-			ShimName: description.Name,
+			Detail:       fmt.Sprintf("agent CLI %s version %s; profile validated", description.Name, description.CLIVersion),
+			ProviderName: description.Name,
 		}, nil
 	}
 	return doctor.CLIProviderCheck{Detail: "profile validated"}, nil
@@ -369,18 +369,18 @@ func (acpProviderChecker) CheckProvider(ctx context.Context, resolved *agentdef.
 	return fmt.Sprintf("%s %s uses ACP v%s; single-project profile verified", description.AgentInfo.Name, description.AgentInfo.Version, description.ProtocolVersion), nil
 }
 
-// CheckAuthentication reports saved-login status for a known mapper identity
+// CheckAuthentication reports saved-login status for a known provider identity
 // without making a model call. The command is application-owned and selected
-// from the trusted describe name; shims can never supply authentication argv.
+// from the trusted descriptor; providers cannot supply authentication argv.
 // Native output can contain account identifiers, so both streams are drained
 // and discarded.
-func (cliProviderChecker) CheckAuthentication(ctx context.Context, _ *agentdef.ResolvedModel, shimName string) (string, error) {
+func (cliProviderChecker) CheckAuthentication(ctx context.Context, _ *agentdef.ResolvedModel, providerName string) (string, error) {
 	var (
 		executable string
 		args       []string
 		success    string
 	)
-	switch shimName {
+	switch providerName {
 	case "opencode":
 		executable, args = "opencode", []string{"auth", "list"}
 		success = "opencode auth list succeeded; saved credentials are available"
@@ -388,7 +388,7 @@ func (cliProviderChecker) CheckAuthentication(ctx context.Context, _ *agentdef.R
 		executable, args = "codex", []string{"login", "status"}
 		success = "codex login status succeeded; saved credentials are available"
 	default:
-		return "", fmt.Errorf("authentication status for shim %q is not supported by this release", shimName)
+		return "", fmt.Errorf("authentication status for provider %q is not supported by this release", providerName)
 	}
 	resolved, err := exec.LookPath(executable)
 	if err != nil {

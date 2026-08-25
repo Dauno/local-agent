@@ -106,7 +106,7 @@ profiles:
 }
 
 // TestPrepareSetupRewritesEnvExampleForAgentCLIWithoutKey covers a root
-// provider backed by an Agent CLI shim process (type: agent_cli): it has no
+// provider backed by an agent CLI (type: agent_cli): it has no
 // api_key_env, so .env.example must not fabricate a model key placeholder.
 func TestPrepareSetupRewritesEnvExampleForAgentCLIWithoutKey(t *testing.T) {
 	application, _, _ := newSeamApplication(t)
@@ -114,9 +114,20 @@ func TestPrepareSetupRewritesEnvExampleForAgentCLIWithoutKey(t *testing.T) {
 	provider := `
 name: opencode
 type: agent_cli
-shim:
-  command: self
-  args: ["shim", "opencode"]
+executable: opencode
+version:
+  command: [--version]
+  pattern: 'opencode (?P<version>\d+\.\d+\.\d+)'
+  min: "0.0.0"
+invocation:
+  prompt: stdin
+  args: [run, "-"]
+stream:
+  format: ndjson
+  final_text: {when: {type: result}, path: text}
+  failure: {when_any: [{type: error}]}
+  activity: {when: {type: activity}, type_field: name, discard_types: []}
+  terminal_types: [result, error]
 profiles:
   root:
     model: anthropic/model-name

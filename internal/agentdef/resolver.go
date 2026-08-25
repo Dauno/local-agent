@@ -47,9 +47,18 @@ func (d *Definitions) ResolveModel(modelRef string) (*ResolvedModel, error) {
 			resolved.PermissionOptionKind = "reject_once"
 		}
 	case ProviderTypeAgentCLI:
-		if provider.Shim != nil {
-			resolved.Shim = *provider.Shim
+		resolved.Executable = provider.Executable
+		if provider.Version != nil {
+			resolved.Version = *provider.Version
 		}
+		resolved.Preconditions = provider.Preconditions
+		if provider.Invocation != nil {
+			resolved.Invocation = *provider.Invocation
+		}
+		if provider.Stream != nil {
+			resolved.Stream = *provider.Stream
+		}
+		resolved.Session = provider.Session
 		resolved.Agent = profile.Agent
 		resolved.Approval = profile.Approval
 		if resolved.Approval == "" {

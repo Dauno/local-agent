@@ -1,16 +1,13 @@
-// Package agentcli adapts an external agent CLI (through a cli-v1 shim
-// subprocess) to ADK's model.LLM boundary. The CLI is a complete nested agent:
-// ADK receives only its final text, never portable function calls.
+// Package agentcli adapts a declarative external agent CLI to ADK's model.LLM
+// boundary. The CLI is a nested agent and returns final text only.
 package agentcli
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"iter"
-	"os"
 	"os/exec"
 	"reflect"
 	"sort"
@@ -20,107 +17,60 @@ import (
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
-	"github.com/Dauno/slack-local-agent/internal/cliprotocol"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 var (
-	// ErrStreamingUnsupported is returned because a CLI run is one complete
-	// external agent invocation.
 	ErrStreamingUnsupported = errors.New("streaming model responses are not supported by agent CLI providers")
-	// ErrToolsUnsupported is returned before process launch when ADK supplies
-	// tool declarations or function-calling configuration.
-	ErrToolsUnsupported = errors.New("ADK tools and function calling are not supported by agent CLI providers")
-	// ErrUnsupportedPart indicates non-text content (function history, images,
-	// audio, or binary parts).
-	ErrUnsupportedPart = errors.New("only text model content is supported by agent CLI providers")
-	// ErrUnsupportedConfig indicates generation settings that cli-v1 cannot
-	// represent.
-	ErrUnsupportedConfig = errors.New("generation settings are not supported by agent CLI providers")
-	// ErrNoUserTurn indicates a request whose transcript does not end in a user
-	// message.
-	ErrNoUserTurn = errors.New("agent CLI request must end in a user message")
+	ErrToolsUnsupported     = errors.New("ADK tools and function calling are not supported by agent CLI providers")
+	ErrUnsupportedPart      = errors.New("only text model content is supported by agent CLI providers")
+	ErrUnsupportedConfig    = errors.New("generation settings are not supported by agent CLI providers")
+	ErrNoUserTurn           = errors.New("agent CLI request must end in a user message")
 )
 
-// ShimError is a terminal cli-v1 error returned by the mapper process.
-type ShimError struct {
+const (
+	CodeInvalidRequest    = "invalid_request"
+	CodeUnsupported       = "unsupported"
+	CodeExecutableMissing = "executable_not_found"
+	CodeProcessFailed     = "process_failed"
+	CodeTimeout           = "timeout"
+	CodeNoResponse        = "no_response"
+)
+
+// CLIError classifies a direct native CLI failure.
+type CLIError struct {
 	Code      string
 	Message   string
 	Retryable bool
 	Cause     error
 }
 
-func (e *ShimError) Error() string {
-	return fmt.Sprintf("agent CLI shim error %s: %s", e.Code, e.Message)
+func (e *CLIError) Error() string { return fmt.Sprintf("agent CLI error %s: %s", e.Code, e.Message) }
+func (e *CLIError) Unwrap() error { return e.Cause }
+
+type ProtocolViolation struct{ Reason string }
+
+func (e *ProtocolViolation) Error() string { return "agent CLI stream violation: " + e.Reason }
+
+type Description struct {
+	Name       string
+	CLIVersion string
 }
 
-// Unwrap preserves context cancellation and deadline classification.
-func (e *ShimError) Unwrap() error { return e.Cause }
-
-// ProtocolViolation reports malformed or out-of-contract shim output.
-type ProtocolViolation struct {
-	Reason string
-}
-
-func (e *ProtocolViolation) Error() string {
-	return "agent CLI protocol violation: " + e.Reason
-}
-
-// SelfCommand selects the currently running executable as the shim command.
-const SelfCommand = "self"
-
-// ResolveCommand resolves a declarative shim command into an executable path.
-// "self" resolves through os.Executable; anything else through exec.LookPath.
-func ResolveCommand(command string) (string, error) {
-	trimmed := strings.TrimSpace(command)
-	if trimmed == "" {
-		return "", errors.New("shim command must not be empty")
-	}
-	if trimmed == SelfCommand {
-		executable, err := os.Executable()
-		if err != nil {
-			return "", fmt.Errorf("resolve current executable for shim command %q: %w", SelfCommand, err)
-		}
-		return executable, nil
-	}
-	resolved, err := exec.LookPath(trimmed)
-	if err != nil {
-		return "", fmt.Errorf("resolve shim command %q: %w", trimmed, err)
-	}
-	return resolved, nil
-}
-
-// Config wires one agent_cli resolved model into a subprocess-backed LLM.
 type Config struct {
-	// Command is the resolved absolute shim executable path.
-	Command string
-	// Args are static trusted arguments configured in provider YAML.
-	Args []string
-	// Profile is the portable CLI profile forwarded verbatim to the shim.
-	Profile cliprotocol.Profile
-	// Workspace is the complete canonical project registry. Projects are
-	// sorted deterministically by name before every request.
-	Workspace cliprotocol.Workspace
-	// ContextLimits bounds the serialized transcript (messages and Unicode
-	// code points) before process launch.
-	ContextLimits domain.ContextLimits
-	// WorkingDir is the canonical application root used as the shim process
-	// working directory.
-	WorkingDir string
-
-	// MaxStdoutBytes bounds aggregate protocol stdout. Zero applies a default.
+	Command        string
+	Provider       agentdef.Provider
+	Profile        agentdef.Profile
+	Workspace      domain.Workspace
+	ContextLimits  domain.ContextLimits
+	WorkingDir     string
 	MaxStdoutBytes int
-	// MaxLineBytes bounds one NDJSON line. Zero applies a default.
-	MaxLineBytes int
-	// MaxStderrBytes bounds captured diagnostics. Zero applies a default.
+	MaxLineBytes   int
 	MaxStderrBytes int
-
-	// Logger receives bounded diagnostic events. Optional.
-	Logger port.Logger
-	// Sanitize redacts known credentials before diagnostic text reaches errors
-	// or logs. Operational composition should provide secure.Redactor.String.
-	Sanitize func(string) string
+	Logger         port.Logger
+	Sanitize       func(string) string
 }
 
 const (
@@ -130,12 +80,11 @@ const (
 	defaultWaitDelay      = 5 * time.Second
 )
 
-// LLM implements ADK's model.LLM through one shim subprocess per model call.
 type LLM struct {
 	command        string
-	args           []string
-	profile        cliprotocol.Profile
-	workspace      cliprotocol.Workspace
+	provider       agentdef.Provider
+	profile        agentdef.Profile
+	workspace      domain.Workspace
 	contextLimits  domain.ContextLimits
 	workingDir     string
 	maxStdoutBytes int
@@ -143,15 +92,25 @@ type LLM struct {
 	maxStderrBytes int
 	logger         port.Logger
 	sanitize       func(string) string
-	newID          func(method string) string
 }
 
 var _ model.LLM = (*LLM)(nil)
 
-// New validates configuration and constructs the adapter.
+func ResolveCommand(command string) (string, error) {
+	trimmed := strings.TrimSpace(command)
+	if trimmed == "" {
+		return "", errors.New("agent CLI executable must not be empty")
+	}
+	resolved, err := exec.LookPath(trimmed)
+	if err != nil {
+		return "", fmt.Errorf("resolve agent CLI executable %q: %w", trimmed, err)
+	}
+	return resolved, nil
+}
+
 func New(cfg Config) (*LLM, error) {
 	if strings.TrimSpace(cfg.Command) == "" {
-		return nil, errors.New("agent CLI shim command is required")
+		return nil, errors.New("agent CLI executable is required")
 	}
 	if strings.TrimSpace(cfg.Profile.Model) == "" {
 		return nil, errors.New("agent CLI profile model is required")
@@ -159,34 +118,20 @@ func New(cfg Config) (*LLM, error) {
 	if strings.TrimSpace(cfg.WorkingDir) == "" {
 		return nil, errors.New("agent CLI working directory is required")
 	}
-	workspace := cfg.Workspace
-	workspace.Projects = append([]cliprotocol.Project(nil), workspace.Projects...)
-	sort.Slice(workspace.Projects, func(i, j int) bool {
-		return workspace.Projects[i].Name < workspace.Projects[j].Name
-	})
-	probe := cliprotocol.NewRequest("startup-validate", cliprotocol.MethodValidate)
-	profile := cfg.Profile
-	probe.Profile = &profile
-	probe.Workspace = &workspace
-	if err := cliprotocol.ValidateRequest(probe); err != nil {
-		return nil, fmt.Errorf("agent CLI configuration: %w", err)
+	if cfg.Provider.Version == nil || cfg.Provider.Invocation == nil || cfg.Provider.Stream == nil {
+		return nil, errors.New("agent CLI descriptor is incomplete")
 	}
-
-	llm := &LLM{
-		command:        cfg.Command,
-		args:           append([]string(nil), cfg.Args...),
-		profile:        cfg.Profile,
-		workspace:      workspace,
-		contextLimits:  cfg.ContextLimits,
-		workingDir:     cfg.WorkingDir,
+	workspace := cfg.Workspace
+	workspace.Projects = append([]domain.Project(nil), workspace.Projects...)
+	sort.Slice(workspace.Projects, func(i, j int) bool { return workspace.Projects[i].Name < workspace.Projects[j].Name })
+	return &LLM{
+		command: cfg.Command, provider: cfg.Provider, profile: cfg.Profile, workspace: workspace,
+		contextLimits: cfg.ContextLimits, workingDir: cfg.WorkingDir,
 		maxStdoutBytes: valueOrDefault(cfg.MaxStdoutBytes, defaultMaxStdoutBytes),
 		maxLineBytes:   valueOrDefault(cfg.MaxLineBytes, defaultMaxLineBytes),
 		maxStderrBytes: valueOrDefault(cfg.MaxStderrBytes, defaultMaxStderrBytes),
-		logger:         cfg.Logger,
-		sanitize:       cfg.Sanitize,
-		newID:          randomRequestID,
-	}
-	return llm, nil
+		logger:         cfg.Logger, sanitize: cfg.Sanitize,
+	}, nil
 }
 
 func valueOrDefault(value, fallback int) int {
@@ -195,16 +140,6 @@ func valueOrDefault(value, fallback int) int {
 	}
 	return fallback
 }
-
-func randomRequestID(method string) string {
-	buffer := make([]byte, 8)
-	if _, err := rand.Read(buffer); err != nil {
-		return method + "-" + fmt.Sprint(time.Now().UnixNano())
-	}
-	return method + "-" + hex.EncodeToString(buffer)
-}
-
-// Name returns the native CLI model reference.
 func (l *LLM) Name() string {
 	if l == nil {
 		return ""
@@ -212,26 +147,40 @@ func (l *LLM) Name() string {
 	return l.profile.Model
 }
 
-// Describe performs a cli-v1 describe exchange without a model call.
-func (l *LLM) Describe(ctx context.Context) (cliprotocol.Response, error) {
-	request := cliprotocol.NewRequest(l.newID(cliprotocol.MethodDescribe), cliprotocol.MethodDescribe)
-	return l.exchange(ctx, request)
+// Describe probes only the native version. It makes no model call.
+func (l *LLM) Describe(ctx context.Context) (Description, error) {
+	version, err := l.probeVersion(ctx)
+	if err != nil {
+		return Description{}, err
+	}
+	return Description{Name: l.provider.Name, CLIVersion: version}, nil
 }
 
-// Validate performs a profile-aware cli-v1 validate exchange without a model
-// call.
+// Validate checks the native version at startup. Preconditions are not checked
+// here: they describe the selected project, and no project is chosen until a
+// caller delegates. See checkPreconditions.
 func (l *LLM) Validate(ctx context.Context) error {
-	request := cliprotocol.NewRequest(l.newID(cliprotocol.MethodValidate), cliprotocol.MethodValidate)
-	profile := l.profile
-	workspace := l.workspace
-	request.Profile = &profile
-	request.Workspace = &workspace
-	_, err := l.exchange(ctx, request)
+	_, err := l.probeVersion(ctx)
 	return err
 }
 
-// GenerateContent converts one ADK request into one shim run and yields at most
-// one ADK text response.
+// checkPreconditions runs every declared precondition against the project the
+// caller selected. It runs for each delegation because the answer changes with
+// the workspace.
+func (l *LLM) checkPreconditions(ctx context.Context, workingDir string) error {
+	for _, precondition := range l.provider.Preconditions {
+		args := substituteArgs(precondition.Command, map[string]string{"workdir": workingDir})
+		if len(args) == 0 {
+			return &CLIError{Code: CodeInvalidRequest, Message: "descriptor precondition.command resolved to no command"}
+		}
+		output, err := l.captureIn(ctx, workingDir, args[0], args[1:])
+		if err != nil || strings.TrimSpace(output) != precondition.Expect {
+			return &CLIError{Code: CodeInvalidRequest, Message: precondition.Message, Cause: err}
+		}
+	}
+	return nil
+}
+
 func (l *LLM) GenerateContent(ctx context.Context, request *model.LLMRequest, stream bool) iter.Seq2[*model.LLMResponse, error] {
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if stream {
@@ -242,103 +191,146 @@ func (l *LLM) GenerateContent(ctx context.Context, request *model.LLMRequest, st
 			yield(nil, errors.New("agent CLI model is nil"))
 			return
 		}
-		runRequest, err := l.runRequest(request)
+		run, err := l.runRequest(request)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		terminal, err := l.exchange(ctx, runRequest)
+		text, err := l.exchange(ctx, run)
 		if err != nil {
 			yield(nil, err)
 			return
 		}
-		yield(&model.LLMResponse{
-			Content: &genai.Content{
-				Role:  genai.RoleModel,
-				Parts: []*genai.Part{genai.NewPartFromText(terminal.Text)},
-			},
-			FinishReason: genai.FinishReasonStop,
-			TurnComplete: true,
-		}, nil)
+		yield(&model.LLMResponse{Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{genai.NewPartFromText(text)}}, FinishReason: genai.FinishReasonStop, TurnComplete: true}, nil)
 	}
 }
 
-// runRequest converts the supported ADK text subset into a bounded cli-v1 run
-// request. All unsupported inputs fail before process launch.
-func (l *LLM) runRequest(request *model.LLMRequest) (cliprotocol.Request, error) {
-	if request == nil {
-		return cliprotocol.Request{}, errors.New("ADK model request is nil")
+type request struct {
+	systemInstruction string
+	messages          []domain.Message
+	// workingDir is the canonical path of the project the caller selected. It
+	// is resolved from the registry for every call, never taken from the
+	// process working directory.
+	workingDir string
+	project    string
+}
+
+// delegation is the argument object an agent CLI leaf exposes to its caller.
+// ADK validates it against the declared input schema and hands it over as JSON
+// in the user turn, so the project name always comes from a schema-checked
+// field rather than from free text.
+type delegation struct {
+	Project string `json:"project"`
+	Task    string `json:"task"`
+}
+
+// resolveProject maps a caller-supplied project name onto a registered path.
+// The name is untrusted, so it is only ever used as a map key. A path is never
+// built from it.
+func (l *LLM) resolveProject(name string) (string, error) {
+	trimmed := strings.TrimSpace(name)
+	if trimmed == "" {
+		return "", &CLIError{Code: CodeInvalidRequest, Message: "project must not be empty; " + l.registeredProjects()}
 	}
-	if len(request.Tools) > 0 {
-		return cliprotocol.Request{}, ErrToolsUnsupported
+	for _, project := range l.workspace.Projects {
+		if project.Name == trimmed {
+			return project.Path, nil
+		}
+	}
+	return "", &CLIError{Code: CodeInvalidRequest, Message: fmt.Sprintf("project %q is not registered; %s", trimmed, l.registeredProjects())}
+}
+
+func (l *LLM) registeredProjects() string {
+	names := make([]string, 0, len(l.workspace.Projects))
+	for _, project := range l.workspace.Projects {
+		names = append(names, project.Name)
+	}
+	if len(names) == 0 {
+		return "no projects are registered"
+	}
+	return "registered projects: " + strings.Join(names, ", ")
+}
+
+func (l *LLM) runRequest(modelRequest *model.LLMRequest) (request, error) {
+	if modelRequest == nil {
+		return request{}, errors.New("ADK model request is nil")
+	}
+	if len(modelRequest.Tools) > 0 {
+		return request{}, ErrToolsUnsupported
 	}
 	systemInstruction := ""
-	if request.Config != nil {
-		if err := rejectUnsupportedConfig(request.Config); err != nil {
-			return cliprotocol.Request{}, err
+	if modelRequest.Config != nil {
+		if err := rejectUnsupportedConfig(modelRequest.Config); err != nil {
+			return request{}, err
 		}
-		if request.Config.SystemInstruction != nil {
-			text, err := textOnly(request.Config.SystemInstruction)
+		if modelRequest.Config.SystemInstruction != nil {
+			text, err := textOnly(modelRequest.Config.SystemInstruction)
 			if err != nil {
-				return cliprotocol.Request{}, fmt.Errorf("convert system instruction: %w", err)
+				return request{}, fmt.Errorf("convert system instruction: %w", err)
 			}
 			systemInstruction = text
 		}
 	}
-
-	history := make([]domain.Message, 0, len(request.Contents))
-	for index, content := range request.Contents {
+	history := make([]domain.Message, 0, len(modelRequest.Contents))
+	for index, content := range modelRequest.Contents {
 		if content == nil {
-			return cliprotocol.Request{}, fmt.Errorf("content %d: %w", index, ErrUnsupportedPart)
+			return request{}, fmt.Errorf("content %d: %w", index, ErrUnsupportedPart)
 		}
 		role, err := messageRole(content.Role)
 		if err != nil {
-			return cliprotocol.Request{}, fmt.Errorf("content %d: %w", index, err)
+			return request{}, fmt.Errorf("content %d: %w", index, err)
 		}
 		text, err := textOnly(content)
 		if err != nil {
-			return cliprotocol.Request{}, fmt.Errorf("content %d: %w", index, err)
+			return request{}, fmt.Errorf("content %d: %w", index, err)
 		}
-		if strings.TrimSpace(text) == "" {
-			continue
+		if strings.TrimSpace(text) != "" {
+			history = append(history, domain.Message{Role: role, Content: text})
 		}
-		history = append(history, domain.Message{Role: role, Content: text})
 	}
 	if len(history) == 0 {
-		return cliprotocol.Request{}, errors.New("ADK model request contains no text messages")
+		return request{}, errors.New("ADK model request contains no text messages")
 	}
 	if history[len(history)-1].Role != domain.RoleUser {
-		return cliprotocol.Request{}, ErrNoUserTurn
+		return request{}, ErrNoUserTurn
 	}
-
-	bounded := history
 	if l.contextLimits.MaxMessages > 0 && l.contextLimits.MaxChars > 0 {
-		bounded = domain.LimitMessages(history, l.contextLimits)
+		history = domain.LimitMessages(history, l.contextLimits)
 	}
-	if len(bounded) == 0 || bounded[len(bounded)-1].Role != domain.RoleUser {
-		return cliprotocol.Request{}, ErrNoUserTurn
+	if len(history) == 0 || history[len(history)-1].Role != domain.RoleUser {
+		return request{}, ErrNoUserTurn
 	}
+	last := len(history) - 1
+	selected, err := parseDelegation(history[last].Content)
+	if err != nil {
+		return request{}, err
+	}
+	workingDir, err := l.resolveProject(selected.Project)
+	if err != nil {
+		return request{}, err
+	}
+	// Only the task text reaches the CLI. The project name was routing data.
+	history[last].Content = selected.Task
+	return request{
+		systemInstruction: systemInstruction,
+		messages:          history,
+		workingDir:        workingDir,
+		project:           selected.Project,
+	}, nil
+}
 
-	messages := make([]cliprotocol.Message, 0, len(bounded))
-	for _, message := range bounded {
-		role := cliprotocol.RoleUser
-		if message.Role == domain.RoleAssistant {
-			role = cliprotocol.RoleAssistant
-		}
-		messages = append(messages, cliprotocol.Message{Role: role, Text: message.Content})
+// parseDelegation reads the {project, task} object that ADK serializes from the
+// leaf's declared input schema. A caller that sends anything else is rejected
+// rather than defaulted, because a default would pick a workspace on its own.
+func parseDelegation(content string) (delegation, error) {
+	var selected delegation
+	if err := json.Unmarshal([]byte(content), &selected); err != nil {
+		return delegation{}, &CLIError{Code: CodeInvalidRequest, Message: "agent CLI request must be a JSON object with project and task"}
 	}
-
-	runRequest := cliprotocol.NewRequest(l.newID(cliprotocol.MethodRun), cliprotocol.MethodRun)
-	profile := l.profile
-	workspace := l.workspace
-	runRequest.Profile = &profile
-	runRequest.Workspace = &workspace
-	runRequest.SystemInstruction = systemInstruction
-	runRequest.Messages = messages
-	if err := cliprotocol.ValidateRequest(runRequest); err != nil {
-		return cliprotocol.Request{}, err
+	if strings.TrimSpace(selected.Task) == "" {
+		return delegation{}, &CLIError{Code: CodeInvalidRequest, Message: "task must not be empty"}
 	}
-	return runRequest, nil
+	return selected, nil
 }
 
 func rejectUnsupportedConfig(cfg *genai.GenerateContentConfig) error {
@@ -348,20 +340,15 @@ func rejectUnsupportedConfig(cfg *genai.GenerateContentConfig) error {
 	if cfg.ResponseSchema != nil || cfg.ResponseJsonSchema != nil || (cfg.ResponseMIMEType != "" && cfg.ResponseMIMEType != "text/plain") {
 		return fmt.Errorf("%w: structured response formats", ErrUnsupportedConfig)
 	}
-
-	// Only SystemInstruction and the default/text/plain response MIME type are
-	// representable by cli-v1. Reflection makes newly added SDK fields fail
-	// closed instead of silently changing nested-agent behavior.
 	value := reflect.ValueOf(*cfg)
 	typeOfConfig := value.Type()
 	for index := 0; index < value.NumField(); index++ {
-		name := typeOfConfig.Field(index).Name
-		switch name {
+		switch typeOfConfig.Field(index).Name {
 		case "SystemInstruction", "ResponseMIMEType", "ResponseSchema", "ResponseJsonSchema", "Tools", "ToolConfig":
 			continue
 		}
 		if !value.Field(index).IsZero() {
-			return fmt.Errorf("%w: %s", ErrUnsupportedConfig, name)
+			return fmt.Errorf("%w: %s", ErrUnsupportedConfig, typeOfConfig.Field(index).Name)
 		}
 	}
 	return nil
@@ -384,15 +371,7 @@ func textOnly(content *genai.Content) (string, error) {
 	}
 	var text strings.Builder
 	for _, part := range content.Parts {
-		if part == nil {
-			return "", ErrUnsupportedPart
-		}
-		if part.FunctionCall != nil || part.FunctionResponse != nil || part.ToolCall != nil || part.ToolResponse != nil {
-			return "", ErrUnsupportedPart
-		}
-		if part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil ||
-			part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil ||
-			part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+		if part == nil || part.FunctionCall != nil || part.FunctionResponse != nil || part.ToolCall != nil || part.ToolResponse != nil || part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
 			return "", ErrUnsupportedPart
 		}
 		text.WriteString(part.Text)

@@ -91,18 +91,161 @@ type Provider struct {
 	BaseURL   string             `yaml:"base_url,omitempty"`
 	APIKeyEnv string             `yaml:"api_key_env,omitempty"`
 	Headers   map[string]string  `yaml:"headers,omitempty"`
-	Shim      *ShimConfig        `yaml:"shim,omitempty"`
 	Profiles  map[string]Profile `yaml:"profiles"`
+	// Shim is decoded only to give a migration error. It is never executed.
+	Shim *ShimConfig `yaml:"shim,omitempty"`
+
+	// Agent CLI provider fields.
+	Executable    string            `yaml:"executable,omitempty"`
+	Version       *CLIVersion       `yaml:"version,omitempty"`
+	Preconditions []CLIPrecondition `yaml:"preconditions,omitempty"`
+	Invocation    *CLIInvocation    `yaml:"invocation,omitempty"`
+	Stream        *CLIStream        `yaml:"stream,omitempty"`
+	Session       *CLISession       `yaml:"session,omitempty"`
 
 	// ACP provider fields.
 	Command string   `yaml:"command,omitempty"`
 	Args    []string `yaml:"args,omitempty"`
 }
 
-// ShimConfig is the executable mapper configuration for an agent_cli provider.
+// ShimConfig is the retired cli-v1 mapper configuration.
 type ShimConfig struct {
 	Command string   `yaml:"command"`
 	Args    []string `yaml:"args,omitempty"`
+}
+
+// CLIVersion declares the accepted native CLI version range.
+type CLIVersion struct {
+	Command []string `yaml:"command"`
+	Pattern string   `yaml:"pattern"`
+	Min     string   `yaml:"min"`
+	Max     string   `yaml:"max,omitempty"`
+}
+
+type CLIPrecondition struct {
+	Name    string   `yaml:"name"`
+	Command []string `yaml:"command"`
+	Expect  string   `yaml:"expect"`
+	Message string   `yaml:"message"`
+}
+
+type CLIInvocation struct {
+	Prompt       string                         `yaml:"prompt"`
+	SystemPrompt *CLISystemPrompt               `yaml:"system_prompt,omitempty"`
+	ArgsPrefix   []string                       `yaml:"args_prefix,omitempty"`
+	Args         []string                       `yaml:"args"`
+	Options      map[string]CLIInvocationOption `yaml:"options,omitempty"`
+	Workspace    *CLIWorkspaceInvocation        `yaml:"workspace,omitempty"`
+}
+
+// CLISystemPrompt declares the CLI's own system-instruction channel. Host-owned
+// content (the agent instruction and the project registry) travels through it
+// and keeps real authority, so the stdin prompt carries only the untrusted
+// transcript.
+//
+// A descriptor omits this block when its CLI has no such channel. The host
+// content is then prepended to the stdin prompt, which is the only option left.
+// It is never labeled as trusted there: the prompt reaches the CLI as user
+// input, and a user message that asserts its own authority has the exact shape
+// of a prompt injection.
+type CLISystemPrompt struct {
+	Flag string `yaml:"flag"`
+}
+
+type CLIInvocationOption struct {
+	Flag     string                              `yaml:"flag,omitempty"`
+	Template []string                            `yaml:"template,omitempty"`
+	Position string                              `yaml:"position,omitempty"`
+	Values   map[string]CLIInvocationOptionValue `yaml:",inline"`
+}
+
+// CLIInvocationOptionValue sets substitutions and can add a fixed argument
+// list. YAML mappings such as {sandbox: read-only} become Substitutions.
+type CLIInvocationOptionValue struct {
+	Substitutions map[string]string
+	Args          []string
+}
+
+func (v *CLIInvocationOptionValue) UnmarshalYAML(node *yaml.Node) error {
+	if node.Kind != yaml.MappingNode {
+		return fmt.Errorf("option value must be a mapping")
+	}
+	v.Substitutions = make(map[string]string)
+	for index := 0; index+1 < len(node.Content); index += 2 {
+		key := node.Content[index].Value
+		value := node.Content[index+1]
+		if key == "args" {
+			if value.Kind != yaml.SequenceNode {
+				return fmt.Errorf("option value args must be a list")
+			}
+			for _, item := range value.Content {
+				if item.Kind != yaml.ScalarNode {
+					return fmt.Errorf("option value args entries must be strings")
+				}
+				v.Args = append(v.Args, item.Value)
+			}
+			continue
+		}
+		if value.Kind != yaml.ScalarNode {
+			return fmt.Errorf("option substitutions must be strings")
+		}
+		v.Substitutions[key] = value.Value
+	}
+	return nil
+}
+
+type CLIWorkspaceInvocation struct {
+	CWDFlag    string            `yaml:"cwd_flag"`
+	AddDirFlag string            `yaml:"add_dir_flag"`
+	AddDirWhen map[string]string `yaml:"add_dir_when"`
+}
+
+type CLIStream struct {
+	Format        string       `yaml:"format"`
+	IgnoreTypes   []string     `yaml:"ignore_types,omitempty"`
+	FinalText     CLIFinalText `yaml:"final_text"`
+	Failure       CLIFailure   `yaml:"failure"`
+	Activity      *CLIActivity `yaml:"activity,omitempty"`
+	TerminalTypes []string     `yaml:"terminal_types"`
+}
+
+type CLIFinalText struct {
+	When map[string]string `yaml:"when"`
+	Path string            `yaml:"path"`
+}
+
+type CLIFailure struct {
+	WhenAny []map[string]string `yaml:"when_any"`
+}
+
+type CLIActivity struct {
+	When         map[string]string `yaml:"when"`
+	TypeField    string            `yaml:"type_field"`
+	ReportTypes  []string          `yaml:"report_types,omitempty"`
+	DiscardTypes []string          `yaml:"discard_types"`
+}
+
+// CLISession records the declared recovery data. Recovery support is not part
+// of the direct foreground CLI adapter yet, but definitions validate it now.
+type CLISession struct {
+	ID         CLISessionID         `yaml:"id"`
+	Transcript CLISessionTranscript `yaml:"transcript"`
+	Resume     CLISessionResume     `yaml:"resume"`
+}
+
+type CLISessionID struct {
+	When map[string]string `yaml:"when"`
+	Path string            `yaml:"path"`
+}
+
+type CLISessionTranscript struct {
+	PathGlob string `yaml:"path_glob"`
+}
+
+type CLISessionResume struct {
+	ResumeFlag []string `yaml:"resume_flag,omitempty"`
+	ArgsPrefix []string `yaml:"args_prefix,omitempty"`
+	Args       []string `yaml:"args,omitempty"`
 }
 
 type Profile struct {
@@ -284,10 +427,15 @@ type ResolvedModel struct {
 	MaxDirectInlineBytes int
 
 	// agent_cli provider fields.
-	Shim     ShimConfig
-	Agent    string
-	Approval string
-	Variant  string
+	Executable    string
+	Version       CLIVersion
+	Preconditions []CLIPrecondition
+	Invocation    CLIInvocation
+	Stream        CLIStream
+	Session       *CLISession
+	Agent         string
+	Approval      string
+	Variant       string
 
 	ContextWindowTokens int
 	MaxOutputTokens     int

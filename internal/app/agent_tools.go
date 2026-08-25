@@ -18,6 +18,7 @@ import (
 	"google.golang.org/adk/v2/tool"
 	"google.golang.org/adk/v2/tool/agenttool"
 	"google.golang.org/adk/v2/tool/functiontool"
+	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
@@ -64,6 +65,7 @@ type preparedAgentTool struct {
 	cliTool          tool.Tool
 	acpRuntime       port.ExternalAgentRuntime
 	acpResolved      *agentdef.ResolvedModel
+	cliResolved      *agentdef.ResolvedModel
 	projectRoots     map[string]string
 	acpTimeout       time.Duration
 	executionMode    string
@@ -179,14 +181,23 @@ func prepareRootAgentTools(
 			if err := handshakeSelectedAgentCLI(ctx, resolved, childModel, describedCLIProviders); err != nil {
 				return nil, fmt.Errorf("validate agent tool %q model: %w", name, err)
 			}
-			child, err := newAgentToolAgent(definition, root.EffectiveDelegatedGlobalInstruction(), childModel, nil)
+			child, err := newAgentCLIToolAgent(definition, root.EffectiveDelegatedGlobalInstruction(), childModel)
 			if err != nil {
 				return nil, fmt.Errorf("build agent tool %q: %w", name, err)
 			}
+			revision, err := agentExecutionFingerprint(definition, resolved, paths.SandboxProjectRoots, cfg)
+			if err != nil {
+				return nil, fmt.Errorf("fingerprint agent tool %q scope: %w", name, err)
+			}
 			prepared = append(prepared, preparedAgentTool{
-				definition: definition,
-				model:      childModel,
-				cliTool:    agenttool.New(child, &agenttool.Config{}),
+				definition:       definition,
+				model:            childModel,
+				cliResolved:      resolved,
+				projectRoots:     paths.SandboxProjectRoots,
+				cliTool:          agenttool.New(child, &agenttool.Config{}),
+				executionMode:    definition.ExecutionMode,
+				acpTimeout:       acpAgentTimeout(definition, acpAgentFallback(definition, cfg)),
+				registryRevision: revision,
 			})
 			continue
 		}
@@ -319,6 +330,17 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 			continue
 		}
 		if child.cliTool != nil {
+			// A durable agent CLI leaf needs invocation identity for the
+			// confirmation gate and the job record, so it is rebuilt per call.
+			// A foreground leaf reuses the startup-validated wrapper.
+			if child.executionMode == agentdef.ExecutionModeDurableJob {
+				durable, err := newAgentCLIDurableTool(child.definition, child.cliResolved, child.projectRoots, child.acpTimeout, child.registryRevision, f.jobStarter, f.completionBindings, actor, key)
+				if err != nil {
+					return nil, fmt.Errorf("build durable agent CLI tool %q: %w", child.definition.Name, err)
+				}
+				combined = append(combined, durable)
+				continue
+			}
 			combined = append(combined, child.cliTool)
 			continue
 		}
@@ -620,7 +642,37 @@ func newAgentToolAgent(definition agentdef.AgentDef, globalInstruction string, c
 	return newAgentToolAgentWithContext(definition, globalInstruction, childModel, tools, nil)
 }
 
+// agentCLIInputSchema is the argument object an agent CLI leaf exposes to its
+// caller. It mirrors the ACP delegation shape so both external-agent families
+// look the same to the root model.
+//
+// Declaring it replaces ADK's default single "request" string. That default is
+// what forced every CLI to run in the application root, because a free-text
+// argument cannot name a workspace the host is willing to trust.
+func agentCLIInputSchema() *genai.Schema {
+	return &genai.Schema{
+		Type: "OBJECT",
+		Properties: map[string]*genai.Schema{
+			"project": {Type: "STRING", Description: "registered project name to use as the workspace"},
+			"task":    {Type: "STRING", Description: "complete bounded task for the agent CLI"},
+		},
+		Required: []string{"project", "task"},
+	}
+}
+
+func newAgentCLIToolAgent(definition agentdef.AgentDef, globalInstruction string, childModel model.LLM) (agent.Agent, error) {
+	return newAgentToolAgentWithSchema(definition, globalInstruction, childModel, agentCLIInputSchema())
+}
+
+func newAgentToolAgentWithSchema(definition agentdef.AgentDef, globalInstruction string, childModel model.LLM, inputSchema *genai.Schema) (agent.Agent, error) {
+	return newAgentToolAgentFull(definition, globalInstruction, childModel, nil, nil, inputSchema)
+}
+
 func newAgentToolAgentWithContext(definition agentdef.AgentDef, globalInstruction string, childModel model.LLM, tools []tool.Tool, contextConfig *agentToolContextConfig) (agent.Agent, error) {
+	return newAgentToolAgentFull(definition, globalInstruction, childModel, tools, contextConfig, nil)
+}
+
+func newAgentToolAgentFull(definition agentdef.AgentDef, globalInstruction string, childModel model.LLM, tools []tool.Tool, contextConfig *agentToolContextConfig, inputSchema *genai.Schema) (agent.Agent, error) {
 	instruction := definition.Instruction
 	includeContents := llmagent.IncludeContentsDefault
 	if definition.IncludeContents == "none" {
@@ -636,6 +688,9 @@ func newAgentToolAgentWithContext(definition agentdef.AgentDef, globalInstructio
 		Mode:                     llmagent.ModeChat,
 		DisallowTransferToParent: true,
 		DisallowTransferToPeers:  true,
+	}
+	if inputSchema != nil {
+		cfg.InputSchema = inputSchema
 	}
 	if len(tools) > 0 {
 		cfg.Tools = tools
@@ -698,4 +753,124 @@ func (f *compositeAgentToolFactory) childDeclarativeTools(provider declarativeTo
 		result = append(result, declared)
 	}
 	return result, nil
+}
+
+// generateAgentCLIText runs one agent CLI turn outside ADK. A durable job has
+// no ADK session: the worker owns the turn, so the delegation is built here in
+// the same {project, task} shape the in-session leaf receives.
+func generateAgentCLIText(ctx context.Context, childModel model.LLM, globalInstruction, instruction, project, task string) (string, error) {
+	if childModel == nil {
+		return "", errors.New("agent CLI model is unavailable")
+	}
+	arguments, err := json.Marshal(map[string]string{"project": project, "task": task})
+	if err != nil {
+		return "", fmt.Errorf("encode agent CLI delegation: %w", err)
+	}
+	request := &model.LLMRequest{
+		Contents: []*genai.Content{genai.NewContentFromText(string(arguments), genai.RoleUser)},
+	}
+	if combined := combineInstructions(globalInstruction, instruction); combined != "" {
+		request.Config = &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText(combined, genai.RoleUser)}
+	}
+	for response, err := range childModel.GenerateContent(ctx, request, false) {
+		if err != nil {
+			return "", err
+		}
+		if response == nil || response.Content == nil {
+			continue
+		}
+		var text strings.Builder
+		for _, part := range response.Content.Parts {
+			text.WriteString(part.Text)
+		}
+		return strings.TrimSpace(text.String()), nil
+	}
+	return "", errors.New("agent CLI produced no response")
+}
+
+func combineInstructions(globalInstruction, instruction string) string {
+	parts := make([]string, 0, 2)
+	if trimmed := strings.TrimSpace(globalInstruction); trimmed != "" {
+		parts = append(parts, trimmed)
+	}
+	if trimmed := strings.TrimSpace(instruction); trimmed != "" {
+		parts = append(parts, trimmed)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// newAgentCLIDurableTool exposes an agent CLI leaf that runs as a durable job.
+//
+// It mirrors the ACP durable path: the same {project, task} arguments, the same
+// confirmation gate, and the same acceptance receipt. The root turn ends once
+// the job is accepted; the durable worker produces the result and Slack
+// receives it later.
+func newAgentCLIDurableTool(
+	definition agentdef.AgentDef,
+	resolved *agentdef.ResolvedModel,
+	projectRoots map[string]string,
+	timeout time.Duration,
+	registryRevision string,
+	jobStarter port.ExternalAgentJobStarter,
+	completionBindings port.ExternalAgentJobCompletionBindingResolver,
+	actor string,
+	key domain.ConversationKey,
+) (tool.Tool, error) {
+	if resolved == nil {
+		return nil, errors.New("agent CLI profile is required")
+	}
+	if len(projectRoots) == 0 {
+		return nil, errors.New("agent CLI durable tools require at least one registered sandbox project")
+	}
+	return functiontool.New(functiontool.Config{
+		Name:        definition.Name,
+		Description: definition.Description + " Requires confirmation because the agent CLI may modify files and run commands within its approval policy.",
+	}, func(ctx agent.Context, args acpAgentArgs) (acpAgentResult, error) {
+		primaryPath, err := resolveACPProject(projectRoots, args.Project)
+		if err != nil {
+			return acpAgentResult{}, err
+		}
+		if strings.TrimSpace(args.Task) == "" {
+			return acpAgentResult{}, errors.New("agent CLI task must not be empty")
+		}
+		confirmation := ctx.ToolConfirmation()
+		if confirmation == nil {
+			hint, payload := acpDelegationConfirmation(ctx, completionBindings, actor, key, args)
+			if err := ctx.RequestConfirmation(hint, payload); err != nil {
+				return acpAgentResult{}, err
+			}
+			return acpAgentResult{}, nil
+		}
+		if !confirmation.Confirmed {
+			return acpAgentResult{}, errors.New("agent CLI delegation confirmation was rejected")
+		}
+		if jobStarter == nil || actor == "" || key == "" || registryRevision == "" {
+			return acpAgentResult{}, errors.New("durable agent CLI execution is not configured for this invocation")
+		}
+		request := domain.ExternalAgentJobRequest{
+			Provider: resolved.Provider.Name, Profile: definition.Model, PrimaryProject: args.Project,
+			RegistryRevision: registryRevision, Task: args.Task, Mode: domain.JobDetached,
+			Timeout: timeout, PrimaryPath: primaryPath,
+			WrapperCallID: ctxFunctionCallID(ctx), OriginalCallID: ctxFunctionCallID(ctx), Actor: actor,
+			TeamID: teamIDFromConversation(key), ConversationKey: key,
+		}
+		if completionBindings != nil {
+			binding, found, bindingErr := completionBindings.CompletionBindingForTask(ctx, actor, key, args.Project, args.Task)
+			if bindingErr != nil {
+				return acpAgentResult{}, fmt.Errorf("resolve external-agent completion binding: %w", bindingErr)
+			}
+			if found {
+				request.WorkstreamID = binding.WorkstreamID
+				request.TaskID = binding.TaskID
+				request.ExecutionIdentity = binding.ExecutionIdentity
+				request.AdmissionRevision = binding.AdmissionRevision
+			}
+		}
+		job, err := jobStarter.Start(ctx, request)
+		if err != nil {
+			return acpAgentResult{}, err
+		}
+		encoded, _ := json.Marshal(map[string]any{"status": "accepted", "job_id": job.ID, "request_sha256": job.RequestSHA256})
+		return acpAgentResult{Result: string(encoded)}, nil
+	})
 }

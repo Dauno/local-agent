@@ -24,9 +24,8 @@ func killProcessGroup(cmd *exec.Cmd) error {
 	rootPID := cmd.Process.Pid
 	descendants := linuxDescendants(rootPID)
 
-	// A nested shim may place its native CLI in a separate process group to
-	// handle parser failures. Stop descendants first, then kill every discovered
-	// group so cancellation still covers the full subprocess tree.
+	// A native CLI can create separate process groups. Stop descendants first,
+	// then kill every discovered group to cover the full subprocess tree.
 	groups := make(map[int]struct{})
 	for _, pid := range descendants {
 		_ = syscall.Kill(pid, syscall.SIGSTOP)

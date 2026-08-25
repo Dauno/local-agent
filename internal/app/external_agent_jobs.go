@@ -130,10 +130,61 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 		}
 		return result, runErr
 	}
-	if profileMatched {
-		return domain.AcpInvocationResult{}, errors.New("durable ACP job scope revision does not match current configuration")
+	if matched, result, err := d.runAgentCLI(ctx, job, &profileMatched); matched {
+		return result, err
 	}
-	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
+	if profileMatched {
+		return domain.AcpInvocationResult{}, errors.New("durable external-agent job scope revision does not match current configuration")
+	}
+	return domain.AcpInvocationResult{}, errors.New("durable external-agent job provider/profile is unavailable")
+}
+
+// runAgentCLI executes a durable job whose leaf is an agent CLI rather than an
+// ACP agent. The two families differ only in how the delegated turn is
+// produced: everything after it (result normalization, native materialization,
+// artifact delivery) is shared with the ACP path above.
+//
+// The CLI has no session and no progress stream today, so this path reports no
+// live progress and does not implement session recovery. A job left in
+// completion_unknown must be closed by an operator.
+func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalAgentJob, profileMatched *bool) (bool, domain.AcpInvocationResult, error) {
+	for _, child := range d.children {
+		if child.model == nil || child.cliResolved == nil {
+			continue
+		}
+		if job.Provider != child.cliResolved.Provider.Name || job.Profile != child.definition.Model {
+			continue
+		}
+		*profileMatched = true
+		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
+			continue
+		}
+		// Side effects become possible the moment the CLI starts, because it
+		// decides on its own once given an approval mode. The job is marked
+		// before the process exists, never after.
+		if d.store != nil {
+			if err := d.store.MarkSideEffectsPossible(ctx, job.ID, job.LeaseOwner, job.Attempt); err != nil {
+				return true, domain.AcpInvocationResult{}, err
+			}
+		}
+		text, runErr := generateAgentCLIText(ctx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, job.Task)
+		if runErr != nil {
+			return true, domain.AcpInvocationResult{}, runErr
+		}
+		result := domain.AcpInvocationResult{Text: text, Inline: true}
+		switch {
+		case job.Mode == domain.JobDetached && d.artifacts != nil:
+			result, runErr = d.materialize(ctx, job, result)
+		case job.Mode == domain.JobDetached && d.results != nil:
+			runErr = errors.New("native result delivery store is unavailable")
+		case job.Mode == domain.JobForeground:
+			result, runErr = d.normalizeForegroundResult(ctx, job, result)
+		case d.sanitize != nil:
+			result.Text = d.sanitize(result.Text)
+		}
+		return true, result, runErr
+	}
+	return false, domain.AcpInvocationResult{}, nil
 }
 
 // normalizeForegroundResult produces the complete persisted identity for a
@@ -340,16 +391,20 @@ func (d *acpJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAge
 	if profileMatched {
 		return domain.AcpInvocationResult{}, errors.New("durable ACP recovery scope revision does not match current configuration")
 	}
+	// Reconciliation resumes the agent's session to learn what happened. This
+	// release captures no session for an agent CLI, so a CLI job is told plainly
+	// that it must be closed by an operator instead of being shown an ACP error.
+	for _, child := range d.children {
+		if child.cliResolved != nil && job.Provider == child.cliResolved.Provider.Name && job.Profile == child.definition.Model {
+			return domain.AcpInvocationResult{}, fmt.Errorf(
+				"session recovery is not supported for agent_cli job %q: inspect the workspace and close the job explicitly", job.ID)
+		}
+	}
 	return domain.AcpInvocationResult{}, errors.New("durable ACP job provider/profile is unavailable")
 }
 
 func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *runtimeInfrastructure, supplied ...externalAgentSchedules) (*externalagent.Service, *externalagent.NotificationWorker, error) {
-	var children []preparedAgentTool
-	for _, child := range models.preparedAgentTools {
-		if child.acpRuntime != nil {
-			children = append(children, child)
-		}
-	}
+	children := externalAgentChildren(models.preparedAgentTools)
 	if len(children) == 0 {
 		return nil, nil, nil
 	}
@@ -446,9 +501,30 @@ func newExternalAgentActivationWorker(store port.ExternalAgentJobActivationStore
 	})
 }
 
+// externalAgentChildren selects the leaves the durable worker can dispatch.
+// Both external-agent families share one worker: an ACP child carries a
+// runtime, an agent CLI child carries a model plus its resolved provider.
+// Dropping either family here leaves its enqueued jobs with no runtime able to
+// claim them, and the worker fails them instead.
+func externalAgentChildren(prepared []preparedAgentTool) []preparedAgentTool {
+	children := make([]preparedAgentTool, 0, len(prepared))
+	for _, child := range prepared {
+		if child.acpRuntime != nil || child.cliResolved != nil {
+			children = append(children, child)
+		}
+	}
+	return children
+}
+
+// durableACPConfigured reports whether any external-agent leaf runs as a
+// durable job. Both families deliver their result the same way, so an agent
+// CLI leaf needs the same Slack scope as an ACP leaf.
 func durableACPConfigured(models runtimeModels) bool {
 	for _, child := range models.preparedAgentTools {
-		if child.acpRuntime != nil && child.definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
+		if child.definition.ExecutionMode != agentdef.ExecutionModeDurableJob {
+			continue
+		}
+		if child.acpRuntime != nil || child.cliResolved != nil {
 			return true
 		}
 	}

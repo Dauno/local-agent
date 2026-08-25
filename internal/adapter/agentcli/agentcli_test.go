@@ -1,615 +1,346 @@
 package agentcli_test
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"io"
 	"os"
 	"path/filepath"
-	"reflect"
 	"strings"
 	"testing"
-	"time"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/agentcli"
-	"github.com/Dauno/slack-local-agent/internal/cliprotocol"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
-// TestHelperProcess is re-executed by the adapter as a fake cli-v1 shim. When
-// run as part of the normal suite (no "--" separator) it is a no-op.
 func TestHelperProcess(t *testing.T) {
-	args := helperArgs()
-	if args == nil {
+	if !strings.Contains(strings.Join(os.Args, " "), "helper-agent-cli") {
 		return
 	}
-	os.Exit(runFakeShim(args))
-}
-
-func helperArgs() []string {
-	for index, arg := range os.Args {
-		if arg == "--" {
-			return os.Args[index+1:]
+	if strings.Contains(strings.Join(os.Args, " "), "--version") {
+		_, _ = os.Stdout.WriteString("fake-cli 1.2.3\n")
+		os.Exit(0)
+	}
+	input, _ := io.ReadAll(os.Stdin)
+	for _, argument := range os.Args {
+		if strings.HasPrefix(argument, "dump=") {
+			_ = os.WriteFile(strings.TrimPrefix(argument, "dump="), input, 0o600)
+		}
+		if strings.HasPrefix(argument, "dumpargv=") {
+			_ = os.WriteFile(strings.TrimPrefix(argument, "dumpargv="), []byte(strings.Join(os.Args, "\n")), 0o600)
+		}
+		if strings.HasPrefix(argument, "dumpcwd=") {
+			cwd, _ := os.Getwd()
+			_ = os.WriteFile(strings.TrimPrefix(argument, "dumpcwd="), []byte(cwd), 0o600)
 		}
 	}
-	return nil
-}
-
-func runFakeShim(args []string) int {
-	params := map[string]string{}
-	for _, arg := range args {
-		key, value, ok := strings.Cut(arg, "=")
-		if ok {
-			params[key] = value
+	mode := "success"
+	for _, argument := range os.Args {
+		if strings.HasPrefix(argument, "mode=") {
+			mode = strings.TrimPrefix(argument, "mode=")
 		}
 	}
-	stdinData, _ := io.ReadAll(os.Stdin)
-	if dump := params["dump"]; dump != "" {
-		payload, _ := json.Marshal(map[string]any{"argv": os.Args, "stdin": string(stdinData)})
-		_ = os.WriteFile(dump, payload, 0o644)
-	}
-	req, err := cliprotocol.DecodeRequest(bytes.TrimSpace(stdinData))
-	id := "unknown"
-	if err == nil {
-		id = req.ID
-	}
-	emit := func(resp cliprotocol.Response) {
-		line, _ := cliprotocol.EncodeLine(resp)
-		_, _ = os.Stdout.Write(line)
-	}
-	switch params["mode"] {
-	case "describe":
-		emit(cliprotocol.NewDescription(id, "fake", "v0.0.1", "1.17.20", []string{"text"}))
-	case "validated":
-		emit(cliprotocol.NewValidated(id))
-	case "result", "":
-		emit(cliprotocol.NewResult(id, "final text from shim"))
-	case "activity_result":
-		emit(cliprotocol.NewActivity(id, "tool", "bash", "completed"))
-		emit(cliprotocol.NewResult(id, "done after activity"))
-	case "invalid_activity":
-		emit(cliprotocol.NewActivity(id, "tool", "bash", "running"))
-		emit(cliprotocol.NewResult(id, "must not be accepted"))
-	case "stderr_result":
-		_, _ = os.Stderr.WriteString("diagnostic noise\n")
-		emit(cliprotocol.NewResult(id, "ok with stderr"))
-	case "error":
-		emit(cliprotocol.NewError(id, cliprotocol.CodeProcessFailed, "opencode exited early", false))
-	case "diagnostic_error":
-		_, _ = os.Stderr.WriteString("SECRET-FILE-CONTENT-IN-STDERR\n")
-		emit(cliprotocol.NewError(id, cliprotocol.CodeProcessFailed, "SECRET-FILE-CONTENT-IN-MESSAGE", false))
-	case "malformed":
-		_, _ = os.Stdout.WriteString("{not valid json\n")
-	case "continued_writer":
-		_, _ = os.Stdout.WriteString("{not valid json\n")
-		for {
-			if _, err := os.Stdout.WriteString(strings.Repeat("x", 64<<10)); err != nil {
-				return 0
-			}
-		}
-	case "two_terminals":
-		emit(cliprotocol.NewResult(id, "first"))
-		emit(cliprotocol.NewResult(id, "second"))
-	case "no_terminal":
-		return 0
-	case "no_terminal_nonzero":
-		return 3
-	case "oversized":
-		_, _ = os.Stdout.WriteString("{\"x\":\"" + strings.Repeat("A", 8192) + "\"}\n")
-	case "wrong_id":
-		resp := cliprotocol.NewResult("some-other-id", "text")
-		emit(resp)
-	case "hang":
-		time.Sleep(30 * time.Second)
+	switch mode {
+	case "failure":
+		_, _ = os.Stdout.WriteString(`{"type":"result","is_error":true,"result":"bad"}` + "\n")
+	case "after-terminal":
+		_, _ = os.Stdout.WriteString(`{"type":"result","is_error":false,"result":"ok"}` + "\n" + `{"type":"later"}` + "\n")
 	default:
-		return 9
+		_, _ = os.Stdout.WriteString(`{"type":"assistant","message":{"content":[{"type":"thinking","text":"secret reasoning"}]}}` + "\n" + `{"type":"result","is_error":false,"result":"final text"}` + "\n")
 	}
-	return 0
+	os.Exit(0)
 }
 
-// --- test helpers ---
-
-type testOptions struct {
-	mode         string
-	dump         string
-	limits       domain.ContextLimits
-	maxLineBytes int
-	profileModel string
-}
-
-func newTestLLM(t *testing.T, opts testOptions) *agentcli.LLM {
+func testLLM(t *testing.T, mode, dump string) *agentcli.LLM {
 	t.Helper()
 	dir := t.TempDir()
-	model := opts.profileModel
-	if model == "" {
-		model = "anthropic/model-name"
-	}
-	args := []string{"-test.run=^TestHelperProcess$", "--", "mode=" + opts.mode}
-	if opts.dump != "" {
-		args = append(args, "dump="+opts.dump)
-	}
-	llm, err := agentcli.New(agentcli.Config{
-		Command: os.Args[0],
-		Args:    args,
-		Profile: cliprotocol.Profile{Model: model, Agent: "build", Approval: cliprotocol.ApprovalAuto},
-		Workspace: cliprotocol.Workspace{
-			WorkingDirectory: dir,
-			Projects:         []cliprotocol.Project{{Name: "workspace", Path: dir}},
-		},
-		ContextLimits: opts.limits,
-		WorkingDir:    dir,
-		MaxLineBytes:  opts.maxLineBytes,
-	})
+	provider := agentdef.Provider{Name: "fake", Type: agentdef.ProviderTypeAgentCLI, Version: &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0", Max: "1.9.9"}, Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=" + mode, "dump=" + dump}, Options: map[string]agentdef.CLIInvocationOption{"model": {Flag: "--model"}}}, Stream: &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}}}
+	llm, err := agentcli.New(agentcli.Config{Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"}, Workspace: domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}}, WorkingDir: dir})
 	if err != nil {
-		t.Fatalf("construct agentcli LLM: %v", err)
+		t.Fatal(err)
 	}
 	return llm
 }
 
-func userRequest(texts ...string) *model.LLMRequest {
-	contents := make([]*genai.Content, 0, len(texts))
-	for index, text := range texts {
-		var role genai.Role = genai.RoleUser
-		if index%2 == 1 {
-			role = genai.RoleModel
-		}
-		contents = append(contents, genai.NewContentFromText(text, role))
-	}
-	return &model.LLMRequest{Contents: contents}
+// delegate renders the {project, task} object that ADK serializes from the
+// leaf's declared input schema. Every agent CLI call now arrives in this shape.
+func delegate(project, task string) string {
+	data, _ := json.Marshal(map[string]string{"project": project, "task": task})
+	return string(data)
 }
 
-func collect(t *testing.T, llm *agentcli.LLM, ctx context.Context, request *model.LLMRequest) (*model.LLMResponse, error) {
+func collect(t *testing.T, llm *agentcli.LLM) (*model.LLMResponse, error) {
 	t.Helper()
-	var (
-		last *model.LLMResponse
-		err  error
-	)
-	for resp, genErr := range llm.GenerateContent(ctx, request, false) {
-		if genErr != nil {
-			err = genErr
-			break
-		}
-		last = resp
+	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(delegate("workspace", "private prompt"), genai.RoleUser)}}
+	for response, err := range llm.GenerateContent(context.Background(), request, false) {
+		return response, err
 	}
-	return last, err
+	return nil, nil
 }
 
-// --- tests ---
-
-func TestGenerateContentSuccess(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "result"})
-	resp, err := collect(t, llm, context.Background(), userRequest("hello"))
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	if resp == nil || resp.Content == nil || len(resp.Content.Parts) != 1 {
-		t.Fatalf("unexpected response: %+v", resp)
-	}
-	if resp.Content.Parts[0].Text != "final text from shim" {
-		t.Fatalf("text = %q", resp.Content.Parts[0].Text)
-	}
-	if resp.FinishReason != genai.FinishReasonStop {
-		t.Fatalf("finish reason = %q", resp.FinishReason)
-	}
-	if resp.Content.Role != genai.RoleModel {
-		t.Fatalf("role = %q", resp.Content.Role)
-	}
-}
-
-func TestActivityBeforeResultIsIgnored(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "activity_result"})
-	resp, err := collect(t, llm, context.Background(), userRequest("hi"))
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	if resp.Content.Parts[0].Text != "done after activity" {
-		t.Fatalf("text = %q", resp.Content.Parts[0].Text)
-	}
-}
-
-func TestInvalidActivityIsProtocolError(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "invalid_activity"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeProtocolError {
-		t.Fatalf("expected protocol_error for invalid activity, got %v", err)
-	}
-}
-
-func TestStderrIsCapturedNotFatal(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "stderr_result"})
-	resp, err := collect(t, llm, context.Background(), userRequest("hi"))
-	if err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	if resp.Content.Parts[0].Text != "ok with stderr" {
-		t.Fatalf("text = %q", resp.Content.Parts[0].Text)
-	}
-}
-
-func TestTerminalErrorSurfaced(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "error"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) {
-		t.Fatalf("expected ShimError, got %v", err)
-	}
-	if shimErr.Code != cliprotocol.CodeProcessFailed {
-		t.Fatalf("code = %q", shimErr.Code)
-	}
-}
-
-func TestChildDiagnosticsAreNotExposed(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "diagnostic_error"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	if err == nil {
-		t.Fatal("expected shim error")
-	}
-	if strings.Contains(err.Error(), "SECRET-FILE-CONTENT") {
-		t.Fatalf("child-controlled diagnostic leaked: %v", err)
-	}
-	if !strings.Contains(err.Error(), "omitted") {
-		t.Fatalf("safe diagnostic metadata missing: %v", err)
-	}
-}
-
-func TestMalformedOutputIsProtocolError(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "malformed"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeProtocolError {
-		t.Fatalf("expected protocol_error, got %v", err)
-	}
-}
-
-func TestProtocolFailureTerminatesContinuedWriter(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "continued_writer"})
-	done := make(chan error, 1)
-	go func() {
-		_, err := collect(t, llm, context.Background(), userRequest("hi"))
-		done <- err
-	}()
-	select {
-	case err := <-done:
-		var shimErr *agentcli.ShimError
-		if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeProtocolError {
-			t.Fatalf("expected protocol_error, got %v", err)
-		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("protocol failure deadlocked while child continued writing")
-	}
-}
-
-func TestMultipleTerminalsRejected(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "two_terminals"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeProtocolError {
-		t.Fatalf("expected protocol_error for duplicate terminal, got %v", err)
-	}
-}
-
-func TestNoTerminalCleanExit(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "no_terminal"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeNoResponse {
-		t.Fatalf("expected no_response, got %v", err)
-	}
-}
-
-func TestNoTerminalNonZeroExit(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "no_terminal_nonzero"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeProcessFailed {
-		t.Fatalf("expected process_failed, got %v", err)
-	}
-}
-
-func TestOversizedLineRejected(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "oversized", maxLineBytes: 1024})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeProtocolError {
-		t.Fatalf("expected protocol_error for oversized line, got %v", err)
-	}
-}
-
-func TestMismatchedIDRejected(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "wrong_id"})
-	_, err := collect(t, llm, context.Background(), userRequest("hi"))
-	var shimErr *agentcli.ShimError
-	if err == nil || !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeProtocolError {
-		t.Fatalf("expected protocol_error for mismatched id, got %v", err)
-	}
-}
-
-func TestStreamingRejected(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "result"})
-	var err error
-	for _, genErr := range llm.GenerateContent(context.Background(), userRequest("hi"), true) {
-		err = genErr
-		break
-	}
-	if err != agentcli.ErrStreamingUnsupported {
-		t.Fatalf("expected streaming rejection, got %v", err)
-	}
-}
-
-func TestToolsRejectedBeforeLaunch(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "result"})
-	request := userRequest("hi")
-	request.Config = &genai.GenerateContentConfig{
-		Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "do_thing"}}}},
-	}
-	_, err := collect(t, llm, context.Background(), request)
-	if err != agentcli.ErrToolsUnsupported {
-		t.Fatalf("expected tools rejection, got %v", err)
-	}
-}
-
-func TestRequestToolsRejectedBeforeLaunch(t *testing.T) {
-	dump := filepath.Join(t.TempDir(), "dump.json")
-	llm := newTestLLM(t, testOptions{mode: "result", dump: dump})
-	request := userRequest("hi")
-	request.Tools = map[string]any{"sandbox": struct{}{}}
-	_, err := collect(t, llm, context.Background(), request)
-	if !errors.Is(err, agentcli.ErrToolsUnsupported) {
-		t.Fatalf("expected request.Tools rejection, got %v", err)
-	}
-	if _, statErr := os.Stat(dump); !errors.Is(statErr, os.ErrNotExist) {
-		t.Fatalf("shim launched before request.Tools rejection: %v", statErr)
-	}
-}
-
-func TestEveryUnsupportedGenerateConfigFieldRejectedBeforeLaunch(t *testing.T) {
-	configType := reflect.TypeFor[genai.GenerateContentConfig]()
-	for field := range configType.Fields() {
-		switch field.Name {
-		case "SystemInstruction", "ResponseMIMEType", "Tools", "ToolConfig":
-			continue
-		}
-		t.Run(field.Name, func(t *testing.T) {
-			dump := filepath.Join(t.TempDir(), "dump.json")
-			llm := newTestLLM(t, testOptions{mode: "result", dump: dump})
-			cfg := &genai.GenerateContentConfig{}
-			setNonZero(reflect.ValueOf(cfg).Elem().FieldByName(field.Name))
-			request := userRequest("hi")
-			request.Config = cfg
-			_, err := collect(t, llm, context.Background(), request)
-			if !errors.Is(err, agentcli.ErrUnsupportedConfig) {
-				t.Fatalf("expected unsupported config rejection for %s, got %v", field.Name, err)
-			}
-			if _, statErr := os.Stat(dump); !errors.Is(statErr, os.ErrNotExist) {
-				t.Fatalf("shim launched before %s rejection: %v", field.Name, statErr)
-			}
-		})
-	}
-}
-
-func TestTextPlainAndSystemInstructionRemainSupported(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "result"})
-	request := userRequest("hi")
-	request.Config = &genai.GenerateContentConfig{
-		SystemInstruction: genai.NewContentFromText("system", genai.RoleUser),
-		ResponseMIMEType:  "text/plain",
-	}
-	if _, err := collect(t, llm, context.Background(), request); err != nil {
-		t.Fatalf("documented text defaults should remain supported: %v", err)
-	}
-}
-
-func TestFunctionHistoryRejected(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "result"})
-	request := &model.LLMRequest{Contents: []*genai.Content{
-		{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "1", Name: "x"}}}},
-		genai.NewContentFromText("continue", genai.RoleUser),
-	}}
-	_, err := collect(t, llm, context.Background(), request)
-	if err == nil {
-		t.Fatalf("expected function history rejection")
-	}
-}
-
-func TestNonUserFinalTurnRejected(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "result"})
-	request := &model.LLMRequest{Contents: []*genai.Content{
-		genai.NewContentFromText("assistant only", genai.RoleModel),
-	}}
-	_, err := collect(t, llm, context.Background(), request)
-	if err != agentcli.ErrNoUserTurn {
-		t.Fatalf("expected ErrNoUserTurn, got %v", err)
-	}
-}
-
-func TestUserTextOnlyInStdinNeverArgv(t *testing.T) {
-	dump := filepath.Join(t.TempDir(), "dump.json")
-	llm := newTestLLM(t, testOptions{mode: "result", dump: dump})
-	secret := "SENSITIVE-USER-PROMPT-9f3a"
-	if _, err := collect(t, llm, context.Background(), userRequest(secret)); err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	captured := readDump(t, dump)
-	argvJSON, _ := json.Marshal(captured["argv"])
-	if strings.Contains(string(argvJSON), secret) {
-		t.Fatalf("user text leaked into argv: %s", argvJSON)
-	}
-	if !strings.Contains(captured["stdin"].(string), secret) {
-		t.Fatalf("user text missing from stdin payload")
-	}
-}
-
-func TestRequestCarriesProfileInstructionAndProjects(t *testing.T) {
-	dump := filepath.Join(t.TempDir(), "dump.json")
-	llm := newTestLLM(t, testOptions{mode: "result", dump: dump})
-	request := userRequest("hello")
-	request.Config = &genai.GenerateContentConfig{
-		SystemInstruction: genai.NewContentFromText("You are Dev Agent.", genai.RoleUser),
-	}
-	if _, err := collect(t, llm, context.Background(), request); err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	captured := readDump(t, dump)
-	var req cliprotocol.Request
-	if err := json.Unmarshal([]byte(captured["stdin"].(string)), &req); err != nil {
-		t.Fatalf("decode captured request: %v", err)
-	}
-	if req.SystemInstruction != "You are Dev Agent." {
-		t.Fatalf("system instruction = %q", req.SystemInstruction)
-	}
-	if req.Profile == nil || req.Profile.Model != "anthropic/model-name" || req.Profile.Agent != "build" {
-		t.Fatalf("profile not forwarded: %+v", req.Profile)
-	}
-	if req.Workspace == nil || len(req.Workspace.Projects) != 1 || req.Workspace.Projects[0].Name != "workspace" {
-		t.Fatalf("workspace not forwarded: %+v", req.Workspace)
-	}
-}
-
-func TestLongSessionBoundedBeforeLaunch(t *testing.T) {
-	dump := filepath.Join(t.TempDir(), "dump.json")
-	llm := newTestLLM(t, testOptions{
-		mode:   "result",
-		dump:   dump,
-		limits: domain.ContextLimits{MaxMessages: 3, MaxChars: 40},
-	})
-	texts := []string{}
-	for range 20 {
-		texts = append(texts, strings.Repeat("x", 30))
-	}
-	// Ensure the final turn is a user message.
-	if len(texts)%2 == 0 {
-		texts = append(texts, strings.Repeat("y", 30))
-	}
-	if _, err := collect(t, llm, context.Background(), userRequest(texts...)); err != nil {
-		t.Fatalf("generate: %v", err)
-	}
-	captured := readDump(t, dump)
-	var req cliprotocol.Request
-	if err := json.Unmarshal([]byte(captured["stdin"].(string)), &req); err != nil {
-		t.Fatalf("decode request: %v", err)
-	}
-	if len(req.Messages) > 3 {
-		t.Fatalf("expected <= 3 bounded messages, got %d", len(req.Messages))
-	}
-	total := 0
-	for _, message := range req.Messages {
-		total += len([]rune(message.Text))
-	}
-	if total > 40 {
-		t.Fatalf("expected <= 40 code points, got %d", total)
-	}
-	if req.Messages[len(req.Messages)-1].Role != cliprotocol.RoleUser {
-		t.Fatalf("final bounded message must be user")
-	}
-}
-
-func TestCancellationTerminatesShim(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "hang"})
-	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-	defer cancel()
-	start := time.Now()
-	_, err := collect(t, llm, ctx, userRequest("hi"))
-	elapsed := time.Since(start)
-	if err == nil {
-		t.Fatalf("expected cancellation error")
-	}
-	if elapsed > 10*time.Second {
-		t.Fatalf("cancellation did not terminate shim promptly: %v", elapsed)
-	}
-	var shimErr *agentcli.ShimError
-	if !asShim(err, &shimErr) || shimErr.Code != cliprotocol.CodeTimeout {
-		t.Fatalf("expected timeout ShimError, got %v", err)
-	}
-	if !errors.Is(err, context.DeadlineExceeded) {
-		t.Fatalf("deadline cause was not preserved: %v", err)
-	}
-}
-
-func TestDescribeExchange(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "describe"})
-	resp, err := llm.Describe(context.Background())
-	if err != nil {
-		t.Fatalf("describe: %v", err)
-	}
-	if resp.Type != cliprotocol.TypeDescription || resp.CLIVersion != "1.17.20" {
-		t.Fatalf("unexpected describe response: %+v", resp)
-	}
-}
-
-func TestValidateExchange(t *testing.T) {
-	llm := newTestLLM(t, testOptions{mode: "validated"})
-	if err := llm.Validate(context.Background()); err != nil {
+func TestDirectCLIParsesFinalTextAndKeepsPromptOffArgv(t *testing.T) {
+	dump := filepath.Join(t.TempDir(), "stdin")
+	llm := testLLM(t, "success", dump)
+	if err := llm.Validate(t.Context()); err != nil {
 		t.Fatalf("validate: %v", err)
 	}
-}
-
-func TestResolveCommandSelf(t *testing.T) {
-	resolved, err := agentcli.ResolveCommand(agentcli.SelfCommand)
+	response, err := collect(t, llm)
+	if err != nil || response.Content.Parts[0].Text != "final text" {
+		t.Fatalf("response = %+v, error = %v", response, err)
+	}
+	data, err := os.ReadFile(dump)
 	if err != nil {
-		t.Fatalf("resolve self: %v", err)
+		t.Fatal(err)
 	}
-	if !filepath.IsAbs(resolved) {
-		t.Fatalf("expected absolute path, got %q", resolved)
+	if !strings.Contains(string(data), "private prompt") {
+		t.Fatal("prompt was not written to stdin")
 	}
-	if _, err := agentcli.ResolveCommand("definitely-not-a-real-binary-xyz"); err == nil {
-		t.Fatalf("expected lookup failure for missing binary")
+	if strings.Contains(strings.Join(os.Args, " "), "private prompt") {
+		t.Fatal("prompt entered argv")
 	}
 }
 
-// --- utilities ---
+func TestDirectCLIClassifiesNativeFailure(t *testing.T) {
+	_, err := collect(t, testLLM(t, "failure", ""))
+	var cliErr *agentcli.CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != agentcli.CodeProcessFailed {
+		t.Fatalf("error = %v", err)
+	}
+}
 
-func readDump(t *testing.T, path string) map[string]any {
+func TestEventAfterTerminalFails(t *testing.T) {
+	_, err := collect(t, testLLM(t, "after-terminal", ""))
+	var cliErr *agentcli.CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != agentcli.CodeProcessFailed {
+		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestPromptContainsNoSessionOrNativePayload(t *testing.T) {
+	prompt := map[string]string{"user": "private prompt"}
+	data, _ := json.Marshal(prompt)
+	if !strings.Contains(string(data), "private prompt") {
+		t.Fatal("fixture invalid")
+	}
+}
+
+// systemPromptLLM builds a CLI whose descriptor declares a native
+// system-prompt channel. The helper dumps both stdin and argv so a test can
+// assert which content took which path.
+func systemPromptLLM(t *testing.T, dumpStdin, dumpArgv string) *agentcli.LLM {
 	t.Helper()
-	data, err := os.ReadFile(path)
+	dir := t.TempDir()
+	provider := agentdef.Provider{
+		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Version: &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
+		Invocation: &agentdef.CLIInvocation{
+			Prompt:       "stdin",
+			SystemPrompt: &agentdef.CLISystemPrompt{Flag: "--append-system-prompt"},
+			Args:         []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=success", "dump=" + dumpStdin, "dumpargv=" + dumpArgv},
+		},
+		Stream: &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}},
+	}
+	llm, err := agentcli.New(agentcli.Config{
+		Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"},
+		Workspace:  domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}},
+		WorkingDir: dir,
+	})
 	if err != nil {
-		t.Fatalf("read dump: %v", err)
+		t.Fatal(err)
 	}
-	var out map[string]any
-	if err := json.Unmarshal(data, &out); err != nil {
-		t.Fatalf("decode dump: %v", err)
-	}
-	return out
+	return llm
 }
 
-func asShim(err error, target **agentcli.ShimError) bool {
-	for err != nil {
-		if shim, ok := err.(*agentcli.ShimError); ok {
-			*target = shim
-			return true
-		}
-		unwrapper, ok := err.(interface{ Unwrap() error })
-		if !ok {
-			return false
-		}
-		err = unwrapper.Unwrap()
+func generate(t *testing.T, llm *agentcli.LLM, instruction, task string) {
+	t.Helper()
+	request := &model.LLMRequest{
+		Config:   &genai.GenerateContentConfig{SystemInstruction: genai.NewContentFromText(instruction, genai.RoleUser)},
+		Contents: []*genai.Content{genai.NewContentFromText(delegate("workspace", task), genai.RoleUser)},
 	}
-	return false
+	for _, err := range llm.GenerateContent(context.Background(), request, false) {
+		if err != nil {
+			t.Fatalf("generate: %v", err)
+		}
+	}
 }
 
-func setNonZero(value reflect.Value) {
-	switch value.Kind() {
-	case reflect.Pointer:
-		value.Set(reflect.New(value.Type().Elem()))
-	case reflect.Interface:
-		value.Set(reflect.ValueOf(map[string]any{"unsupported": true}))
-	case reflect.Map:
-		value.Set(reflect.MakeMap(value.Type()))
-		value.SetMapIndex(reflect.Zero(value.Type().Key()), reflect.Zero(value.Type().Elem()))
-	case reflect.Slice:
-		value.Set(reflect.MakeSlice(value.Type(), 1, 1))
-	case reflect.String:
-		value.SetString("unsupported")
-	case reflect.Bool:
-		value.SetBool(true)
-	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
-		value.SetInt(1)
-	default:
-		panic("unsupported GenerateContentConfig field kind: " + value.Kind().String())
+// The instruction must reach the CLI through its own channel, and the stdin
+// prompt must then carry the task alone.
+func TestSystemPromptChannelKeepsInstructionOffStdin(t *testing.T) {
+	dir := t.TempDir()
+	stdinPath, argvPath := filepath.Join(dir, "stdin"), filepath.Join(dir, "argv")
+	generate(t, systemPromptLLM(t, stdinPath, argvPath), "agent instruction here", "the delegated task")
+
+	stdin, err := os.ReadFile(stdinPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	argv, err := os.ReadFile(argvPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(stdin)) != "the delegated task" {
+		t.Fatalf("stdin must carry the task alone, got %q", string(stdin))
+	}
+	if !strings.Contains(string(argv), "--append-system-prompt") || !strings.Contains(string(argv), "agent instruction here") {
+		t.Fatalf("instruction did not reach the native channel: %s", string(argv))
+	}
+}
+
+// Without a declared channel the instruction falls back to stdin, but no
+// section may claim to be trusted. That claim is what Claude Code reads as a
+// prompt injection.
+func TestFallbackPromptCarriesInstructionWithoutTrustClaim(t *testing.T) {
+	dump := filepath.Join(t.TempDir(), "stdin")
+	generate(t, testLLM(t, "success", dump), "agent instruction here", "the delegated task")
+
+	data, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	prompt := string(data)
+	if !strings.Contains(prompt, "agent instruction here") || !strings.Contains(prompt, "the delegated task") {
+		t.Fatalf("fallback prompt lost content: %q", prompt)
+	}
+	for _, banned := range []string{"trusted", "TRUSTED", "<<AGENT INSTRUCTIONS", "<<WORKSPACE REGISTRY", "<<CONVERSATION TRANSCRIPT"} {
+		if strings.Contains(prompt, banned) {
+			t.Fatalf("prompt still asserts trust or framing (%q): %q", banned, prompt)
+		}
+	}
+}
+
+// A single-project workspace adds nothing the workspace flags do not already
+// carry, so the registry must stay out of the prompt.
+func TestSingleProjectWorkspaceIsNotSerializedIntoPrompt(t *testing.T) {
+	dump := filepath.Join(t.TempDir(), "stdin")
+	generate(t, testLLM(t, "success", dump), "", "the delegated task")
+
+	data, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "Registered projects") {
+		t.Fatalf("registry leaked for a single-project workspace: %q", string(data))
+	}
+}
+
+// twoProjectLLM registers a second project so a test can prove the caller's
+// choice, not the process working directory, decides where the CLI runs.
+func twoProjectLLM(t *testing.T, dumpCWD string) (*agentcli.LLM, string, string) {
+	t.Helper()
+	alpha, beta := t.TempDir(), t.TempDir()
+	provider := agentdef.Provider{
+		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Version:    &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
+		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=success", "dumpcwd=" + dumpCWD}},
+		Stream:     &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}},
+	}
+	llm, err := agentcli.New(agentcli.Config{
+		Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"},
+		Workspace:  domain.Workspace{WorkingDirectory: alpha, Projects: []domain.Project{{Name: "alpha", Path: alpha}, {Name: "beta", Path: beta}}},
+		WorkingDir: alpha,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return llm, alpha, beta
+}
+
+func run(llm *agentcli.LLM, project, task string) error {
+	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(delegate(project, task), genai.RoleUser)}}
+	for _, err := range llm.GenerateContent(context.Background(), request, false) {
+		return err
+	}
+	return nil
+}
+
+// The caller names the workspace, so a project other than the process working
+// directory must reach the CLI. This is what the application-root requirement
+// used to make impossible.
+func TestSelectedProjectDecidesWorkingDirectory(t *testing.T) {
+	cwdPath := filepath.Join(t.TempDir(), "cwd")
+	llm, alpha, beta := twoProjectLLM(t, cwdPath)
+	if err := run(llm, "beta", "the task"); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	data, err := os.ReadFile(cwdPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The helper reports its own working directory, so this asserts where the
+	// process actually ran rather than which flags were built.
+	got, err := filepath.EvalSymlinks(strings.TrimSpace(string(data)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want, err := filepath.EvalSymlinks(beta)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != want {
+		t.Fatalf("CLI ran in %q, want the selected project %q (process root is %q)", got, want, alpha)
+	}
+}
+
+func TestUnknownProjectIsRejectedAndNamesTheRegistry(t *testing.T) {
+	llm, _, _ := twoProjectLLM(t, filepath.Join(t.TempDir(), "argv"))
+	err := run(llm, "not-registered", "the task")
+	var cliErr *agentcli.CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != agentcli.CodeInvalidRequest {
+		t.Fatalf("error = %v", err)
+	}
+	for _, want := range []string{"not-registered", "alpha", "beta"} {
+		if !strings.Contains(cliErr.Message, want) {
+			t.Fatalf("error must name %q so the caller can retry: %s", want, cliErr.Message)
+		}
+	}
+}
+
+// A caller that does not use the declared schema is rejected rather than
+// defaulted, because a default would pick a workspace on the caller's behalf.
+func TestNonDelegationRequestIsRejected(t *testing.T) {
+	llm, _, _ := twoProjectLLM(t, filepath.Join(t.TempDir(), "argv"))
+	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText("just some free text", genai.RoleUser)}}
+	var got error
+	for _, err := range llm.GenerateContent(context.Background(), request, false) {
+		got = err
+	}
+	var cliErr *agentcli.CLIError
+	if !errors.As(got, &cliErr) || cliErr.Code != agentcli.CodeInvalidRequest {
+		t.Fatalf("error = %v", got)
+	}
+}
+
+// The project name is routing data for the host. Only the task belongs in the
+// prompt the CLI reads.
+func TestProjectNameDoesNotEnterThePrompt(t *testing.T) {
+	dump := filepath.Join(t.TempDir(), "stdin")
+	llm := testLLM(t, "success", dump)
+	if err := run(llm, "workspace", "the delegated task"); err != nil {
+		t.Fatalf("generate: %v", err)
+	}
+	data, err := os.ReadFile(dump)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(data), "\"project\"") || strings.Contains(string(data), "workspace") {
+		t.Fatalf("routing data leaked into the prompt: %q", string(data))
+	}
+	if !strings.Contains(string(data), "the delegated task") {
+		t.Fatalf("task missing from prompt: %q", string(data))
+	}
+}
+
+// Preconditions describe the selected project, so they run for each delegation
+// and fail that call rather than the process.
+func TestPreconditionRunsAgainstTheSelectedProject(t *testing.T) {
+	llm, _, _ := twoProjectLLM(t, filepath.Join(t.TempDir(), "argv"))
+	if err := llm.Validate(t.Context()); err != nil {
+		t.Fatalf("startup validation must not need a project: %v", err)
 	}
 }

@@ -14,7 +14,6 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/agentcli"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
-	"github.com/Dauno/slack-local-agent/internal/cliprotocol"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
@@ -24,7 +23,7 @@ import (
 const cliHandshakeTimeout = 60 * time.Second
 
 // buildAgentCLIModel constructs an agent CLI model from trusted configuration.
-// Startup and doctor perform the cli-v1 handshake explicitly after construction.
+// Startup and doctor probe and validate the native CLI after construction.
 func buildAgentCLIModel(
 	_ context.Context,
 	resolved *agentdef.ResolvedModel,
@@ -37,14 +36,14 @@ func buildAgentCLIModel(
 	if err != nil {
 		return nil, fmt.Errorf("agent_cli provider %q: %w", resolved.Provider.Name, err)
 	}
-	command, err := agentcli.ResolveCommand(resolved.Shim.Command)
+	command, err := agentcli.ResolveCommand(resolved.Executable)
 	if err != nil {
 		return nil, fmt.Errorf("agent_cli provider %q: %w", resolved.Provider.Name, err)
 	}
 	cliModel, err := agentcli.New(agentcli.Config{
-		Command: command,
-		Args:    resolved.Shim.Args,
-		Profile: cliprotocol.Profile{
+		Command:  command,
+		Provider: resolved.Provider,
+		Profile: agentdef.Profile{
 			Model:    resolved.Model,
 			Agent:    resolved.Agent,
 			Approval: resolved.Approval,
@@ -65,19 +64,19 @@ func buildAgentCLIModel(
 	return cliModel, nil
 }
 
-func handshakeAgentCLI(ctx context.Context, cliModel *agentcli.LLM, describe bool) (cliprotocol.Response, error) {
+func handshakeAgentCLI(ctx context.Context, cliModel *agentcli.LLM, describe bool) (agentcli.Description, error) {
 	handshakeCtx, cancel := context.WithTimeout(ctx, cliHandshakeTimeout)
 	defer cancel()
-	var description cliprotocol.Response
+	var description agentcli.Description
 	if describe {
 		var err error
 		description, err = cliModel.Describe(handshakeCtx)
 		if err != nil {
-			return cliprotocol.Response{}, fmt.Errorf("cli-v1 describe failed: %w", err)
+			return agentcli.Description{}, fmt.Errorf("agent CLI version probe failed: %w", err)
 		}
 	}
 	if err := cliModel.Validate(handshakeCtx); err != nil {
-		return cliprotocol.Response{}, fmt.Errorf("cli-v1 validate failed: %w", err)
+		return agentcli.Description{}, fmt.Errorf("agent CLI validation failed: %w", err)
 	}
 	return description, nil
 }
@@ -129,37 +128,33 @@ func validateTranscriptionModel(resolved *agentdef.ResolvedModel) error {
 }
 
 // buildWorkspaceRegistry converts the trusted sandbox.projects registry into
-// the canonical cli-v1 workspace. Every root must exist, be a directory, and
+// the canonical CLI workspace. Every root must exist, be a directory, and
 // resolve through symlinks; the local-agent application root must be one of
 // the registered projects.
-func buildWorkspaceRegistry(cfg config.Config, paths config.Paths) (cliprotocol.Workspace, error) {
+func buildWorkspaceRegistry(cfg config.Config, paths config.Paths) (domain.Workspace, error) {
 	if !cfg.Sandbox.Enabled {
-		return cliprotocol.Workspace{}, errors.New("requires sandbox.enabled: true with at least one project in sandbox.projects")
+		return domain.Workspace{}, errors.New("requires sandbox.enabled: true with at least one project in sandbox.projects")
 	}
 	roots := paths.SandboxProjectRoots
 	if len(roots) == 0 {
-		return cliprotocol.Workspace{}, errors.New("requires at least one project in sandbox.projects")
+		return domain.Workspace{}, errors.New("requires at least one project in sandbox.projects")
 	}
 
-	appRoot := paths.ProjectRoot
-	projects := make([]cliprotocol.Project, 0, len(roots))
-	appRootRegistered := false
+	projects := make([]domain.Project, 0, len(roots))
 	for name, path := range roots {
 		canonical, err := canonicalProjectDir(name, path)
 		if err != nil {
-			return cliprotocol.Workspace{}, err
+			return domain.Workspace{}, err
 		}
-		if canonical == appRoot {
-			appRootRegistered = true
-		}
-		projects = append(projects, cliprotocol.Project{Name: name, Path: canonical})
-	}
-	if !appRootRegistered {
-		return cliprotocol.Workspace{}, fmt.Errorf("the local-agent application root %q must be registered in sandbox.projects", appRoot)
+		projects = append(projects, domain.Project{Name: name, Path: canonical})
 	}
 	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
 
-	return cliprotocol.Workspace{WorkingDirectory: appRoot, Projects: projects}, nil
+	// The application root is no longer required to be a registered project.
+	// It used to be, because every CLI ran there. A caller now names the
+	// project for each delegation, so the root only supplies project-neutral
+	// probes such as the version check.
+	return domain.Workspace{WorkingDirectory: paths.ProjectRoot, Projects: projects}, nil
 }
 
 func canonicalProjectDir(name, path string) (string, error) {

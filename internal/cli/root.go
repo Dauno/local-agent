@@ -106,7 +106,6 @@ func NewRoot(backend Backend, streams Streams) (*cobra.Command, error) {
 		newManifestCommand(backend, streams),
 		newVersionCommand(backend, streams),
 		newJobsCommand(backend, streams),
-		newShimCommand(streams),
 		newKnowledgeCommand(backend, streams),
 		newDBCommand(backend, streams),
 	)

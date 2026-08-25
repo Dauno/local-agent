@@ -147,12 +147,12 @@ func SeedAttachmentAnalyzer(modelRef string) AgentDef {
 // action; init never changes active agents.
 func SeedOpenCodeProviderExample() Provider {
 	return Provider{
-		Name: "opencode",
-		Type: ProviderTypeAgentCLI,
-		Shim: &ShimConfig{
-			Command: "self",
-			Args:    []string{"shim", "opencode"},
-		},
+		Name:       "opencode",
+		Type:       ProviderTypeAgentCLI,
+		Executable: "opencode",
+		Version:    &CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "0.0.0"},
+		Invocation: &CLIInvocation{Prompt: "stdin", Args: []string{"run", "-"}},
+		Stream:     &CLIStream{Format: "ndjson", FinalText: CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"}, Failure: CLIFailure{WhenAny: []map[string]string{{"type": "error"}}}, Activity: &CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{}}, TerminalTypes: []string{"result", "error"}},
 		Profiles: map[string]Profile{
 			"build": {
 				Model:    "anthropic/model-name",

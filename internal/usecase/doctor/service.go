@@ -112,22 +112,20 @@ type AudioTranscriptionLiveChecker interface {
 }
 
 // CLIProviderCheck is the typed result of one offline agent_cli provider
-// check. ShimName is the trusted mapper identity returned by the cli-v1
-// describe exchange; it is empty when describe was not performed.
+// check. ProviderName is the trusted provider identity returned by the version
+// probe; it is empty when the probe was not performed.
 type CLIProviderCheck struct {
-	Detail   string
-	ShimName string
+	Detail       string
+	ProviderName string
 }
 
 // CLIProviderChecker validates a selected agent_cli provider. The offline
-// check covers shim command resolution, project canonicalization, and the
-// cli-v1 describe/validate handshake. The live check reports the CLI's saved
-// authentication status without making a model call; it selects the
-// application-owned command from the trusted mapper identity, never from the
-// configurable provider name or shim-supplied argv.
+// check covers native command resolution, project canonicalization, version
+// probing, and descriptor validation. The live check reports saved CLI
+// authentication without making a model call.
 type CLIProviderChecker interface {
 	CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, cfg config.Config, projectRoot string, describe bool) (CLIProviderCheck, error)
-	CheckAuthentication(ctx context.Context, resolved *agentdef.ResolvedModel, shimName string) (string, error)
+	CheckAuthentication(ctx context.Context, resolved *agentdef.ResolvedModel, providerName string) (string, error)
 }
 
 type ACPProviderChecker interface {
@@ -264,7 +262,7 @@ type liveCheckState struct {
 	audioTranscriptionReady bool
 	embeddingEnabled        bool
 	embeddingCfg            config.KnowledgeEmbeddingConfig
-	shimNames               map[string]string
+	providerNames           map[string]string
 }
 
 func selectedModelAlreadyIncluded(selected []selectedModel, agent string) bool {
@@ -400,7 +398,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		report.pass("OpenCode management operators", fmt.Sprintf("%d configured", len(cfg.OpenCode.Management.AllowedUserIDs)))
 	}
 
-	shimNames := make(map[string]string)
+	providerNames := make(map[string]string)
 	if pathErr == nil {
 		var cliModels []selectedModel
 		for _, selected := range selectedModels {
@@ -422,12 +420,12 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 			check, err := s.deps.CLI.CheckProvider(ctx, selected.resolved, cfg, projectRoot, describe)
 			if err != nil {
 				report.fail(resultName, redactor.String(err.Error()),
-					"Verify the shim command, the installed CLI version, selected profile, and sandbox.projects registration.", false)
+					"Verify the CLI executable, installed version, selected profile, and sandbox.projects registration.", false)
 				continue
 			}
 			if describe {
 				described[providerName] = true
-				shimNames[providerName] = check.ShimName
+				providerNames[providerName] = check.ProviderName
 			}
 			report.pass(resultName, check.Detail)
 		}
@@ -444,7 +442,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		defsLoadFailed: defsLoadFailed, resolvedModel: resolvedModel, selectedModels: selectedModels,
 		transcriptionProfile: transcriptionProfile, transcriptionResolved: transcriptionResolved,
 		audioTranscriptionReady: audioTranscriptionReady, embeddingEnabled: embeddingEnabled,
-		embeddingCfg: embeddingCfg, shimNames: shimNames,
+		embeddingCfg: embeddingCfg, providerNames: providerNames,
 	})
 	return report
 }
@@ -521,15 +519,15 @@ func (s *Service) runLiveChecks(ctx context.Context, report *Report, state liveC
 				continue
 			}
 			providerName := selected.resolved.Provider.Name
-			shimName := state.shimNames[providerName]
-			// A missing identity means describe failed and already produced the
+			cliProviderName := state.providerNames[providerName]
+			// A missing identity means the version probe failed and already produced the
 			// actionable provider result. Do not add a misleading auth failure.
-			if strings.TrimSpace(shimName) == "" || authChecked[providerName] {
+			if strings.TrimSpace(cliProviderName) == "" || authChecked[providerName] {
 				continue
 			}
 			authChecked[providerName] = true
 			liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.ModelTimeoutSeconds)
-			detail, err := s.deps.CLI.CheckAuthentication(liveCtx, selected.resolved, shimName)
+			detail, err := s.deps.CLI.CheckAuthentication(liveCtx, selected.resolved, cliProviderName)
 			cancel()
 			if err != nil {
 				report.fail("agent CLI authentication ("+providerName+")", state.redactor.String(err.Error()),

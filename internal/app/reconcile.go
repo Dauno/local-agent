@@ -57,6 +57,14 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 	if err != nil {
 		return domain.ExternalAgentJobStatusView{}, err
 	}
+	// Reconciliation resumes the agent's session to learn what happened. An
+	// agent CLI has no session that this release can capture, so there is
+	// nothing to resume and no honest answer to give. The operator is told
+	// plainly rather than shown an ACP error for a CLI job.
+	if resolved.IsAgentCLI() {
+		return domain.ExternalAgentJobStatusView{}, fmt.Errorf(
+			"session recovery is not supported for agent_cli job %q: inspect the workspace and close the job explicitly", job.ID)
+	}
 	revision, err := agentExecutionFingerprint(definition, resolved, setup.paths.SandboxProjectRoots, setup.cfg)
 	if err != nil {
 		return domain.ExternalAgentJobStatusView{}, fmt.Errorf("fingerprint ACP recovery scope: %w", err)
@@ -118,12 +126,23 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 	return updated.StatusView(), nil
 }
 
+// resolveReconciliationAgent finds the durable leaf a job was started from.
+// Both external-agent families are searched: an ACP leaf keys on `runtime`, an
+// agent CLI leaf on `model`, and the job stores whichever one applies as its
+// profile.
 func resolveReconciliationAgent(setup runtimeSetup, job domain.ExternalAgentJob) (agentdef.AgentDef, *agentdef.ResolvedModel, error) {
 	for _, definition := range setup.defs.Agents {
-		if definition.AgentClass != "AcpAgent" || definition.Runtime != job.Profile || definition.ExecutionMode != agentdef.ExecutionModeDurableJob {
+		if definition.ExecutionMode != agentdef.ExecutionModeDurableJob {
 			continue
 		}
-		resolved, err := setup.defs.ResolveModel(definition.Runtime)
+		reference := definition.Model
+		if definition.AgentClass == "AcpAgent" {
+			reference = definition.Runtime
+		}
+		if reference != job.Profile {
+			continue
+		}
+		resolved, err := setup.defs.ResolveModel(reference)
 		if err != nil {
 			return agentdef.AgentDef{}, nil, err
 		}
@@ -132,7 +151,7 @@ func resolveReconciliationAgent(setup runtimeSetup, job domain.ExternalAgentJob)
 		}
 		return definition, resolved, nil
 	}
-	return agentdef.AgentDef{}, nil, errors.New("durable ACP job provider/profile is unavailable")
+	return agentdef.AgentDef{}, nil, errors.New("durable external-agent job provider/profile is unavailable")
 }
 
 var _ interface {

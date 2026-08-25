@@ -32,7 +32,10 @@ func TestBuildWorkspaceRegistryRequiresSandbox(t *testing.T) {
 	}
 }
 
-func TestBuildWorkspaceRegistryRequiresAppRoot(t *testing.T) {
+// The application root used to be required as a registered project, because
+// every CLI ran there. A caller now names the project for each delegation, so
+// an unregistered root is no longer a startup failure.
+func TestBuildWorkspaceRegistryDoesNotRequireAppRoot(t *testing.T) {
 	t.Parallel()
 	root := t.TempDir()
 	other := t.TempDir()
@@ -40,9 +43,12 @@ func TestBuildWorkspaceRegistryRequiresAppRoot(t *testing.T) {
 	cfg.Sandbox.Enabled = true
 	cfg.Sandbox.Projects = map[string]string{"api": other}
 
-	_, err := buildWorkspaceRegistry(cfg, testPathsFor(t, cfg, root))
-	if err == nil || !strings.Contains(err.Error(), "application root") {
-		t.Fatalf("expected application-root requirement error, got %v", err)
+	workspace, err := buildWorkspaceRegistry(cfg, testPathsFor(t, cfg, root))
+	if err != nil {
+		t.Fatalf("unregistered application root must not fail: %v", err)
+	}
+	if len(workspace.Projects) != 1 || workspace.Projects[0].Name != "api" {
+		t.Fatalf("registry = %+v, want only the declared project", workspace.Projects)
 	}
 }
 
@@ -174,13 +180,14 @@ func TestNewModelForResolvedAgentCLINeedsNoKey(t *testing.T) {
 	cfg.Sandbox.Projects = map[string]string{"workspace": "."}
 	paths := testPathsFor(t, cfg, root)
 
-	resolved := &agentdef.ResolvedModel{
-		Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeAgentCLI},
-		Model:    "anthropic/model-name",
-		Shim:     agentdef.ShimConfig{Command: "self", Args: []string{"shim", "opencode"}},
-		Agent:    "build",
-		Approval: agentdef.ApprovalAuto,
+	provider := agentdef.Provider{
+		Name: "opencode", Type: agentdef.ProviderTypeAgentCLI, Executable: "go",
+		Version:    &agentdef.CLIVersion{Command: []string{"version"}, Pattern: `go version go(?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
+		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"version"}},
+		Stream:     &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{}}, TerminalTypes: []string{"result"}},
+		Profiles:   map[string]agentdef.Profile{"build": {Model: "anthropic/model-name", Approval: agentdef.ApprovalAuto}},
 	}
+	resolved := &agentdef.ResolvedModel{Provider: provider, Profile: provider.Profiles["build"], Model: "anthropic/model-name", Executable: "go", Version: *provider.Version, Invocation: *provider.Invocation, Stream: *provider.Stream, Approval: agentdef.ApprovalAuto}
 
 	built, secret, err := newModelForResolved(context.Background(), resolved, map[string]string{}, cfg, paths, nil, nil)
 	if err != nil {
@@ -261,5 +268,23 @@ func TestValidateTranscriptionModelRequiresDedicatedOpenAIConfiguration(t *testi
 	}
 	if err := validateTranscriptionModel(valid); err != nil {
 		t.Fatalf("valid transcription model = %v", err)
+	}
+}
+
+// The leaf must advertise a project argument. Without a declared input schema
+// ADK exposes a single free-text "request", and a free-text argument cannot
+// name a workspace the host is willing to trust.
+func TestAgentCLILeafAdvertisesProjectArgument(t *testing.T) {
+	t.Parallel()
+	schema := agentCLIInputSchema()
+	if schema == nil || schema.Properties["project"] == nil || schema.Properties["task"] == nil {
+		t.Fatalf("schema = %+v, want project and task", schema)
+	}
+	required := map[string]bool{}
+	for _, name := range schema.Required {
+		required[name] = true
+	}
+	if !required["project"] || !required["task"] {
+		t.Fatalf("required = %v, want both project and task", schema.Required)
 	}
 }

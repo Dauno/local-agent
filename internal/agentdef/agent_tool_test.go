@@ -22,9 +22,20 @@ profiles:
 const agentToolCLIProvider = `
 name: opencode
 type: agent_cli
-shim:
-  command: self
-  args: [shim, opencode]
+executable: opencode
+version:
+  command: [--version]
+  pattern: 'opencode (?P<version>\d+\.\d+\.\d+)'
+  min: "0.0.0"
+invocation:
+  prompt: stdin
+  args: [run, "-"]
+stream:
+  format: ndjson
+  final_text: {when: {type: result}, path: text}
+  failure: {when_any: [{type: error}]}
+  activity: {when: {type: activity}, type_field: name, discard_types: []}
+  terminal_types: [result, error]
 profiles:
   build:
     model: opencode/big-pickle

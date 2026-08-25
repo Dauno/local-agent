@@ -10,12 +10,12 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 )
 
-func TestCheckAuthenticationRejectsUnknownShimIdentity(t *testing.T) {
+func TestCheckAuthenticationRejectsUnknownProviderIdentity(t *testing.T) {
 	checker := cliProviderChecker{}
 	for _, name := range []string{"", "unknown-cli", "opencode;rm -rf /"} {
 		_, err := checker.CheckAuthentication(context.Background(), nil, name)
 		if err == nil {
-			t.Fatalf("shim identity %q must be rejected", name)
+			t.Fatalf("provider identity %q must be rejected", name)
 		}
 		if !strings.Contains(err.Error(), "not supported") {
 			t.Fatalf("unexpected error for %q: %v", name, err)

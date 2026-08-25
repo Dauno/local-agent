@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -19,6 +20,34 @@ import (
 var environmentNamePattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
 
 const maxContextWindowTokens = 10_000_000
+
+type semanticVersion struct {
+	major int
+	minor int
+	patch int
+}
+
+func parseSemanticVersion(value string) (semanticVersion, bool) {
+	match := regexp.MustCompile(`^(\d+)\.(\d+)\.(\d+)$`).FindStringSubmatch(value)
+	if match == nil {
+		return semanticVersion{}, false
+	}
+	var version semanticVersion
+	if _, err := fmt.Sscanf(value, "%d.%d.%d", &version.major, &version.minor, &version.patch); err != nil {
+		return semanticVersion{}, false
+	}
+	return version, true
+}
+
+func compareSemanticVersions(left, right semanticVersion) int {
+	if left.major != right.major {
+		return left.major - right.major
+	}
+	if left.minor != right.minor {
+		return left.minor - right.minor
+	}
+	return left.patch - right.patch
+}
 
 func Load(dir string) (*Definitions, error) {
 	agentsDir := filepath.Join(dir, "agents")
@@ -145,13 +174,13 @@ func validateProviderFieldPresence(data []byte, provider Provider) error {
 	var providerForbidden, profileForbidden []string
 	switch provider.Type {
 	case ProviderTypeAgentCLI:
-		providerForbidden = []string{"base_url", "api_key_env", "headers", "command", "args"}
+		providerForbidden = []string{"base_url", "api_key_env", "headers", "command", "args", "shim"}
 		profileForbidden = []string{"reasoning_effort", "extra_body", "generate_content_config", "config_options", "permission_option_kind"}
 	case ProviderTypeOpenAICompatible:
-		providerForbidden = []string{"shim", "command", "args"}
+		providerForbidden = []string{"executable", "version", "preconditions", "invocation", "stream", "session", "shim", "command", "args"}
 		profileForbidden = []string{"agent", "approval", "variant", "config_options", "permission_option_kind"}
 	case ProviderTypeACP:
-		providerForbidden = []string{"base_url", "api_key_env", "headers", "shim"}
+		providerForbidden = []string{"base_url", "api_key_env", "headers", "executable", "version", "preconditions", "invocation", "stream", "session", "shim"}
 		profileForbidden = []string{"model", "agent", "approval", "variant", "reasoning_effort", "extra_body", "generate_content_config"}
 	default:
 		return nil
@@ -161,7 +190,7 @@ func validateProviderFieldPresence(data []byte, provider Provider) error {
 	var errs []string
 	for _, field := range providerForbidden {
 		if mappingHasKey(root, field) {
-			if provider.Type == ProviderTypeOpenAICompatible {
+			if provider.Type == ProviderTypeOpenAICompatible && field != "shim" {
 				errs = append(errs, fmt.Sprintf("%s: %s is only valid for %s providers", prefix, field, ProviderTypeAgentCLI))
 			} else {
 				errs = append(errs, fmt.Sprintf("%s: %s is invalid for %s providers", prefix, field, provider.Type))
@@ -411,11 +440,39 @@ func validateOpenAICompatibleProvider(prefix string, p Provider) []string {
 
 func validateAgentCLIProvider(prefix string, p Provider) []string {
 	errs := forbidHTTPFields(prefix, p, ProviderTypeAgentCLI)
-	if p.Shim == nil {
-		errs = append(errs, fmt.Sprintf("%s: shim is required for %s providers", prefix, ProviderTypeAgentCLI))
-		return errs
+	if p.Shim != nil {
+		errs = append(errs, fmt.Sprintf("%s: shim is invalid for %s providers; declare executable, version, invocation, and stream", prefix, ProviderTypeAgentCLI))
 	}
-	errs = append(errs, validateCommandArgs(prefix, "shim", p.Shim.Command, p.Shim.Args)...)
+	if strings.TrimSpace(p.Executable) == "" {
+		errs = append(errs, fmt.Sprintf("%s: executable is required for %s providers", prefix, ProviderTypeAgentCLI))
+	} else if strings.ContainsAny(p.Executable, "\r\n\x00") {
+		errs = append(errs, fmt.Sprintf("%s: executable must be a single line", prefix))
+	}
+	if p.Version == nil {
+		errs = append(errs, fmt.Sprintf("%s: version is required for %s providers", prefix, ProviderTypeAgentCLI))
+	} else {
+		errs = append(errs, validateCLIVersion(prefix, *p.Version)...)
+	}
+	if p.Invocation == nil {
+		errs = append(errs, fmt.Sprintf("%s: invocation is required for %s providers", prefix, ProviderTypeAgentCLI))
+	} else {
+		errs = append(errs, validateCLIInvocation(prefix, *p.Invocation)...)
+	}
+	if p.Stream == nil {
+		errs = append(errs, fmt.Sprintf("%s: stream is required for %s providers", prefix, ProviderTypeAgentCLI))
+	} else {
+		errs = append(errs, validateCLIStream(prefix, *p.Stream)...)
+	}
+	for index, condition := range p.Preconditions {
+		conditionPrefix := fmt.Sprintf("%s: preconditions[%d]", prefix, index)
+		if strings.TrimSpace(condition.Name) == "" || strings.TrimSpace(condition.Message) == "" || len(condition.Command) == 0 {
+			errs = append(errs, conditionPrefix+" requires name, command, and message")
+		}
+		errs = append(errs, validateArgumentList(conditionPrefix+".command", condition.Command)...)
+	}
+	if p.Session != nil {
+		errs = append(errs, validateCLISession(prefix, *p.Session, p.Invocation)...)
+	}
 	return errs
 }
 
@@ -461,6 +518,146 @@ func validateACPProvider(prefix string, p Provider) []string {
 		}
 	}
 	return errs
+}
+
+func validateCLIVersion(prefix string, version CLIVersion) []string {
+	var errs []string
+	if len(version.Command) == 0 {
+		errs = append(errs, fmt.Sprintf("%s: version.command must not be empty", prefix))
+	}
+	errs = append(errs, validateArgumentList(prefix+".version.command", version.Command)...)
+	pattern, err := regexp.Compile(version.Pattern)
+	if err != nil || pattern.SubexpIndex("version") < 0 {
+		errs = append(errs, fmt.Sprintf("%s: version.pattern must compile and define named group version", prefix))
+	}
+	if _, ok := parseSemanticVersion(version.Min); !ok {
+		errs = append(errs, fmt.Sprintf("%s: version.min must be a semantic version", prefix))
+	}
+	if version.Max != "" {
+		maxVersion, maxOK := parseSemanticVersion(version.Max)
+		minVersion, minOK := parseSemanticVersion(version.Min)
+		if !maxOK {
+			errs = append(errs, fmt.Sprintf("%s: version.max must be a semantic version", prefix))
+		} else if minOK && compareSemanticVersions(maxVersion, minVersion) < 0 {
+			errs = append(errs, fmt.Sprintf("%s: version.max must not be less than version.min", prefix))
+		}
+	}
+	return errs
+}
+
+func validateCLIInvocation(prefix string, invocation CLIInvocation) []string {
+	var errs []string
+	if invocation.Prompt != "stdin" {
+		errs = append(errs, fmt.Sprintf("%s: invocation.prompt must be stdin", prefix))
+	}
+	if len(invocation.Args) == 0 {
+		errs = append(errs, fmt.Sprintf("%s: invocation.args must not be empty", prefix))
+	}
+	errs = append(errs, validateArgumentList(prefix+".invocation.args_prefix", invocation.ArgsPrefix)...)
+	errs = append(errs, validateArgumentList(prefix+".invocation.args", invocation.Args)...)
+	if system := invocation.SystemPrompt; system != nil {
+		if strings.TrimSpace(system.Flag) == "" {
+			errs = append(errs, fmt.Sprintf("%s: invocation.system_prompt.flag must not be empty", prefix))
+		}
+		errs = append(errs, validateArgumentList(prefix+".invocation.system_prompt.flag", []string{system.Flag})...)
+	}
+	for name, option := range invocation.Options {
+		optionPrefix := fmt.Sprintf("%s: invocation.options.%s", prefix, name)
+		forms := 0
+		if option.Flag != "" {
+			forms++
+		}
+		if len(option.Template) > 0 {
+			forms++
+		}
+		if len(option.Values) > 0 {
+			forms++
+		}
+		if forms != 1 {
+			errs = append(errs, optionPrefix+" must declare exactly one of flag, template, or value mappings")
+		}
+		if option.Position != "" && option.Position != "prefix" {
+			errs = append(errs, optionPrefix+".position must be prefix")
+		}
+		errs = append(errs, validateArgumentList(optionPrefix+".template", option.Template)...)
+		for value, mapping := range option.Values {
+			if strings.TrimSpace(value) == "" || (len(mapping.Substitutions) == 0 && len(mapping.Args) == 0) {
+				errs = append(errs, optionPrefix+" value mappings must not be empty")
+			}
+			errs = append(errs, validateArgumentList(optionPrefix+"."+value+".args", mapping.Args)...)
+		}
+	}
+	if workspace := invocation.Workspace; workspace != nil {
+		if workspace.CWDFlag == "" {
+			errs = append(errs, fmt.Sprintf("%s: invocation.workspace.cwd_flag must not be empty", prefix))
+		}
+		if workspace.AddDirFlag != "" && len(workspace.AddDirWhen) == 0 {
+			errs = append(errs, fmt.Sprintf("%s: invocation.workspace.add_dir_when is required with add_dir_flag", prefix))
+		}
+	}
+	return errs
+}
+
+func validateCLIStream(prefix string, stream CLIStream) []string {
+	var errs []string
+	if stream.Format != "ndjson" {
+		errs = append(errs, fmt.Sprintf("%s: stream.format must be ndjson", prefix))
+	}
+	if len(stream.FinalText.When) == 0 || stream.FinalText.Path == "" {
+		errs = append(errs, fmt.Sprintf("%s: stream.final_text requires when and path", prefix))
+	}
+	if len(stream.Failure.WhenAny) == 0 {
+		errs = append(errs, fmt.Sprintf("%s: stream.failure.when_any must not be empty", prefix))
+	}
+	if len(stream.TerminalTypes) == 0 {
+		errs = append(errs, fmt.Sprintf("%s: stream.terminal_types must not be empty", prefix))
+	}
+	if stream.Activity == nil {
+		errs = append(errs, fmt.Sprintf("%s: stream.activity is required", prefix))
+	} else {
+		if len(stream.Activity.When) == 0 || stream.Activity.TypeField == "" {
+			errs = append(errs, fmt.Sprintf("%s: stream.activity requires when and type_field", prefix))
+		}
+		if stream.Activity.DiscardTypes == nil {
+			errs = append(errs, fmt.Sprintf("%s: stream.activity.discard_types is required", prefix))
+		}
+	}
+	return errs
+}
+
+func validateCLISession(prefix string, session CLISession, invocation *CLIInvocation) []string {
+	var errs []string
+	if len(session.ID.When) == 0 || session.ID.Path == "" {
+		errs = append(errs, fmt.Sprintf("%s: session.id requires when and path", prefix))
+	}
+	if !strings.Contains(session.Transcript.PathGlob, "{{session_id}}") {
+		errs = append(errs, fmt.Sprintf("%s: session.transcript.path_glob must contain {{session_id}}", prefix))
+	}
+	fullResume := len(session.Resume.Args) > 0 || len(session.Resume.ArgsPrefix) > 0
+	if len(session.Resume.ResumeFlag) == 0 && !fullResume {
+		errs = append(errs, fmt.Sprintf("%s: session.resume requires resume_flag or args", prefix))
+	}
+	if len(session.Resume.ResumeFlag) > 0 && fullResume {
+		errs = append(errs, fmt.Sprintf("%s: session.resume.resume_flag and args are exclusive", prefix))
+	}
+	if invocation != nil && containsArgument(invocation.Args, "--ephemeral") {
+		errs = append(errs, fmt.Sprintf("%s: session requires an invocation that persists sessions", prefix))
+	}
+	return errs
+}
+
+func validateArgumentList(prefix string, args []string) []string {
+	var errs []string
+	for index, arg := range args {
+		if strings.TrimSpace(arg) == "" || strings.ContainsAny(arg, "\r\n\x00") {
+			errs = append(errs, fmt.Sprintf("%s[%d] must be a non-empty single line", prefix, index))
+		}
+	}
+	return errs
+}
+
+func containsArgument(args []string, want string) bool {
+	return slices.Contains(args, want)
 }
 
 func forbidHTTPFields(prefix string, p Provider, providerType string) []string {
@@ -667,11 +864,19 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	if a.Runtime != "" {
 		errs = append(errs, fmt.Sprintf("%s: runtime is only valid for AcpAgent", prefix))
 	}
-	if a.Confirmation != "" {
-		errs = append(errs, fmt.Sprintf("%s: confirmation is only valid for AcpAgent", prefix))
-	}
-	if a.ExecutionMode != "" {
-		errs = append(errs, fmt.Sprintf("%s: execution_mode is only valid for AcpAgent", prefix))
+	// Durable execution is available to agent_cli leaves as well as ACP ones.
+	// Both are external agents that outlive one model call, so both may declare
+	// a confirmation gate and a durable execution mode. Every other agent class
+	// runs inside the model call and may declare neither.
+	if isAgentCLIModel(a.Model, providers) {
+		errs = append(errs, validateExternalAgentExecution(prefix, a)...)
+	} else {
+		if a.Confirmation != "" {
+			errs = append(errs, fmt.Sprintf("%s: confirmation is only valid for AcpAgent or agent_cli agents", prefix))
+		}
+		if a.ExecutionMode != "" {
+			errs = append(errs, fmt.Sprintf("%s: execution_mode is only valid for AcpAgent or agent_cli agents", prefix))
+		}
 	}
 
 	switch a.IncludeContents {
@@ -964,6 +1169,44 @@ func ValidateAttachmentModelCapability(resolved *ResolvedModel) []string {
 		errs = append(errs, fmt.Sprintf("attachment_analyzer profile %q must configure token_counter.strategy: estimator because image requests need a visual token estimate; byte_bound cannot value media", resolved.Model))
 	} else if resolved.CounterID != VisualEstimatorID {
 		errs = append(errs, fmt.Sprintf("attachment_analyzer profile %q must configure token_counter.id: %s; %q is not implemented for media", resolved.Model, VisualEstimatorID, resolved.CounterID))
+	}
+	return errs
+}
+
+// isAgentCLIModel reports whether a model reference resolves to an agent_cli
+// provider. It answers false for an unresolvable reference, so the caller's
+// own model validation reports that problem instead of this one.
+func isAgentCLIModel(reference string, providers map[string]Provider) bool {
+	providerName, _, ok := splitModelReference(reference)
+	if !ok {
+		return false
+	}
+	provider, exists := providers[providerName]
+	return exists && provider.Type == ProviderTypeAgentCLI
+}
+
+// validateExternalAgentExecution checks the durable-execution fields shared by
+// the two external-agent families. The bounds match validateAcpAgent so a leaf
+// cannot gain a longer timeout by switching provider family.
+func validateExternalAgentExecution(prefix string, a AgentDef) []string {
+	var errs []string
+	switch a.Confirmation {
+	case "", "required":
+	default:
+		errs = append(errs, fmt.Sprintf("%s: confirmation must be required", prefix))
+	}
+	switch a.ExecutionMode {
+	case "", ExecutionModeForeground, ExecutionModeDurableJob:
+	default:
+		errs = append(errs, fmt.Sprintf("%s: execution_mode must be foreground or durable_job", prefix))
+	}
+	if a.TimeoutSeconds < 0 || a.TimeoutSeconds > MaxACPTimeoutSeconds {
+		errs = append(errs, fmt.Sprintf("%s: timeout_seconds must be between 0 and %d", prefix, MaxACPTimeoutSeconds))
+	}
+	// A durable job is delivered to Slack after the root turn ends, so the user
+	// must have approved it before it started.
+	if a.ExecutionMode == ExecutionModeDurableJob && a.Confirmation != "required" {
+		errs = append(errs, fmt.Sprintf("%s: execution_mode durable_job requires confirmation: required", prefix))
 	}
 	return errs
 }
