@@ -40,7 +40,7 @@ type Dependencies struct {
 	// ProgressStore and ProcessRegistry are optional live-observability
 	// dependencies. Without them, status projection reports no live fields.
 	ProgressStore   port.ExternalAgentJobProgressStore
-	ProcessRegistry port.ACPProcessRegistry
+	ProcessRegistry port.ExternalAgentProcessRegistry
 	// MaxResultBytes bounds host-completion reads. The artifact adapter applies
 	// its own bound as a second, independent check.
 	MaxResultBytes int64
@@ -63,7 +63,7 @@ type Service struct {
 	artifacts           port.ResultArtifactStore
 	nativeResults       port.TrustedResultStore
 	progressStore       port.ExternalAgentJobProgressStore
-	processRegistry     port.ACPProcessRegistry
+	processRegistry     port.ExternalAgentProcessRegistry
 	maxResultBytes      int64
 	maxResultChunkBytes int64
 	clock               port.Clock
@@ -175,27 +175,27 @@ func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequ
 	return &job, nil
 }
 
-func (s *Service) StartAndWait(ctx context.Context, request domain.ExternalAgentJobRequest) (domain.AcpInvocationResult, error) {
+func (s *Service) StartAndWait(ctx context.Context, request domain.ExternalAgentJobRequest) (domain.ExternalAgentInvocationResult, error) {
 	job, err := s.Start(ctx, request)
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	for {
 		current, err := s.store.GetJob(ctx, job.ID)
 		if err != nil {
-			return domain.AcpInvocationResult{}, err
+			return domain.ExternalAgentInvocationResult{}, err
 		}
 		if current == nil {
-			return domain.AcpInvocationResult{}, errors.New("external-agent job disappeared")
+			return domain.ExternalAgentInvocationResult{}, errors.New("external-agent job disappeared")
 		}
 		switch current.Status {
 		case domain.JobCompleted:
 			return s.verifiedForegroundResult(ctx, current, request.Actor, request.ConversationKey)
 		case domain.JobFailed, domain.JobCancelled, domain.JobAbandoned, domain.JobCompletionUnknown:
 			if current.ErrorCode == "" {
-				return domain.AcpInvocationResult{}, fmt.Errorf("external-agent job ended with status %s", current.Status)
+				return domain.ExternalAgentInvocationResult{}, fmt.Errorf("external-agent job ended with status %s", current.Status)
 			}
-			return domain.AcpInvocationResult{}, fmt.Errorf("external-agent job ended with status %s: %s", current.Status, current.ErrorCode)
+			return domain.ExternalAgentInvocationResult{}, fmt.Errorf("external-agent job ended with status %s: %s", current.Status, current.ErrorCode)
 		}
 		if !current.TimeoutAt.After(s.clock.Now().UTC()) {
 			// A queued foreground job can outlive its total budget. Cancellation is
@@ -203,14 +203,14 @@ func (s *Service) StartAndWait(ctx context.Context, request domain.ExternalAgent
 			if current.Status == domain.JobQueued {
 				s.cancelForegroundAsync(ctx, job.ID, request.Actor)
 			}
-			return domain.AcpInvocationResult{}, errors.New("external-agent job ended with status failed: acp_job_timeout")
+			return domain.ExternalAgentInvocationResult{}, errors.New("external-agent job ended with status failed: acp_job_timeout")
 		}
 		timer := time.NewTimer(s.cfg.PollInterval)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			s.cancelForegroundAsync(ctx, job.ID, request.Actor)
-			return domain.AcpInvocationResult{}, ctx.Err()
+			return domain.ExternalAgentInvocationResult{}, ctx.Err()
 		case <-timer.C:
 		}
 	}
@@ -236,25 +236,25 @@ func (s *Service) Cancel(ctx context.Context, jobID, actor string) (*domain.Exte
 // shape only after the row passes the request binding and the same verified
 // identity as the durable readers. Content with an incomplete or tampered
 // identity is never returned.
-func (s *Service) verifiedForegroundResult(ctx context.Context, job *domain.ExternalAgentJob, actor string, conversationKey domain.ConversationKey) (domain.AcpInvocationResult, error) {
+func (s *Service) verifiedForegroundResult(ctx context.Context, job *domain.ExternalAgentJob, actor string, conversationKey domain.ConversationKey) (domain.ExternalAgentInvocationResult, error) {
 	if job.Actor != actor || job.ConversationKey != conversationKey {
-		return domain.AcpInvocationResult{}, errors.New("external-agent job operation is not authorized")
+		return domain.ExternalAgentInvocationResult{}, errors.New("external-agent job operation is not authorized")
 	}
 	verified, err := s.verifiedResultForJob(ctx, job)
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	if s.nativeResults != nil {
 		handle, err := s.nativeResultHandle(ctx, job)
 		if err != nil {
-			return domain.AcpInvocationResult{}, err
+			return domain.ExternalAgentInvocationResult{}, err
 		}
-		return domain.AcpInvocationResult{
+		return domain.ExternalAgentInvocationResult{
 			NativeResultID: handle.ResultID, NativeJobID: job.ID, NativeResultHandle: handle,
 			ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes,
 		}, nil
 	}
-	return domain.AcpInvocationResult{
+	return domain.ExternalAgentInvocationResult{
 		Text:         verified.Text,
 		Inline:       job.ResultArtifact == "",
 		ArtifactRef:  job.ResultArtifact,
@@ -295,7 +295,7 @@ func (s *Service) nativeResultHandle(ctx context.Context, job *domain.ExternalAg
 	if err != nil {
 		return domain.ResultHandle{}, err
 	}
-	if identity.Producer.Kind != domain.ResultProducerACPJob || identity.Producer.ID != job.ID || identity.Producer.Revision != job.StatusRevision ||
+	if identity.Producer.Kind != domain.ResultProducerExternalAgentJob || identity.Producer.ID != job.ID || identity.Producer.Revision != job.StatusRevision ||
 		handle.SHA256 != job.ResultSHA256 || handle.Bytes != job.ResultBytes {
 		return domain.ResultHandle{}, domain.ErrResultUnavailable
 	}
@@ -655,34 +655,34 @@ func (s *Service) requestCancellation(ctx context.Context, jobID, actor string) 
 	return job, err
 }
 
-func (s *Service) Reconcile(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.AcpInvocationResult, error) {
+func (s *Service) Reconcile(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (domain.ExternalAgentInvocationResult, error) {
 	return s.ReconcileExpected(ctx, jobID, actor, conversationKey, -1)
 }
 
-func (s *Service) ReconcileExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int) (domain.AcpInvocationResult, error) {
+func (s *Service) ReconcileExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int) (domain.ExternalAgentInvocationResult, error) {
 	job, err := s.Status(ctx, jobID, actor, conversationKey)
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	if job == nil {
-		return domain.AcpInvocationResult{}, errors.New("external-agent job was not found")
+		return domain.ExternalAgentInvocationResult{}, errors.New("external-agent job was not found")
 	}
 	if job.Status != domain.JobCompletionUnknown {
-		return domain.AcpInvocationResult{}, errors.New("external-agent job is not awaiting reconciliation")
+		return domain.ExternalAgentInvocationResult{}, errors.New("external-agent job is not awaiting reconciliation")
 	}
 	if expectedRevision < -1 {
-		return domain.AcpInvocationResult{}, errors.New("expected status revision is invalid")
+		return domain.ExternalAgentInvocationResult{}, errors.New("expected status revision is invalid")
 	}
 	if expectedRevision >= 0 && job.StatusRevision != expectedRevision {
-		return domain.AcpInvocationResult{}, port.ErrExternalAgentJobRevisionConflict
+		return domain.ExternalAgentInvocationResult{}, port.ErrExternalAgentJobRevisionConflict
 	}
 	recovery, ok := s.runtime.(port.ExternalAgentSessionRecoveryRuntime)
 	if !ok {
-		return domain.AcpInvocationResult{}, errors.New("session recovery is unsupported; inspect external state and close the completion_unknown job explicitly")
+		return domain.ExternalAgentInvocationResult{}, errors.New("session recovery is unsupported; inspect external state and close the completion_unknown job explicitly")
 	}
 	reconciler, ok := s.store.(port.ExternalAgentJobReconciler)
 	if !ok {
-		return domain.AcpInvocationResult{}, errors.New("durable job store does not support reconciliation")
+		return domain.ExternalAgentInvocationResult{}, errors.New("durable job store does not support reconciliation")
 	}
 	owner := "reconciler_" + randomID()
 	var reconciling *domain.ExternalAgentJob
@@ -692,7 +692,7 @@ func (s *Service) ReconcileExpected(ctx context.Context, jobID, actor string, co
 		reconciling, err = reconciler.BeginReconciliation(ctx, jobID, actor, conversationKey, s.clock.Now().UTC(), owner, s.cfg.LeaseTTL)
 	}
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	reconcileCtx, cancelReconcile := context.WithCancel(ctx)
 	heartbeatDone := make(chan struct{})
@@ -711,18 +711,18 @@ func (s *Service) ReconcileExpected(ctx context.Context, jobID, actor string, co
 	}
 	transitionErr := s.transition(context.WithoutCancel(ctx), reconciling.ID, reconciling.LeaseOwner, reconciling.Attempt, next, &result, code, s.clock.Now().UTC())
 	if transitionErr != nil {
-		return domain.AcpInvocationResult{}, errors.New("external-agent reconciliation state update failed")
+		return domain.ExternalAgentInvocationResult{}, errors.New("external-agent reconciliation state update failed")
 	}
 	if runErr != nil {
-		return domain.AcpInvocationResult{}, safeReconciliationError(runErr)
+		return domain.ExternalAgentInvocationResult{}, safeReconciliationError(runErr)
 	}
 	return result, nil
 }
 
 func safeReconciliationError(err error) error {
-	var acpErr *domain.ACPError
-	if errors.As(err, &acpErr) && acpErr.Code != "" {
-		return fmt.Errorf("external-agent reconciliation failed: %s", acpErr.Code)
+	var externalAgentErr *domain.ExternalAgentError
+	if errors.As(err, &externalAgentErr) && externalAgentErr.Code != "" {
+		return fmt.Errorf("external-agent reconciliation failed: %s", externalAgentErr.Code)
 	}
 	return errors.New("external-agent reconciliation failed; job remains completion_unknown")
 }
@@ -872,14 +872,14 @@ func (s *Service) recoverExpired(ctx context.Context) bool {
 		now := s.clock.Now().UTC()
 		next, code := domain.JobQueued, ""
 		if job.Status == domain.JobCancelRequested {
-			if job.SideEffectsPossible || job.ACPSessionID != "" {
+			if job.SideEffectsPossible || job.ExternalAgentSessionID != "" {
 				next, code = domain.JobCompletionUnknown, "completion_unknown"
 			} else {
 				next = domain.JobCancelled
 			}
 		} else if job.Status == domain.JobReconciling {
 			next, code = domain.JobCompletionUnknown, "completion_unknown"
-		} else if job.SideEffectsPossible || job.ACPSessionID != "" {
+		} else if job.SideEffectsPossible || job.ExternalAgentSessionID != "" {
 			next, code = domain.JobCompletionUnknown, "completion_unknown"
 		} else if !job.TimeoutAt.After(now) || job.Attempt >= s.cfg.MaxAttempts {
 			next, code = domain.JobFailed, "job_lease_lost"
@@ -900,7 +900,7 @@ func (s *Service) recoverExpired(ctx context.Context) bool {
 	return recovered
 }
 
-func (s *Service) transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.AcpInvocationResult, errorCode string, now time.Time) error {
+func (s *Service) transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error {
 	if err := s.store.Transition(ctx, jobID, owner, attempt, next, result, errorCode, now); err != nil {
 		return err
 	}
@@ -930,7 +930,7 @@ func notificationTerminal(status domain.ExternalAgentJobStatus) bool {
 
 func terminalOutcome(job *domain.ExternalAgentJob, runErr, contextErr error, maxAttempts int, timedOut bool) (domain.ExternalAgentJobStatus, string) {
 	if timedOut {
-		if job.SideEffectsPossible || job.ACPSessionID != "" {
+		if job.SideEffectsPossible || job.ExternalAgentSessionID != "" {
 			return domain.JobCompletionUnknown, "completion_unknown"
 		}
 		return domain.JobFailed, "acp_job_timeout"
@@ -938,16 +938,16 @@ func terminalOutcome(job *domain.ExternalAgentJob, runErr, contextErr error, max
 	if runErr == nil {
 		return domain.JobCompleted, ""
 	}
-	if code := acpFailureCode(runErr); code == string(domain.ACPErrorResultTooLarge) || code == string(domain.ACPErrorResultArtifactInvalid) || code == string(domain.ACPErrorResultDeliveryFailed) || strings.HasPrefix(code, "result_") {
+	if code := externalAgentFailureCode(runErr); code == string(domain.ExternalAgentErrorResultTooLarge) || code == string(domain.ExternalAgentErrorResultArtifactInvalid) || code == string(domain.ExternalAgentErrorResultDeliveryFailed) || strings.HasPrefix(code, "result_") {
 		return domain.JobFailed, code
 	}
 	if job.Status == domain.JobCancelRequested {
-		if job.SideEffectsPossible || job.ACPSessionID != "" {
+		if job.SideEffectsPossible || job.ExternalAgentSessionID != "" {
 			return domain.JobCompletionUnknown, "completion_unknown"
 		}
 		return domain.JobCancelled, ""
 	}
-	if contextErr != nil && (job.SideEffectsPossible || job.ACPSessionID != "") {
+	if contextErr != nil && (job.SideEffectsPossible || job.ExternalAgentSessionID != "") {
 		return domain.JobCompletionUnknown, "completion_unknown"
 	}
 	if contextErr != nil && job.Attempt < maxAttempts {
@@ -956,23 +956,23 @@ func terminalOutcome(job *domain.ExternalAgentJob, runErr, contextErr error, max
 	if contextErr != nil {
 		return domain.JobFailed, "acp_job_timeout"
 	}
-	code := acpFailureCode(runErr)
-	if !job.SideEffectsPossible && job.ACPSessionID == "" && job.Attempt < maxAttempts &&
-		(code == string(domain.ACPErrorProcessExit) || code == string(domain.ACPErrorIdleTimeout)) {
+	code := externalAgentFailureCode(runErr)
+	if !job.SideEffectsPossible && job.ExternalAgentSessionID == "" && job.Attempt < maxAttempts &&
+		(code == string(domain.ExternalAgentErrorProcessExit) || code == string(domain.ExternalAgentErrorIdleTimeout)) {
 		return domain.JobInterruptedSafe, code
 	}
-	if job.SideEffectsPossible || job.ACPSessionID != "" {
+	if job.SideEffectsPossible || job.ExternalAgentSessionID != "" {
 		return domain.JobCompletionUnknown, "completion_unknown"
 	}
 	return domain.JobFailed, code
 }
 
-func acpFailureCode(err error) string {
-	var acpErr *domain.ACPError
-	if errors.As(err, &acpErr) && acpErr.Code != "" {
-		return string(acpErr.Code)
+func externalAgentFailureCode(err error) string {
+	var externalAgentErr *domain.ExternalAgentError
+	if errors.As(err, &externalAgentErr) && externalAgentErr.Code != "" {
+		return string(externalAgentErr.Code)
 	}
-	return string(domain.ACPErrorProcessExit)
+	return string(domain.ExternalAgentErrorProcessExit)
 }
 
 func isTerminalStatus(status domain.ExternalAgentJobStatus) bool {

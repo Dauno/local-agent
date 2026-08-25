@@ -974,33 +974,33 @@ type jobIDArgs struct {
 }
 
 type jobStatusResult struct {
-	JobID           string `json:"job_id"`
-	Status          string `json:"status"`
-	StatusRevision  int    `json:"status_revision"`
-	ACPSessionID    string `json:"acp_session_id"`
-	Phase           string `json:"phase"`
-	Health          string `json:"health"`
-	LastEventKind   string `json:"last_event_kind"`
-	LastTransport   string `json:"last_transport_activity_at"`
-	LastSession     string `json:"last_session_update_at"`
-	LastMeaningful  string `json:"last_meaningful_progress_at"`
-	ActiveTools     int    `json:"active_tool_count"`
-	PendingPerm     bool   `json:"pending_permission"`
-	PromptElapsed   int64  `json:"prompt_elapsed_seconds"`
-	StopReason      string `json:"stop_reason"`
-	ProcessAlive    *bool  `json:"process_alive"`
-	ResultAvailable bool   `json:"result_available"`
-	ResultSHA256    string `json:"result_sha256,omitempty"`
-	ResultBytes     int64  `json:"result_bytes,omitempty"`
-	DeliveryMode    string `json:"delivery_mode,omitempty"`
-	ErrorCode       string `json:"error_code,omitempty"`
-	FinishedAt      string `json:"finished_at,omitempty"`
+	JobID                  string `json:"job_id"`
+	Status                 string `json:"status"`
+	StatusRevision         int    `json:"status_revision"`
+	ExternalAgentSessionID string `json:"acp_session_id"`
+	Phase                  string `json:"phase"`
+	Health                 string `json:"health"`
+	LastEventKind          string `json:"last_event_kind"`
+	LastTransport          string `json:"last_transport_activity_at"`
+	LastSession            string `json:"last_session_update_at"`
+	LastMeaningful         string `json:"last_meaningful_progress_at"`
+	ActiveTools            int    `json:"active_tool_count"`
+	PendingPerm            bool   `json:"pending_permission"`
+	PromptElapsed          int64  `json:"prompt_elapsed_seconds"`
+	StopReason             string `json:"stop_reason"`
+	ProcessAlive           *bool  `json:"process_alive"`
+	ResultAvailable        bool   `json:"result_available"`
+	ResultSHA256           string `json:"result_sha256,omitempty"`
+	ResultBytes            int64  `json:"result_bytes,omitempty"`
+	DeliveryMode           string `json:"delivery_mode,omitempty"`
+	ErrorCode              string `json:"error_code,omitempty"`
+	FinishedAt             string `json:"finished_at,omitempty"`
 }
 
 func statusViewToJobResult(status domain.ExternalAgentJobStatusView) jobStatusResult {
 	view := jobStatusResult{
 		JobID: status.JobID, Status: string(status.Status), StatusRevision: status.StatusRevision,
-		ACPSessionID: status.ACPSessionID, Phase: string(status.Phase), Health: string(status.Health),
+		ExternalAgentSessionID: status.ExternalAgentSessionID, Phase: string(status.Phase), Health: string(status.Health),
 		LastEventKind: string(status.LastEventKind),
 		ActiveTools:   status.ActiveToolCount, PendingPerm: status.PendingPermission,
 		PromptElapsed: status.PromptElapsedSeconds, StopReason: status.StopReason,

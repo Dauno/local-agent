@@ -126,18 +126,18 @@ func TestRecorderPhaseBoundariesFlushImmediately(t *testing.T) {
 	recorder := newTestRecorder(store, &fakeRegistry{}, clock, time.Hour)
 	recorder.Start(context.Background())
 	defer recorder.Close()
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventProcessStarted, PID: 99})
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventSessionNew})
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventPromptSent})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventProcessStarted, PID: 99})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventSessionNew})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventPromptSent})
 	clock.advance(time.Minute)
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventToolCall, Tool: &domain.ACPToolProgress{CallID: "t1", Kind: domain.ACPToolKindExecute, Status: domain.ACPToolStatusPending}})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventToolCall, Tool: &domain.ExternalAgentToolProgress{CallID: "t1", Kind: domain.ExternalAgentToolKindExecute, Status: domain.ExternalAgentToolStatusPending}})
 	// Phase boundaries persist without any 30-second interval elapsing.
-	waitFor(t, func() bool { return store.latest().Phase == domain.ACPPhaseToolPending })
+	waitFor(t, func() bool { return store.latest().Phase == domain.ExternalAgentPhaseToolPending })
 	if store.count() > 6 {
 		t.Fatalf("phase boundaries must not cause per-event write storms; writes = %d", store.count())
 	}
 	latest := store.latest()
-	if latest.Phase != domain.ACPPhaseToolPending || latest.LastToolCallID != "t1" {
+	if latest.Phase != domain.ExternalAgentPhaseToolPending || latest.LastToolCallID != "t1" {
 		t.Fatalf("latest projection = %+v", latest)
 	}
 	if latest.PromptStartedAt.IsZero() {
@@ -153,14 +153,14 @@ func TestRecorderCoalescesRepeatedChunks(t *testing.T) {
 	defer recorder.Close()
 	for range 200 {
 		clock.advance(time.Millisecond)
-		recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventMessageChunk})
+		recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventMessageChunk})
 	}
 	// Advance the fake clock past the 30-second flush interval and wake the
 	// monitor with an immediate phase boundary. The repeated chunks must have
 	// coalesced into a bounded number of durable writes. The first chunk also
 	// flushes (phase change to responding), so wait for the tool projection.
 	clock.advance(31 * time.Second)
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventToolCall, Tool: &domain.ACPToolProgress{CallID: "t1", Kind: domain.ACPToolKindExecute, Status: domain.ACPToolStatusPending}})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventToolCall, Tool: &domain.ExternalAgentToolProgress{CallID: "t1", Kind: domain.ExternalAgentToolKindExecute, Status: domain.ExternalAgentToolStatusPending}})
 	waitFor(t, func() bool { return store.latest().ActiveToolCount == 1 })
 	if store.count() > 5 {
 		t.Fatalf("repeated chunks caused %d durable writes, want bounded coalescing", store.count())
@@ -183,11 +183,11 @@ func TestRecorderWarningOncePerSilentEpisode(t *testing.T) {
 	recorder.Start(context.Background())
 	defer recorder.Close()
 	base := clock.Now()
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventProcessStarted, PID: 999})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventProcessStarted, PID: 999})
 	registry.Register("job_1", 1, 999)
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventPromptSent})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventPromptSent})
 	// A real inbound frame establishes the transport clock.
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventThoughtChunk})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventThoughtChunk})
 	// First silent episode: cross the threshold and let the ticker warn once.
 	clock.mu.Lock()
 	clock.now = base.Add(6 * time.Second)
@@ -204,7 +204,7 @@ func TestRecorderWarningOncePerSilentEpisode(t *testing.T) {
 	clock.mu.Lock()
 	clock.now = base.Add(11 * time.Second)
 	clock.mu.Unlock()
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventThoughtChunk})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventThoughtChunk})
 	time.Sleep(800 * time.Millisecond)
 	clock.mu.Lock()
 	clock.now = base.Add(20 * time.Second)
@@ -217,8 +217,8 @@ func TestRecorderFailureIsNotFatal(t *testing.T) {
 	logger := &recorderLog{}
 	clock := &fakeClock{now: time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)}
 	recorder := NewProgressRecorder(store, &fakeRegistry{}, clock, logger, port.NoopMetricRecorder{}, nil, time.Hour, "job_1", "owner_1", 1)
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventProcessStarted})
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventPromptResponse, StopReason: domain.ACPStopReasonEndTurn})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventProcessStarted})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventPromptResponse, StopReason: domain.ExternalAgentStopReasonEndTurn})
 	recorder.Close()
 	// The failed writes must be observable but must never panic or fail the
 	// otherwise healthy invocation.
@@ -231,11 +231,11 @@ func TestRecorderTerminalFlushOnClose(t *testing.T) {
 	store := &fakeProgressStore{}
 	clock := &fakeClock{now: time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)}
 	recorder := newTestRecorder(store, &fakeRegistry{}, clock, time.Hour)
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventPromptSent})
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventPromptResponse, StopReason: domain.ACPStopReasonEndTurn})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventPromptSent})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventPromptResponse, StopReason: domain.ExternalAgentStopReasonEndTurn})
 	recorder.Close()
 	latest := store.latest()
-	if latest.Phase != domain.ACPPhaseCompleted || latest.StopReason != domain.ACPStopReasonEndTurn {
+	if latest.Phase != domain.ExternalAgentPhaseCompleted || latest.StopReason != domain.ExternalAgentStopReasonEndTurn {
 		t.Fatalf("final flush lost the terminal projection: %+v", latest)
 	}
 }
@@ -252,13 +252,13 @@ func TestRecorderNeverBlocksReaderOnSlowSQLite(t *testing.T) {
 	recorder.Start(context.Background())
 	defer recorder.Close()
 	// An immediate event wakes the monitor, which starts a write and blocks.
-	recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventProcessStarted, PID: 99})
+	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventProcessStarted, PID: 99})
 	<-store.writeStarted
 	// While the durable write is stuck, the reader path must keep returning
 	// without waiting on SQLite.
 	started := time.Now()
 	for range 200 {
-		recorder.Record(domain.ACPProgressEvent{Kind: domain.ACPEventMessageChunk})
+		recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventMessageChunk})
 	}
 	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
 		t.Fatalf("Record blocked on a slow durable write for %s", elapsed)
@@ -290,75 +290,75 @@ func TestDeriveProgressHealthTable(t *testing.T) {
 		proj     domain.ExternalAgentJobProgress
 		alive    *bool
 		terminal bool
-		want     domain.ACPProgressHealth
+		want     domain.ExternalAgentProgressHealth
 	}{
 		{
 			name: "terminal phase",
-			proj: domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseCompleted},
-			want: domain.ACPHealthTerminal,
+			proj: domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseCompleted},
+			want: domain.ExternalAgentHealthTerminal,
 		},
 		{
 			name:     "terminal durable job",
-			proj:     domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseToolRunning},
+			proj:     domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseToolRunning},
 			terminal: true,
-			want:     domain.ACPHealthTerminal,
+			want:     domain.ExternalAgentHealthTerminal,
 		},
 		{
 			name: "failed phase without terminal response is disconnected",
-			proj: domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseFailed},
-			want: domain.ACPHealthDisconnected,
+			proj: domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseFailed},
+			want: domain.ExternalAgentHealthDisconnected,
 		},
 		{
 			name: "failed phase with terminal stop reason is terminal",
-			proj: domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseFailed, StopReason: domain.ACPStopReasonMaxTokens},
-			want: domain.ACPHealthTerminal,
+			proj: domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseFailed, StopReason: domain.ExternalAgentStopReasonMaxTokens},
+			want: domain.ExternalAgentHealthTerminal,
 		},
 		{
 			name:     "durable terminal job is terminal even when projection is failed",
-			proj:     domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseFailed, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
+			proj:     domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseFailed, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
 			terminal: true,
-			want:     domain.ACPHealthTerminal,
+			want:     domain.ExternalAgentHealthTerminal,
 		},
 		{
 			name: "pre-prompt phase is active",
-			proj: domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseSessionReady},
-			want: domain.ACPHealthActive,
+			proj: domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseSessionReady},
+			want: domain.ExternalAgentHealthActive,
 		},
 		{
 			name:  "known dead process is disconnected",
-			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
+			proj:  domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseAgentProcessing, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
 			alive: new(false),
-			want:  domain.ACPHealthDisconnected,
+			want:  domain.ExternalAgentHealthDisconnected,
 		},
 		{
 			name:  "recent meaningful progress is active",
-			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastTransportActivityAt: now, LastMeaningfulProgressAt: now.Add(-2 * time.Second)},
+			proj:  domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseAgentProcessing, LastTransportActivityAt: now, LastMeaningfulProgressAt: now.Add(-2 * time.Second)},
 			alive: new(true),
-			want:  domain.ACPHealthActive,
+			want:  domain.ExternalAgentHealthActive,
 		},
 		{
 			name:  "silent live process is possibly stalled",
-			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseToolRunning, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
+			proj:  domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseToolRunning, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
 			alive: new(true),
-			want:  domain.ACPHealthPossiblyStalled,
+			want:  domain.ExternalAgentHealthPossiblyStalled,
 		},
 		{
 			name:  "live process with no inbound frames ever is possibly stalled",
-			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastMeaningfulProgressAt: now.Add(-time.Minute)},
+			proj:  domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseAgentProcessing, LastMeaningfulProgressAt: now.Add(-time.Minute)},
 			alive: new(true),
-			want:  domain.ACPHealthPossiblyStalled,
+			want:  domain.ExternalAgentHealthPossiblyStalled,
 		},
 		{
 			name:  "transport recent but progress stale is quiet",
-			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseAgentProcessing, LastTransportActivityAt: now.Add(-2 * time.Second), LastMeaningfulProgressAt: now.Add(-time.Minute)},
+			proj:  domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseAgentProcessing, LastTransportActivityAt: now.Add(-2 * time.Second), LastMeaningfulProgressAt: now.Add(-time.Minute)},
 			alive: new(true),
-			want:  domain.ACPHealthQuiet,
+			want:  domain.ExternalAgentHealthQuiet,
 		},
 		{
 			name:  "unknown process handle cannot claim stalled",
-			proj:  domain.ExternalAgentJobProgress{Phase: domain.ACPPhaseToolRunning, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
+			proj:  domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseToolRunning, LastTransportActivityAt: now.Add(-time.Minute), LastMeaningfulProgressAt: now.Add(-time.Minute)},
 			alive: nil,
-			want:  domain.ACPHealthQuiet,
+			want:  domain.ExternalAgentHealthQuiet,
 		},
 	}
 	for _, test := range tests {

@@ -12,7 +12,7 @@ func TestResultIdentityValidateRequiresCompleteImmutableIdentity(t *testing.T) {
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte("result")))
 	identity := ResultIdentity{
 		ResultID: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		Producer: ResultProducer{Kind: ResultProducerACPJob, ID: "job-1", Revision: 3},
+		Producer: ResultProducer{Kind: ResultProducerExternalAgentJob, ID: "job-1", Revision: 3},
 		Storage:  ResultStorage{Kind: ResultStorageArtifact, Key: "internal-key"},
 		SHA256:   digest, Bytes: 6, MediaType: "text/plain; charset=utf-8",
 		Scope:     ResultScope{Actor: "U1", TeamID: "T1", ConversationKey: "slack:T1:dm:D1", Project: "app"},
@@ -150,7 +150,7 @@ func testResultIdentity() ResultIdentity {
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte("result")))
 	return ResultIdentity{
 		ResultID: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
-		Producer: ResultProducer{Kind: ResultProducerACPJob, ID: "job-1", Revision: 3},
+		Producer: ResultProducer{Kind: ResultProducerExternalAgentJob, ID: "job-1", Revision: 3},
 		Storage:  ResultStorage{Kind: ResultStorageArtifact, Key: "internal-key"},
 		SHA256:   digest, Bytes: 6, MediaType: "text/plain; charset=utf-8",
 		Scope:     ResultScope{Actor: "U1", TeamID: "T1", ConversationKey: "slack:T1:dm:D1", Project: "app"},

@@ -272,7 +272,7 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 	if err != nil {
 		return "", "", err
 	}
-	durableACP := false
+	durableExternalAgent := false
 	defs, err := agentdef.Load(paths.StateDir)
 	if err != nil {
 		return "", "", fmt.Errorf("load agent definitions for Slack manifest: %w", err)
@@ -280,13 +280,13 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 	if defs != nil {
 		for _, definition := range defs.Agents {
 			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
-				durableACP = true
+				durableExternalAgent = true
 				break
 			}
 		}
 	}
 	rendered, err := manifest.Render(manifest.Identity{
-		AppName: cfg.Slack.AppName, BotDisplayName: cfg.Slack.BotDisplayName, CanvasesEnabled: cfg.Canvases.Enabled, ExportsEnabled: cfg.Exports.Enabled, DurableACPEnabled: durableACP,
+		AppName: cfg.Slack.AppName, BotDisplayName: cfg.Slack.BotDisplayName, CanvasesEnabled: cfg.Canvases.Enabled, ExportsEnabled: cfg.Exports.Enabled, DurableExternalAgentEnabled: durableExternalAgent,
 	})
 	if err != nil {
 		return "", "", err
@@ -347,7 +347,7 @@ func (a *Application) InspectJob(ctx context.Context, jobID string) (*domain.Ext
 		view.Health = externalagent.DeriveProgressHealth(domain.ExternalAgentJobProgress{
 			Phase: view.Phase, LastTransportActivityAt: view.LastTransportActivityAt,
 			LastMeaningfulProgressAt: view.LastMeaningfulProgressAt, PromptStartedAt: view.PromptStartedAt,
-		}, now, time.Duration(cfg.ACP.ProgressWarningSeconds)*time.Second, nil, isTerminalInspectionStatus(view.Status))
+		}, now, time.Duration(cfg.ExternalAgent.ProgressWarningSeconds)*time.Second, nil, isTerminalInspectionStatus(view.Status))
 		if !view.PromptStartedAt.IsZero() {
 			elapsed := max(now.Sub(view.PromptStartedAt), 0)
 			view.PromptElapsedSeconds = int64(elapsed / time.Second)

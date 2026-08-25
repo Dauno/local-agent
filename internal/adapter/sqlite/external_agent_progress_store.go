@@ -116,10 +116,10 @@ func (s *ExternalAgentJobStore) ReadJobProgress(ctx context.Context, jobID strin
 	if err != nil {
 		return nil, fmt.Errorf("read external-agent progress: %w", err)
 	}
-	progress.Phase = domain.ACPProgressPhase(phase)
-	progress.LastEventKind = domain.ACPEventKind(lastEventKind)
-	progress.LastToolKind = domain.ACPToolKind(lastToolKind)
-	progress.LastToolStatus = domain.ACPToolStatus(lastToolStatus)
+	progress.Phase = domain.ExternalAgentProgressPhase(phase)
+	progress.LastEventKind = domain.ExternalAgentEventKind(lastEventKind)
+	progress.LastToolKind = domain.ExternalAgentToolKind(lastToolKind)
+	progress.LastToolStatus = domain.ExternalAgentToolStatus(lastToolStatus)
 	progress.ToolOverflow = overflow != 0
 	progress.PendingPermission = pending != 0
 	progress.LastTransportActivityAt = fromUnix(transport)

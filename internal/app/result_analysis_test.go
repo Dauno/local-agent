@@ -142,7 +142,7 @@ func materializeResultAnalysisSource(t *testing.T, store *adaptersqlite.Store, p
 		t.Fatalf("new result store: %v", err)
 	}
 	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
-		Producer:  domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: "op-1", Revision: 0},
+		Producer:  domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: "op-1", Revision: 0},
 		Payload:   "source content for fingerprint test",
 		Scope:     scope,
 		Retention: domain.ResultRetentionWorkstream,

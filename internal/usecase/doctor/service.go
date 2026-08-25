@@ -128,10 +128,6 @@ type CLIProviderChecker interface {
 	CheckAuthentication(ctx context.Context, resolved *agentdef.ResolvedModel, providerName string) (string, error)
 }
 
-type ACPProviderChecker interface {
-	CheckProvider(ctx context.Context, resolved *agentdef.ResolvedModel, projectRoots map[string]string) (string, error)
-}
-
 // CounterChecker validates that a configured token counter strategy and ID
 // are implemented by this release. It is the same availability resolution
 // used at startup, so doctor offline can never disagree with the binary.
@@ -187,7 +183,6 @@ type Dependencies struct {
 	Jobs            JobStoreChecker
 	Live            LiveChecker
 	CLI             CLIProviderChecker
-	ACP             ACPProviderChecker
 	Counter         CounterChecker
 	Knowledge       KnowledgeChecker
 	ResultRetention ResultRetentionChecker
@@ -251,7 +246,7 @@ type liveCheckState struct {
 	values                  map[string]string
 	validSecrets            map[string]bool
 	redactor                secure.Redactor
-	durableACP              bool
+	durableExternalAgent    bool
 	rootCLIProvider         bool
 	modelAPIKeyEnv          string
 	defsLoadFailed          bool
@@ -327,11 +322,11 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		definitions = s.checkDefinitions(&report, cfg, paths)
 	}
 	defs, resolvedModel, selectedModels, defsLoadFailed := definitions.defs, definitions.resolvedModel, definitions.selectedModels, definitions.loadFailed
-	durableACP := false
+	durableExternalAgent := false
 	if defs != nil {
 		for _, definition := range defs.Agents {
 			if definition.AgentClass == "AcpAgent" && definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
-				durableACP = true
+				durableExternalAgent = true
 				break
 			}
 		}
@@ -355,8 +350,8 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	} else if durableOpenAI {
 		report.pass("ADK compaction", "durable OpenAI-compatible model history projection is enabled")
 	}
-	if durableACP {
-		report.pass("ACP result delivery", fmt.Sprintf("complete results use up to %d Markdown parts or sanitized Markdown files", cfg.ACP.Delivery.MaxMarkdownParts))
+	if durableExternalAgent {
+		report.pass("ACP result delivery", fmt.Sprintf("complete results use up to %d Markdown parts or sanitized Markdown files", cfg.ExternalAgent.Delivery.MaxMarkdownParts))
 	}
 
 	modelAPIKeyEnv := ""
@@ -415,7 +410,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	}
 	s.runLiveChecks(ctx, &report, liveCheckState{
 		cfg: cfg, values: values, validSecrets: validSecrets, redactor: redactor,
-		durableACP: durableACP, rootCLIProvider: rootCLIProvider, modelAPIKeyEnv: modelAPIKeyEnv,
+		durableExternalAgent: durableExternalAgent, rootCLIProvider: rootCLIProvider, modelAPIKeyEnv: modelAPIKeyEnv,
 		defsLoadFailed: defsLoadFailed, resolvedModel: resolvedModel, selectedModels: selectedModels,
 		transcriptionProfile: transcriptionProfile, transcriptionResolved: transcriptionResolved,
 		audioTranscriptionReady: audioTranscriptionReady, embeddingEnabled: embeddingEnabled,
@@ -479,7 +474,7 @@ func (s *Service) runLiveChecks(ctx context.Context, report *Report, state liveC
 			report.pass("Slack generated files", "files:write scope check passed")
 		}
 	}
-	if state.durableACP && state.validSecrets[SlackBotTokenKey] {
+	if state.durableExternalAgent && state.validSecrets[SlackBotTokenKey] {
 		liveCtx, cancel := checkTimeout(ctx, state.cfg.Runtime.SlackAPITimeoutSeconds)
 		err := s.deps.Live.CheckSlackExports(liveCtx, state.values[SlackBotTokenKey])
 		cancel()
@@ -717,10 +712,10 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 		})
 	}
 	if s.deps.Artifacts != nil {
-		if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ACP.MaxResultArtifactBytes); err != nil {
+		if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ExternalAgent.MaxResultArtifactBytes); err != nil {
 			report.fail("ACP artifacts", redactor.String(err.Error()), "Fix the configured artifact directory and permissions; do not place secrets in it.", false)
 		} else {
-			report.pass("ACP artifacts", fmt.Sprintf("private artifact directory and %d-byte bound are valid", cfg.ACP.MaxResultArtifactBytes))
+			report.pass("ACP artifacts", fmt.Sprintf("private artifact directory and %d-byte bound are valid", cfg.ExternalAgent.MaxResultArtifactBytes))
 		}
 	}
 	if s.deps.Jobs != nil {

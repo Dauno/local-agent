@@ -119,7 +119,7 @@ func (r *TemplateRenderer) document(name string) (templateDocument, error) {
 type renderEnvironment struct {
 	templateName     string
 	kind             domain.AgentKind
-	isACP            bool
+	isExternalAgent  bool
 	values           map[string]string
 	profiles         []BuilderProviderProfile
 	previewYAMLParts []string
@@ -213,7 +213,7 @@ func newRenderEnvironment(templateName string, context TemplateContext) (renderE
 	return renderEnvironment{
 		templateName:     templateName,
 		kind:             kind,
-		isACP:            kind == domain.AgentKindAgentCLI,
+		isExternalAgent:  kind == domain.AgentKindAgentCLI,
 		values:           context.Values,
 		profiles:         append([]BuilderProviderProfile(nil), context.Profiles...),
 		previewYAMLParts: append([]string(nil), context.PreviewYAMLParts...),
@@ -232,7 +232,7 @@ func compileBlocks(templateName string, source []templateBlock, env renderEnviro
 			blocks = append(blocks, collection...)
 			continue
 		}
-		if sourceBlock.Condition == "is_acp" && !env.isACP {
+		if sourceBlock.Condition == "is_acp" && !env.isExternalAgent {
 			continue
 		}
 		block, err := compileBlock(sourceBlock, env, fmt.Sprintf("blocks[%d]", index))
@@ -558,12 +558,12 @@ func resolveString(source string, env renderEnvironment, optional bool) (string,
 				value = string(env.kind)
 			}
 		case "execution_mode":
-			if value == "" && env.isACP {
+			if value == "" && env.isExternalAgent {
 				value = domain.ExecutionModeForeground
 			}
 		case "timeout_seconds":
-			if value == "" && env.isACP {
-				value = strconv.Itoa(domain.DefaultACPTimeoutSeconds)
+			if value == "" && env.isExternalAgent {
+				value = strconv.Itoa(domain.DefaultExternalAgentTimeoutSeconds)
 			}
 		}
 	}

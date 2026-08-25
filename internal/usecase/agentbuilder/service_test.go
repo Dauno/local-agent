@@ -74,7 +74,7 @@ func TestPreviewBuildsAgentCLILeaf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AgentDef.AgentClass != "LlmAgent" || result.AgentDef.Model != "opencode/default" || result.AgentDef.ExecutionMode != domain.ExecutionModeDurableJob || result.AgentDef.TimeoutSec != domain.DefaultACPTimeoutSeconds {
+	if result.AgentDef.AgentClass != "LlmAgent" || result.AgentDef.Model != "opencode/default" || result.AgentDef.ExecutionMode != domain.ExecutionModeDurableJob || result.AgentDef.TimeoutSec != domain.DefaultExternalAgentTimeoutSeconds {
 		t.Fatalf("preview identity = %#v", result.AgentDef)
 	}
 	if !strings.Contains(result.YAML, "model: opencode/default") || !strings.Contains(result.YAML, "confirmation: required") {

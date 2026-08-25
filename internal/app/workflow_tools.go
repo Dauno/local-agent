@@ -213,7 +213,7 @@ func (p *preparedWorkflowTool) buildTRDTool(scope invocationScope) (tool.Tool, e
 		Description:         p.blueprint.Description + " Requires confirmation before drafting or any Git mutation.",
 		RequireConfirmation: true,
 	}, func(ctx agent.Context, args trdArgs) (trdResult, error) {
-		primaryPath, err := resolveACPProject(p.projectRoots, args.Project)
+		primaryPath, err := resolveExternalAgentProject(p.projectRoots, args.Project)
 		if err != nil {
 			return trdResult{}, err
 		}

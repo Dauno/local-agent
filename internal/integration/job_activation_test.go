@@ -125,7 +125,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	}
 	expectedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(expectedText)))
 
-	acp := &detachedFakeACP{raw: rawResult}
+	acp := &detachedFakeExternalAgent{raw: rawResult}
 	jobService, err := externalagent.New(externalagent.Config{
 		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
 		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
@@ -385,7 +385,7 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 	}
 	expectedDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(expectedText)))
 
-	acp := &detachedFakeACP{raw: rawResult}
+	acp := &detachedFakeExternalAgent{raw: rawResult}
 	jobService, err := externalagent.New(externalagent.Config{
 		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
 		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
@@ -611,7 +611,7 @@ func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 	}
 
 	rawResult := strings.Repeat("x", domain.MaxActivationFrameRunes+1)
-	acp := &detachedFakeACP{raw: rawResult}
+	acp := &detachedFakeExternalAgent{raw: rawResult}
 	jobService, err := externalagent.New(externalagent.Config{
 		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
 		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
@@ -777,7 +777,7 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(sanitizedText)))
 
-	acp := &foregroundFakeACP{raw: rawText}
+	acp := &foregroundFakeExternalAgent{raw: rawText}
 	service, err := externalagent.New(externalagent.Config{
 		DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute,
 		PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1,
@@ -809,11 +809,11 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 	})
 
 	rootModel := &foregroundRootModel{}
-	acpTool := newForegroundACPTool(t, facade, key, actor)
+	externalAgentTool := newForegroundExternalAgentTool(t, facade, key, actor)
 	sessionService := adaptersqlite.NewAdkSessionService(store)
 	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{
 		AgentName: "root_agent", Model: rootModel, SessionService: sessionService,
-		StaticTools: []tool.Tool{acpTool}, ProviderFamily: domain.ProviderFamilyOpenAICompatible,
+		StaticTools: []tool.Tool{externalAgentTool}, ProviderFamily: domain.ProviderFamilyOpenAICompatible,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1271,30 +1271,22 @@ func chunkFromResponse(response map[string]any, ok bool) (content string, offset
 // detachedFakeACP is the direct ACP runtime behind the detached dispatcher.
 // It returns raw multibyte provider text and records exactly how many
 // invocations ran and with which durable job ID.
-type detachedFakeACP struct {
+type detachedFakeExternalAgent struct {
 	mu        sync.Mutex
 	raw       string
 	calls     int
 	lastJobID string
 }
 
-func (r *detachedFakeACP) Run(_ context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error) {
+func (r *detachedFakeExternalAgent) Run(_ context.Context, request domain.ExternalAgentInvocationRequest) (domain.ExternalAgentInvocationResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
 	r.lastJobID = request.JobID
-	return domain.AcpInvocationResult{Text: r.raw}, nil
+	return domain.ExternalAgentInvocationResult{Text: r.raw}, nil
 }
 
-func (*detachedFakeACP) Probe(context.Context, string, []domain.ACPConfigOption) error {
-	return nil
-}
-
-func (*detachedFakeACP) Describe(context.Context) (domain.ACPInitResult, error) {
-	return domain.ACPInitResult{}, nil
-}
-
-func (r *detachedFakeACP) callStats() (int, string) {
+func (r *detachedFakeExternalAgent) callStats() (int, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls, r.lastJobID
@@ -1312,16 +1304,7 @@ func (r *detachedFakeACP) callStats() (int, string) {
 // removed with the ACP transport; this fake keeps the same contract so the
 // detached delivery identity stays under test.
 type externalAgentInvoker interface {
-	Run(ctx context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error)
-}
-
-// externalAgentRuntime is the full prepared-agent contract the removed ACP
-// transport used to satisfy. These integration fakes keep it so the durable
-// worker paths they cover stay exercised.
-type externalAgentRuntime interface {
-	externalAgentInvoker
-	Probe(ctx context.Context, primaryPath string, configOptions []domain.ACPConfigOption) error
-	Describe(ctx context.Context) (domain.ACPInitResult, error)
+	Run(ctx context.Context, request domain.ExternalAgentInvocationRequest) (domain.ExternalAgentInvocationResult, error)
 }
 
 type detachedDispatcherRuntime struct {
@@ -1329,11 +1312,11 @@ type detachedDispatcherRuntime struct {
 	redact func(string) string
 }
 
-func (d *detachedDispatcherRuntime) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+func (d *detachedDispatcherRuntime) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
 	if job.Mode != domain.JobDetached {
-		return domain.AcpInvocationResult{}, errors.New("detached dispatcher runtime received a non-detached job")
+		return domain.ExternalAgentInvocationResult{}, errors.New("detached dispatcher runtime received a non-detached job")
 	}
-	result, err := d.acp.Run(ctx, domain.AcpInvocationRequest{
+	result, err := d.acp.Run(ctx, domain.ExternalAgentInvocationRequest{
 		JobID: job.ID, PrimaryProject: job.PrimaryProject,
 		ProfileName: job.Profile, ProviderName: job.Provider, Task: job.Task,
 		Timeout: time.Until(job.TimeoutAt), Actor: job.Actor, TeamID: job.TeamID,
@@ -1348,11 +1331,11 @@ func (d *detachedDispatcherRuntime) Run(ctx context.Context, job domain.External
 	}
 	text, err = domain.SanitizeResultText(text)
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	size := int64(len([]byte(text)))
 	if size <= 0 {
-		return domain.AcpInvocationResult{}, errors.New("detached dispatcher result is empty")
+		return domain.ExternalAgentInvocationResult{}, errors.New("detached dispatcher result is empty")
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(text)))
 	result.Text = text
@@ -1443,30 +1426,22 @@ func assertMetricAtLeast(t *testing.T, samples []port.MetricSample, name string,
 // foregroundFakeACP is the direct ACP runtime behind the durable facade. It
 // returns raw provider text that the host redactor and SanitizeResultText
 // transform, so the persisted identity necessarily differs from the raw text.
-type foregroundFakeACP struct {
+type foregroundFakeExternalAgent struct {
 	mu        sync.Mutex
 	raw       string
 	calls     int
 	lastJobID string
 }
 
-func (r *foregroundFakeACP) Run(_ context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error) {
+func (r *foregroundFakeExternalAgent) Run(_ context.Context, request domain.ExternalAgentInvocationRequest) (domain.ExternalAgentInvocationResult, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++
 	r.lastJobID = request.JobID
-	return domain.AcpInvocationResult{Text: r.raw}, nil
+	return domain.ExternalAgentInvocationResult{Text: r.raw}, nil
 }
 
-func (*foregroundFakeACP) Probe(context.Context, string, []domain.ACPConfigOption) error {
-	return nil
-}
-
-func (*foregroundFakeACP) Describe(context.Context) (domain.ACPInitResult, error) {
-	return domain.ACPInitResult{}, nil
-}
-
-func (r *foregroundFakeACP) callStats() (int, string) {
+func (r *foregroundFakeExternalAgent) callStats() (int, string) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	return r.calls, r.lastJobID
@@ -1481,11 +1456,11 @@ type foregroundDispatcherRuntime struct {
 	redact func(string) string
 }
 
-func (d *foregroundDispatcherRuntime) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+func (d *foregroundDispatcherRuntime) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
 	if job.Mode != domain.JobForeground {
-		return domain.AcpInvocationResult{}, errors.New("foreground dispatcher runtime received a non-foreground job")
+		return domain.ExternalAgentInvocationResult{}, errors.New("foreground dispatcher runtime received a non-foreground job")
 	}
-	result, err := d.acp.Run(ctx, domain.AcpInvocationRequest{
+	result, err := d.acp.Run(ctx, domain.ExternalAgentInvocationRequest{
 		JobID: job.ID, PrimaryProject: job.PrimaryProject,
 		ProfileName: job.Profile, ProviderName: job.Provider, Task: job.Task,
 		Timeout: time.Until(job.TimeoutAt), Actor: job.Actor, TeamID: job.TeamID,
@@ -1500,7 +1475,7 @@ func (d *foregroundDispatcherRuntime) Run(ctx context.Context, job domain.Extern
 	}
 	text, err = domain.SanitizeResultText(text)
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	result.Text = text
 	result.ResultBytes = int64(len([]byte(text)))
@@ -1516,15 +1491,15 @@ var _ port.ExternalAgentJobRuntime = (*foregroundDispatcherRuntime)(nil)
 // synchronously, while worker dispatches carry JobID and reach the direct ACP
 // runtime. The facade never runs the direct runtime for the root path.
 type foregroundFacadeRuntime struct {
-	direct externalAgentRuntime
+	direct externalAgentInvoker
 	jobs   foregroundSynchronousJobRunner
 }
 
 type foregroundSynchronousJobRunner interface {
-	StartAndWait(context.Context, domain.ExternalAgentJobRequest) (domain.AcpInvocationResult, error)
+	StartAndWait(context.Context, domain.ExternalAgentJobRequest) (domain.ExternalAgentInvocationResult, error)
 }
 
-func (r *foregroundFacadeRuntime) Run(ctx context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error) {
+func (r *foregroundFacadeRuntime) Run(ctx context.Context, request domain.ExternalAgentInvocationRequest) (domain.ExternalAgentInvocationResult, error) {
 	if request.JobID != "" || r.jobs == nil || request.Actor == "" || request.ConversationKey == "" {
 		return r.direct.Run(ctx, request)
 	}
@@ -1543,15 +1518,7 @@ func (r *foregroundFacadeRuntime) Run(ctx context.Context, request domain.AcpInv
 	})
 }
 
-func (r *foregroundFacadeRuntime) Probe(ctx context.Context, primaryPath string, options []domain.ACPConfigOption) error {
-	return r.direct.Probe(ctx, primaryPath, options)
-}
-
-func (r *foregroundFacadeRuntime) Describe(ctx context.Context) (domain.ACPInitResult, error) {
-	return r.direct.Describe(ctx)
-}
-
-var _ externalAgentRuntime = (*foregroundFacadeRuntime)(nil)
+var _ externalAgentInvoker = (*foregroundFacadeRuntime)(nil)
 
 // foregroundRootModel scripts the original root turn: one function call to
 // the foreground ACP tool, then one final response. Every model call is
@@ -1608,37 +1575,37 @@ func (m *foregroundRootModel) toolResponsesSnapshot() []string {
 
 var _ model.LLM = (*foregroundRootModel)(nil)
 
-type foregroundACPToolArgs struct {
+type foregroundExternalAgentToolArgs struct {
 	Project string `json:"project" jsonschema:"registered project name"`
 	Task    string `json:"task" jsonschema:"complete bounded task"`
 }
 
-type foregroundACPToolResult struct {
+type foregroundExternalAgentToolResult struct {
 	Result string `json:"result"`
 }
 
 // newForegroundACPTool builds the confirmable root tool that invokes the
 // durable facade, mirroring the foreground branch of the ACP agent tool.
-func newForegroundACPTool(t *testing.T, runtime externalAgentRuntime, key domain.ConversationKey, actor string) tool.Tool {
+func newForegroundExternalAgentTool(t *testing.T, runtime externalAgentInvoker, key domain.ConversationKey, actor string) tool.Tool {
 	t.Helper()
 	projectRoot := t.TempDir()
 	created, err := functiontool.New(functiontool.Config{
 		Name:                "foreground_acp",
 		Description:         "Runs a foreground durable ACP task in this conversation.",
 		RequireConfirmation: true,
-	}, func(_ agent.Context, args foregroundACPToolArgs) (foregroundACPToolResult, error) {
+	}, func(_ agent.Context, args foregroundExternalAgentToolArgs) (foregroundExternalAgentToolResult, error) {
 		if strings.TrimSpace(args.Project) == "" || strings.TrimSpace(args.Task) == "" {
-			return foregroundACPToolResult{}, errors.New("foreground ACP project and task are required")
+			return foregroundExternalAgentToolResult{}, errors.New("foreground ACP project and task are required")
 		}
-		result, err := runtime.Run(context.Background(), domain.AcpInvocationRequest{
+		result, err := runtime.Run(context.Background(), domain.ExternalAgentInvocationRequest{
 			PrimaryProject: args.Project, PrimaryPath: projectRoot,
 			ProfileName: "opencode/build", ProviderName: "opencode", RegistryRevision: "r1",
 			Task: args.Task, Actor: actor, TeamID: "T12345678", ConversationKey: key,
 		})
 		if err != nil {
-			return foregroundACPToolResult{}, err
+			return foregroundExternalAgentToolResult{}, err
 		}
-		return foregroundACPToolResult{Result: result.Text}, nil
+		return foregroundExternalAgentToolResult{Result: result.Text}, nil
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1806,7 +1773,7 @@ func (*drainActivationHandler) ReconcileJobCompletion(context.Context, domain.Ex
 
 var _ model.LLM = (*activationRootModel)(nil)
 var _ port.ExternalAgentJobRuntime = (*detachedDispatcherRuntime)(nil)
-var _ externalAgentRuntime = (*detachedFakeACP)(nil)
+var _ externalAgentInvoker = (*detachedFakeExternalAgent)(nil)
 var _ port.JobNotificationPublisher = (*jobActivationNotificationPublisher)(nil)
 var _ port.ResponsePublisher = (*jobActivationResponsePublisher)(nil)
 var _ port.ExternalAgentJobActivationStore = (*drainActivationStore)(nil)

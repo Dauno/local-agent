@@ -31,13 +31,13 @@ func TestExternalAgentJobStoreClaimsAndTerminalizesOneAttempt(t *testing.T) {
 	if claimed == nil || claimed.Status != domain.JobRunning || claimed.Attempt != 1 {
 		t.Fatalf("claimed = %#v", claimed)
 	}
-	if err := jobStore.AssignACPSession(t.Context(), job.ID, "worker-1", 1, "session-1"); err != nil {
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker-1", 1, "session-1"); err != nil {
 		t.Fatal(err)
 	}
 	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, "worker-1", 1); err != nil {
 		t.Fatal(err)
 	}
-	result := &domain.AcpInvocationResult{Text: "done", Inline: true, ResultBytes: 4}
+	result := &domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4}
 	if err := jobStore.Transition(t.Context(), job.ID, "worker-1", 1, domain.JobCompleted, result, "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestExternalAgentJobStoreClaimsAndTerminalizesOneAttempt(t *testing.T) {
 	if err != nil || finished == nil {
 		t.Fatalf("finished = %#v, err = %v", finished, err)
 	}
-	if finished.Status != domain.JobCompleted || !finished.SideEffectsPossible || finished.ACPSessionID != "session-1" || finished.ResultSummary != "done" {
+	if finished.Status != domain.JobCompleted || !finished.SideEffectsPossible || finished.ExternalAgentSessionID != "session-1" || finished.ResultSummary != "done" {
 		t.Fatalf("finished = %#v", finished)
 	}
 	if err := jobStore.Transition(t.Context(), job.ID, "worker-1", 1, domain.JobFailed, nil, "late", now.Add(2*time.Second)); err == nil {
@@ -76,14 +76,14 @@ func TestExternalAgentJobStoreAtomicallyBindsNativeCompletedResult(t *testing.T)
 	}
 	const content = "native completed result"
 	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
 		Payload:  content, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
 		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := &domain.AcpInvocationResult{
+	result := &domain.ExternalAgentInvocationResult{
 		Text: content, Inline: true, NativeResultID: handle.ResultID,
 		ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes,
 	}
@@ -129,14 +129,14 @@ func TestExternalAgentJobStoreRejectsNativeResultWithMismatchedBytes(t *testing.
 		t.Fatal(err)
 	}
 	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
 		Payload:  "native result", Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
 		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := &domain.AcpInvocationResult{Text: "native result", Inline: true, NativeResultID: handle.ResultID, ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes + 1}
+	result := &domain.ExternalAgentInvocationResult{Text: "native result", Inline: true, NativeResultID: handle.ResultID, ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes + 1}
 	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", now.Add(time.Second)); err == nil {
 		t.Fatal("native result with mismatched bytes was accepted")
 	}
@@ -172,7 +172,7 @@ func TestExternalAgentJobStoreQuarantinesNativeResultWhenTerminalRevisionChanges
 	}
 	const content = "result raced with cancellation"
 	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
 		Payload:  content, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
 		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
 	})
@@ -182,7 +182,7 @@ func TestExternalAgentJobStoreQuarantinesNativeResultWhenTerminalRevisionChanges
 	if _, err := jobs.RequestCancellation(t.Context(), job.ID, job.Actor); err != nil {
 		t.Fatal(err)
 	}
-	result := &domain.AcpInvocationResult{
+	result := &domain.ExternalAgentInvocationResult{
 		Text: content, Inline: true, NativeResultID: handle.ResultID,
 		ResultSHA256: handle.SHA256, ResultBytes: handle.Bytes,
 	}
@@ -228,7 +228,7 @@ func TestExternalAgentJobStoreRecoveryQuarantinesUnboundNativeResult(t *testing.
 	}
 	const content = "published before worker crash"
 	handle, err := results.Materialize(t.Context(), port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: job.ID, Revision: claimed.StatusRevision + 1},
 		Payload:  content, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
 		Retention: domain.ResultRetentionContext, MediaType: "text/plain; charset=utf-8",
 	})
@@ -355,7 +355,7 @@ func TestExternalAgentJobStoreRejectsEveryOwnerMutationAfterLeaseExpiry(t *testi
 	if err := jobStore.RenewLease(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, now, time.Minute); err == nil {
 		t.Fatal("expired lease was renewed")
 	}
-	if err := jobStore.AssignACPSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "late-session"); err == nil {
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "late-session"); err == nil {
 		t.Fatal("expired lease received an ACP session")
 	}
 	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err == nil {

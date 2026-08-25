@@ -404,24 +404,24 @@ type ExternalAgentJobDeliveryInspection struct {
 // locally authorized. Task, actor, conversation, paths, and result content
 // remain excluded.
 type ExternalAgentJobInspection struct {
-	JobID          string                               `json:"job_id"`
-	Status         ExternalAgentJobStatus               `json:"status"`
-	StatusRevision int                                  `json:"status_revision"`
-	ACPSessionID   string                               `json:"acp_session_id"`
-	FinishedAt     time.Time                            `json:"finished_at"`
-	Deliveries     []ExternalAgentJobDeliveryInspection `json:"deliveries"`
+	JobID                  string                               `json:"job_id"`
+	Status                 ExternalAgentJobStatus               `json:"status"`
+	StatusRevision         int                                  `json:"status_revision"`
+	ExternalAgentSessionID string                               `json:"acp_session_id"`
+	FinishedAt             time.Time                            `json:"finished_at"`
+	Deliveries             []ExternalAgentJobDeliveryInspection `json:"deliveries"`
 	// Live projection fields; empty until the projection row exists.
-	Phase                    ACPProgressPhase  `json:"phase"`
-	Health                   ACPProgressHealth `json:"health"`
-	LastEventKind            ACPEventKind      `json:"last_event_kind"`
-	LastTransportActivityAt  time.Time         `json:"last_transport_activity_at"`
-	LastSessionUpdateAt      time.Time         `json:"last_session_update_at"`
-	LastMeaningfulProgressAt time.Time         `json:"last_meaningful_progress_at"`
-	PromptStartedAt          time.Time         `json:"prompt_started_at"`
-	ActiveToolCount          int               `json:"active_tool_count"`
-	PendingPermission        bool              `json:"pending_permission"`
-	PromptElapsedSeconds     int64             `json:"prompt_elapsed_seconds"`
-	StopReason               string            `json:"stop_reason"`
+	Phase                    ExternalAgentProgressPhase  `json:"phase"`
+	Health                   ExternalAgentProgressHealth `json:"health"`
+	LastEventKind            ExternalAgentEventKind      `json:"last_event_kind"`
+	LastTransportActivityAt  time.Time                   `json:"last_transport_activity_at"`
+	LastSessionUpdateAt      time.Time                   `json:"last_session_update_at"`
+	LastMeaningfulProgressAt time.Time                   `json:"last_meaningful_progress_at"`
+	PromptStartedAt          time.Time                   `json:"prompt_started_at"`
+	ActiveToolCount          int                         `json:"active_tool_count"`
+	PendingPermission        bool                        `json:"pending_permission"`
+	PromptElapsedSeconds     int64                       `json:"prompt_elapsed_seconds"`
+	StopReason               string                      `json:"stop_reason"`
 	// ProcessAlive is nil when the current process has no trustworthy runtime
 	// handle (for example the read-only CLI); it must never be rendered as dead.
 	ProcessAlive *bool `json:"process_alive"`
@@ -483,7 +483,7 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 
 // NewExternalAgentJobDelivery creates a notification from a complete,
 // already-sanitized result. It never truncates provider output.
-func NewExternalAgentJobDelivery(job ExternalAgentJob, result AcpInvocationResult) (ExternalAgentJobNotification, error) {
+func NewExternalAgentJobDelivery(job ExternalAgentJob, result ExternalAgentInvocationResult) (ExternalAgentJobNotification, error) {
 	target, err := ConversationReplyTarget(job.ConversationKey)
 	if err != nil {
 		return ExternalAgentJobNotification{}, err
@@ -879,62 +879,62 @@ func (b ExternalAgentJobCompletionBinding) Present() bool {
 }
 
 type ExternalAgentJob struct {
-	ID                  string
-	Mode                ExternalAgentJobMode
-	Provider            string
-	Profile             string
-	PrimaryProject      string
-	RegistryRevision    string
-	Task                string
-	RequestSHA256       string
-	WrapperCallID       string
-	OriginalCallID      string
-	Actor               string
-	TeamID              string
-	ConversationKey     ConversationKey
-	WorkstreamID        string
-	TaskID              string
-	ExecutionIdentity   string
-	AdmissionRevision   int
-	Status              ExternalAgentJobStatus
-	Attempt             int
-	ACPSessionID        string
-	SideEffectsPossible bool
-	LeaseOwner          string
-	LeaseExpiry         time.Time
-	HeartbeatAt         time.Time
-	TimeoutAt           time.Time
-	ResultSummary       string
-	ResultArtifact      string
-	ResultSHA256        string
-	ResultBytes         int64
-	ErrorCode           string
-	StatusRevision      int
-	CreatedAt           time.Time
-	StartedAt           time.Time
-	FinishedAt          time.Time
-	UpdatedAt           time.Time
+	ID                     string
+	Mode                   ExternalAgentJobMode
+	Provider               string
+	Profile                string
+	PrimaryProject         string
+	RegistryRevision       string
+	Task                   string
+	RequestSHA256          string
+	WrapperCallID          string
+	OriginalCallID         string
+	Actor                  string
+	TeamID                 string
+	ConversationKey        ConversationKey
+	WorkstreamID           string
+	TaskID                 string
+	ExecutionIdentity      string
+	AdmissionRevision      int
+	Status                 ExternalAgentJobStatus
+	Attempt                int
+	ExternalAgentSessionID string
+	SideEffectsPossible    bool
+	LeaseOwner             string
+	LeaseExpiry            time.Time
+	HeartbeatAt            time.Time
+	TimeoutAt              time.Time
+	ResultSummary          string
+	ResultArtifact         string
+	ResultSHA256           string
+	ResultBytes            int64
+	ErrorCode              string
+	StatusRevision         int
+	CreatedAt              time.Time
+	StartedAt              time.Time
+	FinishedAt             time.Time
+	UpdatedAt              time.Time
 }
 
 // ExternalAgentJobStatusView is the host-owned, model-facing subset of a job.
 // It intentionally omits task text, provider configuration, actor identity,
 // and the persisted destination.
 type ExternalAgentJobStatusView struct {
-	JobID           string
-	Status          ExternalAgentJobStatus
-	StatusRevision  int
-	ACPSessionID    string
-	ResultAvailable bool
-	ResultSHA256    string
-	ResultBytes     int64
-	DeliveryMode    JobResultDeliveryMode
-	ErrorCode       string
-	FinishedAt      time.Time
+	JobID                  string
+	Status                 ExternalAgentJobStatus
+	StatusRevision         int
+	ExternalAgentSessionID string
+	ResultAvailable        bool
+	ResultSHA256           string
+	ResultBytes            int64
+	DeliveryMode           JobResultDeliveryMode
+	ErrorCode              string
+	FinishedAt             time.Time
 	// Live ACP projection fields are content-free and may be empty when the
 	// durable projection has not started or the provider is not ACP-backed.
-	Phase                    ACPProgressPhase
-	Health                   ACPProgressHealth
-	LastEventKind            ACPEventKind
+	Phase                    ExternalAgentProgressPhase
+	Health                   ExternalAgentProgressHealth
+	LastEventKind            ExternalAgentEventKind
 	LastTransportActivityAt  time.Time
 	LastSessionUpdateAt      time.Time
 	LastMeaningfulProgressAt time.Time
@@ -984,9 +984,9 @@ func (j ExternalAgentJob) StatusView() ExternalAgentJobStatusView {
 	}
 	return ExternalAgentJobStatusView{
 		JobID: j.ID, Status: j.Status, StatusRevision: j.StatusRevision,
-		ACPSessionID:    j.ACPSessionID,
-		ResultAvailable: available,
-		ResultSHA256:    j.ResultSHA256, ResultBytes: j.ResultBytes, DeliveryMode: mode,
+		ExternalAgentSessionID: j.ExternalAgentSessionID,
+		ResultAvailable:        available,
+		ResultSHA256:           j.ResultSHA256, ResultBytes: j.ResultBytes, DeliveryMode: mode,
 		ErrorCode: j.ErrorCode, FinishedAt: j.FinishedAt,
 	}
 }

@@ -74,7 +74,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 		Sandbox:          config.SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
 		Canvases:         config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:          config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
-		ACP:              config.ACPConfig{MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, ProgressWarningSeconds: 900, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
+		ExternalAgent:    config.ExternalAgentConfig{MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, ProgressWarningSeconds: 900, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ExternalAgentDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
 		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
 		Orchestration: config.OrchestrationConfig{
 			Workstreams: config.WorkstreamConfig{Enabled: false, MaxNonTerminalTasks: 32, MaxDependenciesPerTask: 8, SnapshotBudgetTokens: domain.DefaultWorkstreamSnapshotBudgetTokens},
@@ -171,33 +171,33 @@ func TestADKCompactionDefaultsAndProductionValidation(t *testing.T) {
 	}
 }
 
-func TestACPDeliveryPolicyValidation(t *testing.T) {
+func TestExternalAgentDeliveryPolicyValidation(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default()
-	cfg.ACP.Delivery.MaxMarkdownParts = 9
+	cfg.ExternalAgent.Delivery.MaxMarkdownParts = 9
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_markdown_parts") {
 		t.Fatalf("part policy error = %v", err)
 	}
 	cfg = config.Default()
-	cfg.ACP.Delivery.MaxFileBytes = cfg.ACP.MaxResultArtifactBytes + 1
+	cfg.ExternalAgent.Delivery.MaxFileBytes = cfg.ExternalAgent.MaxResultArtifactBytes + 1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "max_file_bytes") {
 		t.Fatalf("file policy error = %v", err)
 	}
 	cfg = config.Default()
-	cfg.ACP.Delivery.MaxMarkdownParts = 1
+	cfg.ExternalAgent.Delivery.MaxMarkdownParts = 1
 	if err := cfg.Validate(); err == nil || !strings.Contains(err.Error(), "delivery capacity") {
 		t.Fatalf("inline capacity error = %v", err)
 	}
 }
 
-func TestACPDeliveryFileBoundDefaultsToConfiguredArtifactBound(t *testing.T) {
+func TestExternalAgentDeliveryFileBoundDefaultsToConfiguredArtifactBound(t *testing.T) {
 	t.Parallel()
 	cfg, err := config.Parse([]byte("acp:\n  max_result_artifact_bytes: 1048576\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ACP.Delivery.MaxFileBytes != cfg.ACP.MaxResultArtifactBytes {
-		t.Fatalf("max_file_bytes = %d, artifact bound = %d", cfg.ACP.Delivery.MaxFileBytes, cfg.ACP.MaxResultArtifactBytes)
+	if cfg.ExternalAgent.Delivery.MaxFileBytes != cfg.ExternalAgent.MaxResultArtifactBytes {
+		t.Fatalf("max_file_bytes = %d, artifact bound = %d", cfg.ExternalAgent.Delivery.MaxFileBytes, cfg.ExternalAgent.MaxResultArtifactBytes)
 	}
 }
 
@@ -515,7 +515,7 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 	cfg.Runtime.SlackAPITimeoutSeconds = -1
 	cfg.Runtime.MaxConcurrentModelCalls = 0
 	cfg.Runtime.ShutdownGraceSeconds = 0
-	cfg.ACP.ReconciliationTimeoutSeconds = 0
+	cfg.ExternalAgent.ReconciliationTimeoutSeconds = 0
 	cfg.Slack.AllowedUserIDs = []string{"not-a-user"}
 	cfg.Slack.AllowedTeamIDs = []string{"U12345678"}
 	cfg.Slack.AllowedChannelIDs = []string{"D12345678"}

@@ -179,7 +179,7 @@ func validateRuntimeAndSlack(problems *[]FieldError, cfg Config) {
 		}
 	}
 	validateProgressLabels(problems, cfg.Slack.StandardAgent.ProgressLabels)
-	validateACP(problems, cfg.ACP)
+	validateExternalAgent(problems, cfg.ExternalAgent)
 
 	const maxFileBytes = 5 * 1024 * 1024
 	const maxFileChars = 20_000
@@ -679,7 +679,7 @@ func ValidateADKCompaction(cfg Config, durableOpenAICompatible, summarizerCompat
 	return nil
 }
 
-func validateACP(problems *[]FieldError, cfg ACPConfig) {
+func validateExternalAgent(problems *[]FieldError, cfg ExternalAgentConfig) {
 	const (
 		maxFrameCeiling    = 64 * 1024 * 1024
 		maxInlineCeiling   = 16 * 1024 * 1024

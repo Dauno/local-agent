@@ -30,7 +30,7 @@ type Config struct {
 	Sandbox          SandboxConfig           `yaml:"sandbox"`
 	Canvases         CanvasesConfig          `yaml:"canvases"`
 	Exports          ExportsConfig           `yaml:"exports"`
-	ACP              ACPConfig               `yaml:"acp"`
+	ExternalAgent    ExternalAgentConfig     `yaml:"acp"`
 	CodeIntelligence *CodeIntelligenceConfig `yaml:"code_intelligence"`
 	Orchestration    OrchestrationConfig     `yaml:"orchestration"`
 
@@ -58,19 +58,19 @@ type LSPRouteConfig struct {
 	Fallback string   `yaml:"fallback,omitempty"`
 }
 
-type ACPConfig struct {
-	MaxInlineResultBytes         int               `yaml:"max_inline_result_bytes"`
-	MaxResultArtifactBytes       int               `yaml:"max_result_artifact_bytes"`
-	DefaultJobTimeoutSeconds     int               `yaml:"default_job_timeout_seconds"`
-	MaxJobTimeoutSeconds         int               `yaml:"max_job_timeout_seconds"`
-	ReconciliationTimeoutSeconds int               `yaml:"reconciliation_timeout_seconds"`
-	ProgressWarningSeconds       int               `yaml:"progress_warning_seconds"`
-	WorkerConcurrency            int               `yaml:"worker_concurrency"`
-	ArtifactRetentionDays        int               `yaml:"artifact_retention_days"`
-	Delivery                     ACPDeliveryConfig `yaml:"delivery"`
+type ExternalAgentConfig struct {
+	MaxInlineResultBytes         int                         `yaml:"max_inline_result_bytes"`
+	MaxResultArtifactBytes       int                         `yaml:"max_result_artifact_bytes"`
+	DefaultJobTimeoutSeconds     int                         `yaml:"default_job_timeout_seconds"`
+	MaxJobTimeoutSeconds         int                         `yaml:"max_job_timeout_seconds"`
+	ReconciliationTimeoutSeconds int                         `yaml:"reconciliation_timeout_seconds"`
+	ProgressWarningSeconds       int                         `yaml:"progress_warning_seconds"`
+	WorkerConcurrency            int                         `yaml:"worker_concurrency"`
+	ArtifactRetentionDays        int                         `yaml:"artifact_retention_days"`
+	Delivery                     ExternalAgentDeliveryConfig `yaml:"delivery"`
 }
 
-type ACPDeliveryConfig struct {
+type ExternalAgentDeliveryConfig struct {
 	MaxMarkdownParts int `yaml:"max_markdown_parts"`
 	MaxFileBytes     int `yaml:"max_file_bytes"`
 }
@@ -380,7 +380,7 @@ func Default() Config {
 		Sandbox:  SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 64 * 1024},
 		Canvases: CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:  ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
-		ACP: ACPConfig{
+		ExternalAgent: ExternalAgentConfig{
 			MaxInlineResultBytes:     64 * 1024,
 			MaxResultArtifactBytes:   16 * 1024 * 1024,
 			DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400,
@@ -388,7 +388,7 @@ func Default() Config {
 			ProgressWarningSeconds:       900,
 			WorkerConcurrency:            1,
 			ArtifactRetentionDays:        30,
-			Delivery:                     ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
+			Delivery:                     ExternalAgentDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
 		},
 		CodeIntelligence: &CodeIntelligenceConfig{
 			Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10,

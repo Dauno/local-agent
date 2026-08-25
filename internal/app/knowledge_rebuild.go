@@ -74,7 +74,7 @@ func (a *Application) RebuildKnowledgeIndexes(ctx context.Context) (domain.Knowl
 
 	queueStore := adaptersqlite.NewKnowledgeLexicalQueueStore(store)
 	sourceStore := adaptersqlite.NewKnowledgeIndexSourceStore(store)
-	payload, err := fsartifact.NewTypedStore(filepath.Join(paths.ArtifactDir, "v2-results"), int64(cfg.ACP.MaxResultArtifactBytes))
+	payload, err := fsartifact.NewTypedStore(filepath.Join(paths.ArtifactDir, "v2-results"), int64(cfg.ExternalAgent.MaxResultArtifactBytes))
 	if err != nil {
 		return domain.KnowledgeIndexRebuildResult{}, fmt.Errorf("initialize typed result payload store: %w", err)
 	}

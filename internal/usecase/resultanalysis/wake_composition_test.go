@@ -113,7 +113,7 @@ func newWakeAnalysisStores(t *testing.T) wakeAnalysisStores {
 		t.Fatal(err)
 	}
 	handle, err := source.Materialize(t.Context(), port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: "wake-op", Revision: 0},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: "wake-op", Revision: 0},
 		Payload:  "short source content", Scope: testScope(), Retention: domain.ResultRetentionWorkstream,
 		MediaType: "text/plain; charset=utf-8",
 	})

@@ -92,7 +92,7 @@ func TestMultipartNotificationActivatesOnce(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
 	job := activationTestJob("activation-multipart", now)
 	job.Mode = domain.JobDetached
-	terminalizeActivationTestJobWithResult(t, jobs, job, now, &domain.AcpInvocationResult{
+	terminalizeActivationTestJobWithResult(t, jobs, job, now, &domain.ExternalAgentInvocationResult{
 		Text: "multipart result", DeliveryMode: domain.JobResultDeliveryMarkdown,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 4,
 		DeliveryContentBytes: 16,
@@ -627,10 +627,10 @@ func activationTestJob(id string, now time.Time) domain.ExternalAgentJob {
 }
 
 func terminalizeActivationTestJob(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time) {
-	terminalizeActivationTestJobWithResult(t, jobs, job, now, &domain.AcpInvocationResult{Text: "result"})
+	terminalizeActivationTestJobWithResult(t, jobs, job, now, &domain.ExternalAgentInvocationResult{Text: "result"})
 }
 
-func terminalizeActivationTestJobWithResult(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time, result *domain.AcpInvocationResult) {
+func terminalizeActivationTestJobWithResult(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time, result *domain.ExternalAgentInvocationResult) {
 	t.Helper()
 	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
 		seedActivationTestBinding(t, jobs, job, now)
@@ -675,7 +675,7 @@ func terminalizeActivationTestJobByStatus(t *testing.T, jobs *ExternalAgentJobSt
 	owner, attempt := claimed.LeaseOwner, claimed.Attempt
 	switch status {
 	case domain.JobCompleted:
-		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "result"}, "", now.Add(time.Second))
+		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "result"}, "", now.Add(time.Second))
 	case domain.JobFailed:
 		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobFailed, nil, "acp_process_exit", now.Add(time.Second))
 	case domain.JobCancelled:
@@ -709,7 +709,7 @@ func seedActivationTestBinding(t *testing.T, jobs *ExternalAgentJobStore, job do
 	}
 }
 
-func transitionTerminalTestJob(t *testing.T, jobs *ExternalAgentJobStore, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.AcpInvocationResult, errorCode string, now time.Time) {
+func transitionTerminalTestJob(t *testing.T, jobs *ExternalAgentJobStore, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) {
 	t.Helper()
 	if err := jobs.Transition(t.Context(), jobID, owner, attempt, next, result, errorCode, now); err != nil {
 		t.Fatalf("transition %s to %s: %v", jobID, next, err)

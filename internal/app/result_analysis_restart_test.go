@@ -229,7 +229,7 @@ func TestResultAnalysisGateRestartRollbackSequence(t *testing.T) {
 		t.Fatal(err)
 	}
 	handle, err := results2.Materialize(ctx, port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: "op-1", Revision: 0},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: "op-1", Revision: 0},
 		Payload:  content, Scope: scope, Retention: domain.ResultRetentionWorkstream, MediaType: "text/plain; charset=utf-8",
 	})
 	if err != nil {

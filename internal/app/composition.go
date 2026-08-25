@@ -222,12 +222,12 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	if cfg.Context.ModelBudget != nil && cfg.Context.ModelBudget.MaxRequestPercent > 70 {
 		prepared.logger.Warn("model request ceiling is above the recommended maximum", "max_request_percent", cfg.Context.ModelBudget.MaxRequestPercent)
 	}
-	artifactStore, artifactErr := fsartifact.New(paths.ArtifactDir, int64(cfg.ACP.MaxResultArtifactBytes))
+	artifactStore, artifactErr := fsartifact.New(paths.ArtifactDir, int64(cfg.ExternalAgent.MaxResultArtifactBytes))
 	if artifactErr != nil {
 		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize ACP result artifact store: %w", artifactErr))
 	}
 	prepared.artifactStore = artifactStore
-	prepared.resultPayloadStore, err = fsartifact.NewTypedStore(filepath.Join(paths.ArtifactDir, "v2-results"), int64(cfg.ACP.MaxResultArtifactBytes))
+	prepared.resultPayloadStore, err = fsartifact.NewTypedStore(filepath.Join(paths.ArtifactDir, "v2-results"), int64(cfg.ExternalAgent.MaxResultArtifactBytes))
 	if err != nil {
 		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize typed result artifact store: %w", err))
 	}
@@ -416,7 +416,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 		if configured, ok := models.artifactStore.(*fsartifact.Store); ok {
 			configured.SetReferenceChecker(adaptersqlite.NewExternalAgentJobStore(store))
 		}
-		if _, err := retention.Cleanup(ctx, time.Now().UTC().AddDate(0, 0, -cfg.ACP.ArtifactRetentionDays)); err != nil {
+		if _, err := retention.Cleanup(ctx, time.Now().UTC().AddDate(0, 0, -cfg.ExternalAgent.ArtifactRetentionDays)); err != nil {
 			return nil, models.redactor.Error(fmt.Errorf("cleanup ACP result artifacts: %w", err))
 		}
 	}

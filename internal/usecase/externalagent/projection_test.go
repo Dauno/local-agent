@@ -39,8 +39,8 @@ func TestStatusProjectionMergesLiveProgress(t *testing.T) {
 	}
 	base := time.Now().UTC().Add(-time.Minute)
 	progress := domain.ExternalAgentJobProgress{
-		JobID: job.ID, Attempt: 1, Phase: domain.ACPPhaseToolRunning,
-		LastEventKind:           domain.ACPEventToolCallUpdate,
+		JobID: job.ID, Attempt: 1, Phase: domain.ExternalAgentPhaseToolRunning,
+		LastEventKind:           domain.ExternalAgentEventToolCallUpdate,
 		LastTransportActivityAt: base, LastSessionUpdateAt: base,
 		LastMeaningfulProgressAt: base.Add(-20 * time.Second),
 		PromptStartedAt:          base.Add(-time.Minute),
@@ -53,11 +53,11 @@ func TestStatusProjectionMergesLiveProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status projection: %v", err)
 	}
-	if view.Phase != domain.ACPPhaseToolRunning || view.ActiveToolCount != 2 || !view.PendingPermission {
+	if view.Phase != domain.ExternalAgentPhaseToolRunning || view.ActiveToolCount != 2 || !view.PendingPermission {
 		t.Fatalf("projected view = %+v", view)
 	}
 	// Transport stale and process known alive: possibly stalled at read time.
-	if view.Health != domain.ACPHealthPossiblyStalled {
+	if view.Health != domain.ExternalAgentHealthPossiblyStalled {
 		t.Fatalf("health = %s, want possibly_stalled", view.Health)
 	}
 	if view.ProcessAlive == nil || !*view.ProcessAlive {
@@ -84,12 +84,12 @@ func TestStatusProjectionAuthorizationHidesIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_ = jobStore.AssignACPSession(t.Context(), job.ID, "worker_x", 1, "ses_secret_identity")
+	_ = jobStore.AssignExternalAgentSession(t.Context(), job.ID, "worker_x", 1, "ses_secret_identity")
 	view, err := service.StatusProjection(t.Context(), job.ID, "intruder", job.ConversationKey)
 	if err == nil {
 		t.Fatal("unauthorized projection must fail")
 	}
-	if view != nil && view.ACPSessionID != "" {
+	if view != nil && view.ExternalAgentSessionID != "" {
 		t.Fatal("unauthorized projection leaked session identity")
 	}
 }

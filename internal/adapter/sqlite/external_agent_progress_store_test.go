@@ -18,11 +18,11 @@ func TestJobProgressStoreRoundTrip(t *testing.T) {
 		t.Fatalf("read missing progress: %v", err)
 	}
 	progress := domain.ExternalAgentJobProgress{
-		JobID: "job-progress", Attempt: 1, Phase: domain.ACPPhaseToolRunning,
-		LastEventKind: domain.ACPEventToolCallUpdate, LastTransportActivityAt: base.Add(time.Second),
+		JobID: "job-progress", Attempt: 1, Phase: domain.ExternalAgentPhaseToolRunning,
+		LastEventKind: domain.ExternalAgentEventToolCallUpdate, LastTransportActivityAt: base.Add(time.Second),
 		LastSessionUpdateAt: base.Add(time.Second), LastMeaningfulProgressAt: base.Add(time.Second),
 		PromptStartedAt: base, ActiveToolCount: 1, LastToolCallID: "tool-9",
-		LastToolKind: domain.ACPToolKindExecute, LastToolStatus: domain.ACPToolStatusRunning,
+		LastToolKind: domain.ExternalAgentToolKindExecute, LastToolStatus: domain.ExternalAgentToolStatusRunning,
 		PendingPermission: true, UpdatedAt: base.Add(time.Second),
 	}
 	if err := store.WriteJobProgress(ctx, "job-progress", "owner-1", 1, progress); err != nil {
@@ -32,9 +32,9 @@ func TestJobProgressStoreRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read progress: %v", err)
 	}
-	if loaded == nil || loaded.Phase != domain.ACPPhaseToolRunning || loaded.LastToolCallID != "tool-9" ||
+	if loaded == nil || loaded.Phase != domain.ExternalAgentPhaseToolRunning || loaded.LastToolCallID != "tool-9" ||
 		!loaded.PendingPermission || loaded.Attempt != 1 || loaded.ActiveToolCount != 1 ||
-		loaded.LastToolStatus != domain.ACPToolStatusRunning {
+		loaded.LastToolStatus != domain.ExternalAgentToolStatusRunning {
 		t.Fatalf("loaded progress = %+v", loaded)
 	}
 }
@@ -45,7 +45,7 @@ func TestJobProgressStoreLeaseAttemptCAS(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 
 	progress := domain.ExternalAgentJobProgress{
-		JobID: "job-cas", Attempt: 1, Phase: domain.ACPPhaseAgentProcessing, UpdatedAt: base,
+		JobID: "job-cas", Attempt: 1, Phase: domain.ExternalAgentPhaseAgentProcessing, UpdatedAt: base,
 	}
 	if err := store.WriteJobProgress(ctx, "job-cas", "owner-1", 1, progress); err != nil {
 		t.Fatalf("valid write: %v", err)
@@ -58,12 +58,12 @@ func TestJobProgressStoreLeaseAttemptCAS(t *testing.T) {
 	}
 	// A wrong lease owner cannot write while the job is running.
 	wrongOwner := progress
-	wrongOwner.Phase = domain.ACPPhasePlanning
+	wrongOwner.Phase = domain.ExternalAgentPhasePlanning
 	if err := store.WriteJobProgress(ctx, "job-cas", "someone-else", 1, wrongOwner); err == nil {
 		t.Fatal("stale lease owner write must be rejected")
 	}
 	// The current owner can still update.
-	wrongOwner.Phase = domain.ACPPhasePlanning
+	wrongOwner.Phase = domain.ExternalAgentPhasePlanning
 	if err := store.WriteJobProgress(ctx, "job-cas", "owner-1", 1, wrongOwner); err != nil {
 		t.Fatalf("current owner write: %v", err)
 	}
@@ -75,7 +75,7 @@ func TestJobProgressStoreTerminalAcceptsFinalFlush(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 
 	progress := domain.ExternalAgentJobProgress{
-		JobID: "job-terminal", Attempt: 1, Phase: domain.ACPPhaseAgentProcessing, UpdatedAt: base,
+		JobID: "job-terminal", Attempt: 1, Phase: domain.ExternalAgentPhaseAgentProcessing, UpdatedAt: base,
 	}
 	if err := store.WriteJobProgress(ctx, "job-terminal", "owner-1", 1, progress); err != nil {
 		t.Fatalf("initial write: %v", err)
@@ -88,8 +88,8 @@ func TestJobProgressStoreTerminalAcceptsFinalFlush(t *testing.T) {
 	// The final flush from the completing worker must still be accepted after
 	// the lease is released, but only for the current attempt.
 	terminal := progress
-	terminal.Phase = domain.ACPPhaseCompleted
-	terminal.StopReason = domain.ACPStopReasonEndTurn
+	terminal.Phase = domain.ExternalAgentPhaseCompleted
+	terminal.StopReason = domain.ExternalAgentStopReasonEndTurn
 	terminal.UpdatedAt = now
 	if err := store.WriteJobProgress(ctx, "job-terminal", "owner-1", 1, terminal); err != nil {
 		t.Fatalf("terminal final flush: %v", err)
@@ -100,7 +100,7 @@ func TestJobProgressStoreTerminalAcceptsFinalFlush(t *testing.T) {
 		t.Fatal("stale attempt final flush must be rejected")
 	}
 	loaded, err := store.ReadJobProgress(ctx, "job-terminal")
-	if err != nil || loaded == nil || loaded.Phase != domain.ACPPhaseCompleted {
+	if err != nil || loaded == nil || loaded.Phase != domain.ExternalAgentPhaseCompleted {
 		t.Fatalf("terminal projection = %+v err=%v", loaded, err)
 	}
 }
@@ -109,7 +109,7 @@ func TestJobProgressStoreRejectsCrossJobWrite(t *testing.T) {
 	store := newProgressTestStore(t)
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	// The caller authorizes against job-cas but writes job-inspect's payload.
-	foreign := domain.ExternalAgentJobProgress{JobID: "job-inspect", Attempt: 1, Phase: domain.ACPPhaseAgentProcessing, UpdatedAt: base}
+	foreign := domain.ExternalAgentJobProgress{JobID: "job-inspect", Attempt: 1, Phase: domain.ExternalAgentPhaseAgentProcessing, UpdatedAt: base}
 	if err := store.WriteJobProgress(context.Background(), "job-cas", "owner-1", 1, foreign); err == nil {
 		t.Fatal("cross-job progress write must be rejected")
 	}
@@ -120,13 +120,13 @@ func TestJobProgressStoreResetsAttemptScopedFields(t *testing.T) {
 	ctx := context.Background()
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	first := domain.ExternalAgentJobProgress{
-		JobID: "job-cas", Attempt: 1, Phase: domain.ACPPhaseFailed,
-		LastEventKind:           domain.ACPEventPromptResponse,
+		JobID: "job-cas", Attempt: 1, Phase: domain.ExternalAgentPhaseFailed,
+		LastEventKind:           domain.ExternalAgentEventPromptResponse,
 		LastTransportActivityAt: base, LastSessionUpdateAt: base,
 		LastMeaningfulProgressAt: base, PromptStartedAt: base.Add(-time.Minute),
-		ActiveToolCount: 1, LastToolCallID: "old-tool", LastToolKind: domain.ACPToolKindExecute,
-		LastToolStatus: domain.ACPToolStatusRunning, ToolOverflow: true,
-		PendingPermission: true, StopReason: domain.ACPStopReasonMaxTokens, UpdatedAt: base,
+		ActiveToolCount: 1, LastToolCallID: "old-tool", LastToolKind: domain.ExternalAgentToolKindExecute,
+		LastToolStatus: domain.ExternalAgentToolStatusRunning, ToolOverflow: true,
+		PendingPermission: true, StopReason: domain.ExternalAgentStopReasonMaxTokens, UpdatedAt: base,
 	}
 	if err := store.WriteJobProgress(ctx, "job-cas", "owner-1", 1, first); err != nil {
 		t.Fatalf("write first attempt: %v", err)
@@ -136,8 +136,8 @@ func TestJobProgressStoreResetsAttemptScopedFields(t *testing.T) {
 	}
 	nextTime := base.Add(time.Hour)
 	second := domain.ExternalAgentJobProgress{
-		JobID: "job-cas", Attempt: 2, Phase: domain.ACPPhaseStarting,
-		LastEventKind: domain.ACPEventProcessStarted, UpdatedAt: nextTime,
+		JobID: "job-cas", Attempt: 2, Phase: domain.ExternalAgentPhaseStarting,
+		LastEventKind: domain.ExternalAgentEventProcessStarted, UpdatedAt: nextTime,
 	}
 	if err := store.WriteJobProgress(ctx, "job-cas", "owner-1", 2, second); err != nil {
 		t.Fatalf("write second attempt: %v", err)
@@ -146,7 +146,7 @@ func TestJobProgressStoreResetsAttemptScopedFields(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read second attempt: %v", err)
 	}
-	if loaded == nil || loaded.Attempt != 2 || loaded.Phase != domain.ACPPhaseStarting ||
+	if loaded == nil || loaded.Attempt != 2 || loaded.Phase != domain.ExternalAgentPhaseStarting ||
 		!loaded.LastTransportActivityAt.IsZero() || !loaded.LastSessionUpdateAt.IsZero() ||
 		!loaded.LastMeaningfulProgressAt.IsZero() || !loaded.PromptStartedAt.IsZero() ||
 		loaded.ActiveToolCount != 0 || loaded.LastToolCallID != "" || loaded.LastToolKind != "" ||
@@ -169,7 +169,7 @@ func TestJobProgressStoreRejectsRecoveredJobWrites(t *testing.T) {
 	if err := store.RecoverExpired(ctx, "job-cas", 1, 1, now, domain.JobCompletionUnknown, "completion_unknown"); err != nil {
 		t.Fatalf("recover job: %v", err)
 	}
-	progress := domain.ExternalAgentJobProgress{JobID: "job-cas", Attempt: 1, Phase: domain.ACPPhaseFailed, UpdatedAt: now}
+	progress := domain.ExternalAgentJobProgress{JobID: "job-cas", Attempt: 1, Phase: domain.ExternalAgentPhaseFailed, UpdatedAt: now}
 	if err := store.WriteJobProgress(ctx, "job-cas", "owner-1", 1, progress); err == nil {
 		t.Fatal("progress write to a recovered job must be rejected")
 	}
@@ -177,7 +177,7 @@ func TestJobProgressStoreRejectsRecoveredJobWrites(t *testing.T) {
 
 func TestJobProgressStoreRejectsUnknownJob(t *testing.T) {
 	store := newProgressTestStore(t)
-	progress := domain.ExternalAgentJobProgress{JobID: "ghost", Attempt: 1, Phase: domain.ACPPhaseStarting}
+	progress := domain.ExternalAgentJobProgress{JobID: "ghost", Attempt: 1, Phase: domain.ExternalAgentPhaseStarting}
 	if err := store.WriteJobProgress(context.Background(), "ghost", "owner-1", 1, progress); err == nil {
 		t.Fatal("progress write for unknown job must fail")
 	}
@@ -187,14 +187,14 @@ func TestJobInspectionIncludesSessionAndProgress(t *testing.T) {
 	store := newProgressTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
-	if err := store.AssignACPSession(ctx, "job-inspect", "owner-1", 1, "ses_full_identity_0123456789"); err != nil {
+	if err := store.AssignExternalAgentSession(ctx, "job-inspect", "owner-1", 1, "ses_full_identity_0123456789"); err != nil {
 		t.Fatalf("assign session: %v", err)
 	}
 	progress := domain.ExternalAgentJobProgress{
-		JobID: "job-inspect", Attempt: 1, Phase: domain.ACPPhaseToolRunning,
-		LastEventKind: domain.ACPEventToolCallUpdate, LastTransportActivityAt: base,
+		JobID: "job-inspect", Attempt: 1, Phase: domain.ExternalAgentPhaseToolRunning,
+		LastEventKind: domain.ExternalAgentEventToolCallUpdate, LastTransportActivityAt: base,
 		LastMeaningfulProgressAt: base, PromptStartedAt: base.Add(-time.Minute),
-		ActiveToolCount: 1, LastToolCallID: "tool-1", LastToolStatus: domain.ACPToolStatusRunning,
+		ActiveToolCount: 1, LastToolCallID: "tool-1", LastToolStatus: domain.ExternalAgentToolStatusRunning,
 	}
 	if err := store.WriteJobProgress(ctx, "job-inspect", "owner-1", 1, progress); err != nil {
 		t.Fatalf("write progress: %v", err)
@@ -203,10 +203,10 @@ func TestJobInspectionIncludesSessionAndProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	if view == nil || view.ACPSessionID != "ses_full_identity_0123456789" {
+	if view == nil || view.ExternalAgentSessionID != "ses_full_identity_0123456789" {
 		t.Fatalf("inspection session ID = %+v", view)
 	}
-	if view.Phase != domain.ACPPhaseToolRunning {
+	if view.Phase != domain.ExternalAgentPhaseToolRunning {
 		t.Fatalf("inspection projection = %+v", view)
 	}
 }

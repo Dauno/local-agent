@@ -155,8 +155,8 @@ func TestRenderOmitsGeneratedFileScopeWhenDisabled(t *testing.T) {
 	}
 }
 
-func TestRenderIncludesFileScopeForDurableACPDelivery(t *testing.T) {
-	rendered, err := Render(Identity{AppName: "Local Agent", BotDisplayName: "Dev Agent", DurableACPEnabled: true})
+func TestRenderIncludesFileScopeForDurableExternalAgentDelivery(t *testing.T) {
+	rendered, err := Render(Identity{AppName: "Local Agent", BotDisplayName: "Dev Agent", DurableExternalAgentEnabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}

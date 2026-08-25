@@ -664,7 +664,7 @@ func (s *Service) publicModelError(err error) string {
 	if strings.Contains(errMessage, "request_token_count_unavailable") {
 		return "No pude verificar temporalmente el tamaño de la solicitud. Intenta de nuevo cuando se recupere la contabilidad del modelo."
 	}
-	if strings.Contains(errMessage, "completion_unknown") || strings.Contains(errMessage, string(domain.ACPErrorSessionRecoveryUnsupported)) {
+	if strings.Contains(errMessage, "completion_unknown") || strings.Contains(errMessage, string(domain.ExternalAgentErrorSessionRecoveryUnsupported)) {
 		return "La finalización de una operación previa no pudo verificarse. Requiere recuperación operativa antes de continuar."
 	}
 	return s.cfg.ModelErrorMessage

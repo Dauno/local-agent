@@ -59,4 +59,4 @@ var _ interface {
 	ReconcileJob(context.Context, string, int) (domain.ExternalAgentJobStatusView, error)
 } = (*Application)(nil)
 
-var _ port.ExternalAgentJobRuntime = (*acpJobDispatcher)(nil)
+var _ port.ExternalAgentJobRuntime = (*externalAgentJobDispatcher)(nil)

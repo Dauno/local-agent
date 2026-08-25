@@ -9,56 +9,56 @@ import (
 func TestProgressApplyLifecyclePhases(t *testing.T) {
 	now := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-	apply := func(event ACPProgressEvent) {
+	apply := func(event ExternalAgentProgressEvent) {
 		now = now.Add(time.Second)
 		progress.Apply(event, now)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventProcessStarted, PID: 42})
-	if progress.Phase != ACPPhaseStarting {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventProcessStarted, PID: 42})
+	if progress.Phase != ExternalAgentPhaseStarting {
 		t.Fatalf("phase after process start = %s, want starting", progress.Phase)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventInitializeResponse})
-	apply(ACPProgressEvent{Kind: ACPEventSessionNew})
-	if progress.Phase != ACPPhaseSessionReady {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventInitializeResponse})
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventSessionNew})
+	if progress.Phase != ExternalAgentPhaseSessionReady {
 		t.Fatalf("phase after session/new = %s, want session_ready", progress.Phase)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventPromptSent})
-	if progress.Phase != ACPPhaseAgentProcessing || progress.PromptStartedAt != now {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptSent})
+	if progress.Phase != ExternalAgentPhaseAgentProcessing || progress.PromptStartedAt != now {
 		t.Fatalf("phase after prompt sent = %s, prompt_started=%v", progress.Phase, progress.PromptStartedAt)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventPlan})
-	if progress.Phase != ACPPhasePlanning {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPlan})
+	if progress.Phase != ExternalAgentPhasePlanning {
 		t.Fatalf("phase after plan = %s, want planning", progress.Phase)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventToolCall, Tool: &ACPToolProgress{CallID: "tool-1", Kind: ACPToolKindExecute, Status: ACPToolStatusPending}})
-	if progress.Phase != ACPPhaseToolPending || progress.ActiveToolCount != 1 {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: &ExternalAgentToolProgress{CallID: "tool-1", Kind: ExternalAgentToolKindExecute, Status: ExternalAgentToolStatusPending}})
+	if progress.Phase != ExternalAgentPhaseToolPending || progress.ActiveToolCount != 1 {
 		t.Fatalf("phase after tool_call = %s count=%d", progress.Phase, progress.ActiveToolCount)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventPermissionRequested, PermissionPending: true})
-	if progress.Phase != ACPPhaseWaitingPermission || !progress.PendingPermission {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPermissionRequested, PermissionPending: true})
+	if progress.Phase != ExternalAgentPhaseWaitingPermission || !progress.PendingPermission {
 		t.Fatalf("phase after permission request = %s pending=%t", progress.Phase, progress.PendingPermission)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventPermissionResponded, PermissionPending: false})
-	if progress.Phase != ACPPhaseAgentProcessing || progress.PendingPermission {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPermissionResponded, PermissionPending: false})
+	if progress.Phase != ExternalAgentPhaseAgentProcessing || progress.PendingPermission {
 		t.Fatalf("phase after permission response = %s pending=%t", progress.Phase, progress.PendingPermission)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: &ACPToolProgress{CallID: "tool-1", Status: ACPToolStatusRunning}})
-	if progress.Phase != ACPPhaseToolRunning {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-1", Status: ExternalAgentToolStatusRunning}})
+	if progress.Phase != ExternalAgentPhaseToolRunning {
 		t.Fatalf("phase after tool running = %s", progress.Phase)
 	}
-	if progress.LastToolKind != ACPToolKindExecute {
+	if progress.LastToolKind != ExternalAgentToolKindExecute {
 		t.Fatalf("partial tool update replaced kind = %s", progress.LastToolKind)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventMessageChunk})
-	if progress.Phase != ACPPhaseResponding {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventMessageChunk})
+	if progress.Phase != ExternalAgentPhaseResponding {
 		t.Fatalf("phase after message chunk = %s, want responding", progress.Phase)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: &ACPToolProgress{CallID: "tool-1", Status: ACPToolStatusTerminal}})
-	if progress.Phase != ACPPhaseAgentProcessing || progress.ActiveToolCount != 0 {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-1", Status: ExternalAgentToolStatusTerminal}})
+	if progress.Phase != ExternalAgentPhaseAgentProcessing || progress.ActiveToolCount != 0 {
 		t.Fatalf("phase after tool terminal = %s count=%d, want agent_processing/0", progress.Phase, progress.ActiveToolCount)
 	}
-	apply(ACPProgressEvent{Kind: ACPEventPromptResponse, StopReason: ACPStopReasonEndTurn})
-	if progress.Phase != ACPPhaseCompleted || progress.StopReason != ACPStopReasonEndTurn {
+	apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptResponse, StopReason: ExternalAgentStopReasonEndTurn})
+	if progress.Phase != ExternalAgentPhaseCompleted || progress.StopReason != ExternalAgentStopReasonEndTurn {
 		t.Fatalf("phase after end_turn = %s stop=%q", progress.Phase, progress.StopReason)
 	}
 	if err := progress.Validate(); err != nil {
@@ -70,23 +70,23 @@ func TestProgressApplyClocks(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
 	// Outbound events do not refresh transport activity.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventPromptSent}, base.Add(time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptSent}, base.Add(time.Second))
 	if !progress.LastTransportActivityAt.IsZero() {
 		t.Fatalf("prompt_sent must not refresh transport activity")
 	}
 	// Session updates refresh transport and session clocks.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventMessageChunk}, base.Add(2*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventMessageChunk}, base.Add(2*time.Second))
 	if progress.LastTransportActivityAt != base.Add(2*time.Second) || progress.LastSessionUpdateAt != base.Add(2*time.Second) {
 		t.Fatalf("message chunk did not refresh transport/session clocks")
 	}
 	// Unknown notifications have already been attributed to the expected
 	// session by the adapter, so they refresh both clocks.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventUnknownNotification}, base.Add(3*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventUnknownNotification}, base.Add(3*time.Second))
 	if progress.LastTransportActivityAt != base.Add(3*time.Second) || progress.LastSessionUpdateAt != base.Add(3*time.Second) {
 		t.Fatalf("attributable unknown notification must refresh transport/session")
 	}
 	// Monotonic clocks never move backwards.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventThoughtChunk}, base.Add(time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventThoughtChunk}, base.Add(time.Second))
 	if progress.LastTransportActivityAt != base.Add(3*time.Second) {
 		t.Fatalf("monotonic transport clock moved backwards")
 	}
@@ -95,12 +95,12 @@ func TestProgressApplyClocks(t *testing.T) {
 func TestProgressApplyUsageGating(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-	progress.Apply(ACPProgressEvent{Kind: ACPEventPromptSent}, base)
-	progress.Apply(ACPProgressEvent{Kind: ACPEventUsageUpdate, UsageIncreased: false}, base.Add(time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptSent}, base)
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventUsageUpdate, UsageIncreased: false}, base.Add(time.Second))
 	if progress.LastMeaningfulProgressAt != base {
 		t.Fatalf("non-increasing usage must not count as meaningful progress")
 	}
-	progress.Apply(ACPProgressEvent{Kind: ACPEventUsageUpdate, UsageIncreased: true}, base.Add(2*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventUsageUpdate, UsageIncreased: true}, base.Add(2*time.Second))
 	if progress.LastMeaningfulProgressAt != base.Add(2*time.Second) {
 		t.Fatalf("increasing usage must count as meaningful progress")
 	}
@@ -114,7 +114,7 @@ func TestProgressToolAccountingOverflow(t *testing.T) {
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
 	for index := range maxTrackedActiveTools + 5 {
 		callID := "tool-" + strconv.Itoa(index)
-		progress.Apply(ACPProgressEvent{Kind: ACPEventToolCall, Tool: &ACPToolProgress{CallID: callID, Kind: ACPToolKindExecute, Status: ACPToolStatusPending}}, base)
+		progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: &ExternalAgentToolProgress{CallID: callID, Kind: ExternalAgentToolKindExecute, Status: ExternalAgentToolStatusPending}}, base)
 	}
 	if progress.ActiveToolCount != maxTrackedActiveTools {
 		t.Fatalf("active tool count = %d, want bounded %d", progress.ActiveToolCount, maxTrackedActiveTools)
@@ -126,13 +126,13 @@ func TestProgressToolAccountingOverflow(t *testing.T) {
 		t.Fatalf("tracked tool states = %d, want bounded %d", len(progress.toolStates), maxTrackedActiveTools)
 	}
 	// An untracked overflow terminal cannot decrement the tracked count.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: &ACPToolProgress{CallID: "tool-20", Status: ACPToolStatusTerminal}}, base.Add(time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-20", Status: ExternalAgentToolStatusTerminal}}, base.Add(time.Second))
 	if progress.ActiveToolCount != maxTrackedActiveTools {
 		t.Fatalf("overflow terminal decremented tracked count to %d", progress.ActiveToolCount)
 	}
 	// Terminal tracked calls release their map entry for future tools.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: &ACPToolProgress{CallID: "tool-0", Status: ACPToolStatusTerminal}}, base.Add(2*time.Second))
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCall, Tool: &ACPToolProgress{CallID: "tool-new", Kind: ACPToolKindRead, Status: ACPToolStatusPending}}, base.Add(3*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-0", Status: ExternalAgentToolStatusTerminal}}, base.Add(2*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: &ExternalAgentToolProgress{CallID: "tool-new", Kind: ExternalAgentToolKindRead, Status: ExternalAgentToolStatusPending}}, base.Add(3*time.Second))
 	if progress.ActiveToolCount != maxTrackedActiveTools || len(progress.toolStates) != maxTrackedActiveTools {
 		t.Fatalf("replacement tool count/states = %d/%d", progress.ActiveToolCount, len(progress.toolStates))
 	}
@@ -144,39 +144,39 @@ func TestProgressToolAccountingOverflow(t *testing.T) {
 func TestProgressToolAccountingPerCallID(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-	tool := func(callID string, status ACPToolStatus) *ACPToolProgress {
-		return &ACPToolProgress{CallID: callID, Kind: ACPToolKindExecute, Status: status}
+	tool := func(callID string, status ExternalAgentToolStatus) *ExternalAgentToolProgress {
+		return &ExternalAgentToolProgress{CallID: callID, Kind: ExternalAgentToolKindExecute, Status: status}
 	}
 	// A repeated tool_call for the same call ID must not double-count.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCall, Tool: tool("a", ACPToolStatusPending)}, base)
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCall, Tool: tool("a", ACPToolStatusPending)}, base.Add(time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: tool("a", ExternalAgentToolStatusPending)}, base)
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: tool("a", ExternalAgentToolStatusPending)}, base.Add(time.Second))
 	if progress.ActiveToolCount != 1 {
 		t.Fatalf("duplicate tool_call count = %d, want 1", progress.ActiveToolCount)
 	}
 	// A second parallel tool counts independently.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCall, Tool: tool("b", ACPToolStatusPending)}, base.Add(2*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: tool("b", ExternalAgentToolStatusPending)}, base.Add(2*time.Second))
 	if progress.ActiveToolCount != 2 {
 		t.Fatalf("parallel tool count = %d, want 2", progress.ActiveToolCount)
 	}
 	// Both run in parallel; phases stay tool_running.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: tool("a", ACPToolStatusRunning)}, base.Add(3*time.Second))
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: tool("b", ACPToolStatusRunning)}, base.Add(4*time.Second))
-	if progress.Phase != ACPPhaseToolRunning || progress.ActiveToolCount != 2 {
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: tool("a", ExternalAgentToolStatusRunning)}, base.Add(3*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: tool("b", ExternalAgentToolStatusRunning)}, base.Add(4*time.Second))
+	if progress.Phase != ExternalAgentPhaseToolRunning || progress.ActiveToolCount != 2 {
 		t.Fatalf("parallel running phase/count = %s/%d", progress.Phase, progress.ActiveToolCount)
 	}
 	// A duplicated terminal update for the same call ID must not decrement twice.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: tool("a", ACPToolStatusTerminal)}, base.Add(5*time.Second))
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: tool("a", ACPToolStatusTerminal)}, base.Add(6*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: tool("a", ExternalAgentToolStatusTerminal)}, base.Add(5*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: tool("a", ExternalAgentToolStatusTerminal)}, base.Add(6*time.Second))
 	if progress.ActiveToolCount != 1 {
 		t.Fatalf("duplicate terminal count = %d, want 1", progress.ActiveToolCount)
 	}
 	// One tool still active: phase remains tool_running.
-	if progress.Phase != ACPPhaseToolRunning {
+	if progress.Phase != ExternalAgentPhaseToolRunning {
 		t.Fatalf("phase after one terminal = %s, want tool_running", progress.Phase)
 	}
 	// The last terminal returns to agent_processing.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventToolCallUpdate, Tool: tool("b", ACPToolStatusTerminal)}, base.Add(7*time.Second))
-	if progress.ActiveToolCount != 0 || progress.Phase != ACPPhaseAgentProcessing {
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: tool("b", ExternalAgentToolStatusTerminal)}, base.Add(7*time.Second))
+	if progress.ActiveToolCount != 0 || progress.Phase != ExternalAgentPhaseAgentProcessing {
 		t.Fatalf("final terminal phase/count = %s/%d", progress.Phase, progress.ActiveToolCount)
 	}
 }
@@ -184,19 +184,19 @@ func TestProgressToolAccountingPerCallID(t *testing.T) {
 func TestProgressToolWireStatusMapping(t *testing.T) {
 	for _, test := range []struct {
 		wire string
-		want ACPToolStatus
+		want ExternalAgentToolStatus
 		ok   bool
 	}{
-		{"pending", ACPToolStatusPending, true},
-		{"in_progress", ACPToolStatusRunning, true},
-		{"completed", ACPToolStatusTerminal, true},
-		{"failed", ACPToolStatusTerminal, true},
+		{"pending", ExternalAgentToolStatusPending, true},
+		{"in_progress", ExternalAgentToolStatusRunning, true},
+		{"completed", ExternalAgentToolStatusTerminal, true},
+		{"failed", ExternalAgentToolStatusTerminal, true},
 		{"running", "", false},
 		{"terminal", "", false},
 		{"", "", false},
 		{"bogus", "", false},
 	} {
-		got, ok := ACPToolStatusFromWire(test.wire)
+		got, ok := ExternalAgentToolStatusFromWire(test.wire)
 		if ok != test.ok || got != test.want {
 			t.Fatalf("ACPToolStatusFromWire(%q) = %q/%v, want %q/%v", test.wire, got, ok, test.want, test.ok)
 		}
@@ -206,14 +206,14 @@ func TestProgressToolWireStatusMapping(t *testing.T) {
 func TestProgressToolWireKindMapping(t *testing.T) {
 	for _, test := range []struct {
 		wire string
-		want ACPToolKind
+		want ExternalAgentToolKind
 	}{
-		{"read", ACPToolKindRead},
-		{"execute", ACPToolKindExecute},
-		{"other", ACPToolKindOther},
-		{"future_extension", ACPToolKindOther},
+		{"read", ExternalAgentToolKindRead},
+		{"execute", ExternalAgentToolKindExecute},
+		{"other", ExternalAgentToolKindOther},
+		{"future_extension", ExternalAgentToolKindOther},
 	} {
-		if got := ACPToolKindFromWire(test.wire); got != test.want {
+		if got := ExternalAgentToolKindFromWire(test.wire); got != test.want {
 			t.Fatalf("ACPToolKindFromWire(%q) = %q, want %q", test.wire, got, test.want)
 		}
 	}
@@ -223,17 +223,17 @@ func TestProgressProcessSignalsDoNotRefreshTransport(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
 	// Host-generated signals must never move the transport clock.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventProcessStarted, PID: 42}, base.Add(time.Second))
-	progress.Apply(ACPProgressEvent{Kind: ACPEventPromptSent}, base.Add(2*time.Second))
-	progress.Apply(ACPProgressEvent{Kind: ACPEventProcessFailed, ErrorClass: "acp_process_exit"}, base.Add(3*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventProcessStarted, PID: 42}, base.Add(time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptSent}, base.Add(2*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventProcessFailed, ErrorClass: "acp_process_exit"}, base.Add(3*time.Second))
 	if !progress.LastTransportActivityAt.IsZero() {
 		t.Fatalf("host-generated signals refreshed transport activity: %v", progress.LastTransportActivityAt)
 	}
-	if progress.Phase != ACPPhaseFailed {
+	if progress.Phase != ExternalAgentPhaseFailed {
 		t.Fatalf("phase after process failure = %s, want failed", progress.Phase)
 	}
 	// A real inbound frame moves the clock; the failure time stays visible.
-	progress.Apply(ACPProgressEvent{Kind: ACPEventThoughtChunk}, base.Add(4*time.Second))
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventThoughtChunk}, base.Add(4*time.Second))
 	if progress.LastTransportActivityAt != base.Add(4*time.Second) {
 		t.Fatalf("inbound frame transport = %v", progress.LastTransportActivityAt)
 	}
@@ -241,13 +241,13 @@ func TestProgressProcessSignalsDoNotRefreshTransport(t *testing.T) {
 
 func TestProgressProcessFailedDoesNotRegressTerminalPhases(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
-	for _, stopReason := range []string{ACPStopReasonEndTurn, ACPStopReasonCancelled} {
+	for _, stopReason := range []string{ExternalAgentStopReasonEndTurn, ExternalAgentStopReasonCancelled} {
 		progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-		progress.Apply(ACPProgressEvent{Kind: ACPEventPromptResponse, StopReason: stopReason}, base)
-		progress.Apply(ACPProgressEvent{Kind: ACPEventProcessFailed, ErrorClass: "acp_prompt_failed"}, base.Add(time.Second))
-		want := ACPPhaseCompleted
-		if stopReason == ACPStopReasonCancelled {
-			want = ACPPhaseCancelled
+		progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptResponse, StopReason: stopReason}, base)
+		progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventProcessFailed, ErrorClass: "acp_prompt_failed"}, base.Add(time.Second))
+		want := ExternalAgentPhaseCompleted
+		if stopReason == ExternalAgentStopReasonCancelled {
+			want = ExternalAgentPhaseCancelled
 		}
 		if progress.Phase != want {
 			t.Fatalf("process failure regressed %s to %s", want, progress.Phase)
@@ -258,38 +258,38 @@ func TestProgressProcessFailedDoesNotRegressTerminalPhases(t *testing.T) {
 func TestProgressStopReasonPhases(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-	progress.Apply(ACPProgressEvent{Kind: ACPEventPromptResponse, StopReason: ACPStopReasonCancelled}, base)
-	if progress.Phase != ACPPhaseCancelled {
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptResponse, StopReason: ExternalAgentStopReasonCancelled}, base)
+	if progress.Phase != ExternalAgentPhaseCancelled {
 		t.Fatalf("cancelled stop reason phase = %s", progress.Phase)
 	}
 	progress = ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-	progress.Apply(ACPProgressEvent{Kind: ACPEventPromptResponse, StopReason: ACPStopReasonMaxTokens}, base)
-	if progress.Phase != ACPPhaseFailed {
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptResponse, StopReason: ExternalAgentStopReasonMaxTokens}, base)
+	if progress.Phase != ExternalAgentPhaseFailed {
 		t.Fatalf("max_tokens stop reason phase = %s, want failed", progress.Phase)
 	}
 	progress = ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
-	progress.Apply(ACPProgressEvent{Kind: ACPEventProcessFailed, ErrorClass: "acp_process_exit"}, base)
-	if progress.Phase != ACPPhaseFailed {
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventProcessFailed, ErrorClass: "acp_process_exit"}, base)
+	if progress.Phase != ExternalAgentPhaseFailed {
 		t.Fatalf("process failure phase = %s, want failed", progress.Phase)
 	}
 }
 
 func TestProgressValidateAllowlists(t *testing.T) {
-	valid := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1, Phase: ACPPhaseToolRunning,
-		LastEventKind: ACPEventToolCallUpdate, LastToolKind: ACPToolKindExecute,
-		LastToolStatus: ACPToolStatusRunning, StopReason: ACPStopReasonEndTurn}
+	valid := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1, Phase: ExternalAgentPhaseToolRunning,
+		LastEventKind: ExternalAgentEventToolCallUpdate, LastToolKind: ExternalAgentToolKindExecute,
+		LastToolStatus: ExternalAgentToolStatusRunning, StopReason: ExternalAgentStopReasonEndTurn}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid projection rejected: %v", err)
 	}
 	invalid := []ExternalAgentJobProgress{
-		{JobID: "", Phase: ACPPhaseStarting},
-		{JobID: "job_1", Attempt: -1, Phase: ACPPhaseStarting},
-		{JobID: "job_1", Phase: ACPProgressPhase("bogus")},
-		{JobID: "job_1", Phase: ACPPhaseStarting, LastEventKind: ACPEventKind("bogus")},
-		{JobID: "job_1", Phase: ACPPhaseStarting, ActiveToolCount: 99},
-		{JobID: "job_1", Phase: ACPPhaseStarting, LastToolStatus: ACPToolStatus("bogus")},
-		{JobID: "job_1", Phase: ACPPhaseStarting, LastToolKind: ACPToolKind("bogus")},
-		{JobID: "job_1", Phase: ACPPhaseStarting, StopReason: "bogus"},
+		{JobID: "", Phase: ExternalAgentPhaseStarting},
+		{JobID: "job_1", Attempt: -1, Phase: ExternalAgentPhaseStarting},
+		{JobID: "job_1", Phase: ExternalAgentProgressPhase("bogus")},
+		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, LastEventKind: ExternalAgentEventKind("bogus")},
+		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, ActiveToolCount: 99},
+		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, LastToolStatus: ExternalAgentToolStatus("bogus")},
+		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, LastToolKind: ExternalAgentToolKind("bogus")},
+		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, StopReason: "bogus"},
 	}
 	for index, projection := range invalid {
 		if err := projection.Validate(); err == nil {

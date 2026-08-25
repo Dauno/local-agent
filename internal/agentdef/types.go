@@ -21,9 +21,9 @@ const (
 )
 
 const (
-	ExecutionModeForeground = "foreground"
-	ExecutionModeDurableJob = "durable_job"
-	MaxACPTimeoutSeconds    = 24 * 60 * 60
+	ExecutionModeForeground        = "foreground"
+	ExecutionModeDurableJob        = "durable_job"
+	MaxExternalAgentTimeoutSeconds = 24 * 60 * 60
 )
 
 // VisualEstimatorID is the only media-capable token counter combination
@@ -103,7 +103,7 @@ type Provider struct {
 	Session       *CLISession       `yaml:"session,omitempty"`
 	Auth          *CLIAuth          `yaml:"auth,omitempty"`
 
-	// ACP provider fields.
+	// Retired provider fields decoded only to give a migration error.
 	Command string   `yaml:"command,omitempty"`
 	Args    []string `yaml:"args,omitempty"`
 }
@@ -280,10 +280,6 @@ type Profile struct {
 	ContextWindowTokens *int             `yaml:"context_window_tokens,omitempty"`
 	MaxOutputTokens     *int             `yaml:"max_output_tokens,omitempty"`
 	TokenCounter        *TokenCounterDef `yaml:"token_counter,omitempty"`
-
-	// acp profile fields.
-	ConfigOptions        []ACPConfigOption `yaml:"config_options,omitempty"`
-	PermissionOptionKind string            `yaml:"permission_option_kind,omitempty"`
 }
 
 // HardMaxDirectInlineBytes mirrors the TRD 02 hard maximum without importing
@@ -297,11 +293,6 @@ type ProfileResultHandlesConfig struct {
 type TokenCounterDef struct {
 	Strategy string `yaml:"strategy"`
 	ID       string `yaml:"id,omitempty"`
-}
-
-type ACPConfigOption struct {
-	ID    string `yaml:"id"`
-	Value any    `yaml:"value"`
 }
 
 type GenerateContentConfig struct {
@@ -375,7 +366,7 @@ type AgentDef struct {
 	ExecutionMode              string              `yaml:"execution_mode,omitempty"`
 	Role                       string              `yaml:"role,omitempty"`
 
-	// AcpAgent fields.
+	// Retired external-agent fields decoded only to give a migration error.
 	Runtime      string `yaml:"runtime,omitempty"`
 	Confirmation string `yaml:"confirmation,omitempty"`
 }
@@ -455,11 +446,9 @@ type ResolvedModel struct {
 	CounterStrategy     string
 	CounterID           string
 
-	// acp provider fields.
-	Command              string
-	Args                 []string
-	ConfigOptions        []ACPConfigOption
-	PermissionOptionKind string
+	// Retired provider fields.
+	Command string
+	Args    []string
 }
 
 // Type returns the resolved provider family.

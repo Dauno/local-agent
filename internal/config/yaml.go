@@ -253,13 +253,13 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("decode typed configuration: %w", err)
 	}
 	maxFileBytesExplicit := false
-	if _, acpNode, acpPresent := mappingEntry(root, "acp"); acpPresent {
-		if _, deliveryNode, deliveryPresent := mappingEntry(acpNode, "delivery"); deliveryPresent {
+	if _, externalAgentNode, externalAgentPresent := mappingEntry(root, "acp"); externalAgentPresent {
+		if _, deliveryNode, deliveryPresent := mappingEntry(externalAgentNode, "delivery"); deliveryPresent {
 			_, _, maxFileBytesExplicit = mappingEntry(deliveryNode, "max_file_bytes")
 		}
 	}
 	if !maxFileBytesExplicit {
-		cfg.ACP.Delivery.MaxFileBytes = cfg.ACP.MaxResultArtifactBytes
+		cfg.ExternalAgent.Delivery.MaxFileBytes = cfg.ExternalAgent.MaxResultArtifactBytes
 	}
 	normalizeCollections(&cfg)
 	if err := Validate(cfg); err != nil {

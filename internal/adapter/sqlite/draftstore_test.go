@@ -101,7 +101,7 @@ func TestAgentDraftStoreRoundTripAndCompareAndSet(t *testing.T) {
 	}
 }
 
-func TestAgentDraftStoreACPModelIsNullable(t *testing.T) {
+func TestAgentDraftStoreExternalAgentModelIsNullable(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTestStore(t)
 	drafts := NewAgentDraftStore(store)

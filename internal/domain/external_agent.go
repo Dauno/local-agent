@@ -11,112 +11,79 @@ import (
 )
 
 const (
-	ACPProtocolVersion     = "1"
-	ACPClientIdentity      = "slack-local-agent"
-	ACPClientVersion       = "v1"
-	ACPStopReasonEndTurn   = "end_turn"
-	ACPStopReasonCancelled = "cancelled"
-	ACPStopReasonMaxTokens = "max_tokens"
-	ACPStopReasonRefusal   = "refusal"
-
-	ACPPermissionRejectOnce = "reject_once"
-	ACPPermissionAllowOnce  = "allow_once"
+	ExternalAgentStopReasonEndTurn   = "end_turn"
+	ExternalAgentStopReasonCancelled = "cancelled"
+	ExternalAgentStopReasonMaxTokens = "max_tokens"
+	ExternalAgentStopReasonRefusal   = "refusal"
 )
 
-// ACPErrorCode is a bounded host-owned classification for ACP failures. The
+// ExternalAgentErrorCode is a bounded host-owned failure classification. The
 // code is safe to expose in diagnostics; frame content is never included.
-type ACPErrorCode string
+type ExternalAgentErrorCode string
 
 const (
-	ACPErrorFrameTooLarge              ACPErrorCode = "acp_frame_too_large"
-	ACPErrorMalformedFrame             ACPErrorCode = "acp_malformed_frame"
-	ACPErrorProtocolViolation          ACPErrorCode = "acp_protocol_violation"
-	ACPErrorConfigDrift                ACPErrorCode = "acp_config_drift"
-	ACPErrorIdleTimeout                ACPErrorCode = "acp_idle_timeout"
-	ACPErrorJobTimeout                 ACPErrorCode = "acp_job_timeout"
-	ACPErrorProcessExit                ACPErrorCode = "acp_process_exit"
-	ACPErrorResultTooLarge             ACPErrorCode = "acp_result_too_large"
-	ACPErrorResultArtifactInvalid      ACPErrorCode = "result_artifact_invalid"
-	ACPErrorResultDeliveryFailed       ACPErrorCode = "result_delivery_failed"
-	ACPErrorCompletedWithoutFinalText  ACPErrorCode = "acp_completed_without_final_message"
-	ACPErrorPermissionUnavailable      ACPErrorCode = "acp_permission_unavailable"
-	ACPErrorInvalidInput               ACPErrorCode = "acp_invalid_input"
-	ACPErrorSessionRecoveryUnsupported ACPErrorCode = "acp_session_recovery_unsupported"
-	ACPErrorProgressInvalid            ACPErrorCode = "acp_progress_invalid"
+	ExternalAgentErrorFrameTooLarge              ExternalAgentErrorCode = "acp_frame_too_large"
+	ExternalAgentErrorMalformedFrame             ExternalAgentErrorCode = "acp_malformed_frame"
+	ExternalAgentErrorProtocolViolation          ExternalAgentErrorCode = "acp_protocol_violation"
+	ExternalAgentErrorConfigDrift                ExternalAgentErrorCode = "acp_config_drift"
+	ExternalAgentErrorIdleTimeout                ExternalAgentErrorCode = "acp_idle_timeout"
+	ExternalAgentErrorJobTimeout                 ExternalAgentErrorCode = "acp_job_timeout"
+	ExternalAgentErrorProcessExit                ExternalAgentErrorCode = "acp_process_exit"
+	ExternalAgentErrorResultTooLarge             ExternalAgentErrorCode = "acp_result_too_large"
+	ExternalAgentErrorResultArtifactInvalid      ExternalAgentErrorCode = "result_artifact_invalid"
+	ExternalAgentErrorResultDeliveryFailed       ExternalAgentErrorCode = "result_delivery_failed"
+	ExternalAgentErrorCompletedWithoutFinalText  ExternalAgentErrorCode = "acp_completed_without_final_message"
+	ExternalAgentErrorPermissionUnavailable      ExternalAgentErrorCode = "acp_permission_unavailable"
+	ExternalAgentErrorInvalidInput               ExternalAgentErrorCode = "acp_invalid_input"
+	ExternalAgentErrorSessionRecoveryUnsupported ExternalAgentErrorCode = "acp_session_recovery_unsupported"
+	ExternalAgentErrorProgressInvalid            ExternalAgentErrorCode = "acp_progress_invalid"
 )
 
-type ACPError struct {
-	Code ACPErrorCode
+type ExternalAgentError struct {
+	Code ExternalAgentErrorCode
 	Err  error
 }
 
-func (e *ACPError) Error() string {
+func (e *ExternalAgentError) Error() string {
 	if e.Err == nil {
 		return string(e.Code)
 	}
 	return fmt.Sprintf("%s: %v", e.Code, e.Err)
 }
 
-func (e *ACPError) Unwrap() error {
+func (e *ExternalAgentError) Unwrap() error {
 	return e.Err
 }
 
-type ACPConfigOption struct {
-	ID    string
-	Value any
-}
-
-type ACPAgentInfo struct {
-	Name    string
-	Version string
-}
-
-type ACPSessionCapabilities struct {
-	Close       bool
-	LoadSession bool
-	Resume      bool
-}
-
-type ACPInitResult struct {
-	ProtocolVersion     string
-	AgentInfo           ACPAgentInfo
-	SessionCapabilities ACPSessionCapabilities
-}
-
-type ACPConfigState struct {
-	Options []ACPConfigOption
-}
-
-type AcpInvocationRequest struct {
+type ExternalAgentInvocationRequest struct {
 	JobID                string
 	PrimaryProject       string
 	PrimaryPath          string
 	ProfileName          string
 	ProviderName         string
 	RegistryRevision     string
-	ConfigOptions        []ACPConfigOption
 	PermissionOptionKind string
 	GlobalInstruction    string
 	AgentInstruction     string
 	Task                 string
 	Timeout              time.Duration
-	// These fields are trusted host identity and are never included in the ACP prompt.
+	// These fields are trusted host identity and are never included in the prompt.
 	Actor           string
 	TeamID          string
 	ConversationKey ConversationKey
 	OriginalCallID  string
 	// These host-owned hooks are used by durable jobs and are never serialized
-	// into ACP or model-visible content.
+	// into provider or model-visible content.
 	OnSessionCreated      func(string) error
 	OnSideEffectsPossible func() error
 	BeforePermission      func() error
 	// OnProgress receives content-free live progress events derived from the
-	// original ACP stream. Monitoring failures must never fail or cancel an
+	// provider stream. Monitoring failures must never fail or cancel an
 	// otherwise healthy invocation, so the callback returns no error.
-	OnProgress func(ACPProgressEvent)
+	OnProgress func(ExternalAgentProgressEvent)
 }
 
-type AcpInvocationResult struct {
+type ExternalAgentInvocationResult struct {
 	Text        string
 	Inline      bool
 	ArtifactRef string

@@ -28,7 +28,7 @@ func TestExternalAgentJobRequestDigestExcludesHostPaths(t *testing.T) {
 		Provider: "opencode", Profile: "build", PrimaryProject: "workspace",
 		RegistryRevision: "rev-1",
 		Task:             "create a document", Mode: domain.JobDetached,
-		PermissionOptionKind: domain.ACPPermissionAllowOnce,
+		PermissionOptionKind: "allow_once",
 		Timeout:              2 * time.Hour,
 		PrimaryPath:          "/private/one",
 	}
@@ -78,7 +78,7 @@ func TestExternalAgentJobNotificationUsesCanonicalBoundForSummary(t *testing.T) 
 func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing.T) {
 	job := domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678"}
 	resultText := strings.Repeat("result-", 4000)
-	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
 		Text: resultText, DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryCanonicalMarkdown: "OpenCode job `job_1` completed.\n\n" + resultText,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6, DeliveryContentBytes: int64(len([]byte(resultText))),
 	})
@@ -89,7 +89,7 @@ func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing
 		t.Fatalf("notification = %+v", notification)
 	}
 
-	file, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+	file, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
 		Text: "", DeliveryMode: domain.JobResultDeliveryFile, DeliveryArtifactRef: "job_1-delivery.result", DeliveryContentSHA256: strings.Repeat("a", 64), DeliveryContentBytes: 20000,
 	})
 	if err != nil {
@@ -104,7 +104,7 @@ func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testi
 	job := domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678", WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1"}
 	resultText := "safe &lt;result>"
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(resultText)))
-	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
 		Text: resultText, ResultSHA256: digest, ResultBytes: int64(len([]byte(resultText))),
 		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(resultText))),
@@ -132,7 +132,7 @@ func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testi
 
 	foreground := job
 	foreground.Mode = domain.JobForeground
-	foregroundNotification, err := domain.NewExternalAgentJobDelivery(foreground, domain.AcpInvocationResult{
+	foregroundNotification, err := domain.NewExternalAgentJobDelivery(foreground, domain.ExternalAgentInvocationResult{
 		Text: resultText, ResultSHA256: digest, ResultBytes: int64(len([]byte(resultText))),
 		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(resultText))),

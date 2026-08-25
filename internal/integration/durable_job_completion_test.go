@@ -84,7 +84,7 @@ func TestDetachedJobCompletionPublishesDurableSlackDelivery(t *testing.T) {
 	}
 	content := "durable result without a user follow-up"
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
-	result := &domain.AcpInvocationResult{
+	result := &domain.ExternalAgentInvocationResult{
 		Text: content, ResultSHA256: digest, ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryContentSHA256: digest,
 		DeliveryContentBytes: int64(len(content)), DeliveryMaxMarkdownParts: 6,
@@ -183,8 +183,8 @@ var _ port.Logger = integrationLogger{}
 
 type integrationJobRuntime struct{}
 
-func (*integrationJobRuntime) Run(context.Context, domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
-	return domain.AcpInvocationResult{}, context.Canceled
+func (*integrationJobRuntime) Run(context.Context, domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
+	return domain.ExternalAgentInvocationResult{}, context.Canceled
 }
 
 var _ port.ExternalAgentJobRuntime = (*integrationJobRuntime)(nil)
@@ -483,7 +483,7 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 		t.Fatalf("claim job = %#v, err=%v", claimed, err)
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
-	result := &domain.AcpInvocationResult{
+	result := &domain.ExternalAgentInvocationResult{
 		Text: "", ResultSHA256: digest, ResultBytes: int64(len(content)), ArtifactRef: artifact.Reference,
 		DeliveryMode: domain.JobResultDeliveryFile, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryArtifactRef: artifact.Reference, DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len(content)), DeliveryMaxMarkdownParts: 6,
@@ -587,9 +587,9 @@ func integrationDetachedJob(id string, now time.Time) domain.ExternalAgentJob {
 	}
 }
 
-func integrationMarkdownResult(jobID, content string) *domain.AcpInvocationResult {
+func integrationMarkdownResult(jobID, content string) *domain.ExternalAgentInvocationResult {
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
-	return &domain.AcpInvocationResult{
+	return &domain.ExternalAgentInvocationResult{
 		Text: content, ResultSHA256: digest, ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len(content)),
 		DeliveryMaxMarkdownParts: 6, DeliveryCanonicalMarkdown: "OpenCode job `" + jobID + "` completed.\n\n" + content,

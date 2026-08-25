@@ -61,8 +61,8 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 	if got := blockIDs(acp.Blocks.BlockSet); strings.Join(got, ",") != "name,agent_type,description,instruction,model,execution_mode,timeout_seconds" {
 		t.Fatalf("ACP block IDs = %v", got)
 	}
-	acpModel := acp.Blocks.BlockSet[5].(*slackapi.InputBlock).Element.(*slackapi.SelectBlockElement)
-	if got := optionValues(acpModel.Options); strings.Join(got, ",") != "codex/b,opencode/a,opencode/z" {
+	externalAgentModel := acp.Blocks.BlockSet[5].(*slackapi.InputBlock).Element.(*slackapi.SelectBlockElement)
+	if got := optionValues(externalAgentModel.Options); strings.Join(got, ",") != "codex/b,opencode/a,opencode/z" {
 		t.Fatalf("ACP model options = %v", got)
 	}
 	timeout := acp.Blocks.BlockSet[7].(*slackapi.InputBlock).Element.(*slackapi.PlainTextInputBlockElement)

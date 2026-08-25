@@ -74,7 +74,7 @@ func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 	assertStaticSelect(t, model, "model", []string{"openai/a", "openai/z"}, "openai/z")
 }
 
-func TestBuilderModalPresenterRendersACPParity(t *testing.T) {
+func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
 		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/ignored", ProviderType: agentdef.ProviderTypeOpenAICompatible},

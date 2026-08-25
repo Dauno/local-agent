@@ -72,14 +72,14 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 		if err := validateProviderProfile(defs, kind, runtime); err != nil {
 			return nil, err
 		}
-		if err := domain.ValidateACPAllowlist(providerName(runtime)); err != nil {
+		if err := domain.ValidateExternalAgentAllowlist(providerName(runtime)); err != nil {
 			return nil, err
 		}
 		timeout := draft.TimeoutSeconds
 		if timeout == 0 {
-			timeout = domain.DefaultACPTimeoutSeconds
+			timeout = domain.DefaultExternalAgentTimeoutSeconds
 		}
-		if err := domain.ValidateACPTimeout(timeout); err != nil {
+		if err := domain.ValidateExternalAgentTimeout(timeout); err != nil {
 			return nil, err
 		}
 		agent = agentdef.AgentDef{
@@ -157,7 +157,7 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 		if strings.TrimSpace(draft.Model) != "" {
 			return fmt.Errorf("model is not valid for ACP agents")
 		}
-		if err := domain.ValidateACPAllowlist(provider); err != nil {
+		if err := domain.ValidateExternalAgentAllowlist(provider); err != nil {
 			return err
 		}
 		if candidate.Model != "" || candidate.Confirmation != "required" {
@@ -172,9 +172,9 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 		}
 		expectedTimeout := draft.TimeoutSeconds
 		if expectedTimeout == 0 {
-			expectedTimeout = domain.DefaultACPTimeoutSeconds
+			expectedTimeout = domain.DefaultExternalAgentTimeoutSeconds
 		}
-		if err := domain.ValidateACPTimeout(draft.TimeoutSeconds); err != nil {
+		if err := domain.ValidateExternalAgentTimeout(draft.TimeoutSeconds); err != nil {
 			return err
 		}
 		if candidate.TimeoutSeconds != expectedTimeout {

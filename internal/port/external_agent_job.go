@@ -56,10 +56,10 @@ type ExternalAgentJobStore interface {
 	GetJob(ctx context.Context, jobID string) (*domain.ExternalAgentJob, error)
 	ClaimNext(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error)
 	RenewLease(ctx context.Context, jobID, owner string, attempt int, now time.Time, leaseTTL time.Duration) error
-	AssignACPSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error
+	AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error
 	MarkSideEffectsPossible(ctx context.Context, jobID, owner string, attempt int) error
 	RequestCancellation(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error)
-	Transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.AcpInvocationResult, errorCode string, now time.Time) error
+	Transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error
 	ListExpiredRunning(ctx context.Context, now time.Time) ([]domain.ExternalAgentJob, error)
 }
 
@@ -186,7 +186,7 @@ type ExternalAgentJobProgressStore interface {
 // by job and attempt. A nil result means the current process has no
 // trustworthy runtime handle (for example after restart) and must never be
 // rendered as dead.
-type ACPProcessRegistry interface {
+type ExternalAgentProcessRegistry interface {
 	Register(jobID string, attempt int, pid int)
 	ProcessAlive(jobID string, attempt int) *bool
 }
@@ -257,7 +257,7 @@ type ExternalAgentJobShutdownStore interface {
 // ExternalAgentJobReconciliationService is the shared confirmed operation for
 // CLI and invocation-scoped Slack tools.
 type ExternalAgentJobReconciliationService interface {
-	ReconcileExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int) (domain.AcpInvocationResult, error)
+	ReconcileExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int) (domain.ExternalAgentInvocationResult, error)
 }
 
 type JobNotificationPublisher interface {
@@ -266,7 +266,7 @@ type JobNotificationPublisher interface {
 }
 
 type ExternalAgentSessionRecoveryRuntime interface {
-	Reconcile(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error)
+	Reconcile(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error)
 }
 
 // ExpiredExternalAgentJobRecovery is implemented by durable stores that can
@@ -310,7 +310,7 @@ type ExternalAgentJobHostCompleter interface {
 // ExternalAgentJobRuntime executes one already-admitted job. It is deliberately
 // provider-neutral so use cases do not import ACP or process types.
 type ExternalAgentJobRuntime interface {
-	Run(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error)
+	Run(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error)
 }
 
 // ExternalAgentJobPublisher delivers host-owned terminal status. A nil

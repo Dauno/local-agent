@@ -6,10 +6,10 @@ import (
 )
 
 const (
-	ExecutionModeForeground  = "foreground"
-	ExecutionModeDurableJob  = "durable_job"
-	DefaultACPTimeoutSeconds = 7200
-	MaxACPTimeoutSeconds     = 86400
+	ExecutionModeForeground            = "foreground"
+	ExecutionModeDurableJob            = "durable_job"
+	DefaultExternalAgentTimeoutSeconds = 7200
+	MaxExternalAgentTimeoutSeconds     = 86400
 )
 
 var errBadAgentKind = errors.New("agent kind must be llm or agent_cli")
@@ -45,15 +45,15 @@ func ValidateExecutionMode(kind AgentKind, mode string) error {
 }
 
 // ValidateACPTimeout validates an ACP timeout. Zero is accepted for defaulting.
-func ValidateACPTimeout(seconds int) error {
-	if seconds < 0 || seconds > MaxACPTimeoutSeconds {
-		return fmt.Errorf("ACP timeout must be between 0 and %d seconds", MaxACPTimeoutSeconds)
+func ValidateExternalAgentTimeout(seconds int) error {
+	if seconds < 0 || seconds > MaxExternalAgentTimeoutSeconds {
+		return fmt.Errorf("ACP timeout must be between 0 and %d seconds", MaxExternalAgentTimeoutSeconds)
 	}
 	return nil
 }
 
 // ValidateACPAllowlist enforces the only supported ACP provider name.
-func ValidateACPAllowlist(providerName string) error {
+func ValidateExternalAgentAllowlist(providerName string) error {
 	if providerName == "opencode" {
 		return nil
 	}

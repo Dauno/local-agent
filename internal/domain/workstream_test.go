@@ -202,7 +202,7 @@ func TestWorkstreamTransitionPreservesExistingTasks(t *testing.T) {
 	}
 }
 
-func TestWorkstreamTaskCanBeRejectedWithoutACPExecution(t *testing.T) {
+func TestWorkstreamTaskCanBeRejectedWithoutExternalAgentExecution(t *testing.T) {
 	workstream := testWorkstream()
 	workstream.Tasks = []domain.WorkstreamTask{{
 		ID: "task-1", Project: workstream.Project, Description: "declined task", Status: domain.TaskProposed,

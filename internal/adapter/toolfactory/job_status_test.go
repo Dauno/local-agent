@@ -33,12 +33,12 @@ func TestJobStatusJSONContract(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 41, 2, 0, time.UTC)
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
 	reader := &projectionExternalJobReader{
-		job: &domain.ExternalAgentJob{ID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1, ACPSessionID: "ses_full_identity_0123456789"},
+		job: &domain.ExternalAgentJob{ID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1, ExternalAgentSessionID: "ses_full_identity_0123456789"},
 		view: &domain.ExternalAgentJobStatusView{
 			JobID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1,
-			ACPSessionID: "ses_full_identity_0123456789",
-			Phase:        domain.ACPPhaseToolRunning, Health: domain.ACPHealthPossiblyStalled,
-			LastEventKind:            domain.ACPEventToolCallUpdate,
+			ExternalAgentSessionID: "ses_full_identity_0123456789",
+			Phase:                  domain.ExternalAgentPhaseToolRunning, Health: domain.ExternalAgentHealthPossiblyStalled,
+			LastEventKind:            domain.ExternalAgentEventToolCallUpdate,
 			LastTransportActivityAt:  base,
 			LastSessionUpdateAt:      base,
 			LastMeaningfulProgressAt: base.Add(-4 * time.Second),
@@ -97,7 +97,7 @@ func TestJobStatusJSONContract(t *testing.T) {
 
 func TestJobStatusQueuedSessionIsEmpty(t *testing.T) {
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
-	reader := &stubExternalJobReader{job: &domain.ExternalAgentJob{ID: "job_queued", Status: domain.JobQueued, StatusRevision: 0, ACPSessionID: ""}}
+	reader := &stubExternalJobReader{job: &domain.ExternalAgentJob{ID: "job_queued", Status: domain.JobQueued, StatusRevision: 0, ExternalAgentSessionID: ""}}
 	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
 	tools, err := factory.ToolsForInvocation("U12345678", key)
 	if err != nil {
@@ -324,7 +324,7 @@ func TestJobStatusUsesStrictResultAvailability(t *testing.T) {
 func TestJobStatusTerminalRetainsSessionID(t *testing.T) {
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
 	reader := &stubExternalJobReader{job: &domain.ExternalAgentJob{
-		ID: "job_terminal", Status: domain.JobCompletionUnknown, StatusRevision: 3, ACPSessionID: "ses_terminal_identity_9876543210",
+		ID: "job_terminal", Status: domain.JobCompletionUnknown, StatusRevision: 3, ExternalAgentSessionID: "ses_terminal_identity_9876543210",
 	}}
 	factory := toolfactory.New(&stubConversationStore{}, nil, nil, nil).WithExternalAgentJobs(reader)
 	tools, err := factory.ToolsForInvocation("U12345678", key)

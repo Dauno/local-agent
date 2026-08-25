@@ -300,7 +300,7 @@ func TestWorkflowLoopExitsThroughADKExitLoopTool(t *testing.T) {
 	}
 }
 
-func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
+func TestExternalAgentWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
 	project := filepath.Join(t.TempDir(), "project")
 	managedInvocation := filepath.Join(project, ".worktrees", "call")
 	createdWorktree := filepath.Join(managedInvocation, "feature")

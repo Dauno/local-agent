@@ -28,7 +28,7 @@ func TestTerminalTransitionEnqueuesOneDurableNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "safe summary"}, "", now.Add(time.Second)); err != nil {
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "safe summary"}, "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	claimedNotification, err := jobs.ClaimNextNotification(t.Context(), now.Add(2*time.Second), "publisher-1", time.Minute)
@@ -288,7 +288,7 @@ func TestTerminalTransitionRollsBackWhenNotificationCannotBeBuilt(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "done"}, "", now.Add(time.Second)); err == nil {
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "done"}, "", now.Add(time.Second)); err == nil {
 		t.Fatal("terminal transition succeeded without a valid notification target")
 	}
 	current, err := jobs.GetJob(t.Context(), job.ID)
@@ -313,7 +313,7 @@ func TestLegacyNotificationCannotBeConvertedIntoNewDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "done"}, "", now.Add(time.Second)); err != nil {
+	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "done"}, "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.db.ExecContext(t.Context(), `UPDATE external_agent_job_notifications SET
@@ -342,7 +342,7 @@ func TestPermanentDeliveryFailureEnqueuesHostDiagnostic(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	result := &domain.AcpInvocationResult{
+	result := &domain.ExternalAgentInvocationResult{
 		DeliveryMode: domain.JobResultDeliveryFile, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryArtifactRef: "job_1-delivery.result", DeliveryContentSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		DeliveryContentBytes: 4, DeliveryMaxMarkdownParts: 6, ArtifactRef: "job_1-delivery.result", ResultSHA256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", ResultBytes: 4,
@@ -398,7 +398,7 @@ func TestFileNotificationCannotPublishWithoutUploadEvidence(t *testing.T) {
 	}
 	content := "file result"
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(content)))
-	result := &domain.AcpInvocationResult{
+	result := &domain.ExternalAgentInvocationResult{
 		Text: "", DeliveryMode: domain.JobResultDeliveryFile, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryArtifactRef: job.ID + "-delivery.result", DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len(content)),
 		ArtifactRef: job.ID + "-delivery.result", ResultSHA256: digest, ResultBytes: int64(len(content)), DeliveryMaxMarkdownParts: 6,
@@ -449,7 +449,7 @@ func TestNotificationHealthAndAdminInspectionAreContentFree(t *testing.T) {
 		if claimErr != nil {
 			t.Fatal(claimErr)
 		}
-		if transitionErr := jobs.Transition(t.Context(), id, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "secret result text"}, "", base.Add(time.Second)); transitionErr != nil {
+		if transitionErr := jobs.Transition(t.Context(), id, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "secret result text"}, "", base.Add(time.Second)); transitionErr != nil {
 			t.Fatal(transitionErr)
 		}
 		return job
@@ -550,7 +550,7 @@ func TestInspectJobPreservesBoundedResultErrorCodes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := jobs.Transition(t.Context(), jobID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.AcpInvocationResult{Text: "safe summary"}, "", base.Add(time.Second)); err != nil {
+		if err := jobs.Transition(t.Context(), jobID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "safe summary"}, "", base.Add(time.Second)); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications

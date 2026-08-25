@@ -64,7 +64,7 @@ var (
 type ResultProducerKind string
 
 const (
-	ResultProducerACPJob           ResultProducerKind = "acp_job"
+	ResultProducerExternalAgentJob ResultProducerKind = "acp_job"
 	ResultProducerToolOperation    ResultProducerKind = "tool_operation"
 	ResultProducerLegacyProjection ResultProducerKind = "legacy_projection"
 )
@@ -181,7 +181,7 @@ func (p ResultProducer) Validate() error {
 		return ErrResultInvalid
 	}
 	switch p.Kind {
-	case ResultProducerACPJob, ResultProducerToolOperation, ResultProducerLegacyProjection:
+	case ResultProducerExternalAgentJob, ResultProducerToolOperation, ResultProducerLegacyProjection:
 		return nil
 	default:
 		return ErrResultInvalid

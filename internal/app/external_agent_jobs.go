@@ -42,7 +42,7 @@ func newExternalAgentSchedules() (externalAgentSchedules, error) {
 	return externalAgentSchedules{jobs: jobs, notifications: notifications, activations: activations}, nil
 }
 
-type acpJobDispatcher struct {
+type externalAgentJobDispatcher struct {
 	children              []preparedAgentTool
 	global                string
 	store                 port.ExternalAgentJobStore
@@ -53,22 +53,22 @@ type acpJobDispatcher struct {
 	partLabels            bool
 	reconciliationTimeout time.Duration
 	progressStore         port.ExternalAgentJobProgressStore
-	processRegistry       port.ACPProcessRegistry
+	processRegistry       port.ExternalAgentProcessRegistry
 	progressWarnAfter     time.Duration
 	logger                port.Logger
 	metrics               port.MetricRecorder
 	progressGauge         *externalagent.ActiveProgressGauge
 }
 
-func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
+func (d *externalAgentJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
 	profileMatched := false
 	if matched, result, err := d.runAgentCLI(ctx, job, &profileMatched); matched {
 		return result, err
 	}
 	if profileMatched {
-		return domain.AcpInvocationResult{}, errors.New("durable external-agent job scope revision does not match current configuration")
+		return domain.ExternalAgentInvocationResult{}, errors.New("durable external-agent job scope revision does not match current configuration")
 	}
-	return domain.AcpInvocationResult{}, errors.New("durable external-agent job provider/profile is unavailable")
+	return domain.ExternalAgentInvocationResult{}, errors.New("durable external-agent job provider/profile is unavailable")
 }
 
 // runAgentCLI executes a durable job whose leaf is an agent CLI rather than an
@@ -80,7 +80,7 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 // job keeps its projection fresh and its stall warning honest. Session recovery
 // is not implemented: a job left in completion_unknown must be closed by an
 // operator.
-func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalAgentJob, profileMatched *bool) (bool, domain.AcpInvocationResult, error) {
+func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalAgentJob, profileMatched *bool) (bool, domain.ExternalAgentInvocationResult, error) {
 	for _, child := range d.children {
 		if child.model == nil || child.cliResolved == nil {
 			continue
@@ -97,7 +97,7 @@ func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalA
 		// before the process exists, never after.
 		if d.store != nil {
 			if err := d.store.MarkSideEffectsPossible(ctx, job.ID, job.LeaseOwner, job.Attempt); err != nil {
-				return true, domain.AcpInvocationResult{}, err
+				return true, domain.ExternalAgentInvocationResult{}, err
 			}
 		}
 		runCtx := ctx
@@ -112,15 +112,15 @@ func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalA
 		text, runErr := generateAgentCLIText(runCtx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, job.Task)
 		if runErr != nil {
 			if recorder != nil {
-				recorder.Record(domain.ACPProgressEvent{
-					Kind: domain.ACPEventProcessFailed, ErrorClass: acpFailureClass(runErr),
+				recorder.Record(domain.ExternalAgentProgressEvent{
+					Kind: domain.ExternalAgentEventProcessFailed, ErrorClass: externalAgentFailureClass(runErr),
 				})
 			}
-			return true, domain.AcpInvocationResult{}, runErr
+			return true, domain.ExternalAgentInvocationResult{}, runErr
 		}
 		// Inline is detached-delivery metadata that only materialize may set. A
 		// foreground result must carry none of it.
-		result := domain.AcpInvocationResult{Text: text}
+		result := domain.ExternalAgentInvocationResult{Text: text}
 		switch {
 		case job.Mode == domain.JobDetached && d.artifacts != nil:
 			result, runErr = d.materialize(ctx, job, result)
@@ -133,7 +133,7 @@ func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalA
 		}
 		return true, result, runErr
 	}
-	return false, domain.AcpInvocationResult{}, nil
+	return false, domain.ExternalAgentInvocationResult{}, nil
 }
 
 // agentCLIProgressEvent maps one observed agent CLI step onto the host's
@@ -144,21 +144,21 @@ func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalA
 // The tool identity stays nil. A CLI reports a step that already finished, so
 // there is no call to track from pending to terminal, and the projection reads
 // a nil tool as "the agent did something" without altering the active count.
-func agentCLIProgressEvent(activity agentcli.Activity) domain.ACPProgressEvent {
+func agentCLIProgressEvent(activity agentcli.Activity) domain.ExternalAgentProgressEvent {
 	if activity.Kind == agentcli.ActivityProcessStarted {
-		return domain.ACPProgressEvent{Kind: domain.ACPEventProcessStarted, PID: activity.PID}
+		return domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventProcessStarted, PID: activity.PID}
 	}
-	return domain.ACPProgressEvent{Kind: domain.ACPEventToolCall}
+	return domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventToolCall}
 }
 
 // acpFailureClass is the bounded classification the progress projection stores
 // for a failed run. It never carries the error text.
-func acpFailureClass(err error) string {
-	var acpErr *domain.ACPError
-	if errors.As(err, &acpErr) && acpErr.Code != "" {
-		return string(acpErr.Code)
+func externalAgentFailureClass(err error) string {
+	var externalAgentErr *domain.ExternalAgentError
+	if errors.As(err, &externalAgentErr) && externalAgentErr.Code != "" {
+		return string(externalAgentErr.Code)
 	}
-	return string(domain.ACPErrorProcessExit)
+	return string(domain.ExternalAgentErrorProcessExit)
 }
 
 // normalizeForegroundResult produces the complete persisted identity for a
@@ -166,10 +166,10 @@ func acpFailureClass(err error) string {
 // final post-transformation text, its exact UTF-8 byte count and lowercase
 // hex SHA-256 digest are set; Delivery* fields, artifact refs and policy
 // fields stay empty for the synchronous path.
-func (d *acpJobDispatcher) normalizeForegroundResult(ctx context.Context, job domain.ExternalAgentJob, result domain.AcpInvocationResult) (domain.AcpInvocationResult, error) {
+func (d *externalAgentJobDispatcher) normalizeForegroundResult(ctx context.Context, job domain.ExternalAgentJob, result domain.ExternalAgentInvocationResult) (domain.ExternalAgentInvocationResult, error) {
 	text, size, digest, err := d.normalizeResultText(result.Text, d.policy.MaxInlineResultBytes)
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	result.Text = text
 	result.ArtifactRef = ""
@@ -187,19 +187,19 @@ func (d *acpJobDispatcher) normalizeForegroundResult(ctx context.Context, job do
 // the caller can transition its job to a terminal status or create delivery
 // metadata. The terminal status revision is exactly one past the leased job
 // snapshot supplied to this runtime invocation.
-func (d *acpJobDispatcher) materializeNativeResult(ctx context.Context, job domain.ExternalAgentJob, text string, size int64, digest string) (string, error) {
+func (d *externalAgentJobDispatcher) materializeNativeResult(ctx context.Context, job domain.ExternalAgentJob, text string, size int64, digest string) (string, error) {
 	if d.results == nil {
 		return "", nil
 	}
 	if job.StatusRevision < 0 {
-		return "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("ACP result producer revision is invalid")}
+		return "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("ACP result producer revision is invalid")}
 	}
 	retention := domain.ResultRetentionContext
 	if job.Mode == domain.JobDetached {
 		retention = domain.ResultRetentionConversation
 	}
 	handle, err := d.results.Materialize(ctx, port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: job.ID, Revision: job.StatusRevision + 1},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: job.ID, Revision: job.StatusRevision + 1},
 		Payload:  text, Scope: domain.ResultScope{Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject},
 		Retention: retention, MediaType: "text/plain; charset=utf-8",
 	})
@@ -207,7 +207,7 @@ func (d *acpJobDispatcher) materializeNativeResult(ctx context.Context, job doma
 		return "", err
 	}
 	if err != nil || handle.Validate() != nil || handle.SHA256 != digest || handle.Bytes != size || !hasArtifactAvailability(handle.Availability) {
-		return "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("native ACP result materialization failed")}
+		return "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("native ACP result materialization failed")}
 	}
 	return handle.ResultID, nil
 }
@@ -220,21 +220,21 @@ func hasArtifactAvailability(values []domain.ResultAvailability) bool {
 // sanitization to produce the exact final text, its UTF-8 byte count and
 // lowercase hex SHA-256 digest. maxBytes bounds the final UTF-8 bytes.
 // Failures are typed and never include result content.
-func (d *acpJobDispatcher) normalizeResultText(text string, maxBytes int64) (string, int64, string, error) {
+func (d *externalAgentJobDispatcher) normalizeResultText(text string, maxBytes int64) (string, int64, string, error) {
 	if d.sanitize != nil {
 		text = d.sanitize(text)
 	}
 	var err error
 	text, err = domain.SanitizeResultText(text)
 	if err != nil {
-		return "", 0, "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
+		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
 	}
 	size := int64(len([]byte(text)))
 	if size <= 0 {
-		return "", 0, "", &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
+		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
 	}
 	if size > maxBytes {
-		return "", 0, "", &domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("ACP result exceeds the configured delivery bound")}
+		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultTooLarge, Err: errors.New("ACP result exceeds the configured delivery bound")}
 	}
 	digest := sha256.Sum256([]byte(text))
 	return text, size, fmt.Sprintf("%x", digest), nil
@@ -242,26 +242,26 @@ func (d *acpJobDispatcher) normalizeResultText(text string, maxBytes int64) (str
 
 // newRecorder installs the host-owned progress recorder for one job attempt.
 // Monitoring is observational: recorder failure never fails the ACP prompt.
-func (d *acpJobDispatcher) newRecorder(job domain.ExternalAgentJob) *externalagent.ProgressRecorder {
+func (d *externalAgentJobDispatcher) newRecorder(job domain.ExternalAgentJob) *externalagent.ProgressRecorder {
 	if d.progressStore == nil {
 		return nil
 	}
 	return externalagent.NewProgressRecorder(d.progressStore, d.processRegistry, nil, d.logger, d.metrics, d.progressGauge, d.progressWarnAfter, job.ID, job.LeaseOwner, job.Attempt)
 }
 
-func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalAgentJob, result domain.AcpInvocationResult) (domain.AcpInvocationResult, error) {
+func (d *externalAgentJobDispatcher) materialize(ctx context.Context, job domain.ExternalAgentJob, result domain.ExternalAgentInvocationResult) (domain.ExternalAgentInvocationResult, error) {
 	if err := d.policy.Validate(); err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	var content []byte
 	var err error
 	if result.ArtifactRef != "" {
 		if d.artifacts == nil {
-			return domain.AcpInvocationResult{}, errors.New("ACP result artifact cannot be verified")
+			return domain.ExternalAgentInvocationResult{}, errors.New("ACP result artifact cannot be verified")
 		}
 		content, err = d.artifacts.Get(ctx, job.ID, result.ArtifactRef, result.ResultSHA256, d.policy.MaxResultArtifactBytes)
 		if err != nil {
-			return domain.AcpInvocationResult{}, &domain.ACPError{Code: domain.ACPErrorResultArtifactInvalid, Err: errors.New("verified ACP result artifact is unavailable")}
+			return domain.ExternalAgentInvocationResult{}, &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("verified ACP result artifact is unavailable")}
 		}
 	} else {
 		content = []byte(result.Text)
@@ -275,7 +275,7 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 	var contentSHA string
 	text, size, contentSHA, err = d.normalizeResultText(text, d.policy.MaxFileBytes)
 	if err != nil {
-		return domain.AcpInvocationResult{}, err
+		return domain.ExternalAgentInvocationResult{}, err
 	}
 	result.Text = text
 	result.ResultSHA256 = contentSHA
@@ -299,7 +299,7 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: size}
 		}
 		if artifact.Reference == "" || !strings.EqualFold(artifact.SHA256, contentSHA) || artifact.Bytes != size {
-			return result, &domain.ACPError{Code: domain.ACPErrorResultDeliveryFailed, Err: errors.New("sanitized ACP result artifact identity is invalid")}
+			return result, &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultDeliveryFailed, Err: errors.New("sanitized ACP result artifact identity is invalid")}
 		}
 		artifactRef = artifact.Reference
 	}
@@ -323,8 +323,8 @@ func (d *acpJobDispatcher) materialize(ctx context.Context, job domain.ExternalA
 // No runtime in this release captures a session, so a completion-unknown job
 // must be closed by an operator. The `session` descriptor block exists for
 // exactly this and is not wired yet.
-func (d *acpJobDispatcher) Reconcile(_ context.Context, job domain.ExternalAgentJob) (domain.AcpInvocationResult, error) {
-	return domain.AcpInvocationResult{}, fmt.Errorf(
+func (d *externalAgentJobDispatcher) Reconcile(_ context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
+	return domain.ExternalAgentInvocationResult{}, fmt.Errorf(
 		"session recovery is not supported for job %q: inspect the workspace and close the job explicitly", job.ID)
 }
 
@@ -344,10 +344,10 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		}
 	}
 	policy := domain.ResultDeliveryPolicy{
-		MaxMarkdownParts:       cfg.ACP.Delivery.MaxMarkdownParts,
-		MaxFileBytes:           int64(cfg.ACP.Delivery.MaxFileBytes),
-		MaxInlineResultBytes:   int64(cfg.ACP.MaxInlineResultBytes),
-		MaxResultArtifactBytes: int64(cfg.ACP.MaxResultArtifactBytes),
+		MaxMarkdownParts:       cfg.ExternalAgent.Delivery.MaxMarkdownParts,
+		MaxFileBytes:           int64(cfg.ExternalAgent.Delivery.MaxFileBytes),
+		MaxInlineResultBytes:   int64(cfg.ExternalAgent.MaxInlineResultBytes),
+		MaxResultArtifactBytes: int64(cfg.ExternalAgent.MaxResultArtifactBytes),
 	}
 	if err := policy.Validate(); err != nil {
 		return nil, nil, fmt.Errorf("validate durable ACP result delivery policy: %w", err)
@@ -376,24 +376,24 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		global = models.rootDef.EffectiveDelegatedGlobalInstruction()
 	}
 	service, err := externalagent.New(externalagent.Config{
-		DefaultTimeout:         time.Duration(cfg.ACP.DefaultJobTimeoutSeconds) * time.Second,
-		MaxTimeout:             time.Duration(cfg.ACP.MaxJobTimeoutSeconds) * time.Second,
+		DefaultTimeout:         time.Duration(cfg.ExternalAgent.DefaultJobTimeoutSeconds) * time.Second,
+		MaxTimeout:             time.Duration(cfg.ExternalAgent.MaxJobTimeoutSeconds) * time.Second,
 		LeaseTTL:               30 * time.Second,
 		PollInterval:           time.Second,
-		Concurrency:            cfg.ACP.WorkerConcurrency,
+		Concurrency:            cfg.ExternalAgent.WorkerConcurrency,
 		MaxAttempts:            2,
-		ProgressWarningTimeout: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
+		ProgressWarningTimeout: time.Duration(cfg.ExternalAgent.ProgressWarningSeconds) * time.Second,
 	}, externalagent.Dependencies{
-		Store: store, Runtime: &acpJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
+		Store: store, Runtime: &externalAgentJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
 			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
-			reconciliationTimeout: time.Duration(cfg.ACP.ReconciliationTimeoutSeconds) * time.Second,
+			reconciliationTimeout: time.Duration(cfg.ExternalAgent.ReconciliationTimeoutSeconds) * time.Second,
 			progressStore:         store, processRegistry: infra.processRegistry,
-			progressWarnAfter: time.Duration(cfg.ACP.ProgressWarningSeconds) * time.Second,
+			progressWarnAfter: time.Duration(cfg.ExternalAgent.ProgressWarningSeconds) * time.Second,
 			logger:            models.logger, metrics: models.metrics,
 			progressGauge: externalagent.NewActiveProgressGauge(models.metrics)},
 		Publisher: nil, Artifacts: models.artifactStore, NativeResults: nativeResults,
 		ProgressStore: store, ProcessRegistry: infra.processRegistry,
-		MaxResultBytes: int64(cfg.ACP.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
+		MaxResultBytes: int64(cfg.ExternalAgent.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
 		Logger: models.logger, Metrics: models.metrics,
 		Scheduler: schedules.jobs, JobWake: schedules.jobs.Wake, NotificationWake: schedules.notifications.Wake,
 	})

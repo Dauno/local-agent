@@ -190,7 +190,7 @@ func (s *ResultStore) VerifyForWorkstream(ctx context.Context, request port.Work
 	if err := identity.VerifyWorkstreamEligible(); err != nil {
 		return domain.ResultIdentity{}, err
 	}
-	if identity.Producer.Kind == domain.ResultProducerACPJob {
+	if identity.Producer.Kind == domain.ResultProducerExternalAgentJob {
 		var status, actor, teamID, conversationKey, project string
 		var revision int
 		err := s.catalog.db.QueryRowContext(ctx, `SELECT status, status_revision, actor, slack_team_id, conversation_key, primary_project

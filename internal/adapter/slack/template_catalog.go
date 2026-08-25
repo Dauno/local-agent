@@ -1328,7 +1328,7 @@ func validateBuilderInputLimit(templateName string, block templateBlock) error {
 	case "instruction":
 		want = agentdef.MaxInstructionLength
 	case "timeout_seconds":
-		want = len(strconv.Itoa(domain.MaxACPTimeoutSeconds))
+		want = len(strconv.Itoa(domain.MaxExternalAgentTimeoutSeconds))
 	}
 	if want > 0 && block.Element.MaxLength != want {
 		return fmt.Errorf("builder %s max_length must be %d", block.BlockID, want)

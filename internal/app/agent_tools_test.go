@@ -650,10 +650,10 @@ func runDelegatingTurn(t *testing.T, root agent.Agent) string {
 	return final
 }
 
-func TestResolveACPProjectRejectsUnknownName(t *testing.T) {
+func TestResolveExternalAgentProjectRejectsUnknownName(t *testing.T) {
 	root := t.TempDir()
 	projects := map[string]string{"workspace": root}
-	if _, err := resolveACPProject(projects, "missing"); err == nil {
+	if _, err := resolveExternalAgentProject(projects, "missing"); err == nil {
 		t.Fatal("expected unknown project rejection")
 	}
 }

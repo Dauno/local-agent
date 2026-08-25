@@ -59,7 +59,7 @@ func durableCLIJob() domain.ExternalAgentJob {
 func TestDurableAgentCLIJobBuildsDelegation(t *testing.T) {
 	t.Parallel()
 	captured := &captureModel{text: "  the result  "}
-	dispatcher := &acpJobDispatcher{
+	dispatcher := &externalAgentJobDispatcher{
 		children: []preparedAgentTool{durableCLIChild(captured)},
 		global:   "global instruction",
 		// A foreground result is size-checked like any other, so the bound must
@@ -90,7 +90,7 @@ func TestDurableAgentCLIJobBuildsDelegation(t *testing.T) {
 // against a changed registry.
 func TestDurableAgentCLIJobRejectsStaleRevision(t *testing.T) {
 	t.Parallel()
-	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
+	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
 	job := durableCLIJob()
 	job.RegistryRevision = "sha256:stale"
 
@@ -102,7 +102,7 @@ func TestDurableAgentCLIJobRejectsStaleRevision(t *testing.T) {
 
 func TestDurableAgentCLIJobPropagatesFailure(t *testing.T) {
 	t.Parallel()
-	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{err: errors.New("cli failed")})}}
+	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{err: errors.New("cli failed")})}}
 
 	matched, _, err := dispatcher.runAgentCLI(context.Background(), durableCLIJob(), new(bool))
 	if !matched || err == nil || !strings.Contains(err.Error(), "cli failed") {
@@ -143,7 +143,7 @@ func TestDurableConfiguredCoversAgentCLI(t *testing.T) {
 // be told that plainly instead of being shown an ACP lookup failure.
 func TestDurableAgentCLIReconcileReportsNoSessionRecovery(t *testing.T) {
 	t.Parallel()
-	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
+	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
 
 	_, err := dispatcher.Reconcile(context.Background(), durableCLIJob())
 	if err == nil || !strings.Contains(err.Error(), "session recovery is not supported for job") {
@@ -154,7 +154,7 @@ func TestDurableAgentCLIReconcileReportsNoSessionRecovery(t *testing.T) {
 // An ACP job must never be served by a CLI child, and the reverse.
 func TestDurableDispatcherKeepsFamiliesApart(t *testing.T) {
 	t.Parallel()
-	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
+	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
 	job := durableCLIJob()
 	job.Provider = "opencode"
 
@@ -170,12 +170,12 @@ func TestDurableDispatcherKeepsFamiliesApart(t *testing.T) {
 func TestAgentCLIProgressEventMapping(t *testing.T) {
 	t.Parallel()
 	started := agentCLIProgressEvent(agentcli.Activity{Kind: agentcli.ActivityProcessStarted, PID: 4321})
-	if started.Kind != domain.ACPEventProcessStarted || started.PID != 4321 {
+	if started.Kind != domain.ExternalAgentEventProcessStarted || started.PID != 4321 {
 		t.Fatalf("started = %+v, want the process event and its pid", started)
 	}
 
 	step := agentCLIProgressEvent(agentcli.Activity{Kind: agentcli.ActivityStep, Step: "command_execution"})
-	if step.Kind != domain.ACPEventToolCall || step.Tool != nil {
+	if step.Kind != domain.ExternalAgentEventToolCall || step.Tool != nil {
 		t.Fatalf("step = %+v, want a tool call with no tracked identity", step)
 	}
 
@@ -193,12 +193,12 @@ func TestAgentCLIProgressEventMapping(t *testing.T) {
 // The failure class is bounded and never carries the error text.
 func TestAgentCLIFailureClassIsBounded(t *testing.T) {
 	t.Parallel()
-	plain := acpFailureClass(errors.New("codex wrote /etc/passwd"))
-	if plain != string(domain.ACPErrorProcessExit) {
+	plain := externalAgentFailureClass(errors.New("codex wrote /etc/passwd"))
+	if plain != string(domain.ExternalAgentErrorProcessExit) {
 		t.Fatalf("class = %q, want the default process-exit class", plain)
 	}
-	typed := acpFailureClass(&domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("secret")})
-	if typed != string(domain.ACPErrorResultTooLarge) {
+	typed := externalAgentFailureClass(&domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultTooLarge, Err: errors.New("secret")})
+	if typed != string(domain.ExternalAgentErrorResultTooLarge) {
 		t.Fatalf("class = %q, want the typed code", typed)
 	}
 }

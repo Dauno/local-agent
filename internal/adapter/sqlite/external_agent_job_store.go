@@ -100,7 +100,7 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 		job.ID, job.Mode, job.Provider, job.Profile, job.PrimaryProject, string(projects),
 		job.RegistryRevision, job.Task, job.RequestSHA256, job.WrapperCallID, job.OriginalCallID,
 		job.Actor, job.TeamID, string(job.ConversationKey), job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision,
-		job.Status, job.Attempt, job.ACPSessionID,
+		job.Status, job.Attempt, job.ExternalAgentSessionID,
 		boolInt(job.SideEffectsPossible), job.LeaseOwner, unix(job.LeaseExpiry), unix(job.HeartbeatAt), unix(job.TimeoutAt),
 		job.ResultSummary, job.ResultArtifact, job.ResultSHA256, job.ResultBytes, job.ErrorCode,
 		job.StatusRevision, unix(job.CreatedAt), unix(job.StartedAt), unix(job.FinishedAt), unix(job.UpdatedAt),
@@ -199,9 +199,9 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	}
 	view := &domain.ExternalAgentJobInspection{
 		JobID: jobID, Status: safeAdminJobStatus(status), StatusRevision: statusRevision,
-		ACPSessionID: safeAdminSessionID(sessionID), FinishedAt: fromUnix(finishedAt),
-		Phase:                    domain.ACPProgressPhase(phase),
-		LastEventKind:            domain.ACPEventKind(lastEventKind),
+		ExternalAgentSessionID: safeAdminSessionID(sessionID), FinishedAt: fromUnix(finishedAt),
+		Phase:                    domain.ExternalAgentProgressPhase(phase),
+		LastEventKind:            domain.ExternalAgentEventKind(lastEventKind),
 		LastTransportActivityAt:  fromUnix(transport),
 		LastSessionUpdateAt:      fromUnix(session),
 		LastMeaningfulProgressAt: fromUnix(meaningful),
@@ -382,7 +382,7 @@ func (s *ExternalAgentJobStore) RenewLease(ctx context.Context, jobID, owner str
 	return nil
 }
 
-func (s *ExternalAgentJobStore) AssignACPSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error {
+func (s *ExternalAgentJobStore) AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error {
 	if sessionID == "" {
 		return errors.New("ACP session ID is required")
 	}
@@ -527,7 +527,7 @@ func (s *ExternalAgentJobStore) beginReconciliation(ctx context.Context, jobID, 
 	return &job, nil
 }
 
-func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.AcpInvocationResult, errorCode string, now time.Time) error {
+func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
@@ -541,7 +541,7 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 		if result == nil || result.NativeResultID == "" {
 			return cause
 		}
-		if err := quarantineNativeACPResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
+		if err := quarantineNativeExternalAgentResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
 			return fmt.Errorf("quarantine unbound native ACP result: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
@@ -570,11 +570,11 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 	}
 	if result != nil && result.NativeResultID != "" {
 		if next != domain.JobCompleted {
-			if err := quarantineNativeACPResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
+			if err := quarantineNativeExternalAgentResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
 				return fmt.Errorf("quarantine non-completed native ACP result: %w", err)
 			}
-		} else if err := bindNativeACPResult(ctx, tx, job, *result); err != nil {
-			if quarantineErr := quarantineNativeACPResult(ctx, tx, result.NativeResultID, job.ID); quarantineErr != nil {
+		} else if err := bindNativeExternalAgentResult(ctx, tx, job, *result); err != nil {
+			if quarantineErr := quarantineNativeExternalAgentResult(ctx, tx, result.NativeResultID, job.ID); quarantineErr != nil {
 				return fmt.Errorf("validate native ACP result: %v; quarantine: %w", err, quarantineErr)
 			}
 			if commitErr := tx.Commit(); commitErr != nil {
@@ -636,7 +636,7 @@ func (s *ExternalAgentJobStore) NativeResultIDForJob(ctx context.Context, jobID 
 
 var _ port.ExternalAgentJobNativeResultStore = (*ExternalAgentJobStore)(nil)
 
-func bindNativeACPResult(ctx context.Context, tx *sql.Tx, job domain.ExternalAgentJob, result domain.AcpInvocationResult) error {
+func bindNativeExternalAgentResult(ctx context.Context, tx *sql.Tx, job domain.ExternalAgentJob, result domain.ExternalAgentInvocationResult) error {
 	if !validResultOpaqueID(result.NativeResultID) || job.Status != domain.JobCompleted {
 		return domain.ErrResultInvalid
 	}
@@ -651,7 +651,7 @@ func bindNativeACPResult(ctx context.Context, tx *sql.Tx, job domain.ExternalAge
 	if err != nil {
 		return domain.ErrResultUnavailable
 	}
-	if producerKind != string(domain.ResultProducerACPJob) || producerID != job.ID || producerRevision != job.StatusRevision ||
+	if producerKind != string(domain.ResultProducerExternalAgentJob) || producerID != job.ID || producerRevision != job.StatusRevision ||
 		state != string(domain.ResultAvailable) || sha256Hex != result.ResultSHA256 || resultBytes != job.ResultBytes ||
 		actor != job.Actor || teamID != job.TeamID || conversationKey != string(job.ConversationKey) || project != job.PrimaryProject {
 		return domain.ErrResultInvalid
@@ -677,13 +677,13 @@ func bindNativeACPResult(ctx context.Context, tx *sql.Tx, job domain.ExternalAge
 	return err
 }
 
-func quarantineNativeACPResult(ctx context.Context, tx *sql.Tx, resultID, jobID string) error {
+func quarantineNativeExternalAgentResult(ctx context.Context, tx *sql.Tx, resultID, jobID string) error {
 	if !validResultOpaqueID(resultID) || strings.TrimSpace(jobID) == "" {
 		return domain.ErrResultInvalid
 	}
 	changed, err := tx.ExecContext(ctx, `UPDATE result_records SET state = 'quarantined'
 		WHERE result_id = ? AND producer_kind = ? AND producer_id = ? AND state = 'available'`,
-		resultID, domain.ResultProducerACPJob, jobID)
+		resultID, domain.ResultProducerExternalAgentJob, jobID)
 	if err != nil {
 		return err
 	}
@@ -699,13 +699,13 @@ func quarantineNativeACPResult(ctx context.Context, tx *sql.Tx, resultID, jobID 
 	if err != nil {
 		return err
 	}
-	if producerKind != string(domain.ResultProducerACPJob) || producerID != jobID || state != string(domain.ResultQuarantined) {
+	if producerKind != string(domain.ResultProducerExternalAgentJob) || producerID != jobID || state != string(domain.ResultQuarantined) {
 		return domain.ErrResultInvalid
 	}
 	return nil
 }
 
-func quarantineUnboundNativeACPResults(ctx context.Context, tx *sql.Tx, jobID string) error {
+func quarantineUnboundNativeExternalAgentResults(ctx context.Context, tx *sql.Tx, jobID string) error {
 	if strings.TrimSpace(jobID) == "" {
 		return domain.ErrResultInvalid
 	}
@@ -714,7 +714,7 @@ func quarantineUnboundNativeACPResults(ctx context.Context, tx *sql.Tx, jobID st
 		AND NOT EXISTS (
 			SELECT 1 FROM result_references rr
 			WHERE rr.result_id = result_records.result_id AND rr.state = 'live'
-		)`, domain.ResultProducerACPJob, jobID)
+		)`, domain.ResultProducerExternalAgentJob, jobID)
 	return err
 }
 
@@ -793,7 +793,7 @@ func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string
 	if err != nil {
 		return err
 	}
-	if err := quarantineUnboundNativeACPResults(ctx, tx, job.ID); err != nil {
+	if err := quarantineUnboundNativeExternalAgentResults(ctx, tx, job.ID); err != nil {
 		return fmt.Errorf("quarantine unbound native ACP results during recovery: %w", err)
 	}
 	if err := insertJobEvent(ctx, tx, job, "recovery"); err != nil {
@@ -818,7 +818,7 @@ func isNotificationTerminal(status domain.ExternalAgentJobStatus) bool {
 
 func insertJobNotification(ctx context.Context, exec interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, job domain.ExternalAgentJob, result *domain.AcpInvocationResult) error {
+}, job domain.ExternalAgentJob, result *domain.ExternalAgentInvocationResult) error {
 	var notification domain.ExternalAgentJobNotification
 	var err error
 	if result != nil && job.Status == domain.JobCompleted && job.Mode == domain.JobDetached {
@@ -1326,7 +1326,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 		leaseExpiry, heartbeat, timeout, created, started, finished, updated int64
 		sideEffects                                                          int
 	)
-	err := row.Scan(&job.ID, &mode, &job.Provider, &job.Profile, &job.PrimaryProject, &projects, &job.RegistryRevision, &job.Task, &job.RequestSHA256, &job.WrapperCallID, &job.OriginalCallID, &job.Actor, &job.TeamID, &conversation, &job.WorkstreamID, &job.TaskID, &job.ExecutionIdentity, &job.AdmissionRevision, &status, &job.Attempt, &job.ACPSessionID, &sideEffects, &job.LeaseOwner, &leaseExpiry, &heartbeat, &timeout, &job.ResultSummary, &job.ResultArtifact, &job.ResultSHA256, &job.ResultBytes, &job.ErrorCode, &job.StatusRevision, &created, &started, &finished, &updated)
+	err := row.Scan(&job.ID, &mode, &job.Provider, &job.Profile, &job.PrimaryProject, &projects, &job.RegistryRevision, &job.Task, &job.RequestSHA256, &job.WrapperCallID, &job.OriginalCallID, &job.Actor, &job.TeamID, &conversation, &job.WorkstreamID, &job.TaskID, &job.ExecutionIdentity, &job.AdmissionRevision, &status, &job.Attempt, &job.ExternalAgentSessionID, &sideEffects, &job.LeaseOwner, &leaseExpiry, &heartbeat, &timeout, &job.ResultSummary, &job.ResultArtifact, &job.ResultSHA256, &job.ResultBytes, &job.ErrorCode, &job.StatusRevision, &created, &started, &finished, &updated)
 	if err != nil {
 		return domain.ExternalAgentJob{}, err
 	}

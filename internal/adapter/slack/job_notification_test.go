@@ -50,7 +50,7 @@ func TestJobNotificationPublisherUsesDeterministicMetadata(t *testing.T) {
 func TestJobNotificationPublisherEmitsDistinctIdentityPairsForDeliveredResult(t *testing.T) {
 	text := "safe delivered result"
 	job := domain.ExternalAgentJob{ID: "job-1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 3, ConversationKey: "slack:T12345678:dm:D12345678"}
-	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
 		Text: text, ResultSHA256: contentSHA256(text), ResultBytes: int64(len([]byte(text))),
 		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryContentSHA256: contentSHA256(text), DeliveryContentBytes: int64(len([]byte(text))),
@@ -612,7 +612,7 @@ func markdownTestNotification(t *testing.T, wantParts int) domain.ExternalAgentJ
 	text := strings.Repeat("界", domain.SlackMarkdownChunkRunes*(wantParts-1)-20)
 	job := domain.ExternalAgentJob{ID: fmt.Sprintf("job-%d", wantParts), Status: domain.JobCompleted, StatusRevision: 3, Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678"}
 	digest := contentSHA256(text)
-	notification, err := domain.NewExternalAgentJobDelivery(job, domain.AcpInvocationResult{
+	notification, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
 		Text: text, ResultSHA256: digest, ResultBytes: int64(len([]byte(text))), DeliveryMode: domain.JobResultDeliveryMarkdown,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(text))),
 		DeliveryMaxMarkdownParts: 6, DeliveryCanonicalMarkdown: fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text),

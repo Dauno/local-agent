@@ -57,25 +57,25 @@ func (m *agentToolNonStreamingModel) GenerateContent(ctx context.Context, reques
 // rebuilt per invocation because their tool instances capture invocation
 // identity. ACP children carry an ExternalAgentRuntime reference.
 type preparedAgentTool struct {
-	definition       agentdef.AgentDef
-	model            model.LLM
-	contextCompiler  port.ContextCompiler
-	contextCounter   port.RequestTokenCounter
-	contextBudget    domain.RequestBudget
-	cliTool          tool.Tool
-	cliResolved      *agentdef.ResolvedModel
-	projectRoots     map[string]string
-	acpTimeout       time.Duration
-	executionMode    string
-	registryRevision string
+	definition           agentdef.AgentDef
+	model                model.LLM
+	contextCompiler      port.ContextCompiler
+	contextCounter       port.RequestTokenCounter
+	contextBudget        domain.RequestBudget
+	cliTool              tool.Tool
+	cliResolved          *agentdef.ResolvedModel
+	projectRoots         map[string]string
+	externalAgentTimeout time.Duration
+	executionMode        string
+	registryRevision     string
 }
 
-type acpAgentArgs struct {
+type externalAgentArgs struct {
 	Project string `json:"project" jsonschema:"registered project name to use as the workspace"`
 	Task    string `json:"task" jsonschema:"complete bounded task for the external agent"`
 }
 
-type acpAgentResult struct {
+type externalAgentResult struct {
 	Result       string               `json:"result"`
 	ResultHandle *boundedResultHandle `json:"result_handle,omitempty"`
 }
@@ -159,14 +159,14 @@ func prepareRootAgentTools(
 				return nil, fmt.Errorf("fingerprint agent tool %q scope: %w", name, err)
 			}
 			prepared = append(prepared, preparedAgentTool{
-				definition:       definition,
-				model:            childModel,
-				cliResolved:      resolved,
-				projectRoots:     paths.SandboxProjectRoots,
-				cliTool:          agenttool.New(child, &agenttool.Config{}),
-				executionMode:    definition.ExecutionMode,
-				acpTimeout:       acpAgentTimeout(definition, acpAgentFallback(definition, cfg)),
-				registryRevision: revision,
+				definition:           definition,
+				model:                childModel,
+				cliResolved:          resolved,
+				projectRoots:         paths.SandboxProjectRoots,
+				cliTool:              agenttool.New(child, &agenttool.Config{}),
+				executionMode:        definition.ExecutionMode,
+				externalAgentTimeout: externalAgentTimeout(definition, externalAgentFallback(definition, cfg)),
+				registryRevision:     revision,
 			})
 			continue
 		}
@@ -295,7 +295,7 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 			// confirmation gate and the job record, so it is rebuilt per call.
 			// A foreground leaf reuses the startup-validated wrapper.
 			if child.executionMode == agentdef.ExecutionModeDurableJob {
-				durable, err := newAgentCLIDurableTool(child.definition, child.cliResolved, child.projectRoots, child.acpTimeout, child.registryRevision, f.jobStarter, f.completionBindings, actor, key)
+				durable, err := newAgentCLIDurableTool(child.definition, child.cliResolved, child.projectRoots, child.externalAgentTimeout, child.registryRevision, f.jobStarter, f.completionBindings, actor, key)
 				if err != nil {
 					return nil, fmt.Errorf("build durable agent CLI tool %q: %w", child.definition.Name, err)
 				}
@@ -345,7 +345,7 @@ func (f *compositeAgentToolFactory) ToolsForActivation(actor string, key domain.
 	return factory.ToolsForActivation(actor, key, activation)
 }
 
-func acpDelegationConfirmation(ctx context.Context, completionBindings port.ExternalAgentJobCompletionBindingResolver, actor string, key domain.ConversationKey, args acpAgentArgs) (string, map[string]any) {
+func externalAgentDelegationConfirmation(ctx context.Context, completionBindings port.ExternalAgentJobCompletionBindingResolver, actor string, key domain.ConversationKey, args externalAgentArgs) (string, map[string]any) {
 	task := boundedConfirmationText(args.Task, maxConfirmationTaskRunes)
 	payload := map[string]any{
 		"project": args.Project,
@@ -383,17 +383,17 @@ func boundedConfirmationText(value string, maxRunes int) string {
 	return string(runes[:maxRunes]) + "…"
 }
 
-func acpAgentTimeout(definition agentdef.AgentDef, fallback time.Duration) time.Duration {
+func externalAgentTimeout(definition agentdef.AgentDef, fallback time.Duration) time.Duration {
 	if definition.TimeoutSeconds > 0 {
 		return time.Duration(definition.TimeoutSeconds) * time.Second
 	}
 	return fallback
 }
 
-func acpAgentFallback(definition agentdef.AgentDef, cfg config.Config) time.Duration {
+func externalAgentFallback(definition agentdef.AgentDef, cfg config.Config) time.Duration {
 	if definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
 		// Detached jobs have their own total budget; root model timeout is unrelated.
-		return time.Duration(cfg.ACP.DefaultJobTimeoutSeconds) * time.Second
+		return time.Duration(cfg.ExternalAgent.DefaultJobTimeoutSeconds) * time.Second
 	}
 	return time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second
 }
@@ -434,7 +434,7 @@ func teamIDFromConversation(key domain.ConversationKey) string {
 	return ""
 }
 
-func resolveACPProject(projectRoots map[string]string, project string) (string, error) {
+func resolveExternalAgentProject(projectRoots map[string]string, project string) (string, error) {
 	if strings.TrimSpace(project) == "" {
 		return "", errors.New("project must not be empty")
 	}
@@ -647,27 +647,27 @@ func newAgentCLIDurableTool(
 	return functiontool.New(functiontool.Config{
 		Name:        definition.Name,
 		Description: definition.Description + " Requires confirmation because the agent CLI may modify files and run commands within its approval policy.",
-	}, func(ctx agent.Context, args acpAgentArgs) (acpAgentResult, error) {
-		primaryPath, err := resolveACPProject(projectRoots, args.Project)
+	}, func(ctx agent.Context, args externalAgentArgs) (externalAgentResult, error) {
+		primaryPath, err := resolveExternalAgentProject(projectRoots, args.Project)
 		if err != nil {
-			return acpAgentResult{}, err
+			return externalAgentResult{}, err
 		}
 		if strings.TrimSpace(args.Task) == "" {
-			return acpAgentResult{}, errors.New("agent CLI task must not be empty")
+			return externalAgentResult{}, errors.New("agent CLI task must not be empty")
 		}
 		confirmation := ctx.ToolConfirmation()
 		if confirmation == nil {
-			hint, payload := acpDelegationConfirmation(ctx, completionBindings, actor, key, args)
+			hint, payload := externalAgentDelegationConfirmation(ctx, completionBindings, actor, key, args)
 			if err := ctx.RequestConfirmation(hint, payload); err != nil {
-				return acpAgentResult{}, err
+				return externalAgentResult{}, err
 			}
-			return acpAgentResult{}, nil
+			return externalAgentResult{}, nil
 		}
 		if !confirmation.Confirmed {
-			return acpAgentResult{}, errors.New("agent CLI delegation confirmation was rejected")
+			return externalAgentResult{}, errors.New("agent CLI delegation confirmation was rejected")
 		}
 		if jobStarter == nil || actor == "" || key == "" || registryRevision == "" {
-			return acpAgentResult{}, errors.New("durable agent CLI execution is not configured for this invocation")
+			return externalAgentResult{}, errors.New("durable agent CLI execution is not configured for this invocation")
 		}
 		request := domain.ExternalAgentJobRequest{
 			Provider: resolved.Provider.Name, Profile: definition.Model, PrimaryProject: args.Project,
@@ -679,7 +679,7 @@ func newAgentCLIDurableTool(
 		if completionBindings != nil {
 			binding, found, bindingErr := completionBindings.CompletionBindingForTask(ctx, actor, key, args.Project, args.Task)
 			if bindingErr != nil {
-				return acpAgentResult{}, fmt.Errorf("resolve external-agent completion binding: %w", bindingErr)
+				return externalAgentResult{}, fmt.Errorf("resolve external-agent completion binding: %w", bindingErr)
 			}
 			if found {
 				request.WorkstreamID = binding.WorkstreamID
@@ -690,9 +690,9 @@ func newAgentCLIDurableTool(
 		}
 		job, err := jobStarter.Start(ctx, request)
 		if err != nil {
-			return acpAgentResult{}, err
+			return externalAgentResult{}, err
 		}
 		encoded, _ := json.Marshal(map[string]any{"status": "accepted", "job_id": job.ID, "request_sha256": job.RequestSHA256})
-		return acpAgentResult{Result: string(encoded)}, nil
+		return externalAgentResult{Result: string(encoded)}, nil
 	})
 }

@@ -7,7 +7,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var _ port.ACPProcessRegistry = (*inProcessRegistry)(nil)
+var _ port.ExternalAgentProcessRegistry = (*inProcessRegistry)(nil)
 
 // inProcessRegistry tracks the best-effort liveness of the ACP process
 // spawned for each active job attempt. It is intentionally in-memory only:

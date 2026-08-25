@@ -337,7 +337,7 @@ func validateBuilderDraft(callback slackapi.InteractionCallback, draft domain.Ag
 	if err := domain.ValidateExecutionMode(draft.Kind, mode); err != nil {
 		return err
 	}
-	if err := domain.ValidateACPTimeout(draft.TimeoutSeconds); err != nil {
+	if err := domain.ValidateExternalAgentTimeout(draft.TimeoutSeconds); err != nil {
 		return err
 	}
 	// Parse the raw value so malformed numeric input is not silently treated as zero.

@@ -36,7 +36,7 @@ func NewActiveProgressGauge(metrics port.MetricRecorder) *ActiveProgressGauge {
 func (g *ActiveProgressGauge) inc() {
 	g.mu.Lock()
 	g.count++
-	g.metrics.SetGauge(domain.MetricExternalAgentACPActiveJobs, g.count, nil)
+	g.metrics.SetGauge(domain.MetricExternalAgentActiveJobs, g.count, nil)
 	g.mu.Unlock()
 }
 
@@ -46,7 +46,7 @@ func (g *ActiveProgressGauge) dec() {
 	if g.count < 0 {
 		g.count = 0
 	}
-	g.metrics.SetGauge(domain.MetricExternalAgentACPActiveJobs, g.count, nil)
+	g.metrics.SetGauge(domain.MetricExternalAgentActiveJobs, g.count, nil)
 	g.mu.Unlock()
 }
 
@@ -57,7 +57,7 @@ func (g *ActiveProgressGauge) dec() {
 // a job. Monitoring failure is observable but never fails the ACP invocation.
 type ProgressRecorder struct {
 	store     port.ExternalAgentJobProgressStore
-	registry  port.ACPProcessRegistry
+	registry  port.ExternalAgentProcessRegistry
 	clock     port.Clock
 	logger    port.Logger
 	metrics   port.MetricRecorder
@@ -83,7 +83,7 @@ type ProgressRecorder struct {
 
 // NewProgressRecorder creates the recorder bound to one job attempt. The
 // owner is the job lease owner captured at claim time.
-func NewProgressRecorder(store port.ExternalAgentJobProgressStore, registry port.ACPProcessRegistry, clock port.Clock, logger port.Logger, metrics port.MetricRecorder, gauge *ActiveProgressGauge, warnAfter time.Duration, jobID, owner string, attempt int) *ProgressRecorder {
+func NewProgressRecorder(store port.ExternalAgentJobProgressStore, registry port.ExternalAgentProcessRegistry, clock port.Clock, logger port.Logger, metrics port.MetricRecorder, gauge *ActiveProgressGauge, warnAfter time.Duration, jobID, owner string, attempt int) *ProgressRecorder {
 	if clock == nil {
 		clock = port.SystemClock{}
 	}
@@ -103,7 +103,7 @@ func NewProgressRecorder(store port.ExternalAgentJobProgressStore, registry port
 		store: store, registry: registry, clock: clock, logger: logger, metrics: metrics,
 		gauge: gauge, warnAfter: warnAfter, jobID: jobID, owner: owner, attempt: attempt,
 		proj: domain.ExternalAgentJobProgress{
-			JobID: jobID, Attempt: attempt, Phase: domain.ACPPhaseStarting,
+			JobID: jobID, Attempt: attempt, Phase: domain.ExternalAgentPhaseStarting,
 		},
 		flushCh: make(chan struct{}, 1), stopCh: make(chan struct{}), stopped: make(chan struct{}),
 	}
@@ -119,7 +119,7 @@ func (r *ProgressRecorder) SetSessionID(sessionID string) {
 	r.mu.Unlock()
 	if changed {
 		r.logger.Info("external-agent ACP session established",
-			"job_id", r.jobID, "attempt", attempt, "acp_session_id", sessionID, "phase", domain.ACPPhaseSessionReady)
+			"job_id", r.jobID, "attempt", attempt, "acp_session_id", sessionID, "phase", domain.ExternalAgentPhaseSessionReady)
 	}
 }
 
@@ -161,29 +161,29 @@ func (r *ProgressRecorder) Start(ctx context.Context) {
 // Record folds one content-free event into the in-memory projection. The ACP
 // reader is never blocked on SQLite: durable writes happen on the monitor
 // goroutine or during Close.
-func (r *ProgressRecorder) Record(event domain.ACPProgressEvent) {
+func (r *ProgressRecorder) Record(event domain.ExternalAgentProgressEvent) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.closed {
 		return
 	}
 	now := r.clock.Now().UTC()
-	if event.Kind == domain.ACPEventProcessStarted && event.PID > 0 && r.registry != nil {
+	if event.Kind == domain.ExternalAgentEventProcessStarted && event.PID > 0 && r.registry != nil {
 		r.registry.Register(r.jobID, r.attempt, event.PID)
 		r.pid = event.PID
 	}
-	if event.Kind == domain.ACPEventProcessStarted {
+	if event.Kind == domain.ExternalAgentEventProcessStarted {
 		r.logger.Info("external-agent ACP process started",
-			"job_id", r.jobID, "attempt", r.attempt, "pid", event.PID, "phase", domain.ACPPhaseStarting)
+			"job_id", r.jobID, "attempt", r.attempt, "pid", event.PID, "phase", domain.ExternalAgentPhaseStarting)
 	}
 	previousPhase := r.proj.Phase
 	r.proj.Apply(event, now)
 	r.proj.UpdatedAt = now
-	r.metrics.AddCounter(domain.MetricExternalAgentACPProgressEventTotal, 1, port.MetricLabels{
+	r.metrics.AddCounter(domain.MetricExternalAgentProgressEventTotal, 1, port.MetricLabels{
 		"event_kind": string(r.proj.LastEventKind),
 	})
 	if r.proj.Phase != previousPhase {
-		r.metrics.AddCounter(domain.MetricExternalAgentACPPhaseTransitionTotal, 1, port.MetricLabels{
+		r.metrics.AddCounter(domain.MetricExternalAgentPhaseTransitionTotal, 1, port.MetricLabels{
 			"phase": string(r.proj.Phase),
 		})
 		r.logger.Debug("external-agent ACP phase transition",
@@ -194,15 +194,15 @@ func (r *ProgressRecorder) Record(event domain.ACPProgressEvent) {
 	}
 }
 
-func (r *ProgressRecorder) immediate(event domain.ACPProgressEvent) bool {
+func (r *ProgressRecorder) immediate(event domain.ExternalAgentProgressEvent) bool {
 	switch event.Kind {
-	case domain.ACPEventProcessStarted, domain.ACPEventSessionNew,
-		domain.ACPEventPromptSent, domain.ACPEventPermissionRequested,
-		domain.ACPEventPermissionResponded, domain.ACPEventPromptResponse,
-		domain.ACPEventProcessFailed:
+	case domain.ExternalAgentEventProcessStarted, domain.ExternalAgentEventSessionNew,
+		domain.ExternalAgentEventPromptSent, domain.ExternalAgentEventPermissionRequested,
+		domain.ExternalAgentEventPermissionResponded, domain.ExternalAgentEventPromptResponse,
+		domain.ExternalAgentEventProcessFailed:
 		return true
-	case domain.ACPEventToolCallUpdate:
-		return event.Tool != nil && event.Tool.Status == domain.ACPToolStatusTerminal
+	case domain.ExternalAgentEventToolCallUpdate:
+		return event.Tool != nil && event.Tool.Status == domain.ExternalAgentToolStatusTerminal
 	default:
 		return false
 	}
@@ -231,7 +231,7 @@ func (r *ProgressRecorder) Close() {
 
 // RecordAndClose folds a terminal event and flushes it synchronously. It is
 // used by hosts that observe prompt completion outside the monitor path.
-func (r *ProgressRecorder) RecordAndClose(event domain.ACPProgressEvent) {
+func (r *ProgressRecorder) RecordAndClose(event domain.ExternalAgentProgressEvent) {
 	r.Record(event)
 	r.Close()
 }
@@ -256,17 +256,17 @@ func (r *ProgressRecorder) maintenance(immediate bool) {
 	now := r.clock.Now().UTC()
 	health := DeriveProgressHealth(r.proj, now, r.warnAfter, r.processAliveLocked(), false)
 	switch {
-	case health == domain.ACPHealthPossiblyStalled && !r.warned:
+	case health == domain.ExternalAgentHealthPossiblyStalled && !r.warned:
 		r.warned = true
 		idle := max(now.Sub(r.proj.LastTransportActivityAt), 0)
 		r.logger.Warn("external-agent ACP possibly stalled",
 			"job_id", r.jobID, "attempt", r.attempt, "acp_session_id", r.sessionID,
 			"phase", r.proj.Phase, "last_event_kind", r.proj.LastEventKind,
 			"idle_seconds", int(idle.Seconds()), "pid", r.pid)
-		r.metrics.AddCounter(domain.MetricExternalAgentACPInactivityWarningTotal, 1, port.MetricLabels{
+		r.metrics.AddCounter(domain.MetricExternalAgentInactivityWarningTotal, 1, port.MetricLabels{
 			"health": string(health),
 		})
-	case health != domain.ACPHealthPossiblyStalled && r.warned:
+	case health != domain.ExternalAgentHealthPossiblyStalled && r.warned:
 		// Re-arm only after new activity.
 		r.warned = false
 	}
@@ -301,13 +301,13 @@ func (r *ProgressRecorder) flushSynchronous() {
 // ACP reader.
 func (r *ProgressRecorder) flushNow(proj domain.ExternalAgentJobProgress) {
 	if r.store == nil {
-		r.metrics.AddCounter(domain.MetricExternalAgentACPProgressPersistFailureTotal, 1, port.MetricLabels{"outcome": "unconfigured"})
+		r.metrics.AddCounter(domain.MetricExternalAgentProgressPersistFailureTotal, 1, port.MetricLabels{"outcome": "unconfigured"})
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), progressWriteTimeout)
 	defer cancel()
 	if err := r.store.WriteJobProgress(ctx, r.jobID, r.owner, r.attempt, proj); err != nil {
-		r.metrics.AddCounter(domain.MetricExternalAgentACPProgressPersistFailureTotal, 1, port.MetricLabels{"outcome": "write_failed"})
+		r.metrics.AddCounter(domain.MetricExternalAgentProgressPersistFailureTotal, 1, port.MetricLabels{"outcome": "write_failed"})
 		r.logger.Warn("external-agent ACP progress persist failed",
 			"job_id", r.jobID, "attempt", r.attempt, "error_class", progressFailureClass(err))
 		return
@@ -318,9 +318,9 @@ func (r *ProgressRecorder) flushNow(proj domain.ExternalAgentJobProgress) {
 }
 
 func progressFailureClass(err error) string {
-	var acpErr *domain.ACPError
-	if errors.As(err, &acpErr) && acpErr.Code != "" {
-		return string(acpErr.Code)
+	var externalAgentErr *domain.ExternalAgentError
+	if errors.As(err, &externalAgentErr) && externalAgentErr.Code != "" {
+		return string(externalAgentErr.Code)
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return "write_timeout"
@@ -333,34 +333,34 @@ func progressFailureClass(err error) string {
 // death, so it cannot claim possibly_stalled on its own. A durable terminal
 // job is always terminal, even when its projection shows a failed phase
 // without a stop reason.
-func DeriveProgressHealth(proj domain.ExternalAgentJobProgress, now time.Time, warnAfter time.Duration, alive *bool, jobTerminal bool) domain.ACPProgressHealth {
+func DeriveProgressHealth(proj domain.ExternalAgentJobProgress, now time.Time, warnAfter time.Duration, alive *bool, jobTerminal bool) domain.ExternalAgentProgressHealth {
 	if warnAfter <= 0 {
 		warnAfter = 900 * time.Second
 	}
 	if jobTerminal {
-		return domain.ACPHealthTerminal
+		return domain.ExternalAgentHealthTerminal
 	}
 	switch proj.Phase {
-	case domain.ACPPhaseCompleted, domain.ACPPhaseCancelled:
-		return domain.ACPHealthTerminal
-	case domain.ACPPhaseFailed:
+	case domain.ExternalAgentPhaseCompleted, domain.ExternalAgentPhaseCancelled:
+		return domain.ExternalAgentHealthTerminal
+	case domain.ExternalAgentPhaseFailed:
 		if proj.StopReason == "" {
 			// The process or transport ended without a terminal prompt response.
-			return domain.ACPHealthDisconnected
+			return domain.ExternalAgentHealthDisconnected
 		}
-		return domain.ACPHealthTerminal
+		return domain.ExternalAgentHealthTerminal
 	}
-	if proj.Phase == "" || proj.Phase == domain.ACPPhaseStarting || proj.Phase == domain.ACPPhaseSessionReady {
-		return domain.ACPHealthActive
+	if proj.Phase == "" || proj.Phase == domain.ExternalAgentPhaseStarting || proj.Phase == domain.ExternalAgentPhaseSessionReady {
+		return domain.ExternalAgentHealthActive
 	}
 	if alive != nil && !*alive {
-		return domain.ACPHealthDisconnected
+		return domain.ExternalAgentHealthDisconnected
 	}
 	if !proj.LastMeaningfulProgressAt.IsZero() && now.Sub(proj.LastMeaningfulProgressAt) < warnAfter {
-		return domain.ACPHealthActive
+		return domain.ExternalAgentHealthActive
 	}
 	if alive != nil && *alive && now.Sub(proj.LastTransportActivityAt) >= warnAfter {
-		return domain.ACPHealthPossiblyStalled
+		return domain.ExternalAgentHealthPossiblyStalled
 	}
-	return domain.ACPHealthQuiet
+	return domain.ExternalAgentHealthQuiet
 }

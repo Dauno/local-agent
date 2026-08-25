@@ -315,8 +315,8 @@ func TestJobsInspectRendersSessionAndProgress(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 41, 2, 0, time.UTC)
 	backend := &inspectionBackend{fakeBackend: setupBackend(), view: &domain.ExternalAgentJobInspection{
 		JobID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1,
-		ACPSessionID: "ses_full_identity_0123456789", Phase: domain.ACPPhaseToolRunning,
-		Health: domain.ACPHealthPossiblyStalled, LastEventKind: domain.ACPEventToolCallUpdate,
+		ExternalAgentSessionID: "ses_full_identity_0123456789", Phase: domain.ExternalAgentPhaseToolRunning,
+		Health: domain.ExternalAgentHealthPossiblyStalled, LastEventKind: domain.ExternalAgentEventToolCallUpdate,
 		LastTransportActivityAt: base, PromptElapsedSeconds: 3780,
 		ActiveToolCount: 1, PendingPermission: true, StopReason: "",
 	}}
@@ -363,7 +363,7 @@ func TestJobsInspectRendersPendingSession(t *testing.T) {
 func TestJobsReconcileRendersSessionID(t *testing.T) {
 	backend := &reconciliationBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{
 		JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5,
-		ResultAvailable: true, ACPSessionID: "ses_reconciled_identity",
+		ResultAvailable: true, ExternalAgentSessionID: "ses_reconciled_identity",
 		ResultSHA256: strings.Repeat("a", 64), ResultBytes: 1024, DeliveryMode: domain.JobResultDeliveryFile,
 	}}
 	var output, stderr bytes.Buffer

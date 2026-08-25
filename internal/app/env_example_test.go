@@ -151,7 +151,7 @@ profiles:
 	}
 }
 
-func TestPrepareSetupRewritesEnvExampleForACPWithoutKey(t *testing.T) {
+func TestPrepareSetupRewritesEnvExampleForExternalAgentWithoutKey(t *testing.T) {
 	application, _, _ := newSeamApplication(t)
 	service, err := application.bootstrapService()
 	if err != nil {

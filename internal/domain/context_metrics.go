@@ -185,9 +185,9 @@ const (
 // enums (event kind, phase, health, outcome). Job ID, session ID, PID,
 // tool-call ID, actor, conversation, and paths are forbidden as labels.
 const (
-	MetricExternalAgentACPProgressEventTotal          = "external_agent_acp_progress_event_total"
-	MetricExternalAgentACPPhaseTransitionTotal        = "external_agent_acp_phase_transition_total"
-	MetricExternalAgentACPProgressPersistFailureTotal = "external_agent_acp_progress_persist_failure_total"
-	MetricExternalAgentACPInactivityWarningTotal      = "external_agent_acp_inactivity_warning_total"
-	MetricExternalAgentACPActiveJobs                  = "external_agent_acp_active_jobs"
+	MetricExternalAgentProgressEventTotal          = "external_agent_acp_progress_event_total"
+	MetricExternalAgentPhaseTransitionTotal        = "external_agent_acp_phase_transition_total"
+	MetricExternalAgentProgressPersistFailureTotal = "external_agent_acp_progress_persist_failure_total"
+	MetricExternalAgentInactivityWarningTotal      = "external_agent_acp_inactivity_warning_total"
+	MetricExternalAgentActiveJobs                  = "external_agent_acp_active_jobs"
 )

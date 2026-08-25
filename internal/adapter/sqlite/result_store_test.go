@@ -291,7 +291,7 @@ func TestResultStoreVerifyForWorkstreamRejectsForeignScopeBeforePayloadRead(t *t
 	}
 }
 
-func TestResultStoreVerifyForWorkstreamRejectsACPProducerScopeMismatch(t *testing.T) {
+func TestResultStoreVerifyForWorkstreamRejectsExternalAgentProducerScopeMismatch(t *testing.T) {
 	store, err := Initialize(t.Context(), filepath.Join(t.TempDir(), "workstream-acp-scope.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -308,7 +308,7 @@ func TestResultStoreVerifyForWorkstreamRejectsACPProducerScopeMismatch(t *testin
 		t.Fatalf("claim = %#v, %v", claimed, err)
 	}
 	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted,
-		&domain.AcpInvocationResult{Text: "done", Inline: true, ResultBytes: 4}, "", now.Add(time.Second)); err != nil {
+		&domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4}, "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
 	}
 	completed, err := jobs.GetJob(t.Context(), job.ID)
@@ -350,7 +350,7 @@ func TestResultStoreVerifyForWorkstreamRejectsACPProducerScopeMismatch(t *testin
 
 func testResultMaterialization(id string, revision int, payload string) port.ResultMaterialization {
 	return port.ResultMaterialization{
-		Producer: domain.ResultProducer{Kind: domain.ResultProducerACPJob, ID: id, Revision: revision},
+		Producer: domain.ResultProducer{Kind: domain.ResultProducerExternalAgentJob, ID: id, Revision: revision},
 		Payload:  payload, Scope: domain.ResultScope{Actor: "U1", TeamID: "T1", ConversationKey: "slack:T1:dm:D1", Project: "app"},
 		Retention: domain.ResultRetentionWorkstream, MediaType: "text/plain; charset=utf-8",
 	}

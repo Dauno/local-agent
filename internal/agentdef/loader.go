@@ -1062,8 +1062,8 @@ func validateExternalAgentExecution(prefix string, a AgentDef) []string {
 	default:
 		errs = append(errs, fmt.Sprintf("%s: execution_mode must be foreground or durable_job", prefix))
 	}
-	if a.TimeoutSeconds < 0 || a.TimeoutSeconds > MaxACPTimeoutSeconds {
-		errs = append(errs, fmt.Sprintf("%s: timeout_seconds must be between 0 and %d", prefix, MaxACPTimeoutSeconds))
+	if a.TimeoutSeconds < 0 || a.TimeoutSeconds > MaxExternalAgentTimeoutSeconds {
+		errs = append(errs, fmt.Sprintf("%s: timeout_seconds must be between 0 and %d", prefix, MaxExternalAgentTimeoutSeconds))
 	}
 	// A durable job is delivered to Slack after the root turn ends, so the user
 	// must have approved it before it started.
