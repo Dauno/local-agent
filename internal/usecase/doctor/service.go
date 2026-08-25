@@ -384,8 +384,13 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		if len(acpModels) > 0 && s.deps.ACP == nil {
 			report.fail("ACP provider", "ACP checker is unavailable", "Reinstall local-agent with ACP support.", false)
 		}
+		// Probing an ACP provider starts its agent server and completes a
+		// JSON-RPC handshake, so it is a live check. Running it offline broke
+		// the documented contract of `doctor` and made the offline command wait
+		// up to the client's two-minute probe bound for every ACP provider that
+		// did not answer.
 		for _, selected := range acpModels {
-			if s.deps.ACP == nil {
+			if s.deps.ACP == nil || !includeLive {
 				break
 			}
 			detail, err := s.deps.ACP.CheckProvider(ctx, selected.resolved, paths.SandboxProjectRoots)
