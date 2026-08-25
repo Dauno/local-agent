@@ -36,6 +36,12 @@ type JobReconciliationBackend interface {
 	ReconcileJob(ctx context.Context, jobID string, expectedRevision int) (domain.ExternalAgentJobStatusView, error)
 }
 
+// JobClosureBackend is optional so existing embedders of the CLI backend
+// remain valid while the concrete application exposes local jobs close.
+type JobClosureBackend interface {
+	CloseJob(ctx context.Context, jobID string, expectedRevision int) (domain.ExternalAgentJobStatusView, error)
+}
+
 // KnowledgeIndexRebuildBackend is optional so existing embedders of the CLI
 // backend remain valid while the concrete application exposes the bounded
 // reconstructible-knowledge-index rebuild command.
@@ -294,7 +300,7 @@ func newJobsCommand(backend Backend, streams Streams) *cobra.Command {
 			return command.Help()
 		},
 	}
-	command.AddCommand(newJobsInspectCommand(backend, streams), newJobsReconcileCommand(backend, streams), newJobsQuarantineLegacyIdentityCommand(backend, streams))
+	command.AddCommand(newJobsInspectCommand(backend, streams), newJobsReconcileCommand(backend, streams), newJobsCloseCommand(backend, streams), newJobsQuarantineLegacyIdentityCommand(backend, streams))
 	return command
 }
 
@@ -418,6 +424,43 @@ func newJobsReconcileCommand(backend Backend, streams Streams) *cobra.Command {
 	}
 	command.Flags().IntVar(&expectedRevision, "expect-revision", -1, "exact durable job status revision required for reconciliation")
 	command.Flags().BoolVar(&confirm, "confirm", false, "confirm reconciliation of existing provider state")
+	_ = command.MarkFlagRequired("expect-revision")
+	return command
+}
+
+func newJobsCloseCommand(backend Backend, streams Streams) *cobra.Command {
+	var expectedRevision int
+	var confirm bool
+	command := &cobra.Command{
+		Use:   "close <job_id>",
+		Short: "Close a completion-unknown external-agent job without resuming it",
+		Long: "Marks a completion-unknown job as abandoned. Use it after you inspect the " +
+			"external state by hand and decide that no recovery is needed. The command " +
+			"asserts nothing about that state: it only stops the job from waiting. " +
+			"To learn what the agent actually did, use jobs reconcile instead.",
+		Args: cobra.ExactArgs(1),
+		RunE: func(command *cobra.Command, args []string) error {
+			if !confirm {
+				return &ExitError{Code: 1, Cause: errors.New("--confirm is required")}
+			}
+			closer, ok := backend.(JobClosureBackend)
+			if !ok {
+				return &ExitError{Code: 1, Cause: errors.New("jobs close is unavailable")}
+			}
+			view, err := closer.CloseJob(command.Context(), args[0], expectedRevision)
+			if err != nil {
+				return &ExitError{Code: 1, Cause: err}
+			}
+			_, _ = fmt.Fprintf(streams.Out, "job_id: %s\nstatus: %s\nstatus_revision: %d\n", view.JobID, view.Status, view.StatusRevision)
+			if view.ErrorCode != "" {
+				_, _ = fmt.Fprintf(streams.Out, "error_code: %s\n", view.ErrorCode)
+			}
+			_, _ = fmt.Fprintln(streams.Out, "next_action: external state was not asserted to be reverted")
+			return nil
+		},
+	}
+	command.Flags().IntVar(&expectedRevision, "expect-revision", -1, "exact durable job status revision required for closure")
+	command.Flags().BoolVar(&confirm, "confirm", false, "confirm that external state needs no recovery")
 	_ = command.MarkFlagRequired("expect-revision")
 	return command
 }

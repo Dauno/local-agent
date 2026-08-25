@@ -532,6 +532,67 @@ func (s *ExternalAgentJobStore) beginReconciliation(ctx context.Context, jobID, 
 	return &job, nil
 }
 
+// AbandonCompletionUnknown closes a completion-unknown job without resuming
+// it. The operator states that the external state needs no recovery, so the
+// job reaches its terminal abandoned status and notifies its conversation.
+//
+// It never touches a lease. A completion-unknown job holds none, which is why
+// Transition cannot close one.
+func (s *ExternalAgentJobStore) AbandonCompletionUnknown(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time) (*domain.ExternalAgentJob, error) {
+	if expectedRevision < 0 {
+		return nil, errors.New("expected status revision is required")
+	}
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback() }()
+	job, err := s.load(ctx, tx, `WHERE job_id = ?`, jobID)
+	if err != nil {
+		return nil, err
+	}
+	if job.Actor != actor || job.ConversationKey != conversationKey {
+		return nil, errors.New("external-agent job closure is not authorized")
+	}
+	if job.Status != domain.JobCompletionUnknown {
+		return nil, errors.New("external-agent job is not awaiting reconciliation")
+	}
+	if job.StatusRevision != expectedRevision {
+		return nil, port.ErrExternalAgentJobRevisionConflict
+	}
+	if err := job.Transition(domain.JobAbandoned); err != nil {
+		return nil, err
+	}
+	job.StatusRevision++
+	job.UpdatedAt = now.UTC()
+	job.FinishedAt = job.UpdatedAt
+	job.ErrorCode = abandonedByOperatorCode
+	result, err := tx.ExecContext(ctx, `UPDATE external_agent_jobs SET status = ?, error_code = ?, status_revision = ?, finished_at = ?, updated_at = ?
+		WHERE job_id = ? AND status = ? AND status_revision = ?`,
+		job.Status, job.ErrorCode, job.StatusRevision, unix(job.FinishedAt), unix(job.UpdatedAt),
+		jobID, domain.JobCompletionUnknown, expectedRevision)
+	if err != nil {
+		return nil, err
+	}
+	if affected, _ := result.RowsAffected(); affected != 1 {
+		return nil, errors.New("external-agent job closure compare-and-set failed")
+	}
+	if err := insertJobEvent(ctx, tx, job, "transition"); err != nil {
+		return nil, err
+	}
+	if err := insertJobNotification(ctx, tx, job, nil); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return &job, nil
+}
+
+// abandonedByOperatorCode is the host-owned reason stored on a job an operator
+// closed. It never carries operator text.
+const abandonedByOperatorCode = "abandoned_by_operator"
+
 func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
@@ -640,6 +701,7 @@ func (s *ExternalAgentJobStore) NativeResultIDForJob(ctx context.Context, jobID 
 }
 
 var _ port.ExternalAgentJobNativeResultStore = (*ExternalAgentJobStore)(nil)
+var _ port.ExternalAgentJobAbandoner = (*ExternalAgentJobStore)(nil)
 
 func bindNativeExternalAgentResult(ctx context.Context, tx *sql.Tx, job domain.ExternalAgentJob, result domain.ExternalAgentInvocationResult) error {
 	if !validResultOpaqueID(result.NativeResultID) || job.Status != domain.JobCompleted {

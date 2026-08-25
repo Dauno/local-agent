@@ -162,6 +162,21 @@ func TestReconcileGateBehindSchemaIsFatalWithoutTouchingBytes(t *testing.T) {
 	}
 }
 
+// TestCloseJobGateBehindSchemaIsFatalWithoutTouchingBytes pins the jobs close
+// call site. Closure writes a terminal status, so it runs the same schema
+// preflight as reconciliation before it opens the database.
+func TestCloseJobGateBehindSchemaIsFatalWithoutTouchingBytes(t *testing.T) {
+	application, paths := setupInitializedProject(t)
+	before := rewindToV33Delete(t, paths.DatabaseFile)
+
+	_, err := application.CloseJob(context.Background(), "missing-job", 0)
+	assertDigestUnchanged(t, paths.DatabaseFile, before)
+	assertJournalStillDelete(t, paths.DatabaseFile)
+	if err == nil || !strings.Contains(err.Error(), schemaBehindText) {
+		t.Fatalf("err = %v, want %q", err, schemaBehindText)
+	}
+}
+
 // TestKnowledgeRebuildGateBehindSchemaIsFatalWithoutTouchingBytes pins the
 // knowledge rebuild-index call site.
 func TestKnowledgeRebuildGateBehindSchemaIsFatalWithoutTouchingBytes(t *testing.T) {

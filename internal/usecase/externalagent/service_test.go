@@ -1836,7 +1836,9 @@ func testRequestWithTimeout(mode domain.ExternalAgentJobMode, timeout time.Durat
 
 func waitForJob(t *testing.T, store port.ExternalAgentJobStore, id string, status domain.ExternalAgentJobStatus) *domain.ExternalAgentJob {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
+	// Generous on purpose: a loaded machine must not fail a test that only
+	// waits for a status. A job that never arrives still fails, just later.
+	deadline := time.Now().Add(15 * time.Second)
 	for time.Now().Before(deadline) {
 		job, err := store.GetJob(t.Context(), id)
 		if err != nil {

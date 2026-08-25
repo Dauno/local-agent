@@ -437,3 +437,71 @@ func TestJobsReconcileRequiresConfirmationAndRevision(t *testing.T) {
 		t.Fatalf("reconcile output=%q calls=%d expected=%d", output.String(), backend.calls, backend.expected)
 	}
 }
+
+type closureBackend struct {
+	*fakeBackend
+	view     domain.ExternalAgentJobStatusView
+	calls    int
+	expected int
+}
+
+func (b *closureBackend) CloseJob(_ context.Context, _ string, expectedRevision int) (domain.ExternalAgentJobStatusView, error) {
+	b.calls++
+	b.expected = expectedRevision
+	return b.view, nil
+}
+
+// Closure ends a job without asserting anything about external state, so it
+// requires the same explicit confirmation and revision as reconciliation.
+func TestJobsCloseRequiresConfirmationAndRevision(t *testing.T) {
+	backend := &closureBackend{fakeBackend: setupBackend(), view: domain.ExternalAgentJobStatusView{
+		JobID: "job_123", Status: domain.JobAbandoned, StatusRevision: 5, ErrorCode: "abandoned_by_operator",
+	}}
+	var output, stderr bytes.Buffer
+	root, err := NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Execute(t.Context(), root, []string{"jobs", "close", "job_123", "--expect-revision", "4"}, &stderr); code != 1 || backend.calls != 0 {
+		t.Fatalf("missing confirmation exit=%d calls=%d stderr=%q", code, backend.calls, stderr.String())
+	}
+	output.Reset()
+	stderr.Reset()
+	root, err = NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Execute(t.Context(), root, []string{"jobs", "close", "job_123", "--confirm"}, &stderr); code == 0 || backend.calls != 0 {
+		t.Fatalf("missing revision exit=%d calls=%d stderr=%q", code, backend.calls, stderr.String())
+	}
+	output.Reset()
+	stderr.Reset()
+	root, err = NewRoot(backend, Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Execute(t.Context(), root, []string{"jobs", "close", "job_123", "--expect-revision", "4", "--confirm"}, &stderr); code != 0 {
+		t.Fatalf("confirmed exit=%d stderr=%q", code, stderr.String())
+	}
+	if backend.calls != 1 || backend.expected != 4 {
+		t.Fatalf("close calls=%d expected=%d", backend.calls, backend.expected)
+	}
+	for _, want := range []string{"status: abandoned", "status_revision: 5", "error_code: abandoned_by_operator", "external state was not asserted"} {
+		if !strings.Contains(output.String(), want) {
+			t.Fatalf("close output missing %q:\n%s", want, output.String())
+		}
+	}
+}
+
+// A backend without the optional closure interface must refuse rather than
+// pretend the job was closed.
+func TestJobsCloseIsUnavailableWithoutBackendSupport(t *testing.T) {
+	var output, stderr bytes.Buffer
+	root, err := NewRoot(setupBackend(), Streams{In: strings.NewReader(""), Out: &output, Err: &stderr})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code := Execute(t.Context(), root, []string{"jobs", "close", "job_123", "--expect-revision", "4", "--confirm"}, &stderr); code != 1 {
+		t.Fatalf("unsupported backend exit=%d stderr=%q", code, stderr.String())
+	}
+}

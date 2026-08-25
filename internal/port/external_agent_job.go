@@ -250,6 +250,13 @@ type ExternalAgentJobExpectedReconciler interface {
 	BeginReconciliationExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error)
 }
 
+// ExternalAgentJobAbandoner closes a completion-unknown job without resuming
+// it. It is the operator's alternative to reconciliation, for external state
+// that needs no recovery.
+type ExternalAgentJobAbandoner interface {
+	AbandonCompletionUnknown(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time) (*domain.ExternalAgentJob, error)
+}
+
 type ExternalAgentJobShutdownStore interface {
 	ShutdownStats(ctx context.Context) (domain.ExternalAgentJobShutdownStats, error)
 }
