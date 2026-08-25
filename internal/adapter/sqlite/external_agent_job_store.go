@@ -384,18 +384,18 @@ func (s *ExternalAgentJobStore) RenewLease(ctx context.Context, jobID, owner str
 
 func (s *ExternalAgentJobStore) AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error {
 	if sessionID == "" {
-		return errors.New("ACP session ID is required")
+		return errors.New("external-agent session ID is required")
 	}
 	now := time.Now().UTC()
 	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_jobs SET acp_session_id = ?, updated_at = ?
 		WHERE job_id = ? AND lease_owner = ? AND attempt = ? AND status = ? AND acp_session_id = '' AND lease_expiry > ?`,
 		sessionID, now.UnixNano(), jobID, owner, attempt, domain.JobRunning, now.UnixNano())
 	if err != nil {
-		return fmt.Errorf("assign ACP session: %w", err)
+		return fmt.Errorf("assign external-agent session: %w", err)
 	}
 	affected, _ := result.RowsAffected()
 	if affected != 1 {
-		return errors.New("ACP session cannot be assigned to this job attempt")
+		return errors.New("external-agent session cannot be assigned to this job attempt")
 	}
 	return nil
 }
@@ -542,10 +542,10 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 			return cause
 		}
 		if err := quarantineNativeExternalAgentResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
-			return fmt.Errorf("quarantine unbound native ACP result: %w", err)
+			return fmt.Errorf("quarantine unbound native external-agent result: %w", err)
 		}
 		if err := tx.Commit(); err != nil {
-			return fmt.Errorf("commit native ACP result quarantine: %w", err)
+			return fmt.Errorf("commit native external-agent result quarantine: %w", err)
 		}
 		return cause
 	}
@@ -571,16 +571,16 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 	if result != nil && result.NativeResultID != "" {
 		if next != domain.JobCompleted {
 			if err := quarantineNativeExternalAgentResult(ctx, tx, result.NativeResultID, job.ID); err != nil {
-				return fmt.Errorf("quarantine non-completed native ACP result: %w", err)
+				return fmt.Errorf("quarantine non-completed native external-agent result: %w", err)
 			}
 		} else if err := bindNativeExternalAgentResult(ctx, tx, job, *result); err != nil {
 			if quarantineErr := quarantineNativeExternalAgentResult(ctx, tx, result.NativeResultID, job.ID); quarantineErr != nil {
-				return fmt.Errorf("validate native ACP result: %v; quarantine: %w", err, quarantineErr)
+				return fmt.Errorf("validate native external-agent result: %v; quarantine: %w", err, quarantineErr)
 			}
 			if commitErr := tx.Commit(); commitErr != nil {
-				return fmt.Errorf("commit invalid native ACP result quarantine: %w", commitErr)
+				return fmt.Errorf("commit invalid native external-agent result quarantine: %w", commitErr)
 			}
-			return fmt.Errorf("validate native ACP result: %w", err)
+			return fmt.Errorf("validate native external-agent result: %w", err)
 		}
 	}
 	job.ErrorCode = errorCode
@@ -794,7 +794,7 @@ func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string
 		return err
 	}
 	if err := quarantineUnboundNativeExternalAgentResults(ctx, tx, job.ID); err != nil {
-		return fmt.Errorf("quarantine unbound native ACP results during recovery: %w", err)
+		return fmt.Errorf("quarantine unbound native external-agent results during recovery: %w", err)
 	}
 	if err := insertJobEvent(ctx, tx, job, "recovery"); err != nil {
 		return err

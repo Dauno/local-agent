@@ -151,7 +151,7 @@ func (f *Factory) WithDraftStore(svc port.AgentDraftStore) *Factory {
 }
 
 // WithExternalAgentJobs configures the actor-bound inspection tools used by
-// the host to complete detached ACP work. The service owns authorization and
+// the host to complete detached external-agent work. The service owns authorization and
 // artifact verification; this adapter only binds the current invocation.
 func (f *Factory) WithExternalAgentJobs(reader port.ExternalAgentJobReader) *Factory {
 	if f == nil {
@@ -642,8 +642,8 @@ func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) 
 		Kind            domain.AgentKind `json:"kind,omitempty" jsonschema:"tipo de agente: llm o acp (por defecto llm)"`
 		ProviderProfile string           `json:"provider_profile,omitempty" jsonschema:"perfil en formato provider/profile"`
 		Model           string           `json:"model,omitempty" jsonschema:"alias legacy de provider_profile"`
-		ExecutionMode   string           `json:"execution_mode,omitempty" jsonschema:"foreground o durable_job (solo ACP)"`
-		TimeoutSeconds  int              `json:"timeout_seconds,omitempty" jsonschema:"timeout ACP en segundos"`
+		ExecutionMode   string           `json:"execution_mode,omitempty" jsonschema:"foreground o durable_job (solo external-agent)"`
+		TimeoutSeconds  int              `json:"timeout_seconds,omitempty" jsonschema:"timeout external-agent en segundos"`
 	}
 	type previewAgentDefResult struct {
 		YAML          string   `json:"yaml"`
@@ -970,7 +970,7 @@ func (f *Factory) listMessagesTool(key domain.ConversationKey) (tool.Tool, error
 }
 
 type jobIDArgs struct {
-	JobID string `json:"job_id" jsonschema:"durable ACP job ID returned when the job was accepted"`
+	JobID string `json:"job_id" jsonschema:"durable external-agent job ID returned when the job was accepted"`
 }
 
 type jobStatusResult struct {
@@ -1027,7 +1027,7 @@ func (f *Factory) jobStatusTool(actor string, key domain.ConversationKey) (tool.
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "job_status",
-		Description: "Returns the status of an ACP durable job created in this Slack conversation. Read-only; actor and destination are bound by the host. When acp_session_id is non-empty, the response must always be presented with the complete ACP session line verbatim; presenting an authorized status without that line is a contract failure, not optional summarization.",
+		Description: "Returns the status of an external-agent durable job created in this Slack conversation. Read-only; actor and destination are bound by the host. When acp_session_id is non-empty, the response must always be presented with the complete external-agent session line verbatim; presenting an authorized status without that line is a contract failure, not optional summarization.",
 	}, func(ctx agent.Context, args jobIDArgs) (jobStatusResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return jobStatusResult{}, errors.New("job_id is required")
@@ -1074,7 +1074,7 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "read_job_result",
-		Description: "Reads bounded result metadata for a completed ACP durable job in this Slack conversation. V2 jobs return a handle; legacy inline jobs may return complete sanitized text. No ACP task is rerun.",
+		Description: "Reads bounded result metadata for a completed external-agent durable job in this Slack conversation. V2 jobs return a handle; legacy inline jobs may return complete sanitized text. No external-agent task is rerun.",
 	}, func(ctx agent.Context, args jobIDArgs) (readJobResultResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return readJobResultResult{}, errors.New("job_id is required")
@@ -1124,7 +1124,7 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 }
 
 type readJobResultChunkArgs struct {
-	JobID       string `json:"job_id" jsonschema:"durable ACP job ID returned when the job was accepted"`
+	JobID       string `json:"job_id" jsonschema:"durable external-agent job ID returned when the job was accepted"`
 	OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"server-provided UTF-8 continuation offset"`
 	MaxBytes    int64  `json:"max_bytes,omitempty" jsonschema:"maximum bytes requested for this bounded chunk"`
 }
@@ -1141,7 +1141,7 @@ func (f *Factory) readJobResultChunkTool(actor string, key domain.ConversationKe
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "read_job_result_chunk",
-		Description: "Reads one bounded, verified UTF-8 chunk from a completed ACP durable job in this Slack conversation. Read-only; the complete file-mode artifact is never placed in the tool response.",
+		Description: "Reads one bounded, verified UTF-8 chunk from a completed external-agent durable job in this Slack conversation. Read-only; the complete file-mode artifact is never placed in the tool response.",
 	}, func(ctx agent.Context, args readJobResultChunkArgs) (readJobResultChunkResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return readJobResultChunkResult{}, errors.New("job_id is required")
@@ -1158,7 +1158,7 @@ func (f *Factory) readJobResultChunkTool(actor string, key domain.ConversationKe
 }
 
 type reconcileJobArgs struct {
-	JobID            string `json:"job_id" jsonschema:"durable ACP job ID"`
+	JobID            string `json:"job_id" jsonschema:"durable external-agent job ID"`
 	ExpectedRevision int    `json:"expected_revision" jsonschema:"status revision returned by job_status"`
 }
 
@@ -1173,7 +1173,7 @@ type reconcileJobResult struct {
 func (f *Factory) reconcileJobTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
 	return functiontool.New(functiontool.Config{
 		Name:                "reconcile_job",
-		Description:         "Reconciles one completion_unknown ACP job after inspecting existing provider state. Never replays the original task. Requires confirmation.",
+		Description:         "Reconciles one completion_unknown external-agent job after inspecting existing provider state. Never replays the original task. Requires confirmation.",
 		RequireConfirmation: true,
 	}, func(ctx agent.Context, args reconcileJobArgs) (reconcileJobResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {

@@ -161,7 +161,7 @@ func TestRenderIncludesFileScopeForDurableExternalAgentDelivery(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(rendered, "files:write") {
-		t.Fatal("durable ACP delivery did not request files:write")
+		t.Fatal("durable external-agent delivery did not request files:write")
 	}
 }
 

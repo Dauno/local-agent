@@ -181,7 +181,7 @@ const (
 	MetricExternalAgentActivationSuppressionTotal = "external_agent_activation_suppression_total"
 )
 
-// ACP live progress observability metrics. Labels are restricted to bounded
+// external-agent live progress observability metrics. Labels are restricted to bounded
 // enums (event kind, phase, health, outcome). Job ID, session ID, PID,
 // tool-call ID, actor, conversation, and paths are forbidden as labels.
 const (

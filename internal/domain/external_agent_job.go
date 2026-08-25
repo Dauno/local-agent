@@ -78,7 +78,7 @@ func (p ResultDeliveryPolicy) Validate() error {
 		return errors.New("result delivery max file bytes must be positive and within the artifact bound")
 	}
 	if p.MaxInlineResultBytes <= 0 || p.MaxInlineResultBytes > int64(p.MaxMarkdownParts*SlackMarkdownChunkRunes) {
-		return errors.New("ACP inline result bound exceeds the configured Markdown delivery capacity")
+		return errors.New("external-agent inline result bound exceeds the configured Markdown delivery capacity")
 	}
 	return nil
 }
@@ -400,7 +400,7 @@ type ExternalAgentJobDeliveryInspection struct {
 }
 
 // ExternalAgentJobInspection is the safe local operator view of one job.
-// The complete ACP session ID is present because the view is actor-free and
+// The complete external-agent session ID is present because the view is actor-free and
 // locally authorized. Task, actor, conversation, paths, and result content
 // remain excluded.
 type ExternalAgentJobInspection struct {
@@ -930,8 +930,8 @@ type ExternalAgentJobStatusView struct {
 	DeliveryMode           JobResultDeliveryMode
 	ErrorCode              string
 	FinishedAt             time.Time
-	// Live ACP projection fields are content-free and may be empty when the
-	// durable projection has not started or the provider is not ACP-backed.
+	// Live progress fields are content-free and may be empty before the durable
+	// projection starts.
 	Phase                    ExternalAgentProgressPhase
 	Health                   ExternalAgentProgressHealth
 	LastEventKind            ExternalAgentEventKind

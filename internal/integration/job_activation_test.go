@@ -35,10 +35,10 @@ import (
 
 // TestJobCompletionActivationEndToEnd proves the detached root awareness
 // contract (FR-02, FR-12): a detached job executes exactly once through the
-// durable ACP runtime, its multibyte result is consumed by the scripted root
+// durable external-agent runtime, its multibyte result is consumed by the scripted root
 // model in bounded verified UTF-8 chunks (per-chunk SHA-256 against the
 // status identity and a recomputed total digest) and only then answered with
-// a single root synthesis. Exactly one notification, one activation, one ACP
+// a single root synthesis. Exactly one notification, one activation, one external-agent
 // execution and one root response are asserted. The test fails when the chunk
 // reader is broken even though the read_job_result_chunk tool is registered,
 // because every model-side verification failure fails the activation turn.
@@ -153,7 +153,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	})
 	waitForJobStatus(t, jobs, job.ID, domain.JobCompleted)
 	if calls, jobID := acp.callStats(); calls != 1 || jobID != job.ID {
-		t.Fatalf("detached ACP executions = %d with jobID %q, want exactly 1 with %q", calls, jobID, job.ID)
+		t.Fatalf("detached external-agent executions = %d with jobID %q, want exactly 1 with %q", calls, jobID, job.ID)
 	}
 
 	metrics := metricsadapter.NewRecorder()
@@ -546,7 +546,7 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 // whose oversized markdown result cannot be represented, so the host publishes
 // one deterministic fallback update through the activation worker's fallback
 // claim instead of leaving the conversation visibly open. Root is never
-// invoked and the producing ACP job is never replayed.
+// invoked and the producing external-agent job is never replayed.
 func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 	store, err := adaptersqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "fallback.db"))
 	if err != nil {
@@ -639,7 +639,7 @@ func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 	})
 	waitForJobStatus(t, jobs, job.ID, domain.JobCompleted)
 	if calls, _ := acp.callStats(); calls != 1 {
-		t.Fatalf("ACP executions = %d, want exactly 1", calls)
+		t.Fatalf("external-agent executions = %d, want exactly 1", calls)
 	}
 
 	metrics := metricsadapter.NewRecorder()
@@ -737,12 +737,12 @@ func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 		t.Fatalf("fallback was republished: %#v", responsePublisher.snapshot())
 	}
 	if calls, _ := acp.callStats(); calls != 1 {
-		t.Fatalf("producing ACP job was replayed: %d calls", calls)
+		t.Fatalf("producing external-agent job was replayed: %d calls", calls)
 	}
 }
 
 // TestForegroundJobSingleRootResponseEndToEnd reproduces the user-observed
-// foreground contract (FR-01, FR-04, FR-08): a foreground ACP job executed
+// foreground contract (FR-01, FR-04, FR-08): a foreground external-agent job executed
 // through the durable facade returns one original tool response and the
 // original root turn answers exactly once, while publishing the terminal
 // notification creates zero activations, zero activation model calls and zero
@@ -789,7 +789,7 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Durable facade: root tool calls without JobID go through StartAndWait;
-	// worker dispatches carry JobID and reach the direct ACP runtime.
+	// worker dispatches carry JobID and reach the direct external-agent runtime.
 	facade := &foregroundFacadeRuntime{direct: acp, jobs: service}
 
 	workerCtx, stopWorker := context.WithCancel(context.Background())
@@ -870,7 +870,7 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 		t.Fatalf("confirmation wrapper call ID missing: %q", promptCalls[0].text)
 	}
 	if calls, _ := acp.callStats(); calls != 0 {
-		t.Fatalf("ACP executed before approval: %d calls", calls)
+		t.Fatalf("external-agent executed before approval: %d calls", calls)
 	}
 	approval := foregroundThreadedDMInvocation("Ev-fg-02", "approve "+wrapperCallID, key)
 	approval.EventTS = "1710000001.000002"
@@ -894,7 +894,7 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 		t.Fatalf("root deliveries = %#v, want [confirmation prompt, single root response]", rootCalls)
 	}
 	if calls, jobID := acp.callStats(); calls != 1 || jobID == "" {
-		t.Fatalf("ACP executions = %d with jobID %q, want exactly 1 worker dispatch", calls, jobID)
+		t.Fatalf("external-agent executions = %d with jobID %q, want exactly 1 worker dispatch", calls, jobID)
 	}
 
 	// The persisted row carries the post-transform identity.
@@ -1268,7 +1268,7 @@ func chunkFromResponse(response map[string]any, ok bool) (content string, offset
 	return content, int64(offsetF), int64(nextF), eof, chunkSHA, true
 }
 
-// detachedFakeACP is the direct ACP runtime behind the detached dispatcher.
+// detachedFakeExternalAgent is the direct external-agent runtime behind the detached dispatcher.
 // It returns raw multibyte provider text and records exactly how many
 // invocations ran and with which durable job ID.
 type detachedFakeExternalAgent struct {
@@ -1293,15 +1293,15 @@ func (r *detachedFakeExternalAgent) callStats() (int, string) {
 }
 
 // detachedDispatcherRuntime mirrors the detached branch of the real
-// acpJobDispatcher.Run: the durable worker executes the job exactly once
-// through the direct ACP runtime carrying the job ID and then normalizes the
+// externalAgentJobDispatcher.Run: the durable worker executes the job exactly once
+// through the direct external-agent runtime carrying the job ID and then normalizes the
 // raw text into the complete detached delivery identity (host redactor,
 // domain.SanitizeResultText, exact UTF-8 bytes, lowercase hex SHA-256,
 // canonical Markdown, policy fields). It is the test twin of the detached
 // materialize path and produces the same persisted identity as the real host.
 // externalAgentInvoker is the shape the durable dispatcher needs from a
 // prepared external agent. The production interface it used to mirror was
-// removed with the ACP transport; this fake keeps the same contract so the
+// removed with the external-agent transport; this fake keeps the same contract so the
 // detached delivery identity stays under test.
 type externalAgentInvoker interface {
 	Run(ctx context.Context, request domain.ExternalAgentInvocationRequest) (domain.ExternalAgentInvocationResult, error)
@@ -1423,7 +1423,7 @@ func assertMetricAtLeast(t *testing.T, samples []port.MetricSample, name string,
 	t.Fatalf("metric %q not found at value >= %v: %#v", name, value, samples)
 }
 
-// foregroundFakeACP is the direct ACP runtime behind the durable facade. It
+// foregroundFakeExternalAgent is the direct external-agent runtime behind the durable facade. It
 // returns raw provider text that the host redactor and SanitizeResultText
 // transform, so the persisted identity necessarily differs from the raw text.
 type foregroundFakeExternalAgent struct {
@@ -1447,8 +1447,8 @@ func (r *foregroundFakeExternalAgent) callStats() (int, string) {
 	return r.calls, r.lastJobID
 }
 
-// foregroundDispatcherRuntime mirrors the acpJobDispatcher foreground branch:
-// the durable worker runs the job through the direct ACP runtime and computes
+// foregroundDispatcherRuntime mirrors the externalAgentJobDispatcher foreground branch:
+// the durable worker runs the job through the direct external-agent runtime and computes
 // bytes and SHA-256 only over the final post-redaction, post-sanitization
 // text. It is the test twin of normalizeForegroundResult (FR-03).
 type foregroundDispatcherRuntime struct {
@@ -1488,7 +1488,7 @@ var _ port.ExternalAgentJobRuntime = (*foregroundDispatcherRuntime)(nil)
 
 // foregroundFacadeRuntime is the test twin of the durable foreground facade:
 // a root tool call without JobID becomes a durable foreground job waited on
-// synchronously, while worker dispatches carry JobID and reach the direct ACP
+// synchronously, while worker dispatches carry JobID and reach the direct external-agent
 // runtime. The facade never runs the direct runtime for the root path.
 type foregroundFacadeRuntime struct {
 	direct externalAgentInvoker
@@ -1521,7 +1521,7 @@ func (r *foregroundFacadeRuntime) Run(ctx context.Context, request domain.Extern
 var _ externalAgentInvoker = (*foregroundFacadeRuntime)(nil)
 
 // foregroundRootModel scripts the original root turn: one function call to
-// the foreground ACP tool, then one final response. Every model call is
+// the foreground external-agent tool, then one final response. Every model call is
 // counted, so any activation turn would be visible as an additional call, and
 // the tool response delivered to the model is captured verbatim.
 type foregroundRootModel struct {
@@ -1584,18 +1584,18 @@ type foregroundExternalAgentToolResult struct {
 	Result string `json:"result"`
 }
 
-// newForegroundACPTool builds the confirmable root tool that invokes the
-// durable facade, mirroring the foreground branch of the ACP agent tool.
+// newForegroundExternalAgentTool builds the confirmable root tool that invokes the
+// durable facade, mirroring the foreground branch of the external-agent agent tool.
 func newForegroundExternalAgentTool(t *testing.T, runtime externalAgentInvoker, key domain.ConversationKey, actor string) tool.Tool {
 	t.Helper()
 	projectRoot := t.TempDir()
 	created, err := functiontool.New(functiontool.Config{
 		Name:                "foreground_acp",
-		Description:         "Runs a foreground durable ACP task in this conversation.",
+		Description:         "Runs a foreground durable external-agent task in this conversation.",
 		RequireConfirmation: true,
 	}, func(_ agent.Context, args foregroundExternalAgentToolArgs) (foregroundExternalAgentToolResult, error) {
 		if strings.TrimSpace(args.Project) == "" || strings.TrimSpace(args.Task) == "" {
-			return foregroundExternalAgentToolResult{}, errors.New("foreground ACP project and task are required")
+			return foregroundExternalAgentToolResult{}, errors.New("foreground external-agent project and task are required")
 		}
 		result, err := runtime.Run(context.Background(), domain.ExternalAgentInvocationRequest{
 			PrimaryProject: args.Project, PrimaryPath: projectRoot,

@@ -71,10 +71,7 @@ func (d *externalAgentJobDispatcher) Run(ctx context.Context, job domain.Externa
 	return domain.ExternalAgentInvocationResult{}, errors.New("durable external-agent job provider/profile is unavailable")
 }
 
-// runAgentCLI executes a durable job whose leaf is an agent CLI rather than an
-// ACP agent. The two families differ only in how the delegated turn is
-// produced: everything after it (result normalization, native materialization,
-// artifact delivery) is shared with the ACP path above.
+// runAgentCLI executes a durable job whose leaf is an agent CLI.
 //
 // Progress comes from the descriptor's `stream.activity` selection, so a CLI
 // job keeps its projection fresh and its stall warning honest. Session recovery
@@ -151,7 +148,7 @@ func agentCLIProgressEvent(activity agentcli.Activity) domain.ExternalAgentProgr
 	return domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventToolCall}
 }
 
-// acpFailureClass is the bounded classification the progress projection stores
+// externalAgentFailureClass is the bounded classification the progress projection stores
 // for a failed run. It never carries the error text.
 func externalAgentFailureClass(err error) string {
 	var externalAgentErr *domain.ExternalAgentError
@@ -183,7 +180,7 @@ func (d *externalAgentJobDispatcher) normalizeForegroundResult(ctx context.Conte
 	return result, nil
 }
 
-// materializeNativeResult commits the complete sanitized ACP payload before
+// materializeNativeResult commits the complete sanitized external-agent payload before
 // the caller can transition its job to a terminal status or create delivery
 // metadata. The terminal status revision is exactly one past the leased job
 // snapshot supplied to this runtime invocation.
@@ -192,7 +189,7 @@ func (d *externalAgentJobDispatcher) materializeNativeResult(ctx context.Context
 		return "", nil
 	}
 	if job.StatusRevision < 0 {
-		return "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("ACP result producer revision is invalid")}
+		return "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("external-agent result producer revision is invalid")}
 	}
 	retention := domain.ResultRetentionContext
 	if job.Mode == domain.JobDetached {
@@ -207,7 +204,7 @@ func (d *externalAgentJobDispatcher) materializeNativeResult(ctx context.Context
 		return "", err
 	}
 	if err != nil || handle.Validate() != nil || handle.SHA256 != digest || handle.Bytes != size || !hasArtifactAvailability(handle.Availability) {
-		return "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("native ACP result materialization failed")}
+		return "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("native external-agent result materialization failed")}
 	}
 	return handle.ResultID, nil
 }
@@ -227,21 +224,21 @@ func (d *externalAgentJobDispatcher) normalizeResultText(text string, maxBytes i
 	var err error
 	text, err = domain.SanitizeResultText(text)
 	if err != nil {
-		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
+		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("external-agent result identity is invalid")}
 	}
 	size := int64(len([]byte(text)))
 	if size <= 0 {
-		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("ACP result identity is invalid")}
+		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("external-agent result identity is invalid")}
 	}
 	if size > maxBytes {
-		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultTooLarge, Err: errors.New("ACP result exceeds the configured delivery bound")}
+		return "", 0, "", &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultTooLarge, Err: errors.New("external-agent result exceeds the configured delivery bound")}
 	}
 	digest := sha256.Sum256([]byte(text))
 	return text, size, fmt.Sprintf("%x", digest), nil
 }
 
 // newRecorder installs the host-owned progress recorder for one job attempt.
-// Monitoring is observational: recorder failure never fails the ACP prompt.
+// Monitoring is observational: recorder failure never fails the agent prompt.
 func (d *externalAgentJobDispatcher) newRecorder(job domain.ExternalAgentJob) *externalagent.ProgressRecorder {
 	if d.progressStore == nil {
 		return nil
@@ -257,11 +254,11 @@ func (d *externalAgentJobDispatcher) materialize(ctx context.Context, job domain
 	var err error
 	if result.ArtifactRef != "" {
 		if d.artifacts == nil {
-			return domain.ExternalAgentInvocationResult{}, errors.New("ACP result artifact cannot be verified")
+			return domain.ExternalAgentInvocationResult{}, errors.New("external-agent result artifact cannot be verified")
 		}
 		content, err = d.artifacts.Get(ctx, job.ID, result.ArtifactRef, result.ResultSHA256, d.policy.MaxResultArtifactBytes)
 		if err != nil {
-			return domain.ExternalAgentInvocationResult{}, &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("verified ACP result artifact is unavailable")}
+			return domain.ExternalAgentInvocationResult{}, &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("verified external-agent result artifact is unavailable")}
 		}
 	} else {
 		content = []byte(result.Text)
@@ -299,7 +296,7 @@ func (d *externalAgentJobDispatcher) materialize(ctx context.Context, job domain
 			artifact = domain.ResultArtifact{Reference: ownerID + ".result", SHA256: contentSHA, Bytes: size}
 		}
 		if artifact.Reference == "" || !strings.EqualFold(artifact.SHA256, contentSHA) || artifact.Bytes != size {
-			return result, &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultDeliveryFailed, Err: errors.New("sanitized ACP result artifact identity is invalid")}
+			return result, &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultDeliveryFailed, Err: errors.New("sanitized external-agent result artifact identity is invalid")}
 		}
 		artifactRef = artifact.Reference
 	}
@@ -350,7 +347,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		MaxResultArtifactBytes: int64(cfg.ExternalAgent.MaxResultArtifactBytes),
 	}
 	if err := policy.Validate(); err != nil {
-		return nil, nil, fmt.Errorf("validate durable ACP result delivery policy: %w", err)
+		return nil, nil, fmt.Errorf("validate durable external-agent result delivery policy: %w", err)
 	}
 	maxResultChunkBytes := int64(0)
 	if cfg.Context.RecoverableResults != nil {
@@ -364,11 +361,11 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	var err error
 	if cfg.Orchestration.ResultHandles.Enabled {
 		if models.resultPayloadStore == nil {
-			return nil, nil, errors.New("initialize native ACP result payload store")
+			return nil, nil, errors.New("initialize native external-agent result payload store")
 		}
 		nativeResults, err = adaptersqlite.NewResultStore(infra.store, models.resultPayloadStore)
 		if err != nil {
-			return nil, nil, fmt.Errorf("initialize native ACP result store: %w", err)
+			return nil, nil, fmt.Errorf("initialize native external-agent result store: %w", err)
 		}
 	}
 	global := ""
@@ -401,7 +398,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		return nil, nil, err
 	}
 	if models.artifactStore == nil {
-		return nil, nil, errors.New("initialize durable ACP result delivery: verified artifact store is unavailable")
+		return nil, nil, errors.New("initialize durable external-agent result delivery: verified artifact store is unavailable")
 	}
 	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
 	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, models.artifactStore, store, infra.api, cfg.Slack.PartLabels)

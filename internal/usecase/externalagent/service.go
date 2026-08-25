@@ -340,8 +340,8 @@ func (s *Service) StatusAtRevision(ctx context.Context, jobID, actor string, con
 }
 
 // StatusProjection returns the authorized status view merged with the
-// content-free live ACP projection and read-time health. It never opens or
-// probes the ACP session. A missing progress store yields the plain view.
+// content-free live external-agent projection and read-time health. It never opens or
+// probes the external-agent session. A missing progress store yields the plain view.
 func (s *Service) StatusProjection(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJobStatusView, error) {
 	job, err := s.Status(ctx, jobID, actor, conversationKey)
 	if err != nil {
@@ -630,7 +630,7 @@ func completeUTF8Prefix(data []byte) int {
 
 // HostCompletionTurn is the non-privileged completion phase for a detached
 // invocation. It is deliberately deterministic: it reads the already
-// materialized result and never starts ACP or requests confirmation.
+// materialized result and never starts external-agent or requests confirmation.
 func (s *Service) HostCompletionTurn(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (port.AgentTurn, error) {
 	result, err := s.ReadResult(ctx, jobID, actor, conversationKey)
 	if err != nil {

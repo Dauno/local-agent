@@ -55,7 +55,7 @@ func (m *agentToolNonStreamingModel) GenerateContent(ctx context.Context, reques
 // preparedAgentTool is one startup-validated agent-tool child. CLI children
 // carry a reusable tool-less AgentTool wrapper; OpenAI-compatible children are
 // rebuilt per invocation because their tool instances capture invocation
-// identity. ACP children carry an ExternalAgentRuntime reference.
+// identity.
 type preparedAgentTool struct {
 	definition           agentdef.AgentDef
 	model                model.LLM
@@ -465,8 +465,7 @@ func newAgentToolAgent(definition agentdef.AgentDef, globalInstruction string, c
 }
 
 // agentCLIInputSchema is the argument object an agent CLI leaf exposes to its
-// caller. It mirrors the ACP delegation shape so both external-agent families
-// look the same to the root model.
+// caller. It keeps the structured durable delegation shape used by the root model.
 //
 // Declaring it replaces ADK's default single "request" string. That default is
 // what forced every CLI to run in the application root, because a free-text
@@ -623,8 +622,8 @@ func combineInstructions(globalInstruction, instruction string) string {
 
 // newAgentCLIDurableTool exposes an agent CLI leaf that runs as a durable job.
 //
-// It mirrors the ACP durable path: the same {project, task} arguments, the same
-// confirmation gate, and the same acceptance receipt. The root turn ends once
+// It uses structured {project, task} arguments, a confirmation gate, and an
+// acceptance receipt. The root turn ends once
 // the job is accepted; the durable worker produces the result and Slack
 // receives it later.
 func newAgentCLIDurableTool(

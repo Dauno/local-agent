@@ -5,7 +5,7 @@ import (
 	"time"
 )
 
-// ACPProgressPhase is the best ACP-visible description of the current prompt
+// ExternalAgentProgressPhase is the best host-visible description of the current prompt
 // work. It is the latest safe phase, never a claim about provider internals.
 type ExternalAgentProgressPhase string
 
@@ -23,7 +23,7 @@ const (
 	ExternalAgentPhaseFailed            ExternalAgentProgressPhase = "failed"
 )
 
-// ValidACPProgressPhase reports whether phase belongs to the bounded allowlist.
+// ValidExternalAgentProgressPhase reports whether phase belongs to the bounded allowlist.
 func ValidExternalAgentProgressPhase(phase ExternalAgentProgressPhase) bool {
 	switch phase {
 	case ExternalAgentPhaseStarting, ExternalAgentPhaseSessionReady, ExternalAgentPhaseAgentProcessing,
@@ -36,7 +36,7 @@ func ValidExternalAgentProgressPhase(phase ExternalAgentProgressPhase) bool {
 	}
 }
 
-// ACPProgressHealth is an orthogonal interpretation of recency and
+// ExternalAgentProgressHealth is an orthogonal interpretation of recency and
 // transport/process state. No health value changes job state.
 type ExternalAgentProgressHealth string
 
@@ -48,7 +48,7 @@ const (
 	ExternalAgentHealthTerminal        ExternalAgentProgressHealth = "terminal"
 )
 
-// ACPToolStatus is the bounded internal tool status retained from ACP updates.
+// ExternalAgentToolStatus is the bounded internal status retained from tool updates.
 type ExternalAgentToolStatus string
 
 const (
@@ -66,8 +66,8 @@ func ValidExternalAgentToolStatus(status ExternalAgentToolStatus) bool {
 	}
 }
 
-// ACPToolStatusFromWire maps an ACP v1 wire status to the bounded internal
-// status. ACP v1 uses pending, in_progress, completed, and failed; unknown
+// ExternalAgentToolStatusFromWire maps a provider status to the bounded internal
+// status. Supported values are pending, in_progress, completed, and failed; unknown
 // values are not retained (the frame still refreshes session activity).
 func ExternalAgentToolStatusFromWire(value string) (ExternalAgentToolStatus, bool) {
 	switch value {
@@ -82,7 +82,7 @@ func ExternalAgentToolStatusFromWire(value string) (ExternalAgentToolStatus, boo
 	}
 }
 
-// ACPToolKind is the bounded ACP v1 tool category retained from tool calls.
+// ExternalAgentToolKind is the bounded tool category retained from tool calls.
 type ExternalAgentToolKind string
 
 const (
@@ -108,7 +108,7 @@ func ValidExternalAgentToolKind(kind ExternalAgentToolKind) bool {
 	}
 }
 
-// ACPToolKindFromWire maps unknown and extension kinds to the bounded "other"
+// ExternalAgentToolKindFromWire maps unknown and extension kinds to the bounded "other"
 // category. An omitted kind is handled by the caller because tool_call defaults
 // to other while a partial tool_call_update should preserve the previous kind.
 func ExternalAgentToolKindFromWire(value string) ExternalAgentToolKind {
@@ -119,8 +119,8 @@ func ExternalAgentToolKindFromWire(value string) ExternalAgentToolKind {
 	return ExternalAgentToolKindOther
 }
 
-// ACPEventKind is the bounded content-free classification of an inbound ACP
-// protocol event. Raw frame content never becomes part of these values.
+// ExternalAgentEventKind is the bounded content-free classification of an
+// external-agent event. Raw content never becomes part of these values.
 type ExternalAgentEventKind string
 
 const (
@@ -157,7 +157,7 @@ func ValidExternalAgentEventKind(kind ExternalAgentEventKind) bool {
 	}
 }
 
-// ACPToolProgress is the bounded tool identity retained from a tool update.
+// ExternalAgentToolProgress is the bounded tool identity retained from a tool update.
 // Tool title, input, output, locations, and command data are excluded.
 type ExternalAgentToolProgress struct {
 	CallID string                  `json:"call_id"`
@@ -165,8 +165,8 @@ type ExternalAgentToolProgress struct {
 	Status ExternalAgentToolStatus `json:"status"`
 }
 
-// ACPProgressEvent is a content-free protocol event emitted by the ACP
-// adapter from the original job-owned stream. It never carries prompt text,
+// ExternalAgentProgressEvent is a content-free event emitted from the original
+// job-owned stream. It never carries prompt text,
 // tool arguments or output, thoughts, plans, paths, or raw frames.
 type ExternalAgentProgressEvent struct {
 	Kind ExternalAgentEventKind
@@ -212,7 +212,7 @@ func (e ExternalAgentProgressEvent) session() bool {
 }
 
 // ExternalAgentJobProgress is the durable content-free live projection of one
-// ACP job. It never contains provider payloads.
+// external-agent job. It never contains provider payloads.
 type ExternalAgentJobProgress struct {
 	JobID                    string
 	Attempt                  int

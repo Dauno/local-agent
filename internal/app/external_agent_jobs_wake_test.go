@@ -96,7 +96,7 @@ func newWakeCompositionInfrastructure(t *testing.T, logger *logging.Logger) *run
 	}
 }
 
-// newWakeCompositionModels builds a runtimeModels with one durable-job ACP
+// newWakeCompositionModels builds a runtimeModels with one durable-job external-agent
 // child wired to a fakeExternalRuntime, so newExternalAgentJobService takes
 // its real, non-empty composition path instead of the len(children)==0
 // early return.

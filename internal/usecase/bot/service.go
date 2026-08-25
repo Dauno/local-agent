@@ -42,7 +42,7 @@ type Config struct {
 	// ResultHandlesEnabled reports the V2 result-handles gate state. While
 	// enabled, direct-inline selection requires a positive per-profile
 	// MaxDirectInlineBytes admission; while disabled, the legacy rune-cap-only
-	// selection remains for legacy ACP delivery.
+	// selection remains for legacy external-agent delivery.
 	ResultHandlesEnabled bool
 	// MaxDirectInlineBytes is the consuming root profile's declared TRD 02
 	// direct-inline admission. Zero means no V2 direct-inline bytes when the

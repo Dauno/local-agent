@@ -138,7 +138,7 @@ type ExternalAgentJobActivationReconciler interface {
 
 // ExternalAgentJobCompletionHandler is the use-case boundary for a root turn
 // started by a published external-agent completion. It is intentionally
-// separate from the ACP runtime and from Slack event handling.
+// separate from job execution and Slack event handling.
 type ExternalAgentJobCompletionHandler interface {
 	HandleJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error
 	ReconcileJobCompletion(ctx context.Context, activation domain.ExternalAgentJobActivation) error
@@ -174,7 +174,7 @@ type ExternalAgentJobAdminStore interface {
 	InspectJob(ctx context.Context, jobID string) (*domain.ExternalAgentJobInspection, error)
 }
 
-// ExternalAgentJobProgressStore persists the content-free live ACP projection.
+// ExternalAgentJobProgressStore persists the content-free live external-agent projection.
 // Writes are bound to the job lease owner and attempt while the job is
 // running; terminal projections remain readable after lease release.
 type ExternalAgentJobProgressStore interface {
@@ -182,7 +182,7 @@ type ExternalAgentJobProgressStore interface {
 	ReadJobProgress(ctx context.Context, jobID string) (*domain.ExternalAgentJobProgress, error)
 }
 
-// ACPProcessRegistry reports best-effort in-process process liveness keyed
+// ExternalAgentProcessRegistry reports best-effort in-process process liveness keyed
 // by job and attempt. A nil result means the current process has no
 // trustworthy runtime handle (for example after restart) and must never be
 // rendered as dead.
@@ -302,13 +302,13 @@ type ExternalAgentJobActivationReader interface {
 }
 
 // ExternalAgentJobHostCompleter is the deterministic response phase after a
-// detached job has completed. It must not create a confirmation or rerun ACP.
+// detached job has completed. It must not create a confirmation or rerun the job.
 type ExternalAgentJobHostCompleter interface {
 	HostCompletionTurn(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey) (AgentTurn, error)
 }
 
 // ExternalAgentJobRuntime executes one already-admitted job. It is deliberately
-// provider-neutral so use cases do not import ACP or process types.
+// provider-neutral so use cases do not import process types.
 type ExternalAgentJobRuntime interface {
 	Run(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error)
 }

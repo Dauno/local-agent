@@ -198,7 +198,7 @@ func TestProgressToolWireStatusMapping(t *testing.T) {
 	} {
 		got, ok := ExternalAgentToolStatusFromWire(test.wire)
 		if ok != test.ok || got != test.want {
-			t.Fatalf("ACPToolStatusFromWire(%q) = %q/%v, want %q/%v", test.wire, got, ok, test.want, test.ok)
+			t.Fatalf("ExternalAgentToolStatusFromWire(%q) = %q/%v, want %q/%v", test.wire, got, ok, test.want, test.ok)
 		}
 	}
 }
@@ -214,7 +214,7 @@ func TestProgressToolWireKindMapping(t *testing.T) {
 		{"future_extension", ExternalAgentToolKindOther},
 	} {
 		if got := ExternalAgentToolKindFromWire(test.wire); got != test.want {
-			t.Fatalf("ACPToolKindFromWire(%q) = %q, want %q", test.wire, got, test.want)
+			t.Fatalf("ExternalAgentToolKindFromWire(%q) = %q, want %q", test.wire, got, test.want)
 		}
 	}
 }

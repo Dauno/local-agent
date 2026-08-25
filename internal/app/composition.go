@@ -224,7 +224,7 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 	}
 	artifactStore, artifactErr := fsartifact.New(paths.ArtifactDir, int64(cfg.ExternalAgent.MaxResultArtifactBytes))
 	if artifactErr != nil {
-		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize ACP result artifact store: %w", artifactErr))
+		return runtimeModels{}, prepared.redactor.Error(fmt.Errorf("initialize external-agent result artifact store: %w", artifactErr))
 	}
 	prepared.artifactStore = artifactStore
 	prepared.resultPayloadStore, err = fsartifact.NewTypedStore(filepath.Join(paths.ArtifactDir, "v2-results"), int64(cfg.ExternalAgent.MaxResultArtifactBytes))
@@ -417,7 +417,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 			configured.SetReferenceChecker(adaptersqlite.NewExternalAgentJobStore(store))
 		}
 		if _, err := retention.Cleanup(ctx, time.Now().UTC().AddDate(0, 0, -cfg.ExternalAgent.ArtifactRetentionDays)); err != nil {
-			return nil, models.redactor.Error(fmt.Errorf("cleanup ACP result artifacts: %w", err))
+			return nil, models.redactor.Error(fmt.Errorf("cleanup external-agent result artifacts: %w", err))
 		}
 	}
 
@@ -450,7 +450,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 		return nil, errors.New("initialize generated file exports: Slack bot token is missing files:write; regenerate the manifest and reinstall the app")
 	}
 	if durableExternalAgentConfigured(models) && !hasSlackScope(grantedSlackScopes, "files:write") {
-		return nil, errors.New("initialize durable ACP result delivery: Slack bot token is missing files:write; regenerate the manifest and reinstall the app")
+		return nil, errors.New("initialize durable external-agent result delivery: Slack bot token is missing files:write; regenerate the manifest and reinstall the app")
 	}
 
 	slackTimeout := time.Duration(cfg.Runtime.SlackAPITimeoutSeconds) * time.Second

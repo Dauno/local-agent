@@ -321,7 +321,7 @@ func TestResultStoreVerifyForWorkstreamRejectsExternalAgentProducerScopeMismatch
 	if err != nil {
 		t.Fatal(err)
 	}
-	request := testResultMaterialization(job.ID, completed.StatusRevision, "foreign scoped ACP payload")
+	request := testResultMaterialization(job.ID, completed.StatusRevision, "foreign scoped external-agent payload")
 	request.Scope = domain.ResultScope{Actor: "U2", TeamID: "T2", ConversationKey: "slack:T2:dm:D2", Project: "project-b"}
 	handle, err := results.Materialize(t.Context(), request)
 	if err != nil {
@@ -344,7 +344,7 @@ func TestResultStoreVerifyForWorkstreamRejectsExternalAgentProducerScopeMismatch
 		TeamID: request.Scope.TeamID, Conversation: request.Scope.ConversationKey, Project: request.Scope.Project,
 	})
 	if !errors.Is(err, domain.ErrResultScopeMismatch) {
-		t.Fatalf("ACP producer scope mismatch error = %v, want %v", err, domain.ErrResultScopeMismatch)
+		t.Fatalf("external-agent producer scope mismatch error = %v, want %v", err, domain.ErrResultScopeMismatch)
 	}
 }
 

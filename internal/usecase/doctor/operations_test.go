@@ -34,7 +34,7 @@ func TestOfflineDoctorReportsArtifactAndJobStoreChecks(t *testing.T) {
 		t.Fatalf("report=%#v", report)
 	}
 	for _, result := range report.Results {
-		if result.Name == "ACP artifacts" && strings.Contains(result.Detail, "xoxb-secret-token") {
+		if result.Name == "external-agent artifacts" && strings.Contains(result.Detail, "xoxb-secret-token") {
 			t.Fatal("doctor leaked artifact checker detail")
 		}
 	}

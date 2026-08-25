@@ -356,7 +356,7 @@ func TestExternalAgentJobStoreRejectsEveryOwnerMutationAfterLeaseExpiry(t *testi
 		t.Fatal("expired lease was renewed")
 	}
 	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "late-session"); err == nil {
-		t.Fatal("expired lease received an ACP session")
+		t.Fatal("expired lease received an external-agent session")
 	}
 	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err == nil {
 		t.Fatal("expired lease changed side-effect state")

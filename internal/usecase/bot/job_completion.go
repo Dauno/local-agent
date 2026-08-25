@@ -240,7 +240,7 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 		if !modelStarted {
 			// An irreducible frame admission failure is terminal for this
 			// activation: it can never fit the provider-shaped budget and must
-			// not retry the producing ACP job.
+			// not retry the producing external-agent job.
 			if errors.Is(runErr, domain.ErrIrreducibleContext) {
 				return s.failActivation(ctx, activation, "activation_frame_invalid", false, runErr)
 			}
@@ -361,7 +361,7 @@ func (s *Service) activationFrame(ctx context.Context, activation domain.Externa
 // directInlineAdmitted applies the TRD 02 per-profile inline admission. While
 // the result-handles gate is enabled, a positive declared admission is
 // required; no declaration means zero direct-inline bytes. While the gate is
-// disabled, the legacy rune-cap-only selection remains for legacy ACP
+// disabled, the legacy rune-cap-only selection remains for legacy external-agent
 // delivery.
 func (s *Service) directInlineAdmitted(bytes int64) bool {
 	if !s.cfg.ResultHandlesEnabled {

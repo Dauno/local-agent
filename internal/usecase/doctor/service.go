@@ -351,7 +351,7 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 		report.pass("ADK compaction", "durable OpenAI-compatible model history projection is enabled")
 	}
 	if durableExternalAgent {
-		report.pass("ACP result delivery", fmt.Sprintf("complete results use up to %d Markdown parts or sanitized Markdown files", cfg.ExternalAgent.Delivery.MaxMarkdownParts))
+		report.pass("external-agent result delivery", fmt.Sprintf("complete results use up to %d Markdown parts or sanitized Markdown files", cfg.ExternalAgent.Delivery.MaxMarkdownParts))
 	}
 
 	modelAPIKeyEnv := ""
@@ -479,9 +479,9 @@ func (s *Service) runLiveChecks(ctx context.Context, report *Report, state liveC
 		err := s.deps.Live.CheckSlackExports(liveCtx, state.values[SlackBotTokenKey])
 		cancel()
 		if err != nil {
-			report.fail("Slack ACP result delivery", state.redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
+			report.fail("Slack external-agent result delivery", state.redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
 		} else {
-			report.pass("Slack ACP result delivery", "files:write scope check passed")
+			report.pass("Slack external-agent result delivery", "files:write scope check passed")
 		}
 	}
 	if s.deps.CLI != nil {
@@ -713,9 +713,9 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 	}
 	if s.deps.Artifacts != nil {
 		if err := s.deps.Artifacts.CheckArtifactStore(ctx, paths.ArtifactDir, cfg.ExternalAgent.MaxResultArtifactBytes); err != nil {
-			report.fail("ACP artifacts", redactor.String(err.Error()), "Fix the configured artifact directory and permissions; do not place secrets in it.", false)
+			report.fail("external-agent artifacts", redactor.String(err.Error()), "Fix the configured artifact directory and permissions; do not place secrets in it.", false)
 		} else {
-			report.pass("ACP artifacts", fmt.Sprintf("private artifact directory and %d-byte bound are valid", cfg.ExternalAgent.MaxResultArtifactBytes))
+			report.pass("external-agent artifacts", fmt.Sprintf("private artifact directory and %d-byte bound are valid", cfg.ExternalAgent.MaxResultArtifactBytes))
 		}
 	}
 	if s.deps.Jobs != nil {

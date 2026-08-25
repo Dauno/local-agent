@@ -169,7 +169,7 @@ func (a *Application) PrepareSetup(ctx context.Context) (bootstrap.Snapshot, boo
 		return bootstrap.Snapshot{}, bootstrap.Secrets{}, err
 	}
 	if err := os.MkdirAll(snapshot.Paths.ArtifactDir, 0o700); err != nil {
-		return bootstrap.Snapshot{}, bootstrap.Secrets{}, fmt.Errorf("create ACP artifact directory: %w", err)
+		return bootstrap.Snapshot{}, bootstrap.Secrets{}, fmt.Errorf("create external-agent artifact directory: %w", err)
 	}
 	keys := []string{bootstrap.SlackBotTokenEnv, bootstrap.SlackAppTokenEnv}
 	if snapshot.ModelAPIKeyEnv != "" {

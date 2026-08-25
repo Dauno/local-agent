@@ -44,18 +44,18 @@ func ValidateExecutionMode(kind AgentKind, mode string) error {
 	return fmt.Errorf("execution mode %q is not valid for agent kind %q", mode, kind)
 }
 
-// ValidateACPTimeout validates an ACP timeout. Zero is accepted for defaulting.
+// ValidateExternalAgentTimeout validates an external-agent timeout. Zero uses the default.
 func ValidateExternalAgentTimeout(seconds int) error {
 	if seconds < 0 || seconds > MaxExternalAgentTimeoutSeconds {
-		return fmt.Errorf("ACP timeout must be between 0 and %d seconds", MaxExternalAgentTimeoutSeconds)
+		return fmt.Errorf("external-agent timeout must be between 0 and %d seconds", MaxExternalAgentTimeoutSeconds)
 	}
 	return nil
 }
 
-// ValidateACPAllowlist enforces the only supported ACP provider name.
+// ValidateExternalAgentAllowlist enforces the supported external-agent provider name.
 func ValidateExternalAgentAllowlist(providerName string) error {
 	if providerName == "opencode" {
 		return nil
 	}
-	return fmt.Errorf("ACP provider %q is not allowed", providerName)
+	return fmt.Errorf("external-agent provider %q is not allowed", providerName)
 }

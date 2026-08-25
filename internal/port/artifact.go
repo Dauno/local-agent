@@ -92,7 +92,7 @@ type GeneratedFileUploader interface {
 }
 
 // MarkdownResultUploader is the optional typed transport used for durable
-// ACP results. The fallback method remains available for existing export
+// external-agent results. The fallback method remains available for existing export
 // adapters and fakes.
 type MarkdownResultUploader interface {
 	GeneratedFileUploader

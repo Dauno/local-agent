@@ -50,11 +50,11 @@ func (g *ActiveProgressGauge) dec() {
 	g.mu.Unlock()
 }
 
-// ProgressRecorder folds content-free ACP events into a per-job projection,
+// ProgressRecorder folds content-free external-agent events into a per-job projection,
 // persists phase boundaries immediately and coalesced activity at most once
 // per flush interval, and emits one passive inactivity warning per silent
 // episode. It never cancels, retries, closes, loads, resumes, or transitions
-// a job. Monitoring failure is observable but never fails the ACP invocation.
+// a job. Monitoring failure is observable but never fails the external-agent invocation.
 type ProgressRecorder struct {
 	store     port.ExternalAgentJobProgressStore
 	registry  port.ExternalAgentProcessRegistry
@@ -118,7 +118,7 @@ func (r *ProgressRecorder) SetSessionID(sessionID string) {
 	attempt := r.attempt
 	r.mu.Unlock()
 	if changed {
-		r.logger.Info("external-agent ACP session established",
+		r.logger.Info("external-agent session established",
 			"job_id", r.jobID, "attempt", attempt, "acp_session_id", sessionID, "phase", domain.ExternalAgentPhaseSessionReady)
 	}
 }
@@ -158,7 +158,7 @@ func (r *ProgressRecorder) Start(ctx context.Context) {
 	}()
 }
 
-// Record folds one content-free event into the in-memory projection. The ACP
+// Record folds one content-free event into the in-memory projection. The external-agent
 // reader is never blocked on SQLite: durable writes happen on the monitor
 // goroutine or during Close.
 func (r *ProgressRecorder) Record(event domain.ExternalAgentProgressEvent) {
@@ -173,7 +173,7 @@ func (r *ProgressRecorder) Record(event domain.ExternalAgentProgressEvent) {
 		r.pid = event.PID
 	}
 	if event.Kind == domain.ExternalAgentEventProcessStarted {
-		r.logger.Info("external-agent ACP process started",
+		r.logger.Info("external-agent process started",
 			"job_id", r.jobID, "attempt", r.attempt, "pid", event.PID, "phase", domain.ExternalAgentPhaseStarting)
 	}
 	previousPhase := r.proj.Phase
@@ -186,7 +186,7 @@ func (r *ProgressRecorder) Record(event domain.ExternalAgentProgressEvent) {
 		r.metrics.AddCounter(domain.MetricExternalAgentPhaseTransitionTotal, 1, port.MetricLabels{
 			"phase": string(r.proj.Phase),
 		})
-		r.logger.Debug("external-agent ACP phase transition",
+		r.logger.Debug("external-agent phase transition",
 			"job_id", r.jobID, "attempt", r.attempt, "phase", r.proj.Phase, "last_event_kind", r.proj.LastEventKind)
 	}
 	if r.immediate(event) || r.proj.Phase != previousPhase {
@@ -246,7 +246,7 @@ func (r *ProgressRecorder) signalFlush() {
 // maintenance runs on the monitor goroutine: evaluate the passive warning and
 // flush when the event was immediate or the flush interval elapsed. Durable
 // writes never happen while the projection mutex is held, so a slow SQLite
-// write can never block the ACP reader path.
+// write can never block the external-agent reader path.
 func (r *ProgressRecorder) maintenance(immediate bool) {
 	r.mu.Lock()
 	if r.closed {
@@ -259,7 +259,7 @@ func (r *ProgressRecorder) maintenance(immediate bool) {
 	case health == domain.ExternalAgentHealthPossiblyStalled && !r.warned:
 		r.warned = true
 		idle := max(now.Sub(r.proj.LastTransportActivityAt), 0)
-		r.logger.Warn("external-agent ACP possibly stalled",
+		r.logger.Warn("external-agent possibly stalled",
 			"job_id", r.jobID, "attempt", r.attempt, "acp_session_id", r.sessionID,
 			"phase", r.proj.Phase, "last_event_kind", r.proj.LastEventKind,
 			"idle_seconds", int(idle.Seconds()), "pid", r.pid)
@@ -298,7 +298,7 @@ func (r *ProgressRecorder) flushSynchronous() {
 
 // flushNow writes one projection snapshot. It never holds the projection
 // mutex during the write; a slow store degrades only the recorder, never the
-// ACP reader.
+// external-agent reader.
 func (r *ProgressRecorder) flushNow(proj domain.ExternalAgentJobProgress) {
 	if r.store == nil {
 		r.metrics.AddCounter(domain.MetricExternalAgentProgressPersistFailureTotal, 1, port.MetricLabels{"outcome": "unconfigured"})
@@ -308,7 +308,7 @@ func (r *ProgressRecorder) flushNow(proj domain.ExternalAgentJobProgress) {
 	defer cancel()
 	if err := r.store.WriteJobProgress(ctx, r.jobID, r.owner, r.attempt, proj); err != nil {
 		r.metrics.AddCounter(domain.MetricExternalAgentProgressPersistFailureTotal, 1, port.MetricLabels{"outcome": "write_failed"})
-		r.logger.Warn("external-agent ACP progress persist failed",
+		r.logger.Warn("external-agent progress persist failed",
 			"job_id", r.jobID, "attempt", r.attempt, "error_class", progressFailureClass(err))
 		return
 	}

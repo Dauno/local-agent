@@ -323,10 +323,8 @@ func buildWorkflowNode(doc agentdef.AgentDocument, bp *agentdef.WorkflowBlueprin
 	}
 }
 
-// buildAgentCLINode runs one workflow step on an agent CLI. It mirrors
-// buildACPNode: the same trusted project state, the same delegation, and the
-// same output contract. The two differ only in how the external agent is
-// reached.
+// buildAgentCLINode runs one workflow step on an agent CLI with trusted project
+// state and the standard workflow output contract.
 func buildAgentCLINode(doc agentdef.AgentDocument, llm model.LLM, scope invocationScope) (agent.Agent, error) {
 	resolved := scope.modelResolved[doc.LLM.Model]
 	if resolved == nil || !resolved.IsAgentCLI() {

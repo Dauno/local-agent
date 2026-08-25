@@ -42,7 +42,7 @@ func TestNoExternalAgentConfigurationReturnsNilJobService(t *testing.T) {
 		t.Fatal(err)
 	}
 	if service != nil || worker != nil {
-		t.Fatalf("no-ACP configuration returned service=%v worker=%v", service, worker)
+		t.Fatalf("no-external-agent configuration returned service=%v worker=%v", service, worker)
 	}
 }
 
@@ -190,13 +190,13 @@ func TestDurableExternalAgentDispatcherNativeResultMatchesInlineAndFileDelivery(
 			}
 			var resultID string
 			if err := catalog.DB().QueryRowContext(t.Context(), `SELECT result_id FROM result_records WHERE producer_kind = ? AND producer_id = ? AND producer_revision = ?`, domain.ResultProducerExternalAgentJob, job.ID, job.StatusRevision+1).Scan(&resultID); err != nil {
-				t.Fatalf("read native ACP result: %v", err)
+				t.Fatalf("read native external-agent result: %v", err)
 			}
 			_, handle, err := results.Resolve(t.Context(), resultID, domain.ResultScope{
 				Actor: job.Actor, TeamID: job.TeamID, ConversationKey: string(job.ConversationKey), Project: job.PrimaryProject,
 			})
 			if err != nil {
-				t.Fatalf("resolve native ACP result: %v", err)
+				t.Fatalf("resolve native external-agent result: %v", err)
 			}
 			if handle.SHA256 != delivery.ResultSHA256 || handle.Bytes != delivery.ResultBytes {
 				t.Fatalf("native/delivery identity differs: handle=%+v delivery=%+v", handle, delivery)

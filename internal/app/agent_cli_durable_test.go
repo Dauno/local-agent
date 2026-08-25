@@ -140,7 +140,7 @@ func TestDurableConfiguredCoversAgentCLI(t *testing.T) {
 }
 
 // Reconciliation resumes a session. An agent CLI has none, so the operator must
-// be told that plainly instead of being shown an ACP lookup failure.
+// be told that plainly instead of being shown an external-agent lookup failure.
 func TestDurableAgentCLIReconcileReportsNoSessionRecovery(t *testing.T) {
 	t.Parallel()
 	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
@@ -151,7 +151,7 @@ func TestDurableAgentCLIReconcileReportsNoSessionRecovery(t *testing.T) {
 	}
 }
 
-// An ACP job must never be served by a CLI child, and the reverse.
+// An external-agent job must never be served by a CLI child, and the reverse.
 func TestDurableDispatcherKeepsFamiliesApart(t *testing.T) {
 	t.Parallel()
 	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}

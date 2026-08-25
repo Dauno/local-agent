@@ -199,7 +199,7 @@ func (s *ResultStore) VerifyForWorkstream(ctx context.Context, request port.Work
 			return domain.ResultIdentity{}, domain.ErrResultUnavailable
 		}
 		if err != nil {
-			return domain.ResultIdentity{}, fmt.Errorf("read ACP producer for result verification: %w", err)
+			return domain.ResultIdentity{}, fmt.Errorf("read external-agent producer for result verification: %w", err)
 		}
 		if status != string(domain.JobCompleted) || revision != identity.Producer.Revision {
 			return domain.ResultIdentity{}, domain.ErrResultUnavailable
@@ -215,7 +215,7 @@ func (s *ResultStore) VerifyForWorkstream(ctx context.Context, request port.Work
 			return domain.ResultIdentity{}, domain.ErrResultUnavailable
 		}
 		if err != nil {
-			return domain.ResultIdentity{}, fmt.Errorf("read ACP result binding for workstream verification: %w", err)
+			return domain.ResultIdentity{}, fmt.Errorf("read external-agent result binding for workstream verification: %w", err)
 		}
 	}
 	return identity, nil
