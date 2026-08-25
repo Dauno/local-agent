@@ -414,7 +414,7 @@ func (a *Application) createVerifiedBackup(ctx context.Context, backupper rollou
 	if err != nil {
 		return rollout.BackupIdentity{}, err
 	}
-	name := fmt.Sprintf("local-agent.pre-v42.v%d.%s.db", sourceVersion, time.Now().UTC().Format("20060102T150405Z"))
+	name := fmt.Sprintf("local-agent.pre-v43.v%d.%s.db", sourceVersion, time.Now().UTC().Format("20060102T150405Z"))
 	destination := filepath.Join(resolvedDir, name)
 	identity, err := backupper.BackupInto(ctx, databasePath, destination)
 	if err != nil {

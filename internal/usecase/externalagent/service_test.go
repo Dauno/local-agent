@@ -174,10 +174,142 @@ func TestExpiredReconciliationReturnsToCompletionUnknown(t *testing.T) {
 		t.Fatal(err)
 	}
 	time.Sleep(30 * time.Millisecond)
-	service.recoverExpired(t.Context())
+	service.recoverExpired(t.Context(), nil, nil)
 	recovered, err := jobStore.GetJob(t.Context(), job.ID)
 	if err != nil || recovered == nil || recovered.Status != domain.JobCompletionUnknown || recovered.StatusRevision != reconciling.StatusRevision+1 {
 		t.Fatalf("recovered job = %#v, err=%v", recovered, err)
+	}
+}
+
+// A daemon restart leaves the old worker lease expired. A persisted session ID
+// lets the new worker reconcile without replaying the original task or waiting
+// for an operator command.
+func TestExpiredRunningJobAutomaticallyReconcilesPersistedSession(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "automatic-reconcile.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	runtime := &fakeRecoveryRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}
+	// The recovery lease must outlive one heartbeat under test load. Expiry of
+	// the dead worker's lease is driven by its own claim TTL below, not by this.
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 2 * time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.Start(t.Context(), testRequest(domain.JobDetached))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	claimed, err := jobStore.ClaimNext(t.Context(), now, "dead-worker", time.Second)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-automatic", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	runCtx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.Run(runCtx)
+	}()
+	completed := waitForJob(t, jobStore, job.ID, domain.JobCompleted)
+	cancel()
+	<-done
+	if completed.ExternalAgentSessionID != "session-automatic" || completed.ResultSummary != "done" {
+		t.Fatalf("completed job = %#v", completed)
+	}
+}
+
+// A job the actor cancelled must never be resumed automatically. It reaches
+// completion_unknown like any job with possible side effects, but resuming it
+// would complete work that was stopped on purpose.
+func TestCancelledJobIsNotAutomaticallyResumed(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "cancelled-no-resume.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	runtime := &fakeRecoveryRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job, err := service.Start(t.Context(), testRequest(domain.JobDetached))
+	if err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobStore.ClaimNext(t.Context(), time.Now().UTC(), "dead-worker", time.Second)
+	if err != nil || claimed == nil {
+		t.Fatalf("claim = %#v, err = %v", claimed, err)
+	}
+	if err := jobStore.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-cancelled", ""); err != nil {
+		t.Fatal(err)
+	}
+	if err := jobStore.MarkSideEffectsPossible(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt); err != nil {
+		t.Fatal(err)
+	}
+	// The actor cancels, then the worker dies and its lease expires.
+	if _, err := jobStore.RequestCancellation(t.Context(), job.ID, job.Actor); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(1100 * time.Millisecond)
+	runCtx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		service.Run(runCtx)
+	}()
+	awaiting := waitForJob(t, jobStore, job.ID, domain.JobCompletionUnknown)
+	time.Sleep(300 * time.Millisecond)
+	cancel()
+	<-done
+	final, err := jobStore.GetJob(t.Context(), job.ID)
+	if err != nil || final == nil {
+		t.Fatalf("job = %#v, err = %v", final, err)
+	}
+	if final.Status != domain.JobCompletionUnknown || final.StatusRevision != awaiting.StatusRevision {
+		t.Fatalf("a cancelled job must rest untouched in completion_unknown, got %#v", final)
+	}
+}
+
+// A reconciliation that loses its own lease returns to completion_unknown and
+// stops there. Resuming it again would retry without a bound.
+func TestExpiredReconciliationIsNotAutomaticallyRetried(t *testing.T) {
+	store, err := sqlite.Initialize(t.Context(), filepath.Join(t.TempDir(), "expired-no-retry.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	jobStore := sqlite.NewExternalAgentJobStore(store)
+	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeRecoveryRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	job := createCompletionUnknownJob(t, service, jobStore)
+	reconciling, err := jobStore.BeginReconciliationExpected(t.Context(), job.ID, job.Actor, job.ConversationKey, job.StatusRevision, time.Now().UTC(), "reconciler-dead", 20*time.Millisecond)
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(30 * time.Millisecond)
+	var workers sync.WaitGroup
+	sem := make(chan struct{}, 1)
+	service.recoverExpired(t.Context(), sem, &workers)
+	workers.Wait()
+	recovered, err := jobStore.GetJob(t.Context(), job.ID)
+	if err != nil || recovered == nil {
+		t.Fatalf("job = %#v, err = %v", recovered, err)
+	}
+	if recovered.Status != domain.JobCompletionUnknown || recovered.StatusRevision != reconciling.StatusRevision+1 {
+		t.Fatalf("an expired reconciliation must rest in completion_unknown, got %#v", recovered)
 	}
 }
 
@@ -1685,7 +1817,7 @@ func createCompletionUnknownJob(t *testing.T, service *Service, store port.Exter
 	if err != nil || claimed == nil {
 		t.Fatalf("claim = %#v, err=%v", claimed, err)
 	}
-	if err := store.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-1"); err != nil {
+	if err := store.AssignExternalAgentSession(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, "session-1", ""); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompletionUnknown, nil, "completion_unknown", now.Add(time.Millisecond)); err != nil {

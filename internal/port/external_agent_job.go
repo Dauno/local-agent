@@ -56,7 +56,7 @@ type ExternalAgentJobStore interface {
 	GetJob(ctx context.Context, jobID string) (*domain.ExternalAgentJob, error)
 	ClaimNext(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error)
 	RenewLease(ctx context.Context, jobID, owner string, attempt int, now time.Time, leaseTTL time.Duration) error
-	AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error
+	AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID, transcriptPath string) error
 	MarkSideEffectsPossible(ctx context.Context, jobID, owner string, attempt int) error
 	RequestCancellation(ctx context.Context, jobID, actor string) (*domain.ExternalAgentJob, error)
 	Transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error

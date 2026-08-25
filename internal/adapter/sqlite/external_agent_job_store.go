@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"math/rand/v2"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -91,16 +92,16 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 		job_id, mode, provider, profile, primary_project, additional_projects,
 		registry_revision, task, request_sha256, wrapper_call_id, original_call_id,
 		actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
-		status, attempt, acp_session_id,
+		status, attempt, acp_session_id, transcript_path,
 		side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at,
 		result_summary, result_artifact, result_sha256, result_bytes, error_code,
 		status_revision, created_at, started_at, finished_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
 		job.ID, job.Mode, job.Provider, job.Profile, job.PrimaryProject, string(projects),
 		job.RegistryRevision, job.Task, job.RequestSHA256, job.WrapperCallID, job.OriginalCallID,
 		job.Actor, job.TeamID, string(job.ConversationKey), job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision,
-		job.Status, job.Attempt, job.ExternalAgentSessionID,
+		job.Status, job.Attempt, job.ExternalAgentSessionID, job.TranscriptPath,
 		boolInt(job.SideEffectsPossible), job.LeaseOwner, unix(job.LeaseExpiry), unix(job.HeartbeatAt), unix(job.TimeoutAt),
 		job.ResultSummary, job.ResultArtifact, job.ResultSHA256, job.ResultBytes, job.ErrorCode,
 		job.StatusRevision, unix(job.CreatedAt), unix(job.StartedAt), unix(job.FinishedAt), unix(job.UpdatedAt),
@@ -174,14 +175,14 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	var status string
 	var statusRevision int
 	var finishedAt int64
-	var sessionID string
+	var sessionID, transcriptPath string
 	var phase string
 	var lastEventKind string
 	var transport, session, meaningful, promptStarted int64
 	var activeTools int
 	var pending int
 	var stopReason string
-	err := s.db.QueryRowContext(ctx, `SELECT j.status, j.status_revision, j.finished_at, j.acp_session_id,
+	err := s.db.QueryRowContext(ctx, `SELECT j.status, j.status_revision, j.finished_at, j.acp_session_id, j.transcript_path,
 		COALESCE(p.phase, ''), COALESCE(p.last_event_kind, ''), COALESCE(p.last_transport_activity_at, 0),
 		COALESCE(p.last_session_update_at, 0), COALESCE(p.last_meaningful_progress_at, 0),
 		COALESCE(p.prompt_started_at, 0), COALESCE(p.active_tool_count, 0),
@@ -189,7 +190,7 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 		FROM external_agent_jobs j
 		LEFT JOIN external_agent_job_progress p ON p.job_id = j.job_id
 		WHERE j.job_id = ?`, jobID).
-		Scan(&status, &statusRevision, &finishedAt, &sessionID, &phase, &lastEventKind,
+		Scan(&status, &statusRevision, &finishedAt, &sessionID, &transcriptPath, &phase, &lastEventKind,
 			&transport, &session, &meaningful, &promptStarted, &activeTools, &pending, &stopReason)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -200,6 +201,7 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	view := &domain.ExternalAgentJobInspection{
 		JobID: jobID, Status: safeAdminJobStatus(status), StatusRevision: statusRevision,
 		ExternalAgentSessionID: safeAdminSessionID(sessionID), FinishedAt: fromUnix(finishedAt),
+		TranscriptPath:           safeAdminTranscriptPath(transcriptPath),
 		Phase:                    domain.ExternalAgentProgressPhase(phase),
 		LastEventKind:            domain.ExternalAgentEventKind(lastEventKind),
 		LastTransportActivityAt:  fromUnix(transport),
@@ -382,14 +384,17 @@ func (s *ExternalAgentJobStore) RenewLease(ctx context.Context, jobID, owner str
 	return nil
 }
 
-func (s *ExternalAgentJobStore) AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID string) error {
+func (s *ExternalAgentJobStore) AssignExternalAgentSession(ctx context.Context, jobID, owner string, attempt int, sessionID, transcriptPath string) error {
 	if sessionID == "" {
 		return errors.New("external-agent session ID is required")
 	}
+	if transcriptPath != "" && safeAdminTranscriptPath(transcriptPath) == "" {
+		return errors.New("external-agent transcript path is invalid")
+	}
 	now := time.Now().UTC()
-	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_jobs SET acp_session_id = ?, updated_at = ?
+	result, err := s.db.ExecContext(ctx, `UPDATE external_agent_jobs SET acp_session_id = ?, transcript_path = ?, updated_at = ?
 		WHERE job_id = ? AND lease_owner = ? AND attempt = ? AND status = ? AND acp_session_id = '' AND lease_expiry > ?`,
-		sessionID, now.UnixNano(), jobID, owner, attempt, domain.JobRunning, now.UnixNano())
+		sessionID, transcriptPath, now.UnixNano(), jobID, owner, attempt, domain.JobRunning, now.UnixNano())
 	if err != nil {
 		return fmt.Errorf("assign external-agent session: %w", err)
 	}
@@ -1254,6 +1259,16 @@ func safeAdminSlackTimestamp(value string) string {
 	return value
 }
 
+func safeAdminTranscriptPath(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value) > 4096 || !filepath.IsAbs(value) || filepath.Clean(value) != value || strings.ContainsAny(value, "\x00\r\n") {
+		return ""
+	}
+	return value
+}
+
 func safeAdminDeliveryMode(value string) domain.JobResultDeliveryMode {
 	switch domain.JobResultDeliveryMode(value) {
 	case domain.JobResultDeliveryMarkdown, domain.JobResultDeliveryFile:
@@ -1306,7 +1321,7 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 	return n, nil
 }
 
-const jobColumns = `job_id, mode, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision, status, attempt, acp_session_id, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
+const jobColumns = `job_id, mode, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision, status, attempt, acp_session_id, transcript_path, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
 
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -1326,7 +1341,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 		leaseExpiry, heartbeat, timeout, created, started, finished, updated int64
 		sideEffects                                                          int
 	)
-	err := row.Scan(&job.ID, &mode, &job.Provider, &job.Profile, &job.PrimaryProject, &projects, &job.RegistryRevision, &job.Task, &job.RequestSHA256, &job.WrapperCallID, &job.OriginalCallID, &job.Actor, &job.TeamID, &conversation, &job.WorkstreamID, &job.TaskID, &job.ExecutionIdentity, &job.AdmissionRevision, &status, &job.Attempt, &job.ExternalAgentSessionID, &sideEffects, &job.LeaseOwner, &leaseExpiry, &heartbeat, &timeout, &job.ResultSummary, &job.ResultArtifact, &job.ResultSHA256, &job.ResultBytes, &job.ErrorCode, &job.StatusRevision, &created, &started, &finished, &updated)
+	err := row.Scan(&job.ID, &mode, &job.Provider, &job.Profile, &job.PrimaryProject, &projects, &job.RegistryRevision, &job.Task, &job.RequestSHA256, &job.WrapperCallID, &job.OriginalCallID, &job.Actor, &job.TeamID, &conversation, &job.WorkstreamID, &job.TaskID, &job.ExecutionIdentity, &job.AdmissionRevision, &status, &job.Attempt, &job.ExternalAgentSessionID, &job.TranscriptPath, &sideEffects, &job.LeaseOwner, &leaseExpiry, &heartbeat, &timeout, &job.ResultSummary, &job.ResultArtifact, &job.ResultSHA256, &job.ResultBytes, &job.ErrorCode, &job.StatusRevision, &created, &started, &finished, &updated)
 	if err != nil {
 		return domain.ExternalAgentJob{}, err
 	}

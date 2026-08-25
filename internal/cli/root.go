@@ -451,6 +451,7 @@ func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
 	_, _ = fmt.Fprintf(out, "status: %s\n", view.Status)
 	_, _ = fmt.Fprintf(out, "status_revision: %d\n", view.StatusRevision)
 	_, _ = fmt.Fprintf(out, "acp_session_id: %s\n", inspectionSessionID(view.ExternalAgentSessionID))
+	_, _ = fmt.Fprintf(out, "transcript_path: %s\n", inspectionTranscriptPath(view.TranscriptPath))
 	if view.Phase != "" || view.Health != "" || view.ProcessAlive != nil {
 		_, _ = fmt.Fprintf(out, "phase: %s\n", view.Phase)
 		_, _ = fmt.Fprintf(out, "health: %s\n", view.Health)
@@ -498,6 +499,13 @@ func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
 			_, _ = fmt.Fprintf(out, "slack_file_id_present: %t\n", delivery.SlackFileIDPresent)
 		}
 	}
+}
+
+func inspectionTranscriptPath(value string) string {
+	if value == "" {
+		return "unavailable"
+	}
+	return value
 }
 
 func inspectionTime(value time.Time) string {

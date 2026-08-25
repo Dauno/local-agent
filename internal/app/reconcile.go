@@ -4,22 +4,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"time"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/fsartifact"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
+	externalagent "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 )
 
-// ReconcileJob is the local operator boundary for a completion-unknown job.
-//
-// Reconciliation resumes the agent's session to learn what actually happened,
-// which is the only honest way to close a job whose side effects are unknown.
-// No runtime in this release captures a session: the `session` descriptor block
-// is parsed and validated, but the engine does not yet record the identifier.
-//
-// The command therefore reports plainly that the job must be inspected and
-// closed by hand. It still runs the full schema preflight first, so an operator
-// who is really facing a migration problem is told about that instead.
+// ReconcileJob is the local operator boundary. It loads actor and destination
+// from durable state, so neither can be supplied through CLI input.
 func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRevision int) (domain.ExternalAgentJobStatusView, error) {
 	if expectedRevision < 0 {
 		return domain.ExternalAgentJobStatusView{}, errors.New("expected status revision is required")
@@ -51,8 +48,92 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 	if job == nil {
 		return domain.ExternalAgentJobStatusView{}, errors.New("external-agent job was not found")
 	}
-	return domain.ExternalAgentJobStatusView{}, fmt.Errorf(
-		"session recovery is not supported for job %q: inspect the workspace and close the job explicitly", job.ID)
+	definition, resolved, err := resolveReconciliationAgent(setup, *job)
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, err
+	}
+	if !resolved.IsAgentCLI() || resolved.Session == nil {
+		return domain.ExternalAgentJobStatusView{}, fmt.Errorf("session recovery is not supported for job %q: no resumable agent_cli descriptor matches its provider and profile", job.ID)
+	}
+	revision, err := agentExecutionFingerprint(definition, resolved, setup.paths.SandboxProjectRoots, setup.cfg)
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, fmt.Errorf("fingerprint agent CLI recovery scope: %w", err)
+	}
+	cliModel, err := buildAgentCLIModel(ctx, resolved, setup.cfg, setup.paths, nil, nil)
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, err
+	}
+	artifactStore, err := fsartifact.New(setup.paths.ArtifactDir, int64(setup.cfg.ExternalAgent.MaxResultArtifactBytes))
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, fmt.Errorf("initialize external-agent result artifact store: %w", err)
+	}
+	policy := domain.ResultDeliveryPolicy{
+		MaxMarkdownParts: setup.cfg.ExternalAgent.Delivery.MaxMarkdownParts,
+		MaxFileBytes:     int64(setup.cfg.ExternalAgent.Delivery.MaxFileBytes), MaxInlineResultBytes: int64(setup.cfg.ExternalAgent.MaxInlineResultBytes),
+		MaxResultArtifactBytes: int64(setup.cfg.ExternalAgent.MaxResultArtifactBytes),
+	}
+	if err := policy.Validate(); err != nil {
+		return domain.ExternalAgentJobStatusView{}, err
+	}
+	jobStore := adaptersqlite.NewExternalAgentJobStore(store)
+	var nativeResults port.TrustedResultStore
+	if setup.cfg.Orchestration.ResultHandles.Enabled {
+		payloads, payloadErr := fsartifact.NewTypedStore(filepath.Join(setup.paths.ArtifactDir, "v2-results"), int64(setup.cfg.ExternalAgent.MaxResultArtifactBytes))
+		if payloadErr != nil {
+			return domain.ExternalAgentJobStatusView{}, fmt.Errorf("initialize native external-agent result payload store: %w", payloadErr)
+		}
+		nativeResults, err = adaptersqlite.NewResultStore(store, payloads)
+		if err != nil {
+			return domain.ExternalAgentJobStatusView{}, fmt.Errorf("initialize native external-agent result store: %w", err)
+		}
+	}
+	dispatcher := &externalAgentJobDispatcher{
+		children: []preparedAgentTool{{definition: definition, model: cliModel, cliResolved: resolved, projectRoots: setup.paths.SandboxProjectRoots, registryRevision: revision}},
+		store:    jobStore, artifacts: artifactStore, results: nativeResults, policy: policy, partLabels: setup.cfg.Slack.PartLabels,
+		reconciliationTimeout: time.Duration(setup.cfg.ExternalAgent.ReconciliationTimeoutSeconds) * time.Second,
+	}
+	if root, ok := setup.defs.Agents["root_agent"]; ok {
+		dispatcher.global = root.EffectiveDelegatedGlobalInstruction()
+	}
+	runtime := &recoverableExternalAgentJobDispatcher{externalAgentJobDispatcher: dispatcher}
+	service, err := externalagent.New(externalagent.Config{
+		DefaultTimeout: time.Duration(setup.cfg.ExternalAgent.DefaultJobTimeoutSeconds) * time.Second,
+		MaxTimeout:     time.Duration(setup.cfg.ExternalAgent.MaxJobTimeoutSeconds) * time.Second,
+		LeaseTTL:       30 * time.Second, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 2,
+	}, externalagent.Dependencies{Store: jobStore, Runtime: runtime, Artifacts: artifactStore, NativeResults: nativeResults, MaxResultBytes: int64(setup.cfg.ExternalAgent.MaxResultArtifactBytes)})
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, err
+	}
+	if _, err := service.ReconcileExpected(ctx, job.ID, job.Actor, job.ConversationKey, expectedRevision); err != nil {
+		return domain.ExternalAgentJobStatusView{}, err
+	}
+	updated, err := jobStore.GetJob(ctx, job.ID)
+	if err != nil {
+		return domain.ExternalAgentJobStatusView{}, err
+	}
+	if updated == nil {
+		return domain.ExternalAgentJobStatusView{}, errors.New("external-agent job disappeared after reconciliation")
+	}
+	return updated.StatusView(), nil
+}
+
+func resolveReconciliationAgent(setup runtimeSetup, job domain.ExternalAgentJob) (agentdef.AgentDef, *agentdef.ResolvedModel, error) {
+	if setup.defs == nil {
+		return agentdef.AgentDef{}, nil, errors.New("durable external-agent definitions are unavailable")
+	}
+	for _, definition := range setup.defs.Agents {
+		if definition.ExecutionMode != agentdef.ExecutionModeDurableJob || definition.Model != job.Profile {
+			continue
+		}
+		resolved, err := setup.defs.ResolveModel(definition.Model)
+		if err != nil {
+			return agentdef.AgentDef{}, nil, err
+		}
+		if resolved.Provider.Name == job.Provider {
+			return definition, resolved, nil
+		}
+	}
+	return agentdef.AgentDef{}, nil, fmt.Errorf("durable job %q uses provider/profile %s/%s, but no current agent_cli definition matches it", job.ID, job.Provider, job.Profile)
 }
 
 var _ interface {
@@ -60,3 +141,4 @@ var _ interface {
 } = (*Application)(nil)
 
 var _ port.ExternalAgentJobRuntime = (*externalAgentJobDispatcher)(nil)
+var _ port.ExternalAgentSessionRecoveryRuntime = (*recoverableExternalAgentJobDispatcher)(nil)

@@ -66,10 +66,117 @@ func TestHelperProcess(t *testing.T) {
 		}
 	case "ignored-after-terminal":
 		_, _ = os.Stdout.WriteString(`{"type":"result","is_error":false,"result":"ok"}` + "\n" + `{"type":"rate_limit_event"}` + "\n")
+	case "session":
+		sessionID := "session-1234"
+		for _, argument := range os.Args {
+			if strings.HasPrefix(argument, "session=") {
+				sessionID = strings.TrimPrefix(argument, "session=")
+			}
+		}
+		_, _ = os.Stdout.WriteString(`{"type":"thread.started","thread_id":"` + sessionID + `"}` + "\n" + `{"type":"result","is_error":false,"result":"resumed text"}` + "\n")
 	default:
 		_, _ = os.Stdout.WriteString(`{"type":"assistant","message":{"content":[{"type":"thinking","text":"secret reasoning"}]}}` + "\n" + `{"type":"result","is_error":false,"result":"final text"}` + "\n")
 	}
 	os.Exit(0)
+}
+
+func sessionLLM(t *testing.T, invocationArgs []string, resume agentdef.CLISessionResume, transcriptGlob string) *agentcli.LLM {
+	t.Helper()
+	dir := t.TempDir()
+	provider := agentdef.Provider{
+		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Version:    &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
+		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: invocationArgs},
+		Stream:     &agentdef.CLIStream{Format: "ndjson", IgnoreTypes: []string{"thread.started"}, FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "kind", DiscardTypes: []string{}}, TerminalTypes: []string{"result"}},
+		Session:    &agentdef.CLISession{ID: agentdef.CLISessionID{When: map[string]string{"type": "thread.started"}, Path: "thread_id"}, Transcript: agentdef.CLISessionTranscript{PathGlob: transcriptGlob}, Resume: resume},
+	}
+	llm, err := agentcli.New(agentcli.Config{Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"}, Workspace: domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}}, WorkingDir: dir})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return llm
+}
+
+func TestSessionEventCapturesIDAndCanonicalTranscriptBeforeIgnore(t *testing.T) {
+	transcriptRoot := t.TempDir()
+	transcript := filepath.Join(transcriptRoot, "2026", "08", "25", "rollout-now-session-1234.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	llm := sessionLLM(t,
+		[]string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=session"},
+		agentdef.CLISessionResume{ResumeFlag: []string{"resume", "{{session_id}}"}},
+		filepath.Join(transcriptRoot, "**", "rollout-*-{{session_id}}.jsonl"),
+	)
+	var session agentcli.Activity
+	ctx := agentcli.WithActivityReporter(t.Context(), func(activity agentcli.Activity) {
+		if activity.Kind == agentcli.ActivitySessionCreated {
+			session = activity
+		}
+	})
+	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(delegate("workspace", "task"), genai.RoleUser)}}
+	for _, err := range llm.GenerateContent(ctx, request, false) {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if session.SessionID != "session-1234" || session.TranscriptPath != transcript {
+		t.Fatalf("session activity = %+v, want captured ID and transcript", session)
+	}
+}
+
+func TestResumeFlagKeepsNormalInvocationAndSessionIDOffPrompt(t *testing.T) {
+	dumpArgv := filepath.Join(t.TempDir(), "argv")
+	dumpStdin := filepath.Join(t.TempDir(), "stdin")
+	llm := sessionLLM(t,
+		[]string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=session", "dump=" + dumpStdin, "dumpargv=" + dumpArgv},
+		agentdef.CLISessionResume{ResumeFlag: []string{"resume", "{{session_id}}"}},
+		filepath.Join(t.TempDir(), "{{session_id}}.jsonl"),
+	)
+	text, err := llm.Resume(t.Context(), "workspace", "session-1234")
+	if err != nil || text != "resumed text" {
+		t.Fatalf("Resume() = %q, %v", text, err)
+	}
+	argv, _ := os.ReadFile(dumpArgv)
+	stdin, _ := os.ReadFile(dumpStdin)
+	if !strings.Contains(string(argv), "resume\nsession-1234") {
+		t.Fatalf("resume argv = %q", argv)
+	}
+	if strings.Contains(string(stdin), "session-1234") || !strings.Contains(string(stdin), "Inspect the existing repository") {
+		t.Fatalf("resume stdin = %q", stdin)
+	}
+}
+
+func TestFullResumeInvocationReplacesInitialArgs(t *testing.T) {
+	dumpArgv := filepath.Join(t.TempDir(), "argv")
+	llm := sessionLLM(t,
+		[]string{"--color", "never"},
+		agentdef.CLISessionResume{Args: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "exec", "resume", "{{session_id}}", "mode=session", "dumpargv=" + dumpArgv}},
+		filepath.Join(t.TempDir(), "{{session_id}}.jsonl"),
+	)
+	if _, err := llm.Resume(t.Context(), "workspace", "session-1234"); err != nil {
+		t.Fatal(err)
+	}
+	argv, _ := os.ReadFile(dumpArgv)
+	if strings.Contains(string(argv), "--color") || !strings.Contains(string(argv), "exec\nresume\nsession-1234") {
+		t.Fatalf("full resume argv = %q", argv)
+	}
+}
+
+func TestInvalidStreamSessionIDFailsBeforePathResolution(t *testing.T) {
+	llm := sessionLLM(t,
+		[]string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=session", "session=../escape"},
+		agentdef.CLISessionResume{ResumeFlag: []string{"resume", "{{session_id}}"}},
+		filepath.Join(t.TempDir(), "{{session_id}}.jsonl"),
+	)
+	_, err := collect(t, llm)
+	var cliErr *agentcli.CLIError
+	if !errors.As(err, &cliErr) || cliErr.Code != agentcli.CodeProcessFailed {
+		t.Fatalf("error = %v, want bounded process failure", err)
+	}
 }
 
 func testLLM(t *testing.T, mode, dump string) *agentcli.LLM {

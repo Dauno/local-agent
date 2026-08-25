@@ -732,7 +732,7 @@ func (s *Service) Run(ctx context.Context) {
 	var workers sync.WaitGroup
 	sem := make(chan struct{}, s.cfg.Concurrency)
 	s.scheduler.Run(ctx, s.stopClaims, func() bool {
-		worked := s.recoverExpired(ctx)
+		worked := s.recoverExpired(ctx, sem, &workers)
 		return s.claimAvailable(ctx, sem, &workers) || worked
 	})
 	workers.Wait()
@@ -862,7 +862,13 @@ func (s *Service) heartbeat(ctx context.Context, job *domain.ExternalAgentJob, d
 	}
 }
 
-func (s *Service) recoverExpired(ctx context.Context) bool {
+// recoverExpired returns every job whose lease expired to a resting status.
+//
+// A job that was running and holds a session is reconciled in the background,
+// under the same concurrency limit as an ordinary claim. A cancelled job and a
+// reconciliation that lost its own lease are never resumed: the first was
+// stopped on purpose, and the second would retry without a bound.
+func (s *Service) recoverExpired(ctx context.Context, sem chan struct{}, workers *sync.WaitGroup) bool {
 	jobs, err := s.store.ListExpiredRunning(ctx, s.clock.Now().UTC())
 	if err != nil {
 		return false
@@ -894,10 +900,29 @@ func (s *Service) recoverExpired(ctx context.Context) bool {
 				if notificationTerminal(next) {
 					s.wakeNotifications()
 				}
+				if s.resumableAfterExpiry(job, next) && workers != nil && sem != nil {
+					workers.Add(1)
+					go func(job domain.ExternalAgentJob) {
+						defer workers.Done()
+						select {
+						case sem <- struct{}{}:
+						case <-ctx.Done():
+							return
+						}
+						defer func() { <-sem }()
+						_, _ = s.Reconcile(ctx, job.ID, job.Actor, job.ConversationKey)
+					}(job)
+				}
 			}
 		}
 	}
 	return recovered
+}
+
+// resumableAfterExpiry reports whether an expired job may be resumed without
+// an operator command. Only a running job with a session qualifies.
+func (s *Service) resumableAfterExpiry(job domain.ExternalAgentJob, next domain.ExternalAgentJobStatus) bool {
+	return next == domain.JobCompletionUnknown && job.Status == domain.JobRunning && job.ExternalAgentSessionID != ""
 }
 
 func (s *Service) transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error {

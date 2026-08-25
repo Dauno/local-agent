@@ -316,7 +316,8 @@ func TestJobsInspectRendersSessionAndProgress(t *testing.T) {
 	backend := &inspectionBackend{fakeBackend: setupBackend(), view: &domain.ExternalAgentJobInspection{
 		JobID: "job_bb3ed6", Status: domain.JobRunning, StatusRevision: 1,
 		ExternalAgentSessionID: "ses_full_identity_0123456789", Phase: domain.ExternalAgentPhaseToolRunning,
-		Health: domain.ExternalAgentHealthPossiblyStalled, LastEventKind: domain.ExternalAgentEventToolCallUpdate,
+		TranscriptPath: "/home/operator/.codex/sessions/rollout-session.jsonl",
+		Health:         domain.ExternalAgentHealthPossiblyStalled, LastEventKind: domain.ExternalAgentEventToolCallUpdate,
 		LastTransportActivityAt: base, PromptElapsedSeconds: 3780,
 		ActiveToolCount: 1, PendingPermission: true, StopReason: "",
 	}}
@@ -329,6 +330,7 @@ func TestJobsInspectRendersSessionAndProgress(t *testing.T) {
 	for _, want := range []string{
 		"job_id: job_bb3ed6",
 		"acp_session_id: ses_full_identity_0123456789",
+		"transcript_path: /home/operator/.codex/sessions/rollout-session.jsonl",
 		"phase: tool_running",
 		"health: possibly_stalled",
 		"last_event: tool_call_update",

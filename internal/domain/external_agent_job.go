@@ -408,6 +408,7 @@ type ExternalAgentJobInspection struct {
 	Status                 ExternalAgentJobStatus               `json:"status"`
 	StatusRevision         int                                  `json:"status_revision"`
 	ExternalAgentSessionID string                               `json:"acp_session_id"`
+	TranscriptPath         string                               `json:"transcript_path"`
 	FinishedAt             time.Time                            `json:"finished_at"`
 	Deliveries             []ExternalAgentJobDeliveryInspection `json:"deliveries"`
 	// Live projection fields; empty until the projection row exists.
@@ -899,6 +900,7 @@ type ExternalAgentJob struct {
 	Status                 ExternalAgentJobStatus
 	Attempt                int
 	ExternalAgentSessionID string
+	TranscriptPath         string
 	SideEffectsPossible    bool
 	LeaseOwner             string
 	LeaseExpiry            time.Time

@@ -73,10 +73,7 @@ func (d *externalAgentJobDispatcher) Run(ctx context.Context, job domain.Externa
 
 // runAgentCLI executes a durable job whose leaf is an agent CLI.
 //
-// Progress comes from the descriptor's `stream.activity` selection, so a CLI
-// job keeps its projection fresh and its stall warning honest. Session recovery
-// is not implemented: a job left in completion_unknown must be closed by an
-// operator.
+// Progress and session identity come from descriptor-selected stream events.
 func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalAgentJob, profileMatched *bool) (bool, domain.ExternalAgentInvocationResult, error) {
 	for _, child := range d.children {
 		if child.model == nil || child.cliResolved == nil {
@@ -97,16 +94,32 @@ func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain
 				return true, domain.ExternalAgentInvocationResult{}, err
 			}
 		}
-		runCtx := ctx
 		recorder := d.newRecorder(job)
 		if recorder != nil {
 			recorder.Start(ctx)
 			defer recorder.Close()
-			runCtx = agentcli.WithActivityReporter(ctx, func(activity agentcli.Activity) {
-				recorder.Record(agentCLIProgressEvent(activity))
-			})
 		}
+		var sessionErr error
+		runCtx := agentcli.WithActivityReporter(ctx, func(activity agentcli.Activity) {
+			if activity.Kind == agentcli.ActivitySessionCreated {
+				if recorder != nil {
+					recorder.SetSessionID(activity.SessionID)
+				}
+				if d.store == nil {
+					sessionErr = errors.New("durable external-agent job store is unavailable")
+					return
+				}
+				sessionErr = d.store.AssignExternalAgentSession(ctx, job.ID, job.LeaseOwner, job.Attempt, activity.SessionID, activity.TranscriptPath)
+				return
+			}
+			if recorder != nil {
+				recorder.Record(agentCLIProgressEvent(activity))
+			}
+		})
 		text, runErr := generateAgentCLIText(runCtx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, job.Task)
+		if sessionErr != nil {
+			return true, domain.ExternalAgentInvocationResult{}, sessionErr
+		}
 		if runErr != nil {
 			if recorder != nil {
 				recorder.Record(domain.ExternalAgentProgressEvent{
@@ -146,6 +159,10 @@ func agentCLIProgressEvent(activity agentcli.Activity) domain.ExternalAgentProgr
 		return domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventProcessStarted, PID: activity.PID}
 	}
 	return domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventToolCall}
+}
+
+type agentCLISessionRecoveryModel interface {
+	Resume(context.Context, string, string) (string, error)
 }
 
 // externalAgentFailureClass is the bounded classification the progress projection stores
@@ -316,13 +333,69 @@ func (d *externalAgentJobDispatcher) materialize(ctx context.Context, job domain
 	return result, nil
 }
 
-// Reconcile resumes an agent's session to learn what happened after a crash.
-// No runtime in this release captures a session, so a completion-unknown job
-// must be closed by an operator. The `session` descriptor block exists for
-// exactly this and is not wired yet.
-func (d *externalAgentJobDispatcher) Reconcile(_ context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
-	return domain.ExternalAgentInvocationResult{}, fmt.Errorf(
-		"session recovery is not supported for job %q: inspect the workspace and close the job explicitly", job.ID)
+// recoverableExternalAgentJobDispatcher adds the optional recovery interface
+// only when composition found at least one descriptor with a session block.
+type recoverableExternalAgentJobDispatcher struct{ *externalAgentJobDispatcher }
+
+func (d *recoverableExternalAgentJobDispatcher) Reconcile(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
+	if d == nil || d.externalAgentJobDispatcher == nil {
+		return domain.ExternalAgentInvocationResult{}, errors.New("external-agent recovery runtime is unavailable")
+	}
+	profileMatched := false
+	for _, child := range d.children {
+		if child.model == nil || child.cliResolved == nil || job.Provider != child.cliResolved.Provider.Name || job.Profile != child.definition.Model {
+			continue
+		}
+		profileMatched = true
+		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
+			continue
+		}
+		if child.cliResolved.Session == nil {
+			return domain.ExternalAgentInvocationResult{}, fmt.Errorf("session recovery is not supported for agent_cli job %q: its descriptor has no session block", job.ID)
+		}
+		if strings.TrimSpace(job.ExternalAgentSessionID) == "" {
+			return domain.ExternalAgentInvocationResult{}, fmt.Errorf("session recovery is not supported for agent_cli job %q: no session ID was persisted", job.ID)
+		}
+		recovery, ok := child.model.(agentCLISessionRecoveryModel)
+		if !ok {
+			return domain.ExternalAgentInvocationResult{}, errors.New("composed agent CLI does not support session recovery")
+		}
+		recoveryTimeout := d.reconciliationTimeout
+		if recoveryTimeout <= 0 {
+			recoveryTimeout = 30 * time.Minute
+		}
+		recoveryCtx, cancel := context.WithTimeout(ctx, recoveryTimeout)
+		text, runErr := recovery.Resume(recoveryCtx, job.PrimaryProject, job.ExternalAgentSessionID)
+		cancel()
+		if runErr != nil {
+			return domain.ExternalAgentInvocationResult{}, runErr
+		}
+		result := domain.ExternalAgentInvocationResult{Text: text}
+		switch {
+		case job.Mode == domain.JobDetached && d.artifacts != nil:
+			result, runErr = d.materialize(ctx, job, result)
+		case job.Mode == domain.JobDetached && d.results != nil:
+			runErr = errors.New("native result delivery store is unavailable")
+		case job.Mode == domain.JobForeground:
+			result, runErr = d.normalizeForegroundResult(ctx, job, result)
+		case d.sanitize != nil:
+			result.Text = d.sanitize(result.Text)
+		}
+		return result, runErr
+	}
+	if profileMatched {
+		return domain.ExternalAgentInvocationResult{}, errors.New("durable external-agent recovery scope revision does not match current configuration")
+	}
+	return domain.ExternalAgentInvocationResult{}, fmt.Errorf("session recovery is unavailable for job %q: no matching resumable agent_cli descriptor exists", job.ID)
+}
+
+func (d *externalAgentJobDispatcher) hasSessionRecovery() bool {
+	for _, child := range d.children {
+		if child.cliResolved != nil && child.cliResolved.Session != nil {
+			return true
+		}
+	}
+	return false
 }
 
 func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *runtimeInfrastructure, supplied ...externalAgentSchedules) (*externalagent.Service, *externalagent.NotificationWorker, error) {
@@ -372,6 +445,14 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	if models.rootDef != nil {
 		global = models.rootDef.EffectiveDelegatedGlobalInstruction()
 	}
+	dispatcher := &externalAgentJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
+		artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
+		reconciliationTimeout: time.Duration(cfg.ExternalAgent.ReconciliationTimeoutSeconds) * time.Second,
+		progressStore:         store, processRegistry: infra.processRegistry,
+		progressWarnAfter: time.Duration(cfg.ExternalAgent.ProgressWarningSeconds) * time.Second,
+		logger:            models.logger, metrics: models.metrics,
+		progressGauge: externalagent.NewActiveProgressGauge(models.metrics)}
+	runtime := jobRuntimeForDispatcher(dispatcher)
 	service, err := externalagent.New(externalagent.Config{
 		DefaultTimeout:         time.Duration(cfg.ExternalAgent.DefaultJobTimeoutSeconds) * time.Second,
 		MaxTimeout:             time.Duration(cfg.ExternalAgent.MaxJobTimeoutSeconds) * time.Second,
@@ -381,13 +462,7 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		MaxAttempts:            2,
 		ProgressWarningTimeout: time.Duration(cfg.ExternalAgent.ProgressWarningSeconds) * time.Second,
 	}, externalagent.Dependencies{
-		Store: store, Runtime: &externalAgentJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
-			artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
-			reconciliationTimeout: time.Duration(cfg.ExternalAgent.ReconciliationTimeoutSeconds) * time.Second,
-			progressStore:         store, processRegistry: infra.processRegistry,
-			progressWarnAfter: time.Duration(cfg.ExternalAgent.ProgressWarningSeconds) * time.Second,
-			logger:            models.logger, metrics: models.metrics,
-			progressGauge: externalagent.NewActiveProgressGauge(models.metrics)},
+		Store: store, Runtime: runtime,
 		Publisher: nil, Artifacts: models.artifactStore, NativeResults: nativeResults,
 		ProgressStore: store, ProcessRegistry: infra.processRegistry,
 		MaxResultBytes: int64(cfg.ExternalAgent.MaxResultArtifactBytes), MaxResultChunkBytes: maxResultChunkBytes,
@@ -407,6 +482,13 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 		return nil, nil, err
 	}
 	return service, notificationWorker, nil
+}
+
+func jobRuntimeForDispatcher(dispatcher *externalAgentJobDispatcher) port.ExternalAgentJobRuntime {
+	if dispatcher != nil && dispatcher.hasSessionRecovery() {
+		return &recoverableExternalAgentJobDispatcher{externalAgentJobDispatcher: dispatcher}
+	}
+	return dispatcher
 }
 
 // newExternalAgentActivationWorker builds the root-activation consumer

@@ -187,7 +187,8 @@ func TestJobInspectionIncludesSessionAndProgress(t *testing.T) {
 	store := newProgressTestStore(t)
 	ctx := context.Background()
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
-	if err := store.AssignExternalAgentSession(ctx, "job-inspect", "owner-1", 1, "ses_full_identity_0123456789"); err != nil {
+	const transcriptPath = "/home/operator/.codex/sessions/rollout-session.jsonl"
+	if err := store.AssignExternalAgentSession(ctx, "job-inspect", "owner-1", 1, "ses_full_identity_0123456789", transcriptPath); err != nil {
 		t.Fatalf("assign session: %v", err)
 	}
 	progress := domain.ExternalAgentJobProgress{
@@ -203,7 +204,7 @@ func TestJobInspectionIncludesSessionAndProgress(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	if view == nil || view.ExternalAgentSessionID != "ses_full_identity_0123456789" {
+	if view == nil || view.ExternalAgentSessionID != "ses_full_identity_0123456789" || view.TranscriptPath != transcriptPath {
 		t.Fatalf("inspection session ID = %+v", view)
 	}
 	if view.Phase != domain.ExternalAgentPhaseToolRunning {

@@ -99,7 +99,7 @@ func (a *Application) schemaLock(databasePath string) (rollout.Lock, error) {
 }
 
 const (
-	schemaBehindMessage     = "database schema is behind this binary's v42; run local-agent db upgrade first"
+	schemaBehindMessage     = "database schema is behind this binary's v43; run local-agent db upgrade first"
 	mutationLockHeldMessage = "another local-agent process is using the database; wait for it to finish"
 )
 
@@ -127,7 +127,7 @@ func schemaLockFailure(err error) error {
 // schemaOpenFailure maps OpenCurrent rejections to the shared operator
 // texts; every other error keeps its own shape. A schema inside [33, 40]
 // keeps the upgrade-first message because db upgrade accepts it; a schema
-// outside [33, 42] maps to the terminal message that never recommends
+// outside [33, 43] maps to the terminal message that never recommends
 // db upgrade for a file db upgrade itself refuses (FIND-179).
 func schemaOpenFailure(err error) error {
 	if upgrade, ok := errors.AsType[*adaptersqlite.SchemaUpgradeRequiredError](err); ok {

@@ -229,7 +229,7 @@ func TestClassifyRolloutRefusesOutOfRangeSchemas(t *testing.T) {
 		if typed.Found != schema || typed.MinSupported != MinSourceVersion || typed.MaxSupported != MaxSourceVersion {
 			t.Fatalf("schema %d typed = %+v", schema, typed)
 		}
-		if !strings.Contains(err.Error(), "[33, 42]") {
+		if !strings.Contains(err.Error(), "[33, 43]") {
 			t.Fatalf("schema %d err = %v, want it to name the supported range", schema, err)
 		}
 		_ = row
@@ -385,9 +385,9 @@ func TestParseHelpersPinDurableFormats(t *testing.T) {
 		t.Fatal("short digest must not parse")
 	}
 	if value, ok := ParseBackupSourceVersion("41"); !ok || value != 41 {
-		t.Fatalf("source_version 42-bound check failed: %d %v", value, ok)
+		t.Fatalf("source_version 43-bound check failed: %d %v", value, ok)
 	}
-	for _, raw := range []string{"0", "43", "-3", "x"} {
+	for _, raw := range []string{"0", "44", "-3", "x"} {
 		if _, ok := ParseBackupSourceVersion(raw); ok {
 			t.Fatalf("%q must not parse as source version", raw)
 		}

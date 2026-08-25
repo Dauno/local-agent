@@ -181,7 +181,7 @@ func TestDurableExternalAgentDispatcherNativeResultMatchesInlineAndFileDelivery(
 			dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, results: results, policy: policy}
 			var delivery domain.ExternalAgentInvocationResult
 			if tc.reconcile {
-				delivery, err = dispatcher.Reconcile(t.Context(), job)
+				delivery, err = (&recoverableExternalAgentJobDispatcher{externalAgentJobDispatcher: dispatcher}).Reconcile(t.Context(), job)
 			} else {
 				delivery, err = dispatcher.Run(t.Context(), job)
 			}

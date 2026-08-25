@@ -136,7 +136,7 @@ func TestSchemaProbeReadRolloutStateMalformedValuesStayInvalid(t *testing.T) {
 		{rollout.KeyBackupPath, "relative/path.db", func(s rollout.RolloutState) bool { return s.BackupPathPresent && !s.BackupPathValid }},
 		{rollout.KeyBackupBytes, "big", func(s rollout.RolloutState) bool { return s.BackupBytesPresent && !s.BackupBytesValid }},
 		{rollout.KeyBackupSHA256, strings.ToUpper(probeSHA256), func(s rollout.RolloutState) bool { return s.BackupSHA256Present && !s.BackupSHA256Valid }},
-		{rollout.KeyBackupSourceVersion, "43", func(s rollout.RolloutState) bool { return s.BackupSourceVersionPresent && !s.BackupSourceVersionValid }},
+		{rollout.KeyBackupSourceVersion, "44", func(s rollout.RolloutState) bool { return s.BackupSourceVersionPresent && !s.BackupSourceVersionValid }},
 		{rollout.KeyBackupVerifiedAt, "yesterday", func(s rollout.RolloutState) bool { return s.BackupVerifiedAtPresent && !s.BackupVerifiedAtValid }},
 		{rollout.KeyPostflightStatus, "weird", func(s rollout.RolloutState) bool { return s.PostflightPresent && !s.PostflightValid }},
 	}

@@ -13,6 +13,9 @@ const (
 	// ActivityStep is reported for each event the descriptor selects through
 	// `stream.activity.report_types`.
 	ActivityStep ActivityKind = "step"
+	// ActivitySessionCreated reports host-owned recovery metadata captured from
+	// the descriptor's session event.
+	ActivitySessionCreated ActivityKind = "session_created"
 )
 
 // Activity is one reported step of a run. Step holds the descriptor-declared
@@ -22,6 +25,10 @@ type Activity struct {
 	Kind ActivityKind
 	Step string
 	PID  int
+	// SessionID and TranscriptPath are set only for ActivitySessionCreated.
+	// They never enter model-visible content.
+	SessionID      string
+	TranscriptPath string
 }
 
 // ActivityReporter receives activity from a running agent CLI. It runs on the

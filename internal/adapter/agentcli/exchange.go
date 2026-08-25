@@ -9,7 +9,9 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
+	"slices"
 	"sort"
 	"strings"
 
@@ -90,8 +92,37 @@ func (l *LLM) exchange(ctx context.Context, request request) (string, error) {
 	if err != nil {
 		return "", err
 	}
+	return l.exchangeCommand(ctx, request.workingDir, args, prompt, "")
+}
+
+// Resume continues one native CLI session with the fixed recovery prompt. It
+// never replays the original task.
+func (l *LLM) Resume(ctx context.Context, project, sessionID string) (string, error) {
+	if l == nil || l.provider.Session == nil {
+		return "", &CLIError{Code: CodeUnsupported, Message: "agent CLI session recovery is not declared"}
+	}
+	if !validSessionID(sessionID) {
+		return "", &CLIError{Code: CodeInvalidRequest, Message: "persisted agent CLI session ID is invalid"}
+	}
+	workingDir, err := l.resolveProject(project)
+	if err != nil {
+		return "", err
+	}
+	if err := l.checkPreconditions(ctx, workingDir); err != nil {
+		return "", err
+	}
+	args, err := l.buildResumeArgs(workingDir, sessionID)
+	if err != nil {
+		return "", err
+	}
+	return l.exchangeCommand(ctx, workingDir, args, recoveryPrompt, sessionID)
+}
+
+const recoveryPrompt = "Inspect the existing repository and remote state for this interrupted task. Do not repeat completed mutations. Complete only missing steps. Return a concise factual result with files, commit, branch, remote, pull request, verification, and unresolved ambiguity."
+
+func (l *LLM) exchangeCommand(ctx context.Context, workingDir string, args []string, prompt, expectedSessionID string) (string, error) {
 	cmd := exec.CommandContext(ctx, l.command, args...)
-	cmd.Dir, cmd.Env = request.workingDir, os.Environ()
+	cmd.Dir, cmd.Env = workingDir, os.Environ()
 	configureProcessGroup(cmd)
 	cmd.Cancel = func() error { return killProcessGroup(cmd) }
 	cmd.WaitDelay = defaultWaitDelay
@@ -120,7 +151,7 @@ func (l *LLM) exchange(ctx context.Context, request request) (string, error) {
 	}()
 	stderrCh := make(chan diagnosticSummary, 1)
 	go func() { stderrCh <- readDiagnostic(stderr, l.maxStderrBytes) }()
-	text, readErr := l.readStdout(stdout, report)
+	text, readErr := l.readStdout(stdout, report, expectedSessionID)
 	if readErr != nil {
 		_ = killProcessGroup(cmd)
 		_, _ = io.Copy(io.Discard, stdout)
@@ -139,7 +170,88 @@ func (l *LLM) exchange(ctx context.Context, request request) (string, error) {
 	return text, nil
 }
 
+func (l *LLM) buildResumeArgs(workingDir, sessionID string) ([]string, error) {
+	session := l.provider.Session
+	if session == nil {
+		return nil, &CLIError{Code: CodeUnsupported, Message: "agent CLI session recovery is not declared"}
+	}
+	if len(session.Resume.ResumeFlag) > 0 {
+		args, err := l.buildArgs("", workingDir)
+		if err != nil {
+			return nil, err
+		}
+		return append(args, substituteArgs(session.Resume.ResumeFlag, map[string]string{"session_id": sessionID})...), nil
+	}
+	values, mappingPrefix, mappingSuffix, err := l.resumeValues(workingDir)
+	if err != nil {
+		return nil, err
+	}
+	values["session_id"] = sessionID
+	args := append([]string{}, mappingPrefix...)
+	args = append(args, substituteArgs(session.Resume.ArgsPrefix, values)...)
+	args = append(args, substituteArgs(session.Resume.Args, values)...)
+	args = append(args, mappingSuffix...)
+	return args, nil
+}
+
+// resumeValues applies only value mappings. A full resume vector replaces the
+// normal invocation, but mappings can still provide substitutions such as the
+// Codex sandbox mode.
+func (l *LLM) resumeValues(workingDir string) (map[string]string, []string, []string, error) {
+	values := map[string]string{"model": l.profile.Model, "agent": l.profile.Agent, "approval": l.profile.Approval, "variant": l.profile.Variant, "workdir": workingDir}
+	var prefix, suffix []string
+	for _, name := range sortedOptionNames(l.provider.Invocation.Options) {
+		option := l.provider.Invocation.Options[name]
+		if len(option.Values) == 0 {
+			continue
+		}
+		mapping, ok := option.Values[values[name]]
+		if !ok {
+			return nil, nil, nil, &CLIError{Code: CodeInvalidRequest, Message: "descriptor invocation.options." + name + " has no mapping for profile value"}
+		}
+		for key, mapped := range mapping.Substitutions {
+			values[key] = mapped
+		}
+		if option.Position == "prefix" {
+			prefix = append(prefix, mapping.Args...)
+		} else {
+			suffix = append(suffix, mapping.Args...)
+		}
+	}
+	return values, prefix, suffix, nil
+}
+
 func (l *LLM) buildArgs(systemPrompt, workingDir string) ([]string, error) {
+	invocation := l.provider.Invocation
+	values, prefix, suffix, err := l.invocationValues(workingDir)
+	if err != nil {
+		return nil, err
+	}
+	args := append([]string{}, prefix...)
+	if workspace := invocation.Workspace; workspace != nil && workspace.CWDFlag != "" {
+		args = append(args, workspace.CWDFlag, workingDir)
+	}
+	args = append(args, substituteArgs(invocation.ArgsPrefix, values)...)
+	if workspace := invocation.Workspace; workspace != nil && workspace.AddDirFlag != "" && conditionMatches(workspace.AddDirWhen, values) {
+		seen := map[string]bool{}
+		for _, project := range l.workspace.Projects {
+			if project.Path != workingDir && !seen[project.Path] {
+				args = append(args, workspace.AddDirFlag, project.Path)
+				seen[project.Path] = true
+			}
+		}
+	}
+	args = append(args, substituteArgs(invocation.Args, values)...)
+	args = append(args, suffix...)
+	// The system prompt is host-owned text, never user text, so it is the one
+	// content value allowed on argv. The transcript always stays on stdin.
+	if system := invocation.SystemPrompt; system != nil && systemPrompt != "" {
+		args = append(args, system.Flag, systemPrompt)
+	}
+	return args, nil
+}
+
+func (l *LLM) invocationValues(workingDir string) (map[string]string, []string, []string, error) {
 	invocation := l.provider.Invocation
 	values := map[string]string{"model": l.profile.Model, "agent": l.profile.Agent, "approval": l.profile.Approval, "variant": l.profile.Variant, "workdir": workingDir}
 	var prefix, suffix []string
@@ -149,7 +261,7 @@ func (l *LLM) buildArgs(systemPrompt, workingDir string) ([]string, error) {
 		if len(option.Values) > 0 {
 			mapping, ok := option.Values[value]
 			if !ok {
-				return nil, &CLIError{Code: CodeInvalidRequest, Message: "descriptor invocation.options." + name + " has no mapping for profile value"}
+				return nil, nil, nil, &CLIError{Code: CodeInvalidRequest, Message: "descriptor invocation.options." + name + " has no mapping for profile value"}
 			}
 			for key, mapped := range mapping.Substitutions {
 				values[key] = mapped
@@ -176,28 +288,7 @@ func (l *LLM) buildArgs(systemPrompt, workingDir string) ([]string, error) {
 			suffix = append(suffix, args...)
 		}
 	}
-	args := append([]string{}, prefix...)
-	if workspace := invocation.Workspace; workspace != nil && workspace.CWDFlag != "" {
-		args = append(args, workspace.CWDFlag, workingDir)
-	}
-	args = append(args, substituteArgs(invocation.ArgsPrefix, values)...)
-	if workspace := invocation.Workspace; workspace != nil && workspace.AddDirFlag != "" && conditionMatches(workspace.AddDirWhen, values) {
-		seen := map[string]bool{}
-		for _, project := range l.workspace.Projects {
-			if project.Path != workingDir && !seen[project.Path] {
-				args = append(args, workspace.AddDirFlag, project.Path)
-				seen[project.Path] = true
-			}
-		}
-	}
-	args = append(args, substituteArgs(invocation.Args, values)...)
-	args = append(args, suffix...)
-	// The system prompt is host-owned text, never user text, so it is the one
-	// content value allowed on argv. The transcript always stays on stdin.
-	if system := invocation.SystemPrompt; system != nil && systemPrompt != "" {
-		args = append(args, system.Flag, systemPrompt)
-	}
-	return args, nil
+	return values, prefix, suffix, nil
 }
 
 // renderRequest splits host-owned content from user-controlled content.
@@ -236,7 +327,7 @@ func sortedOptionNames(options map[string]agentdef.CLIInvocationOption) []string
 	return append(mapping, plain...)
 }
 
-func (l *LLM) readStdout(reader io.Reader, report ActivityReporter) (string, error) {
+func (l *LLM) readStdout(reader io.Reader, report ActivityReporter, expectedSessionID string) (string, error) {
 	stream := l.provider.Stream
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64<<10), l.maxLineBytes)
@@ -244,6 +335,7 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter) (string, err
 	terminal := false
 	failed := false
 	final := ""
+	capturedSessionID := ""
 	for scanner.Scan() {
 		line := scanner.Bytes()
 		total += len(line) + 1
@@ -256,6 +348,19 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter) (string, err
 		var event any
 		if err := json.Unmarshal(line, &event); err != nil {
 			return "", &ProtocolViolation{Reason: "malformed NDJSON line"}
+		}
+		if session := l.provider.Session; session != nil && capturedSessionID == "" && matchesOne(event, session.ID.When) {
+			sessionID, found := stringAt(event, session.ID.Path)
+			if !found || !validSessionID(sessionID) {
+				return "", &ProtocolViolation{Reason: "descriptor session.id.path did not resolve to a valid identifier"}
+			}
+			if expectedSessionID != "" && sessionID != expectedSessionID {
+				return "", &ProtocolViolation{Reason: "resumed agent CLI returned a different session ID"}
+			}
+			capturedSessionID = sessionID
+			if report != nil {
+				report(Activity{Kind: ActivitySessionCreated, SessionID: sessionID, TranscriptPath: l.resolveTranscriptPath(sessionID)})
+			}
 		}
 		// An ignored type carries nothing this adapter reads. It is skipped
 		// before every other rule, so a trailing bookkeeping event cannot be
@@ -317,10 +422,122 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter) (string, err
 	if failed {
 		return "", &CLIError{Code: CodeProcessFailed, Message: "agent CLI reported a failed turn"}
 	}
+	if l.provider.Session != nil && capturedSessionID == "" {
+		return "", &CLIError{Code: CodeProcessFailed, Message: "descriptor session.id did not resolve"}
+	}
 	if !terminal || strings.TrimSpace(final) == "" {
 		return "", &CLIError{Code: CodeNoResponse, Message: "agent CLI exited without final text"}
 	}
 	return strings.TrimSpace(final), nil
+}
+
+func validSessionID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, r := range value {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+// resolveTranscriptPath returns one canonical regular file below the literal
+// root of the trusted descriptor glob. Missing or ambiguous matches are clean
+// absence and never fail the model call.
+func (l *LLM) resolveTranscriptPath(sessionID string) string {
+	if l == nil || l.provider.Session == nil || !validSessionID(sessionID) {
+		return ""
+	}
+	pattern := strings.ReplaceAll(l.provider.Session.Transcript.PathGlob, "{{session_id}}", sessionID)
+	if strings.HasPrefix(pattern, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		pattern = filepath.Join(home, strings.TrimPrefix(pattern, "~/"))
+	}
+	if !filepath.IsAbs(pattern) {
+		return ""
+	}
+	root := literalGlobRoot(pattern)
+	canonicalRoot, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		return ""
+	}
+	var matches []string
+	_ = filepath.WalkDir(canonicalRoot, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil || entry.Type()&os.ModeSymlink != 0 {
+			if entry != nil && entry.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		matched, matchErr := recursiveGlobMatch(filepath.Clean(pattern), path)
+		// An entry this walk cannot classify is not a match. It is skipped so
+		// the walk continues, because a transcript is optional metadata.
+		if matchErr != nil || !matched || entry.IsDir() || !entry.Type().IsRegular() {
+			return nil //nolint:nilerr // an unclassifiable entry is skipped, never reported
+		}
+		canonical, evalErr := filepath.EvalSymlinks(path)
+		if evalErr != nil || !pathWithin(canonicalRoot, canonical) {
+			return nil //nolint:nilerr // a path that escapes the trusted root is skipped
+		}
+		matches = append(matches, canonical)
+		return nil
+	})
+	slices.Sort(matches)
+	if len(matches) != 1 {
+		return ""
+	}
+	return matches[0]
+}
+
+func literalGlobRoot(pattern string) string {
+	root := filepath.VolumeName(pattern) + string(filepath.Separator)
+	for _, part := range strings.Split(strings.TrimPrefix(pattern, root), string(filepath.Separator)) {
+		if strings.ContainsAny(part, "*?[") {
+			break
+		}
+		root = filepath.Join(root, part)
+	}
+	return filepath.Clean(root)
+}
+
+func recursiveGlobMatch(pattern, name string) (bool, error) {
+	patternParts := strings.Split(filepath.Clean(pattern), string(filepath.Separator))
+	nameParts := strings.Split(filepath.Clean(name), string(filepath.Separator))
+	var match func(int, int) (bool, error)
+	match = func(patternIndex, nameIndex int) (bool, error) {
+		if patternIndex == len(patternParts) {
+			return nameIndex == len(nameParts), nil
+		}
+		if patternParts[patternIndex] == "**" {
+			for next := nameIndex; next <= len(nameParts); next++ {
+				ok, err := match(patternIndex+1, next)
+				if err != nil || ok {
+					return ok, err
+				}
+			}
+			return false, nil
+		}
+		if nameIndex == len(nameParts) {
+			return false, nil
+		}
+		ok, err := filepath.Match(patternParts[patternIndex], nameParts[nameIndex])
+		if err != nil || !ok {
+			return false, err
+		}
+		return match(patternIndex+1, nameIndex+1)
+	}
+	return match(0, 0)
+}
+
+func pathWithin(root, path string) bool {
+	relative, err := filepath.Rel(root, path)
+	return err == nil && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
 func matches(event any, conditions []map[string]string) bool {
