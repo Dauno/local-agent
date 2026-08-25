@@ -1,5 +1,14 @@
 # Release Notes
 
+## v0.9.0 (2026-08-25)
+
+- Removed the ACP transport. Every external agent now runs through the declarative agent CLI protocol; `agent_class: AcpAgent` and `runtime:` no longer parse.
+- Declarative agent CLI descriptors (`invocation`, `stream`, `session`, `auth`) replace the retired cli-v1 shim hop, with a shared semantic-version parser and content-free progress reporting.
+- A durable agent CLI job now captures its native session the moment the CLI announces it, so a job left `completion_unknown` after a crash is resumable instead of stuck.
+- Automatic recovery on daemon restart resumes only a job that was actually running and holds a session; a cancelled job and a reconciliation that lost its own lease are never retried, and recovery shares the same worker concurrency limit as an ordinary claim.
+- `jobs close` ends a completion-unknown job without resuming it, for the case an operator has inspected external state by hand and decided no recovery is needed.
+- The transcript path resolves after the CLI process exits, not when the session is announced, and `jobs inspect` derives it lazily from the persisted session ID when a run never got to record it. Schema v43 adds the column.
+
 ## v0.8.0 (2026-08-24)
 
 - Bumped the toolchain to Go 1.27.0 and updated module dependencies.
