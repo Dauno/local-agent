@@ -37,6 +37,7 @@ type preparedWorkflowTool struct {
 	models            map[string]model.LLM
 	acpRuntimes       map[string]port.ExternalAgentRuntime
 	acpResolved       map[string]*agentdef.ResolvedModel
+	modelResolved     map[string]*agentdef.ResolvedModel
 	projectRoots      map[string]string
 	timeout           time.Duration
 	globalInstruction string
@@ -91,8 +92,12 @@ type invocationScope struct {
 	validateOnly      bool
 	acpRuntimes       map[string]port.ExternalAgentRuntime
 	acpResolved       map[string]*agentdef.ResolvedModel
-	projectRoots      map[string]string
-	timeout           time.Duration
+	// modelResolved carries the resolved definition behind each prepared LLM
+	// model reference. A node builder needs it to tell an agent CLI step from
+	// an ordinary in-process step.
+	modelResolved map[string]*agentdef.ResolvedModel
+	projectRoots  map[string]string
+	timeout       time.Duration
 }
 
 func prepareRootWorkflowTools(
@@ -126,6 +131,7 @@ func prepareRootWorkflowTools(
 	}
 
 	models := make(map[string]model.LLM)
+	modelResolved := make(map[string]*agentdef.ResolvedModel)
 	acpRuntimes := make(map[string]port.ExternalAgentRuntime)
 	acpResolved := make(map[string]*agentdef.ResolvedModel)
 	for _, blueprint := range blueprints {
@@ -168,6 +174,7 @@ func prepareRootWorkflowTools(
 				return nil, fmt.Errorf("workflow %q agent %q: validate model: %w", blueprint.ID, doc.Name, err)
 			}
 			models[modelRef] = childModel
+			modelResolved[modelRef] = resolved
 		}
 	}
 
@@ -179,6 +186,7 @@ func prepareRootWorkflowTools(
 			validateOnly:      true,
 			acpRuntimes:       acpRuntimes,
 			acpResolved:       acpResolved,
+			modelResolved:     modelResolved,
 			projectRoots:      paths.SandboxProjectRoots,
 			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
 		}); err != nil {
@@ -190,6 +198,7 @@ func prepareRootWorkflowTools(
 			models:            models,
 			acpRuntimes:       acpRuntimes,
 			acpResolved:       acpResolved,
+			modelResolved:     modelResolved,
 			projectRoots:      paths.SandboxProjectRoots,
 			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
 			globalInstruction: root.EffectiveDelegatedGlobalInstruction(),
@@ -205,6 +214,7 @@ func (p *preparedWorkflowTool) buildAgentTool(scope invocationScope) (tool.Tool,
 	}
 	scope.acpRuntimes = p.acpRuntimes
 	scope.acpResolved = p.acpResolved
+	scope.modelResolved = p.modelResolved
 	scope.projectRoots = p.projectRoots
 	scope.timeout = p.timeout
 	if p.blueprint.ID == "trd_generator" || p.blueprint.ID == "tdd_engineer" {
@@ -463,6 +473,81 @@ func buildACPNode(doc agentdef.AgentDocument, scope invocationScope) (agent.Agen
 	})
 }
 
+// buildAgentCLINode runs one workflow step on an agent CLI. It mirrors
+// buildACPNode: the same trusted project state, the same delegation, and the
+// same output contract. The two differ only in how the external agent is
+// reached.
+func buildAgentCLINode(doc agentdef.AgentDocument, llm model.LLM, scope invocationScope) (agent.Agent, error) {
+	resolved := scope.modelResolved[doc.LLM.Model]
+	if resolved == nil || !resolved.IsAgentCLI() {
+		return nil, fmt.Errorf("agent %q: project is only valid for an agent CLI model", doc.Name)
+	}
+	if doc.LLM.Project != "{target_project}" {
+		return nil, fmt.Errorf("agent %q: project must be the trusted {target_project} state template", doc.Name)
+	}
+	for _, directory := range doc.LLM.AdditionalDirectories {
+		if directory != "{worktree_root}" {
+			return nil, fmt.Errorf("agent %q: additional_directories may only contain {worktree_root}", doc.Name)
+		}
+	}
+	return agent.New(agent.Config{
+		Name:        doc.Name,
+		Description: doc.Description,
+		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
+			return func(yield func(*session.Event, error) bool) {
+				state := ctx.Session().State()
+				project, err := stateString(state, "target_project")
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				instruction := renderWorkflowState(doc.LLM.Instruction, state)
+				output, err := generateAgentCLIText(ctx, llm, scope.globalInstruction, instruction, project,
+					"Complete the trusted workflow step and return only the requested result.")
+				if err != nil {
+					yield(nil, err)
+					return
+				}
+				if doc.LLM.OutputSchema == "git_delivery_result" {
+					output, err = canonicalGitDeliveryResult(output, project, state)
+					if err != nil {
+						yield(nil, err)
+						return
+					}
+				}
+				event := session.NewEvent(ctx, ctx.InvocationID())
+				event.LLMResponse = model.LLMResponse{
+					Content:      genai.NewContentFromText(output, genai.RoleModel),
+					FinishReason: genai.FinishReasonStop,
+					TurnComplete: true,
+				}
+				if doc.LLM.OutputKey != "" {
+					event.Actions.StateDelta[doc.LLM.OutputKey] = output
+				}
+				yield(event, nil)
+			}
+		},
+	})
+}
+
+// canonicalGitDeliveryResult parses and re-encodes a git delivery result so the
+// stored value is the host's canonical form, never the agent's own text.
+func canonicalGitDeliveryResult(output, project string, state session.ReadonlyState) (string, error) {
+	worktreeRoot, err := stateString(state, "worktree_root")
+	if err != nil {
+		return "", err
+	}
+	parsed, err := domain.ParseGitDeliveryResult([]byte(output), project, worktreeRoot)
+	if err != nil {
+		return "", err
+	}
+	canonical, err := json.Marshal(parsed)
+	if err != nil {
+		return "", err
+	}
+	return string(canonical), nil
+}
+
 func domainConfigOptions(resolved *agentdef.ResolvedModel) []domain.ACPConfigOption {
 	options := make([]domain.ACPConfigOption, 0, len(resolved.ConfigOptions))
 	for _, option := range resolved.ConfigOptions {
@@ -502,6 +587,13 @@ func buildLLMNode(doc agentdef.AgentDocument, models map[string]model.LLM, scope
 	llm, exists := models[modelRef]
 	if !exists {
 		return nil, fmt.Errorf("agent %q: model %q not prepared", doc.Name, modelRef)
+	}
+
+	// A node that names a project is an external-agent step: it delegates a
+	// bounded task to an agent CLI running in the workflow's target project,
+	// instead of taking a turn inside this process.
+	if strings.TrimSpace(doc.LLM.Project) != "" {
+		return buildAgentCLINode(doc, llm, scope)
 	}
 
 	includeContents := llmagent.IncludeContentsDefault

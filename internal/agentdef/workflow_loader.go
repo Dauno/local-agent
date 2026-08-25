@@ -288,6 +288,9 @@ func decodeWorkflowDocument(data []byte, canonicalPath, displayPath string) (Age
 			OutputKey:                raw.OutputKey,
 			DisallowTransferToParent: raw.DisallowTransferToParent,
 			DisallowTransferToPeers:  raw.DisallowTransferToPeers,
+			Project:                  raw.Project,
+			AdditionalDirectories:    raw.AdditionalDirectories,
+			OutputSchema:             raw.OutputSchema,
 		}
 		for _, t := range raw.Tools {
 			llm.Tools = append(llm.Tools, ToolRef{Name: t.Name, Args: t.Args})
@@ -364,6 +367,54 @@ func resolveWorkflowModelRef(defs *Definitions, ref, prefix, field string) (stri
 	return providerName, profileName, nil
 }
 
+// validateWorkflowExternalStep applies the trust rules an external-agent
+// workflow step must satisfy. The project and the extra directory are fixed
+// state templates the host itself fills, never free text from a workflow
+// author, so a step cannot name a workspace the run was not scoped to.
+//
+// An empty project means the node is an ordinary in-process step, which needs
+// none of these fields.
+func validateWorkflowExternalStep(prefix, project string, additionalDirectories []string, outputSchema, outputKey string) []string {
+	var errs []string
+	if strings.TrimSpace(project) == "" {
+		if len(additionalDirectories) > 0 || outputSchema != "" {
+			errs = append(errs, fmt.Sprintf("%s: additional_directories and output_schema require project", prefix))
+		}
+		return errs
+	}
+	if project != "{target_project}" {
+		errs = append(errs, fmt.Sprintf("%s: project must be the trusted {target_project} state template", prefix))
+	}
+	for _, directory := range additionalDirectories {
+		if directory != "{worktree_root}" {
+			errs = append(errs, fmt.Sprintf("%s: additional_directories may only contain {worktree_root}", prefix))
+		}
+	}
+	if outputSchema != "" && outputSchema != "git_delivery_result" {
+		errs = append(errs, fmt.Sprintf("%s: output_schema must be git_delivery_result", prefix))
+	}
+	if outputSchema != "" && strings.TrimSpace(outputKey) == "" {
+		errs = append(errs, fmt.Sprintf("%s: output_key is required when output_schema is set", prefix))
+	}
+	return errs
+}
+
+// forbidWorkflowExternalStepFields rejects the external-agent step fields on a
+// node that runs in process. Such a node has no workspace to scope.
+func forbidWorkflowExternalStepFields(prefix, providerType string, llm *LLMAgentDocument) []string {
+	var errs []string
+	if strings.TrimSpace(llm.Project) != "" {
+		errs = append(errs, fmt.Sprintf("%s: project is only valid for %s nodes, not %s", prefix, ProviderTypeAgentCLI, providerType))
+	}
+	if len(llm.AdditionalDirectories) > 0 {
+		errs = append(errs, fmt.Sprintf("%s: additional_directories is only valid for %s nodes, not %s", prefix, ProviderTypeAgentCLI, providerType))
+	}
+	if strings.TrimSpace(llm.OutputSchema) != "" {
+		errs = append(errs, fmt.Sprintf("%s: output_schema is only valid for %s nodes, not %s", prefix, ProviderTypeAgentCLI, providerType))
+	}
+	return errs
+}
+
 func validateWorkflowClassFields(fields map[string]struct{}, class AgentClass, displayPath string) error {
 	allowed := map[string]struct{}{
 		"agent_class": {},
@@ -372,7 +423,7 @@ func validateWorkflowClassFields(fields map[string]struct{}, class AgentClass, d
 	}
 	switch class {
 	case AgentClassLLM:
-		for _, field := range []string{"model", "instruction", "include_contents", "output_key", "tools", "disallow_transfer_to_parent", "disallow_transfer_to_peers"} {
+		for _, field := range []string{"model", "instruction", "include_contents", "output_key", "tools", "disallow_transfer_to_parent", "disallow_transfer_to_peers", "project", "additional_directories", "output_schema"} {
 			allowed[field] = struct{}{}
 		}
 	case AgentClassAcp:
@@ -472,6 +523,9 @@ func validateWorkflowNode(doc AgentDocument, defs *Definitions, isLoopDescendant
 						if len(doc.LLM.Tools) > 0 {
 							errs = append(errs, fmt.Sprintf("%s: tools are not supported for %s nodes", prefix, ProviderTypeAgentCLI))
 						}
+						errs = append(errs, validateWorkflowExternalStep(prefix, doc.LLM.Project, doc.LLM.AdditionalDirectories, doc.LLM.OutputSchema, doc.LLM.OutputKey)...)
+					} else {
+						errs = append(errs, forbidWorkflowExternalStepFields(prefix, p.Type, doc.LLM)...)
 					}
 				}
 			}

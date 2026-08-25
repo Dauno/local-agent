@@ -286,3 +286,114 @@ tools:
 		t.Fatalf("workflow tools = %+v", bp)
 	}
 }
+
+// cliWorkflowDefinitions adds an agent CLI provider to the fixture, so a
+// workflow step can delegate to a CLI instead of taking a turn in process.
+func cliWorkflowDefinitions() *agentdef.Definitions {
+	defs := workflowDefinitions()
+	defs.Providers["codex"] = agentdef.Provider{
+		Name: "codex", Type: agentdef.ProviderTypeAgentCLI, Executable: "codex",
+		Version:    &agentdef.CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "0.0.0"},
+		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"exec", "-"}},
+		Stream: &agentdef.CLIStream{Format: "ndjson",
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "item"}, TypeField: "item.type", DiscardTypes: []string{}},
+			TerminalTypes: []string{"result"}},
+		Profiles: map[string]agentdef.Profile{"build": {Model: "gpt-5.6-luna", Approval: agentdef.ApprovalAuto}},
+	}
+	return defs
+}
+
+// loadCLIWorkflowStep builds a one-node workflow around the given step body.
+func loadCLIWorkflowStep(t *testing.T, step string) error {
+	t.Helper()
+	stateDir := t.TempDir()
+	writeWorkflowFile(t, stateDir, "case", "root_agent.yaml", `
+agent_class: SequentialAgent
+name: Pipeline
+description: Runs one delegated step.
+sub_agents:
+  - config_path: agents/step.yaml
+`)
+	writeWorkflowFile(t, stateDir, "case", "agents/step.yaml", step)
+	_, err := cliWorkflowDefinitions().LoadWorkflow(stateDir, "case")
+	return err
+}
+
+// An agent CLI workflow step runs in the workflow's target project, the same
+// shape an AcpAgent step had. Retiring ACP must not retire that capability.
+func TestAgentCLIWorkflowStepLoads(t *testing.T) {
+	err := loadCLIWorkflowStep(t, `
+agent_class: LlmAgent
+name: Implementer
+model: codex/build
+description: Implements one step in the worktree.
+instruction: Implement {task}.
+include_contents: none
+project: "{target_project}"
+additional_directories:
+  - "{worktree_root}"
+output_key: implementation_result
+`)
+	if err != nil {
+		t.Fatalf("an agent CLI workflow step must load: %v", err)
+	}
+}
+
+// The project and the extra directory are fixed state templates the host fills.
+// A workflow author must not be able to name a workspace the run is not scoped
+// to.
+func TestAgentCLIWorkflowStepRejectsUntrustedScope(t *testing.T) {
+	tests := []struct{ name, body, want string }{
+		{
+			name: "literal project",
+			body: "project: \"/etc\"\n",
+			want: "project must be the trusted {target_project} state template",
+		},
+		{
+			name: "another state key",
+			body: "project: \"{user_project}\"\n",
+			want: "project must be the trusted {target_project} state template",
+		},
+		{
+			name: "literal extra directory",
+			body: "project: \"{target_project}\"\nadditional_directories:\n  - \"/\"\n",
+			want: "additional_directories may only contain {worktree_root}",
+		},
+		{
+			name: "unknown output schema",
+			body: "project: \"{target_project}\"\noutput_schema: anything\noutput_key: k\n",
+			want: "output_schema must be git_delivery_result",
+		},
+		{
+			name: "schema without key",
+			body: "project: \"{target_project}\"\noutput_schema: git_delivery_result\n",
+			want: "output_key is required when output_schema is set",
+		},
+		{
+			name: "scope without project",
+			body: "additional_directories:\n  - \"{worktree_root}\"\n",
+			want: "additional_directories and output_schema require project",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			step := "agent_class: LlmAgent\nname: Step\nmodel: codex/build\ndescription: test\ninstruction: test\ninclude_contents: none\n" + test.body
+			err := loadCLIWorkflowStep(t, step)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+// An in-process step has no workspace to scope, so the external-step fields
+// must be rejected rather than silently ignored.
+func TestInProcessWorkflowStepRejectsExternalScope(t *testing.T) {
+	step := "agent_class: LlmAgent\nname: Step\nmodel: deepseek/test\ndescription: test\ninstruction: test\nproject: \"{target_project}\"\n"
+	err := loadCLIWorkflowStep(t, step)
+	if err == nil || !strings.Contains(err.Error(), "project is only valid for agent_cli nodes") {
+		t.Fatalf("error = %v, want the in-process rejection", err)
+	}
+}
