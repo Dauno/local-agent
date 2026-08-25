@@ -6,14 +6,12 @@ const (
 	AgentClassLLM        AgentClass = "LlmAgent"
 	AgentClassSequential AgentClass = "SequentialAgent"
 	AgentClassLoop       AgentClass = "LoopAgent"
-	AgentClassAcp        AgentClass = "AcpAgent"
 )
 
 var agentClasses = map[string]AgentClass{
 	"LlmAgent":        AgentClassLLM,
 	"SequentialAgent": AgentClassSequential,
 	"LoopAgent":       AgentClassLoop,
-	"AcpAgent":        AgentClassAcp,
 }
 
 type AgentDocument struct {
@@ -24,16 +22,6 @@ type AgentDocument struct {
 	SubAgents   []AgentRef
 	LLM         *LLMAgentDocument
 	Loop        *LoopAgentDocument
-	ACP         *AcpAgentDocument
-}
-
-type AcpAgentDocument struct {
-	Runtime               string
-	Instruction           string
-	Project               string
-	AdditionalDirectories []string
-	OutputKey             string
-	OutputSchema          string
 }
 
 type AgentRef struct {

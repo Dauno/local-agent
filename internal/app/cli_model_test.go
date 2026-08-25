@@ -254,7 +254,7 @@ func TestValidateTranscriptionModelRequiresDedicatedOpenAIConfiguration(t *testi
 	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeAgentCLI}}); err == nil || !strings.Contains(err.Error(), "openai_compatible") {
 		t.Fatalf("agent_cli transcription validation = %v", err)
 	}
-	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeACP}}); err == nil || !strings.Contains(err.Error(), "openai_compatible") {
+	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeAgentCLI}}); err == nil || !strings.Contains(err.Error(), "openai_compatible") {
 		t.Fatalf("ACP transcription validation = %v", err)
 	}
 	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible}, Model: "stt"}); err == nil || !strings.Contains(err.Error(), "base URL") {

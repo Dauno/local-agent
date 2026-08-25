@@ -74,8 +74,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 		Sandbox:          config.SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
 		Canvases:         config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:          config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
-		OpenCode:         config.OpenCodeConfig{Management: config.OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
-		ACP:              config.ACPConfig{MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, ProgressWarningSeconds: 900, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
+		ACP:              config.ACPConfig{MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, ProgressWarningSeconds: 900, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ACPDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
 		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
 		Orchestration: config.OrchestrationConfig{
 			Workstreams: config.WorkstreamConfig{Enabled: false, MaxNonTerminalTasks: 32, MaxDependenciesPerTask: 8, SnapshotBudgetTokens: domain.DefaultWorkstreamSnapshotBudgetTokens},
@@ -290,17 +289,11 @@ exports:
   max_filename_chars: 128
   max_content_bytes: 1048576
   timeout_seconds: 30
-opencode:
-  management:
-    allowed_user_ids: []
 acp:
-  max_frame_bytes: 8388608
   max_inline_result_bytes: 65536
   max_result_artifact_bytes: 16777216
-  stderr_tail_bytes: 131072
    default_job_timeout_seconds: 7200
    max_job_timeout_seconds: 86400
-   idle_timeout_seconds: 0
    reconciliation_timeout_seconds: 1800
    progress_warning_seconds: 900
    worker_concurrency: 1
@@ -1275,20 +1268,6 @@ func TestParseAppliesSandboxConfig(t *testing.T) {
 	}
 	if cfg.Sandbox.MaxOutputBytes != 32768 {
 		t.Fatalf("sandbox.max_output_bytes = %d", cfg.Sandbox.MaxOutputBytes)
-	}
-}
-
-func TestParseAppliesOpenCodeManagementAllowlist(t *testing.T) {
-	t.Parallel()
-	cfg, err := config.Parse([]byte(`opencode:
-  management:
-    allowed_user_ids: [U12345678]
-`))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := cfg.OpenCode.Management.AllowedUserIDs; len(got) != 1 || got[0] != "U12345678" {
-		t.Fatalf("allowed user IDs = %v", got)
 	}
 }
 

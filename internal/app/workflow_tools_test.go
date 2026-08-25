@@ -16,7 +16,6 @@ import (
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
-	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
 type exitLoopCallingModel struct {
@@ -311,20 +310,20 @@ func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
 		}
 	}
 	jsonResult := `{"status":"success","repository":"workspace","pr_url":"https://example.test/pr/1","branch":"trd/x","base_branch":"main","remote":"origin","commit":"abc","title":"Title","file_path":"docs/TRD-X.md","worktree":"` + createdWorktree + `","error":""}`
-	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: jsonResult}}
+	runtime := &captureModel{text: jsonResult}
 	doc := agentdef.AgentDocument{
-		AgentClass: agentdef.AgentClassAcp,
+		AgentClass: agentdef.AgentClassLLM,
 		Name:       "TRDGitOperator",
-		ACP: &agentdef.AcpAgentDocument{
-			Runtime: "opencode/build", Instruction: "Deliver {trd_content}.", Project: "{target_project}",
-			OutputKey: "delivery_result", OutputSchema: "git_delivery_result",
+		LLM: &agentdef.LLMAgentDocument{
+			Model: "codex/build", Instruction: "Deliver {trd_content}.", Project: "{target_project}",
+			IncludeContents: "none", OutputKey: "delivery_result", OutputSchema: "git_delivery_result",
 		},
 	}
 	bp := &agentdef.WorkflowBlueprint{Root: doc}
-	root, err := buildWorkflowAgent(bp, nil, invocationScope{
-		globalInstruction: "Global.", acpRuntimes: map[string]port.ExternalAgentRuntime{"opencode/build": runtime},
-		acpResolved: map[string]*agentdef.ResolvedModel{"opencode/build": {
-			Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}, PermissionOptionKind: domain.ACPPermissionAllowOnce,
+	root, err := buildWorkflowAgent(bp, map[string]model.LLM{"codex/build": runtime}, invocationScope{
+		globalInstruction: "Global.",
+		modelResolved: map[string]*agentdef.ResolvedModel{"codex/build": {
+			Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI},
 		}},
 		projectRoots: map[string]string{"workspace": project},
 	})
@@ -337,7 +336,11 @@ func TestACPWorkflowNodeValidatesGitResultAndWritesOutput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !strings.Contains(text, `"status":"success"`) || runtime.request.PrimaryPath != project {
-		t.Fatalf("text = %s, request = %+v", text, runtime.request)
+	if !strings.Contains(text, `"status":"success"`) {
+		t.Fatalf("text = %s", text)
+	}
+	delegation := runtime.request.Contents[0].Parts[0].Text
+	if !strings.Contains(delegation, `"project":"workspace"`) {
+		t.Fatalf("delegation %q must name the trusted target project", delegation)
 	}
 }

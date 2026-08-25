@@ -18,7 +18,6 @@ import (
 const (
 	ProviderTypeOpenAICompatible = "openai_compatible"
 	ProviderTypeAgentCLI         = "agent_cli"
-	ProviderTypeACP              = "acp"
 )
 
 const (
@@ -474,9 +473,4 @@ func (r *ResolvedModel) Type() string {
 // IsAgentCLI reports whether the resolved model is backed by an agent CLI.
 func (r *ResolvedModel) IsAgentCLI() bool {
 	return r.Type() == ProviderTypeAgentCLI
-}
-
-// IsACP reports whether the resolved model is backed by an ACP agent.
-func (r *ResolvedModel) IsACP() bool {
-	return r.Type() == ProviderTypeACP
 }

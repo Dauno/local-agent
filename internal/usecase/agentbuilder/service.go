@@ -61,7 +61,7 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 			IncludeContents: "none",
 			ToolScope:       agentdef.ToolScope{"invocation_scoped"},
 		}
-	case domain.AgentKindACP:
+	case domain.AgentKindAgentCLI:
 		if strings.TrimSpace(draft.Model) != "" {
 			return nil, fmt.Errorf("model is not valid for ACP agents")
 		}
@@ -83,14 +83,15 @@ func (s *Service) Preview(draft domain.AgentDraft, current any) (*port.PreviewRe
 			return nil, err
 		}
 		agent = agentdef.AgentDef{
-			AgentClass:     string(agentdef.AgentClassAcp),
-			Name:           draft.Name,
-			Runtime:        runtime,
-			Description:    draft.Description,
-			Instruction:    draft.Instruction,
-			ExecutionMode:  mode,
-			TimeoutSeconds: timeout,
-			Confirmation:   "required",
+			AgentClass:      string(agentdef.AgentClassLLM),
+			Name:            draft.Name,
+			Model:           runtime,
+			IncludeContents: "none",
+			Description:     draft.Description,
+			Instruction:     draft.Instruction,
+			ExecutionMode:   mode,
+			TimeoutSeconds:  timeout,
+			Confirmation:    "required",
 		}
 	}
 
@@ -142,9 +143,8 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 
 	expectedClass := string(agentdef.AgentClassLLM)
 	reference := candidate.Model
-	if kind == domain.AgentKindACP {
-		expectedClass = string(agentdef.AgentClassAcp)
-		reference = candidate.Runtime
+	if kind == domain.AgentKindAgentCLI {
+		reference = candidate.Model
 	}
 	if candidate.AgentClass != expectedClass {
 		return fmt.Errorf("canonical agent class does not match draft kind")
@@ -153,7 +153,7 @@ func (s *Service) ValidateInstallCandidate(draft domain.AgentDraft, candidate ag
 		return fmt.Errorf("invalid canonical agent provider: %w", err)
 	}
 	provider := providerName(reference)
-	if kind == domain.AgentKindACP {
+	if kind == domain.AgentKindAgentCLI {
 		if strings.TrimSpace(draft.Model) != "" {
 			return fmt.Errorf("model is not valid for ACP agents")
 		}

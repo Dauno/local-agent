@@ -179,7 +179,6 @@ func validateRuntimeAndSlack(problems *[]FieldError, cfg Config) {
 		}
 	}
 	validateProgressLabels(problems, cfg.Slack.StandardAgent.ProgressLabels)
-	validateIDs(problems, "opencode.management.allowed_user_ids", cfg.OpenCode.Management.AllowedUserIDs, slackUserIDPattern, "a plausible Slack user ID beginning with U or W")
 	validateACP(problems, cfg.ACP)
 
 	const maxFileBytes = 5 * 1024 * 1024
@@ -693,10 +692,8 @@ func validateACP(problems *[]FieldError, cfg ACPConfig) {
 		value int
 		max   int
 	}{
-		{"acp.max_frame_bytes", cfg.MaxFrameBytes, maxFrameCeiling},
 		{"acp.max_inline_result_bytes", cfg.MaxInlineResultBytes, maxInlineCeiling},
 		{"acp.max_result_artifact_bytes", cfg.MaxResultArtifactBytes, maxArtifactCeiling},
-		{"acp.stderr_tail_bytes", cfg.StderrTailBytes, maxStderrCeiling},
 		{"acp.max_job_timeout_seconds", cfg.MaxJobTimeoutSeconds, maxTimeoutCeiling},
 		{"acp.worker_concurrency", cfg.WorkerConcurrency, 64},
 		{"acp.artifact_retention_days", cfg.ArtifactRetentionDays, 3650},
@@ -717,9 +714,6 @@ func validateACP(problems *[]FieldError, cfg ACPConfig) {
 		addConfigProblem(problems, "acp.reconciliation_timeout_seconds", "must be greater than zero")
 	} else if cfg.MaxJobTimeoutSeconds > 0 && cfg.ReconciliationTimeoutSeconds > cfg.MaxJobTimeoutSeconds {
 		addConfigProblem(problems, "acp.reconciliation_timeout_seconds", "must not exceed acp.max_job_timeout_seconds")
-	}
-	if cfg.IdleTimeoutSeconds < 0 {
-		addConfigProblem(problems, "acp.idle_timeout_seconds", "must be zero or greater")
 	}
 	if cfg.ProgressWarningSeconds <= 0 {
 		addConfigProblem(problems, "acp.progress_warning_seconds", "must be greater than zero")

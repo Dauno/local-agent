@@ -188,9 +188,6 @@ func validateProviderFieldPresence(data []byte, provider Provider) error {
 	case ProviderTypeOpenAICompatible:
 		providerForbidden = []string{"executable", "version", "preconditions", "invocation", "stream", "session", "auth", "shim", "command", "args"}
 		profileForbidden = []string{"agent", "approval", "variant", "config_options", "permission_option_kind"}
-	case ProviderTypeACP:
-		providerForbidden = []string{"base_url", "api_key_env", "headers", "executable", "version", "preconditions", "invocation", "stream", "session", "shim"}
-		profileForbidden = []string{"model", "agent", "approval", "variant", "reasoning_effort", "extra_body", "generate_content_config"}
 	default:
 		return nil
 	}
@@ -307,8 +304,8 @@ func ValidateCandidateAgent(current *Definitions, candidate AgentDef) error {
 	if current == nil {
 		return errors.New("current agent definitions must not be nil")
 	}
-	if candidate.AgentClass != "LlmAgent" && candidate.AgentClass != "AcpAgent" {
-		return fmt.Errorf("agent %q: agent_class must be LlmAgent or AcpAgent", candidate.Name)
+	if candidate.AgentClass != "LlmAgent" {
+		return fmt.Errorf("agent %q: agent_class must be LlmAgent", candidate.Name)
 	}
 	if candidate.Role != "" {
 		return fmt.Errorf("agent %q: role must be empty", candidate.Name)
@@ -343,10 +340,14 @@ func ValidateAgentEligibility(agent AgentDef, providers map[string]Provider) []s
 	if len(agent.AgentTools) > 0 {
 		errs = append(errs, fmt.Sprintf("%s: nested agent_tools are not supported", prefix))
 	}
-	if agent.AgentClass == "AcpAgent" && agent.Confirmation != "required" {
-		errs = append(errs, fmt.Sprintf("%s: confirmation must be required", prefix))
+	if agent.AgentClass != "" && agent.AgentClass != "LlmAgent" {
+		errs = append(errs, fmt.Sprintf("%s: agent_class must be LlmAgent", prefix))
 	}
-
+	// A durable job is delivered after the turn ends, so the user must have
+	// approved it before it started.
+	if agent.ExecutionMode == ExecutionModeDurableJob && agent.Confirmation != "required" {
+		errs = append(errs, fmt.Sprintf("%s: durable_job requires confirmation: required", prefix))
+	}
 	if provider, ok := providerForAgent(agent, providers); ok {
 		switch provider.Type {
 		case ProviderTypeAgentCLI:
@@ -371,7 +372,7 @@ func eligibleAgentNames(defs *Definitions) []string {
 		if name == "root_agent" || agent.Role != "" {
 			continue
 		}
-		if agent.AgentClass != "LlmAgent" && agent.AgentClass != "AcpAgent" {
+		if agent.AgentClass != "LlmAgent" {
 			continue
 		}
 		names = append(names, name)
@@ -398,10 +399,8 @@ func validateProvider(p Provider) []string {
 		errs = append(errs, validateOpenAICompatibleProvider(prefix, p)...)
 	case ProviderTypeAgentCLI:
 		errs = append(errs, validateAgentCLIProvider(prefix, p)...)
-	case ProviderTypeACP:
-		errs = append(errs, validateACPProvider(prefix, p)...)
 	default:
-		errs = append(errs, fmt.Sprintf("%s: type must be %s, %s, or %s", prefix, ProviderTypeOpenAICompatible, ProviderTypeAgentCLI, ProviderTypeACP))
+		errs = append(errs, fmt.Sprintf("%s: type must be %s or %s", prefix, ProviderTypeOpenAICompatible, ProviderTypeAgentCLI))
 	}
 	if len(p.Profiles) == 0 {
 		errs = append(errs, fmt.Sprintf("%s: at least one profile is required", prefix))
@@ -500,53 +499,6 @@ func validateCLIAuth(prefix string, auth CLIAuth) []string {
 	for index, argument := range auth.Command {
 		if strings.Contains(argument, "{{") {
 			errs = append(errs, fmt.Sprintf("%s: auth.command[%d] must not use a template", prefix, index))
-		}
-	}
-	return errs
-}
-
-func validateACPProvider(prefix string, p Provider) []string {
-	errs := forbidHTTPFields(prefix, p, ProviderTypeACP)
-	if p.Shim != nil {
-		errs = append(errs, fmt.Sprintf("%s: shim is invalid for %s providers", prefix, ProviderTypeACP))
-	}
-	errs = append(errs, validateCommandArgs(prefix, "", p.Command, p.Args)...)
-	if p.Auth != nil {
-		errs = append(errs, validateCLIAuth(prefix, *p.Auth)...)
-	}
-	for profileName, profile := range p.Profiles {
-		profilePrefix := fmt.Sprintf("%s profile %q", prefix, profileName)
-		if len(profile.ConfigOptions) == 0 {
-			errs = append(errs, fmt.Sprintf("%s: at least one config option is required", profilePrefix))
-		}
-		seenOptions := make(map[string]struct{}, len(profile.ConfigOptions))
-		for i, opt := range profile.ConfigOptions {
-			id := strings.TrimSpace(opt.ID)
-			if id == "" {
-				errs = append(errs, fmt.Sprintf("%s: config_options[%d].id must not be empty", profilePrefix, i))
-			} else if len(id) > 256 {
-				errs = append(errs, fmt.Sprintf("%s: config_options[%d].id exceeds 256 bytes", profilePrefix, i))
-			} else if _, duplicate := seenOptions[id]; duplicate {
-				errs = append(errs, fmt.Sprintf("%s: duplicate config option id %q", profilePrefix, id))
-			} else {
-				seenOptions[id] = struct{}{}
-			}
-			switch value := opt.Value.(type) {
-			case string:
-				if strings.TrimSpace(value) == "" {
-					errs = append(errs, fmt.Sprintf("%s: config_options[%d].value must not be empty", profilePrefix, i))
-				} else if len(value) > 4096 {
-					errs = append(errs, fmt.Sprintf("%s: config_options[%d].value exceeds 4096 bytes", profilePrefix, i))
-				}
-			case bool:
-			default:
-				errs = append(errs, fmt.Sprintf("%s: config_options[%d].value must be a string or boolean", profilePrefix, i))
-			}
-		}
-		switch profile.PermissionOptionKind {
-		case "", "reject_once", "allow_once":
-		default:
-			errs = append(errs, fmt.Sprintf("%s: permission_option_kind must be reject_once or allow_once", profilePrefix))
 		}
 	}
 	return errs
@@ -706,41 +658,11 @@ func forbidHTTPFields(prefix string, p Provider, providerType string) []string {
 	return errs
 }
 
-func validateCommandArgs(prefix, label, command string, args []string) []string {
-	commandLabel := "command"
-	argsLabel := "args"
-	if label != "" {
-		commandLabel = label + ".command"
-		argsLabel = label + ".args"
-	}
-
-	var errs []string
-	if strings.TrimSpace(command) == "" {
-		if label == "" {
-			errs = append(errs, fmt.Sprintf("%s: command is required for %s providers", prefix, ProviderTypeACP))
-		} else {
-			errs = append(errs, fmt.Sprintf("%s: %s must not be empty", prefix, commandLabel))
-		}
-	}
-	if strings.ContainsAny(command, "\r\n\x00") {
-		errs = append(errs, fmt.Sprintf("%s: %s must be a single line", prefix, commandLabel))
-	}
-	for index, arg := range args {
-		if strings.TrimSpace(arg) == "" {
-			errs = append(errs, fmt.Sprintf("%s: %s[%d] must not be empty", prefix, argsLabel, index))
-		}
-		if strings.ContainsAny(arg, "\r\n\x00") {
-			errs = append(errs, fmt.Sprintf("%s: %s[%d] must be a single line", prefix, argsLabel, index))
-		}
-	}
-	return errs
-}
-
 func validateProfile(providerPrefix, providerType, name string, profile Profile) []string {
 	var errs []string
 	prefix := fmt.Sprintf("%s profile %q", providerPrefix, name)
 
-	if providerType != ProviderTypeACP && strings.TrimSpace(profile.Model) == "" {
+	if strings.TrimSpace(profile.Model) == "" {
 		errs = append(errs, fmt.Sprintf("%s: model must not be empty", prefix))
 	}
 	if profile.ResultHandles.MaxDirectInlineBytes < 0 || profile.ResultHandles.MaxDirectInlineBytes > HardMaxDirectInlineBytes {
@@ -748,7 +670,7 @@ func validateProfile(providerPrefix, providerType, name string, profile Profile)
 	}
 
 	switch providerType {
-	case ProviderTypeACP, ProviderTypeAgentCLI:
+	case ProviderTypeAgentCLI:
 		if profile.ReasoningEffort != "" {
 			errs = append(errs, fmt.Sprintf("%s: reasoning_effort is invalid for %s profiles", prefix, providerType))
 		}
@@ -758,18 +680,7 @@ func validateProfile(providerPrefix, providerType, name string, profile Profile)
 		if profile.GenerateContentConfig != nil {
 			errs = append(errs, fmt.Sprintf("%s: generate_content_config is invalid for %s profiles", prefix, providerType))
 		}
-		switch providerType {
-		case ProviderTypeACP:
-			if profile.Agent != "" {
-				errs = append(errs, fmt.Sprintf("%s: agent is invalid for %s profiles", prefix, ProviderTypeACP))
-			}
-			if profile.Approval != "" {
-				errs = append(errs, fmt.Sprintf("%s: approval is invalid for %s profiles", prefix, ProviderTypeACP))
-			}
-			if profile.Variant != "" {
-				errs = append(errs, fmt.Sprintf("%s: variant is invalid for %s profiles", prefix, ProviderTypeACP))
-			}
-		case ProviderTypeAgentCLI:
+		{
 			switch profile.Approval {
 			case "", ApprovalReject, ApprovalAuto:
 			default:
@@ -861,20 +772,11 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	if strings.TrimSpace(a.Name) == "" {
 		errs = append(errs, "agent name must not be empty")
 	}
-	if a.AgentClass != "LlmAgent" && a.AgentClass != "AcpAgent" {
-		errs = append(errs, fmt.Sprintf("%s: agent_class must be LlmAgent or AcpAgent", prefix))
+	if a.AgentClass != "LlmAgent" {
+		errs = append(errs, fmt.Sprintf("%s: agent_class must be LlmAgent", prefix))
 	}
 	if strings.TrimSpace(a.Instruction) == "" {
 		errs = append(errs, fmt.Sprintf("%s: instruction must not be empty", prefix))
-	}
-
-	if a.AgentClass == "AcpAgent" {
-		if a.ContextBudget != nil {
-			errs = append(errs, fmt.Sprintf("%s: context_budget is not valid for AcpAgent", prefix))
-		}
-		errs = append(errs, validateAcpAgent(prefix, a, providers)...)
-		// Skip model validation for AcpAgent since it uses runtime instead.
-		return errs
 	}
 
 	if a.Model == "" {
@@ -888,13 +790,11 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 				errs = append(errs, fmt.Sprintf("%s: unknown provider %q", prefix, providerName))
 			} else if _, exists := p.Profiles[profileName]; !exists {
 				errs = append(errs, fmt.Sprintf("%s: unknown profile %q in provider %q", prefix, profileName, providerName))
-			} else if p.Type == ProviderTypeACP {
-				errs = append(errs, fmt.Sprintf("%s: ACP providers require agent_class: AcpAgent", prefix))
 			}
 		}
 	}
 	if a.Runtime != "" {
-		errs = append(errs, fmt.Sprintf("%s: runtime is only valid for AcpAgent", prefix))
+		errs = append(errs, fmt.Sprintf("%s: runtime is not supported; use model with an agent_cli provider", prefix))
 	}
 	// Durable execution is available to agent_cli leaves as well as ACP ones.
 	// Both are external agents that outlive one model call, so both may declare
@@ -904,10 +804,10 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 		errs = append(errs, validateExternalAgentExecution(prefix, a)...)
 	} else {
 		if a.Confirmation != "" {
-			errs = append(errs, fmt.Sprintf("%s: confirmation is only valid for AcpAgent or agent_cli agents", prefix))
+			errs = append(errs, fmt.Sprintf("%s: confirmation is only valid for agent_cli agents", prefix))
 		}
 		if a.ExecutionMode != "" {
-			errs = append(errs, fmt.Sprintf("%s: execution_mode is only valid for AcpAgent or agent_cli agents", prefix))
+			errs = append(errs, fmt.Sprintf("%s: execution_mode is only valid for agent_cli agents", prefix))
 		}
 	}
 
@@ -986,11 +886,7 @@ func validateAgentTools(defs *Definitions) []string {
 }
 
 func providerForAgent(agent AgentDef, providers map[string]Provider) (Provider, bool) {
-	ref := agent.Model
-	if agent.AgentClass == "AcpAgent" {
-		ref = agent.Runtime
-	}
-	providerName, _, ok := splitModelReference(ref)
+	providerName, _, ok := splitModelReference(agent.Model)
 	if !ok {
 		return Provider{}, false
 	}
@@ -1054,72 +950,6 @@ func checkUnique(prefix, label string, values []string) ([]string, []string) {
 		unique = append(unique, value)
 	}
 	return unique, errs
-}
-
-func validateAcpAgent(prefix string, a AgentDef, providers map[string]Provider) []string {
-	var errs []string
-
-	if a.Runtime == "" {
-		errs = append(errs, fmt.Sprintf("%s: runtime must not be empty", prefix))
-	} else {
-		providerName, profileName, ok := splitModelReference(a.Runtime)
-		if !ok {
-			errs = append(errs, fmt.Sprintf("%s: runtime must be provider/profile format", prefix))
-		} else {
-			if p, exists := providers[providerName]; !exists {
-				errs = append(errs, fmt.Sprintf("%s: unknown runtime provider %q", prefix, providerName))
-			} else if p.Type != ProviderTypeACP {
-				errs = append(errs, fmt.Sprintf("%s: runtime provider %q must be type acp", prefix, providerName))
-			} else if _, exists := p.Profiles[profileName]; !exists {
-				errs = append(errs, fmt.Sprintf("%s: unknown runtime profile %q in provider %q", prefix, profileName, providerName))
-			}
-		}
-	}
-	if a.Model != "" {
-		errs = append(errs, fmt.Sprintf("%s: model is not valid for AcpAgent (use runtime instead)", prefix))
-	}
-	if a.IncludeContents != "" {
-		errs = append(errs, fmt.Sprintf("%s: include_contents is not valid for AcpAgent", prefix))
-	}
-	if a.Mode != "" {
-		errs = append(errs, fmt.Sprintf("%s: mode is not valid for AcpAgent", prefix))
-	}
-	if a.DurableSession {
-		errs = append(errs, fmt.Sprintf("%s: durable_session is not valid for AcpAgent", prefix))
-	}
-	if len(a.ToolScope) > 0 {
-		errs = append(errs, fmt.Sprintf("%s: tool_scope is not valid for AcpAgent", prefix))
-	}
-	if len(a.AgentTools) > 0 {
-		errs = append(errs, fmt.Sprintf("%s: agent_tools is not valid for AcpAgent", prefix))
-	}
-	if len(a.WorkflowTools) > 0 {
-		errs = append(errs, fmt.Sprintf("%s: workflow_tools is not valid for AcpAgent", prefix))
-	}
-	if a.TimeoutSeconds < 0 || a.TimeoutSeconds > MaxACPTimeoutSeconds {
-		errs = append(errs, fmt.Sprintf("%s: timeout_seconds must be between 0 and %d", prefix, MaxACPTimeoutSeconds))
-	}
-	switch a.ExecutionMode {
-	case "", ExecutionModeForeground, ExecutionModeDurableJob:
-	default:
-		errs = append(errs, fmt.Sprintf("%s: execution_mode must be foreground or durable_job", prefix))
-	}
-	if a.Role != "" {
-		errs = append(errs, fmt.Sprintf("%s: role is not valid for AcpAgent", prefix))
-	}
-	if a.GlobalInstruction != "" {
-		errs = append(errs, fmt.Sprintf("%s: global_instruction is not valid for AcpAgent", prefix))
-	}
-	if a.DelegatedGlobalInstruction != "" {
-		errs = append(errs, fmt.Sprintf("%s: delegated_global_instruction is not valid for AcpAgent", prefix))
-	}
-	switch a.Confirmation {
-	case "required":
-	default:
-		errs = append(errs, fmt.Sprintf("%s: confirmation must be required", prefix))
-	}
-
-	return errs
 }
 
 func validateBaseURL(value string) error {

@@ -112,7 +112,7 @@ func TestBuilderModalUpdatePreservesPrivateMetadata(t *testing.T) {
 		View: slackapi.View{
 			PrivateMetadata: metadata,
 			State: &slackapi.ViewState{Values: map[string]map[string]slackapi.BlockAction{
-				"agent_type": {"agent_type": {Value: string(domain.AgentKindACP)}},
+				"agent_type": {"agent_type": {Value: string(domain.AgentKindAgentCLI)}},
 			}},
 		},
 	}

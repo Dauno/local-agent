@@ -21,15 +21,15 @@ import (
 
 func TestDurableACPDispatcherRejectsScopeRevisionDrift(t *testing.T) {
 	workspace := t.TempDir()
-	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "must not run"}}
+	runtime := &captureModel{text: "must not run"}
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   runtime,
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        runtime,
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "sha256:current",
 	}
 	_, err := (&acpJobDispatcher{children: []preparedAgentTool{child}}).Run(context.Background(), domain.ExternalAgentJob{
-		ID: "job-1", Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "sha256:approved", Task: "task",
+		ID: "job-1", Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "sha256:approved", Task: "task",
 	})
 	if err == nil || !strings.Contains(err.Error(), "scope revision") || runtime.runs != 0 {
 		t.Fatalf("err = %v, runtime runs = %d", err, runtime.runs)
@@ -48,23 +48,23 @@ func TestNoACPConfigurationReturnsNilJobService(t *testing.T) {
 
 func TestDurableACPDispatcherDisambiguatesSharedRuntimeByScopeRevision(t *testing.T) {
 	workspace := t.TempDir()
-	wrongRuntime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "wrong agent"}}
-	rightRuntime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "right agent"}}
-	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}}
+	wrongRuntime := &captureModel{text: "wrong agent"}
+	rightRuntime := &captureModel{text: "right agent"}
+	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}}
 	children := []preparedAgentTool{
 		{
-			definition: agentdef.AgentDef{Name: "improve_agent", Runtime: "opencode/sol-high"},
-			acpRuntime: wrongRuntime, acpResolved: resolved,
+			definition: agentdef.AgentDef{Name: "improve_agent", Model: "codex/sol-high"},
+			model:      wrongRuntime, cliResolved: resolved,
 			projectRoots: map[string]string{"workspace": workspace}, registryRevision: "sha256:improve",
 		},
 		{
-			definition: agentdef.AgentDef{Name: "sol-advisor", Runtime: "opencode/sol-high"},
-			acpRuntime: rightRuntime, acpResolved: resolved,
+			definition: agentdef.AgentDef{Name: "sol-advisor", Model: "codex/sol-high"},
+			model:      rightRuntime, cliResolved: resolved,
 			projectRoots: map[string]string{"workspace": workspace}, registryRevision: "sha256:advisor",
 		},
 	}
 	result, err := (&acpJobDispatcher{children: children}).Run(context.Background(), domain.ExternalAgentJob{
-		ID: "job-1", Provider: "opencode", Profile: "opencode/sol-high", PrimaryProject: "workspace", RegistryRevision: "sha256:advisor", Task: "review",
+		ID: "job-1", Provider: "codex", Profile: "codex/sol-high", PrimaryProject: "workspace", RegistryRevision: "sha256:advisor", Task: "review",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -85,8 +85,8 @@ func TestDetachedACPTimeoutFallbackDoesNotUseRootModelTimeout(t *testing.T) {
 }
 
 func TestAgentExecutionFingerprintChangesWithScopeInputs(t *testing.T) {
-	definition := agentdef.AgentDef{Name: "worker", Runtime: "opencode/build"}
-	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}}
+	definition := agentdef.AgentDef{Name: "worker", Model: "codex/build"}
+	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}}
 	cfg := config.Default()
 	left, err := agentExecutionFingerprint(definition, resolved, map[string]string{"workspace": "/workspace"}, cfg)
 	if err != nil {
@@ -106,15 +106,15 @@ func TestDurableACPDispatcherMaterializesSanitizedCompleteResult(t *testing.T) {
 	workspace := t.TempDir()
 	artifacts := &recordingResultArtifacts{}
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "safe <result>"}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: "safe <result>"},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, sanitize: func(value string) string { return value }, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
 	}}
-	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -123,9 +123,9 @@ func TestDurableACPDispatcherMaterializesSanitizedCompleteResult(t *testing.T) {
 	}
 	largeArtifacts := &recordingResultArtifacts{}
 	dispatcher.artifacts = largeArtifacts
-	child.acpRuntime = &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: strings.Repeat("x", domain.SlackMarkdownChunkRunes*6+1)}}
+	child.model = &captureModel{text: strings.Repeat("x", domain.SlackMarkdownChunkRunes*6+1)}
 	dispatcher.children = []preparedAgentTool{child}
-	large, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_2", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	large, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_2", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -161,18 +161,17 @@ func TestDurableACPDispatcherNativeResultMatchesInlineAndFileDelivery(t *testing
 	}{
 		{name: "inline", jobID: "job_v2_inline", payload: "inline <verified> result"},
 		{name: "file", jobID: "job_v2_file", payload: strings.Repeat("x", domain.SlackMarkdownChunkRunes+1), fileOutput: true},
-		{name: "recovered inline", jobID: "job_v2_recovered", payload: "recovered result", reconcile: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			artifacts := &recordingResultArtifacts{}
 			child := preparedAgentTool{
-				definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-				acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: tc.payload}},
-				acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+				definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+				model:        &captureModel{text: tc.payload},
+				cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 				projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 			}
 			job := domain.ExternalAgentJob{
-				ID: tc.jobID, Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+				ID: tc.jobID, Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace",
 				RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
 				ConversationKey: "slack:T12345678:dm:D12345678", StatusRevision: 4, TimeoutAt: time.Now().Add(time.Minute),
 			}
@@ -218,16 +217,16 @@ func TestDurableACPDispatcherBlocksDeliveryWhenNativeMaterializationFails(t *tes
 	artifacts := &recordingResultArtifacts{}
 	results := &failingTrustedResultStore{}
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "complete result"}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: "complete result"},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, results: results, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
 	}}
 	_, err := dispatcher.Run(t.Context(), domain.ExternalAgentJob{
-		ID: "job_v2_failure", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+		ID: "job_v2_failure", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace",
 		RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
 		ConversationKey: "slack:T12345678:dm:D12345678", TimeoutAt: time.Now().Add(time.Minute),
 	})
@@ -256,16 +255,16 @@ func TestDurableACPDispatcherPreservesNativeResultWhenDeliveryArtifactFails(t *t
 	}
 	workspace := t.TempDir()
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: strings.Repeat("x", domain.SlackMarkdownChunkRunes+1)}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: strings.Repeat("x", domain.SlackMarkdownChunkRunes+1)},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: failingDeliveryArtifacts{}, results: results, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
 	}}
 	delivery, err := dispatcher.Run(t.Context(), domain.ExternalAgentJob{
-		ID: "job_v2_delivery_failure", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+		ID: "job_v2_delivery_failure", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace",
 		RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
 		ConversationKey: "slack:T12345678:dm:D12345678", StatusRevision: 4, TimeoutAt: time.Now().Add(time.Minute),
 	})
@@ -277,16 +276,16 @@ func TestDurableACPDispatcherPreservesNativeResultWhenDeliveryArtifactFails(t *t
 func TestDurableACPDispatcherPreservesMaterializationCancellation(t *testing.T) {
 	workspace := t.TempDir()
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "complete result"}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: "complete result"},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: &recordingResultArtifacts{}, results: cancelingTrustedResultStore{}, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
 	}}
 	_, err := dispatcher.Run(t.Context(), domain.ExternalAgentJob{
-		ID: "job_v2_cancel", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace",
+		ID: "job_v2_cancel", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace",
 		RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
 		ConversationKey: "slack:T12345678:dm:D12345678", TimeoutAt: time.Now().Add(time.Minute),
 	})
@@ -299,15 +298,15 @@ func TestDurableACPDispatcherFallsBackForUnicodeTwentyThousandCharacters(t *test
 	artifacts := &recordingResultArtifacts{}
 	workspace := t.TempDir()
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: strings.Repeat("界", 20000)}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: strings.Repeat("界", 20000)},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
 	}}
-	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_unicode", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_unicode", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -320,15 +319,15 @@ func TestDurableACPMaterializationRedactsBeforeSQLiteDelivery(t *testing.T) {
 	secret := "xoxb-super-secret-value-12345"
 	workspace := t.TempDir()
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "result=" + secret}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: "result=" + secret},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, sanitize: secure.NewRedactor(secret).String, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
 	}}
-	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", ConversationKey: "slack:T12345678:dm:D12345678", Actor: "U12345678", TimeoutAt: time.Now().Add(time.Minute)})
+	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", ConversationKey: "slack:T12345678:dm:D12345678", Actor: "U12345678", TimeoutAt: time.Now().Add(time.Minute)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -341,7 +340,7 @@ func TestDurableACPMaterializationRedactsBeforeSQLiteDelivery(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
-	job := domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "opencode", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued, TimeoutAt: time.Now().Add(time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now(), OriginalCallID: "secret-call", RequestSHA256: "request"}
+	job := domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "codex", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued, TimeoutAt: time.Now().Add(time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now(), OriginalCallID: "secret-call", RequestSHA256: "request"}
 	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 		t.Fatalf("create job = %v, err = %v", created, err)
 	}
@@ -411,14 +410,14 @@ func TestDurableACPDispatcherNormalizesForegroundResultIdentity(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			child := preparedAgentTool{
-				definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-				acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: tc.raw}},
-				acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+				definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+				model:        &captureModel{text: tc.raw},
+				cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 				projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 			}
 			dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, sanitize: tc.redact, policy: policy}
 			result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{
-				ID: "job_fg", Mode: domain.JobForeground, Provider: "opencode", Profile: "opencode/build",
+				ID: "job_fg", Mode: domain.JobForeground, Provider: "codex", Profile: "codex/build",
 				PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute),
 			})
 			if err != nil {
@@ -445,9 +444,9 @@ func TestDurableACPDispatcherForegroundResultPersistsCompleteIdentity(t *testing
 	workspace := t.TempDir()
 	redact := func(value string) string { return strings.ReplaceAll(value, secret, "[REDACTED]") }
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "result=" + secret + " <raw>"}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: "result=" + secret + " <raw>"},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	artifacts := &recordingResultArtifacts{}
@@ -455,7 +454,7 @@ func TestDurableACPDispatcherForegroundResultPersistsCompleteIdentity(t *testing
 		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
 	}}
 	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{
-		ID: "job_fg", Mode: domain.JobForeground, Provider: "opencode", Profile: "opencode/build",
+		ID: "job_fg", Mode: domain.JobForeground, Provider: "codex", Profile: "codex/build",
 		PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678",
 		ConversationKey: "slack:T12345678:dm:D12345678", TimeoutAt: time.Now().Add(time.Minute),
 	})
@@ -476,7 +475,7 @@ func TestDurableACPDispatcherForegroundResultPersistsCompleteIdentity(t *testing
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
-	job := domain.ExternalAgentJob{ID: "job_fg", Mode: domain.JobForeground, Provider: "opencode", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued, TimeoutAt: time.Now().Add(time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now(), OriginalCallID: "fg-call", RequestSHA256: "request"}
+	job := domain.ExternalAgentJob{ID: "job_fg", Mode: domain.JobForeground, Provider: "codex", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued, TimeoutAt: time.Now().Add(time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now(), OriginalCallID: "fg-call", RequestSHA256: "request"}
 	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 		t.Fatalf("create job = %v, err = %v", created, err)
 	}
@@ -508,44 +507,13 @@ func TestDurableACPDispatcherForegroundResultPersistsCompleteIdentity(t *testing
 	}
 }
 
-func TestDurableACPDispatcherForegroundRecoveryNormalizesWithoutDetachedMetadata(t *testing.T) {
-	secret := "xoxb-recovery-secret-value-7"
-	workspace := t.TempDir()
-	artifacts := &recordingResultArtifacts{}
-	redact := func(value string) string { return strings.ReplaceAll(value, secret, "[REDACTED]") }
-	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "raw=" + secret + " <safe>"}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
-		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
-	}
-	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, sanitize: redact, policy: domain.ResultDeliveryPolicy{
-		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
-	}}
-	result, err := dispatcher.Reconcile(context.Background(), domain.ExternalAgentJob{
-		ID: "job_rec", Mode: domain.JobForeground, Provider: "opencode", Profile: "opencode/build",
-		PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", ACPSessionID: "session-1", TimeoutAt: time.Now().Add(time.Minute),
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	final := "raw=[REDACTED] &lt;safe>"
-	digest := sha256.Sum256([]byte(final))
-	if result.Text != final || result.ResultBytes != int64(len([]byte(final))) || result.ResultSHA256 != fmt.Sprintf("%x", digest) {
-		t.Fatalf("recovered foreground result = %+v, want %q with exact identity", result, final)
-	}
-	if result.DeliveryMode != "" || result.DeliveryCanonicalMarkdown != "" || result.DeliveryPolicyVersion != "" || result.Inline || result.ArtifactRef != "" || len(artifacts.contents) != 0 {
-		t.Fatalf("foreground recovery produced detached delivery metadata: result=%+v artifacts=%#v", result, artifacts.contents)
-	}
-}
-
 func TestDurableACPDispatcherForegroundNormalizationFailsClosed(t *testing.T) {
 	workspace := t.TempDir()
 	newDispatcher := func(raw string, redact func(string) string, inlineBytes int64) *acpJobDispatcher {
 		child := preparedAgentTool{
-			definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-			acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: raw}},
-			acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+			definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+			model:        &captureModel{text: raw},
+			cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 			projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 		}
 		policy := domain.ResultDeliveryPolicy{
@@ -555,7 +523,7 @@ func TestDurableACPDispatcherForegroundNormalizationFailsClosed(t *testing.T) {
 	}
 	runForeground := func(dispatcher *acpJobDispatcher) error {
 		_, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{
-			ID: "job_fg", Mode: domain.JobForeground, Provider: "opencode", Profile: "opencode/build",
+			ID: "job_fg", Mode: domain.JobForeground, Provider: "codex", Profile: "codex/build",
 			PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute),
 		})
 		return err

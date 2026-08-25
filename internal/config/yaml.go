@@ -116,19 +116,11 @@ var configSchema = []schemaField{
 		{name: "max_content_bytes"},
 		{name: "timeout_seconds"},
 	}},
-	{name: "opencode", children: []schemaField{
-		{name: "management", children: []schemaField{
-			{name: "allowed_user_ids"},
-		}},
-	}},
 	{name: "acp", children: []schemaField{
-		{name: "max_frame_bytes"},
 		{name: "max_inline_result_bytes"},
 		{name: "max_result_artifact_bytes"},
-		{name: "stderr_tail_bytes"},
 		{name: "default_job_timeout_seconds"},
 		{name: "max_job_timeout_seconds"},
-		{name: "idle_timeout_seconds"},
 		{name: "reconciliation_timeout_seconds"},
 		{name: "progress_warning_seconds"},
 		{name: "worker_concurrency"},
@@ -441,9 +433,6 @@ func normalizeCollections(cfg *Config) {
 	}
 	if cfg.Slack.StandardAgent.ProgressLabels == nil {
 		cfg.Slack.StandardAgent.ProgressLabels = map[domain.ProgressState]string{}
-	}
-	if cfg.OpenCode.Management.AllowedUserIDs == nil {
-		cfg.OpenCode.Management.AllowedUserIDs = []string{}
 	}
 	if cfg.CodeIntelligence != nil {
 		if cfg.CodeIntelligence.LSPServers == nil {

@@ -6,8 +6,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/Dauno/slack-local-agent/internal/agentdef"
 )
 
 // writeRootAgentProvider seeds a root_agent bound to the given provider YAML,
@@ -153,38 +151,6 @@ profiles:
 	}
 }
 
-// TestResolveModelACPProviderHasNoAPIKeyEnv proves the ACP-specific half of
-// resolveSetupModelAPIKeyEnv's contract directly against agentdef: a genuine
-// type: acp provider (not agent_cli) resolves through the ACP branch of
-// Definitions.ResolveModel, which never sets APIKeyEnv. A full end-to-end
-// PrepareSetup run isn't exercised here because EnsureBaseArtifacts always
-// seeds an LlmAgent "explore" companion pinned to the root agent's model,
-// which an ACP root (agent_class: AcpAgent, no model) cannot satisfy — that
-// is a bootstrap limitation orthogonal to .env.example rendering.
-func TestResolveModelACPProviderHasNoAPIKeyEnv(t *testing.T) {
-	defs := &agentdef.Definitions{
-		Providers: map[string]agentdef.Provider{
-			"claude-code-acp": {
-				Name: "claude-code-acp", Type: agentdef.ProviderTypeACP,
-				Command: "claude-code-acp", Args: []string{"--acp"},
-				Profiles: map[string]agentdef.Profile{
-					"root": {ConfigOptions: []agentdef.ACPConfigOption{{ID: "model", Value: "claude-sonnet"}}},
-				},
-			},
-		},
-	}
-	resolved, err := defs.ResolveModel("claude-code-acp/root")
-	if err != nil {
-		t.Fatalf("ResolveModel: %v", err)
-	}
-	if resolved.APIKeyEnv != "" {
-		t.Fatalf("ACP resolved APIKeyEnv = %q, want empty", resolved.APIKeyEnv)
-	}
-}
-
-// TestPrepareSetupRewritesEnvExampleForACPWithoutKey covers the other half:
-// RewriteEnvExample given the empty api_key_env an ACP (or Agent CLI)
-// resolution produces must not fabricate a model key placeholder.
 func TestPrepareSetupRewritesEnvExampleForACPWithoutKey(t *testing.T) {
 	application, _, _ := newSeamApplication(t)
 	service, err := application.bootstrapService()

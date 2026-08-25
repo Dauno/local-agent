@@ -4,8 +4,8 @@ package domain
 type AgentKind string
 
 const (
-	AgentKindLLM AgentKind = "llm"
-	AgentKindACP AgentKind = "acp"
+	AgentKindLLM      AgentKind = "llm"
+	AgentKindAgentCLI AgentKind = "agent_cli"
 )
 
 // AgentDraft is the user-provided input for creating a new agent definition.

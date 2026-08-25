@@ -14,11 +14,11 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 	renderer := mustEmbeddedRenderer(t)
 	profiles := []BuilderProviderProfile{
 		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeACP},
-		{Reference: "agent-cli/ignored", ProviderType: agentdef.ProviderTypeAgentCLI},
-		{Reference: "other/ignored", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "codex/b", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "other/ignored", ProviderType: "unsupported"},
 	}
 	llm, err := renderer.CompileModal("builder_modal", TemplateContext{
 		Kind:     domain.AgentKindLLM,
@@ -45,7 +45,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		t.Fatalf("LLM initial model = %#v", model.InitialOption)
 	}
 	acp, err := renderer.CompileModal("builder_modal", TemplateContext{
-		Kind:     domain.AgentKindACP,
+		Kind:     domain.AgentKindAgentCLI,
 		Profiles: profiles,
 		Values: map[string]string{
 			"name": "incident_analyst", "description": "desc", "instruction": "instruction",
@@ -62,7 +62,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		t.Fatalf("ACP block IDs = %v", got)
 	}
 	acpModel := acp.Blocks.BlockSet[5].(*slackapi.InputBlock).Element.(*slackapi.SelectBlockElement)
-	if got := optionValues(acpModel.Options); strings.Join(got, ",") != "opencode/a,opencode/z" {
+	if got := optionValues(acpModel.Options); strings.Join(got, ",") != "codex/b,opencode/a,opencode/z" {
 		t.Fatalf("ACP model options = %v", got)
 	}
 	timeout := acp.Blocks.BlockSet[7].(*slackapi.InputBlock).Element.(*slackapi.PlainTextInputBlockElement)
@@ -75,7 +75,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		t.Fatal(err)
 	}
 	second, err := json.Marshal(mustCompileModal(t, renderer, "builder_modal", TemplateContext{
-		Kind:     domain.AgentKindACP,
+		Kind:     domain.AgentKindAgentCLI,
 		Profiles: profiles,
 		Values: map[string]string{
 			"name": "incident_analyst", "description": "desc", "instruction": "instruction",

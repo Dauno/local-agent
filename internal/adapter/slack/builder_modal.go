@@ -22,8 +22,8 @@ type BuilderModalPresenter struct {
 func NewBuilderModalPresenterWithProviders(profiles []BuilderProviderProfile) *BuilderModalPresenter {
 	renderer, err := NewEmbeddedTemplateRenderer()
 	if err == nil {
-		for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindACP} {
-			if kind == domain.AgentKindACP && len(builderProfilesForKind(kind, profiles)) == 0 {
+		for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindAgentCLI} {
+			if kind == domain.AgentKindAgentCLI && len(builderProfilesForKind(kind, profiles)) == 0 {
 				continue
 			}
 			_, err = renderer.CompileModal("builder_modal", TemplateContext{Kind: kind, Profiles: profiles})
@@ -124,7 +124,7 @@ func (p *BuilderModalPresenter) BuildViewForKindResult(kind domain.AgentKind, va
 		}
 		return slackapi.ModalViewRequest{}, fmt.Errorf("builder modal presenter is not configured")
 	}
-	if kind != domain.AgentKindACP {
+	if kind != domain.AgentKindAgentCLI {
 		kind = domain.AgentKindLLM
 	}
 	view, err := p.renderer.CompileModal("builder_modal", TemplateContext{

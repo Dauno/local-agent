@@ -17,7 +17,6 @@ import (
 	"google.golang.org/adk/v2/artifact"
 	"google.golang.org/adk/v2/model"
 
-	"github.com/Dauno/slack-local-agent/internal/adapter/acpclient"
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkartifact"
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
@@ -33,7 +32,6 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/adapter/modelcalllimiter"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaillm"
 	"github.com/Dauno/slack-local-agent/internal/adapter/openaistt"
-	"github.com/Dauno/slack-local-agent/internal/adapter/opencodemanager"
 	"github.com/Dauno/slack-local-agent/internal/adapter/rangedreader"
 	"github.com/Dauno/slack-local-agent/internal/adapter/recoverableresult"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
@@ -56,7 +54,6 @@ import (
 	externalagentusecase "github.com/Dauno/slack-local-agent/internal/usecase/externalagent"
 	generatedfileusecase "github.com/Dauno/slack-local-agent/internal/usecase/generatedfile"
 	knowledgeusecase "github.com/Dauno/slack-local-agent/internal/usecase/knowledge"
-	opencodeusecase "github.com/Dauno/slack-local-agent/internal/usecase/opencode"
 	resultanalysisusecase "github.com/Dauno/slack-local-agent/internal/usecase/resultanalysis"
 	resultsusecase "github.com/Dauno/slack-local-agent/internal/usecase/results"
 	sandboxusecase "github.com/Dauno/slack-local-agent/internal/usecase/sandbox"
@@ -93,7 +90,6 @@ type runtimeModels struct {
 	modelBaseURL          string
 	redactor              secure.Redactor
 	logger                *logging.Logger
-	openCodeCoordinator   *opencodeusecase.Coordinator
 	artifactStore         port.ResultArtifactStore
 	resultPayloadStore    port.ResultPayloadStore
 	requestTokenCounter   port.RequestTokenCounter
@@ -104,24 +100,8 @@ type runtimeModels struct {
 
 func newRuntimeModels() runtimeModels {
 	return runtimeModels{
-		rootFamily:          domain.ProviderFamilyOpenAICompatible,
-		openCodeCoordinator: opencodeusecase.NewCoordinator(),
-		metrics:             metricsadapter.NewRecorder(),
-	}
-}
-
-func bindForegroundRuntimes(models runtimeModels, jobs synchronousExternalAgentJobs) {
-	for _, child := range models.preparedAgentTools {
-		if runtime, ok := child.acpRuntime.(*foregroundExternalAgentRuntime); ok {
-			runtime.setJobRunner(jobs)
-		}
-	}
-	for _, workflow := range models.preparedWorkflows {
-		for _, runtime := range workflow.acpRuntimes {
-			if facade, ok := runtime.(*foregroundExternalAgentRuntime); ok {
-				facade.setJobRunner(jobs)
-			}
-		}
+		rootFamily: domain.ProviderFamilyOpenAICompatible,
+		metrics:    metricsadapter.NewRecorder(),
 	}
 }
 
@@ -296,18 +276,11 @@ func (a *Application) prepareRuntimeModels(ctx context.Context, setup runtimeSet
 		prepared.apiKey = rootSecret
 		prepared.modelBaseURL = resolved.BaseURL
 	}
-	acpRuntimeFactory := func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error) {
-		direct := acpclient.NewWithCoordinatorAndBounds(resolved.Command, resolved.Args, prepared.openCodeCoordinator, acpclient.Bounds{
-			MaxFrameBytes: cfg.ACP.MaxFrameBytes, MaxInlineResultBytes: cfg.ACP.MaxInlineResultBytes,
-			MaxResultArtifactBytes: cfg.ACP.MaxResultArtifactBytes, StderrTailBytes: cfg.ACP.StderrTailBytes,
-		})
-		return newForegroundExternalAgentRuntime(direct, nil), nil
-	}
-	prepared.preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, acpRuntimeFactory)
+	prepared.preparedAgentTools, err = prepareRootAgentTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders)
 	if err != nil {
 		return runtimeModels{}, prepared.redactor.Error(err)
 	}
-	prepared.preparedWorkflows, err = prepareRootWorkflowTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, paths.StateDir, acpRuntimeFactory, prepared.openCodeCoordinator)
+	prepared.preparedWorkflows, err = prepareRootWorkflowTools(ctx, defs, *prepared.rootDef, values, cfg, paths, prepared.logger, prepared.redactor.String, describedCLIProviders, paths.StateDir)
 	if err != nil {
 		return runtimeModels{}, prepared.redactor.Error(err)
 	}
@@ -476,7 +449,7 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 	if cfg.Exports.Enabled && !hasSlackScope(grantedSlackScopes, "files:write") {
 		return nil, errors.New("initialize generated file exports: Slack bot token is missing files:write; regenerate the manifest and reinstall the app")
 	}
-	if durableACPConfigured(models) && !hasSlackScope(grantedSlackScopes, "files:write") {
+	if durableExternalAgentConfigured(models) && !hasSlackScope(grantedSlackScopes, "files:write") {
 		return nil, errors.New("initialize durable ACP result delivery: Slack bot token is missing files:write; regenerate the manifest and reinstall the app")
 	}
 
@@ -751,7 +724,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	resultProducingTools := make([]string, 0, len(models.preparedAgentTools))
 	if cfg.Orchestration.ResultHandles.Enabled {
 		for _, child := range models.preparedAgentTools {
-			if child.acpRuntime != nil {
+			if child.cliResolved != nil {
 				resultProducingTools = append(resultProducingTools, child.definition.Name)
 			}
 		}
@@ -875,7 +848,6 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		if err != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize external-agent activation worker: %w", err))
 		}
-		bindForegroundRuntimes(models, externalJobService)
 		go externalJobService.Run(ctx)
 	}
 	if notificationWorker != nil {
@@ -1044,19 +1016,6 @@ func composeExternalAgentRuntime(cfg config.Config, paths config.Paths, defs *ag
 		result.compositeFactory.setJobStarter(result.externalJobService)
 		if result.workstreamService != nil {
 			result.compositeFactory.setCompletionBindingResolver(result.workstreamService)
-		}
-	}
-	if defs != nil {
-		if provider, exists := defs.Providers["opencode"]; exists && provider.Type == agentdef.ProviderTypeACP {
-			resolved, resolveErr := defs.ResolveModel("opencode/smoke")
-			if resolveErr != nil {
-				return models.redactor.Error(fmt.Errorf("resolve OpenCode management profile: %w", resolveErr))
-			}
-			primaryPath, pathErr := managementProbePath(paths.SandboxProjectRoots)
-			if pathErr != nil {
-				return models.redactor.Error(pathErr)
-			}
-			result.toolFactory = &openCodeManagementToolFactory{base: result.toolFactory, runtime: acpclient.NewWithCoordinator(resolved.Command, resolved.Args, models.openCodeCoordinator), manager: opencodemanager.New(resolved.Command), allowedIDs: cfg.OpenCode.Management.AllowedUserIDs, primaryPath: primaryPath, configOptions: domainConfigOptions(resolved), coordinator: models.openCodeCoordinator}
 		}
 	}
 	return nil

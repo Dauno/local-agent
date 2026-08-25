@@ -60,32 +60,32 @@ func TestPreviewBuildsLLMAgentFromProviderProfile(t *testing.T) {
 	}
 }
 
-func TestPreviewBuildsACPAgentWithoutModel(t *testing.T) {
+// A built external-agent leaf is an agent CLI LlmAgent. It carries a model and
+// an isolated child session, and never the retired ACP runtime field.
+func TestPreviewBuildsAgentCLILeaf(t *testing.T) {
 	service := New()
 	defs := &agentdef.Definitions{Providers: map[string]agentdef.Provider{
-		"opencode": {
-			Name: "opencode", Type: agentdef.ProviderTypeACP, Command: "opencode",
-			Profiles: map[string]agentdef.Profile{
-				"default": {ConfigOptions: []agentdef.ACPConfigOption{{ID: "model", Value: "test"}}},
-			},
-		},
+		"opencode": agentCLIBuilderProvider(),
 	}}
 	result, err := service.Preview(domain.AgentDraft{
 		Name: "acp_worker", Description: "Delegates work", Instruction: "Complete the task.",
-		Kind: domain.AgentKindACP, ProviderProfile: "opencode/default", ExecutionMode: domain.ExecutionModeDurableJob,
+		Kind: domain.AgentKindAgentCLI, ProviderProfile: "opencode/default", ExecutionMode: domain.ExecutionModeDurableJob,
 	}, defs)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AgentDef.AgentClass != "AcpAgent" || result.AgentDef.Model != "" || result.AgentDef.ExecutionMode != domain.ExecutionModeDurableJob || result.AgentDef.TimeoutSec != domain.DefaultACPTimeoutSeconds {
+	if result.AgentDef.AgentClass != "LlmAgent" || result.AgentDef.Model != "opencode/default" || result.AgentDef.ExecutionMode != domain.ExecutionModeDurableJob || result.AgentDef.TimeoutSec != domain.DefaultACPTimeoutSeconds {
 		t.Fatalf("preview identity = %#v", result.AgentDef)
 	}
-	if !strings.Contains(result.YAML, "runtime: opencode/default") || !strings.Contains(result.YAML, "confirmation: required") {
-		t.Fatalf("ACP YAML missing expected fields: %s", result.YAML)
+	if !strings.Contains(result.YAML, "model: opencode/default") || !strings.Contains(result.YAML, "confirmation: required") {
+		t.Fatalf("agent CLI YAML missing expected fields: %s", result.YAML)
 	}
-	for _, forbidden := range []string{"model:", "include_contents:", "tool_scope:"} {
+	if !strings.Contains(result.YAML, "include_contents: none") {
+		t.Fatalf("an external-agent leaf must isolate its child session: %s", result.YAML)
+	}
+	for _, forbidden := range []string{"runtime:", "tool_scope:"} {
 		if strings.Contains(result.YAML, forbidden) {
-			t.Fatalf("ACP YAML contains forbidden %q: %s", forbidden, result.YAML)
+			t.Fatalf("agent CLI YAML contains forbidden %q: %s", forbidden, result.YAML)
 		}
 	}
 }
@@ -96,20 +96,14 @@ func TestPreviewRejectsInvalidV2Drafts(t *testing.T) {
 			Type:     agentdef.ProviderTypeOpenAICompatible,
 			Profiles: map[string]agentdef.Profile{"fast": {}},
 		},
-		"opencode": {
-			Type:     agentdef.ProviderTypeACP,
-			Profiles: map[string]agentdef.Profile{"default": {}},
-		},
-		"other-acp": {
-			Type:     agentdef.ProviderTypeACP,
-			Profiles: map[string]agentdef.Profile{"default": {}},
-		},
+		"opencode":  agentCLIBuilderProvider(),
+		"other-cli": agentCLIBuilderProvider(),
 	}}
 	base := domain.AgentDraft{
 		Name:            "builder_worker",
 		Description:     "description",
 		Instruction:     "instruction",
-		Kind:            domain.AgentKindACP,
+		Kind:            domain.AgentKindAgentCLI,
 		ProviderProfile: "opencode/default",
 		ExecutionMode:   domain.ExecutionModeForeground,
 	}
@@ -139,16 +133,13 @@ func TestPreviewRejectsInvalidV2Drafts(t *testing.T) {
 	}
 }
 
-func TestPreviewAcceptsACPMaximumTimeout(t *testing.T) {
+func TestPreviewAcceptsMaximumTimeout(t *testing.T) {
 	defs := &agentdef.Definitions{Providers: map[string]agentdef.Provider{
-		"opencode": {
-			Name: "opencode", Type: agentdef.ProviderTypeACP, Command: "opencode",
-			Profiles: map[string]agentdef.Profile{"default": {ConfigOptions: []agentdef.ACPConfigOption{{ID: "model", Value: "test"}}}},
-		},
+		"opencode": agentCLIBuilderProvider(),
 	}}
 	result, err := New().Preview(domain.AgentDraft{
 		Name: "builder_worker", Description: "description", Instruction: "instruction",
-		Kind: domain.AgentKindACP, ProviderProfile: "opencode/default",
+		Kind: domain.AgentKindAgentCLI, ProviderProfile: "opencode/default",
 		ExecutionMode: domain.ExecutionModeForeground, TimeoutSeconds: 86400,
 	}, defs)
 	if err != nil {
@@ -156,5 +147,26 @@ func TestPreviewAcceptsACPMaximumTimeout(t *testing.T) {
 	}
 	if result.AgentDef.TimeoutSec != 86400 {
 		t.Fatalf("timeout = %d, want 86400", result.AgentDef.TimeoutSec)
+	}
+}
+
+// agentCLIBuilderProvider is a complete, loadable agent CLI descriptor. The
+// builder validates a draft against real definitions, so a partial provider
+// fails on its own schema instead of on the behaviour under test.
+func agentCLIBuilderProvider() agentdef.Provider {
+	return agentdef.Provider{
+		Name: "opencode", Type: agentdef.ProviderTypeAgentCLI, Executable: "opencode",
+		Version:    &agentdef.CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "0.0.0"},
+		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"run", "-"}},
+		Stream: &agentdef.CLIStream{
+			Format:    "ndjson",
+			FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"},
+			Failure:   agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
+			Activity: &agentdef.CLIActivity{
+				When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{},
+			},
+			TerminalTypes: []string{"result", "error"},
+		},
+		Profiles: map[string]agentdef.Profile{"default": {Model: "test-model"}},
 	}
 }

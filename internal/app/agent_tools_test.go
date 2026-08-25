@@ -6,8 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"iter"
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -64,68 +62,6 @@ func (m *streamRecordingModel) GenerateContent(_ context.Context, request *model
 type delegatingRootModel struct {
 	calls  int
 	target string
-}
-
-type fakeExternalRuntime struct {
-	request domain.AcpInvocationRequest
-	result  domain.AcpInvocationResult
-	err     error
-	probes  int
-	runs    int
-}
-
-type recordingJobStarter struct {
-	request domain.ExternalAgentJobRequest
-}
-
-func (s *recordingJobStarter) Start(_ context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error) {
-	s.request = request
-	return &domain.ExternalAgentJob{ID: "job_1", RequestSHA256: "request"}, nil
-}
-
-type fixedCompletionBindingResolver struct {
-	binding domain.ExternalAgentJobCompletionBinding
-	found   bool
-	err     error
-}
-
-func (r fixedCompletionBindingResolver) CompletionBindingForTask(context.Context, string, domain.ConversationKey, string, string) (domain.ExternalAgentJobCompletionBinding, bool, error) {
-	return r.binding, r.found, r.err
-}
-
-func (f *fakeExternalRuntime) Run(_ context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error) {
-	f.runs++
-	f.request = request
-	return f.result, f.err
-}
-
-func (f *fakeExternalRuntime) ReconcileInvocation(context.Context, domain.AcpInvocationRequest, string) (domain.AcpInvocationResult, error) {
-	f.runs++
-	return f.result, f.err
-}
-
-type acpCallingRootModel struct{}
-
-func (*acpCallingRootModel) Name() string { return "acp-caller" }
-
-func (*acpCallingRootModel) GenerateContent(context.Context, *model.LLMRequest, bool) iter.Seq2[*model.LLMResponse, error] {
-	return func(yield func(*model.LLMResponse, error) bool) {
-		yield(&model.LLMResponse{
-			Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-				ID: "acp-1", Name: "opencode_worker", Args: map[string]any{"project": "workspace", "task": "change code"},
-			}}}},
-			FinishReason: genai.FinishReasonStop, TurnComplete: true,
-		}, nil)
-	}
-}
-
-func (f *fakeExternalRuntime) Probe(context.Context, string, []domain.ACPConfigOption) error {
-	f.probes++
-	return f.err
-}
-
-func (f *fakeExternalRuntime) Describe(context.Context) (domain.ACPInitResult, error) {
-	return domain.ACPInitResult{ProtocolVersion: "1", AgentInfo: domain.ACPAgentInfo{Name: "fake", Version: "1"}}, f.err
 }
 
 func (*delegatingRootModel) Name() string { return "root" }
@@ -714,168 +650,11 @@ func runDelegatingTurn(t *testing.T, root agent.Agent) string {
 	return final
 }
 
-func TestACPAgentToolResolvesRegisteredProjectsAndInvokesRuntime(t *testing.T) {
-	primary := filepath.Join(t.TempDir(), "primary")
-	additional := filepath.Join(t.TempDir(), "additional")
-	for _, path := range []string{primary, additional} {
-		if err := os.MkdirAll(path, 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "completed"}}
-	resolved := &agentdef.ResolvedModel{
-		Provider:             agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP},
-		ConfigOptions:        []agentdef.ACPConfigOption{{ID: "model", Value: "test/model"}},
-		PermissionOptionKind: domain.ACPPermissionAllowOnce,
-	}
-	result, err := invokeACPAgent(t.Context(), agentdef.AgentDef{Name: "opencode_worker", Description: "Runs OpenCode.", Instruction: "Do work."}, "Global.", runtime, resolved, map[string]string{"primary": primary, "additional": additional}, time.Minute, acpAgentArgs{Project: "primary", Task: "change code"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Result != "completed" || runtime.request.PrimaryProject != "primary" || runtime.request.PrimaryPath != primary {
-		t.Fatalf("result = %v, request = %+v", result, runtime.request)
-	}
-	if runtime.request.PermissionOptionKind != domain.ACPPermissionAllowOnce || runtime.request.Task != "change code" {
-		t.Fatalf("request = %+v", runtime.request)
-	}
-	if runtime.request.GlobalInstruction != "Global." {
-		t.Fatalf("delegated global instruction = %q", runtime.request.GlobalInstruction)
-	}
-}
-
-func TestACPAgentToolReturnsNativeHandleWithoutPayload(t *testing.T) {
-	handle := domain.ResultHandle{
-		ResultID: strings.Repeat("a", 64), SHA256: strings.Repeat("b", 64), Bytes: 4096,
-		MediaType: "text/plain; charset=utf-8", Availability: []domain.ResultAvailability{domain.ResultAvailabilityRangeRead},
-	}
-	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{
-		Text: "must not enter ADK", NativeResultID: handle.ResultID, NativeJobID: "job_native", NativeResultHandle: handle,
-	}}
-	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}}
-	result, err := invokeACPAgent(t.Context(), agentdef.AgentDef{Name: "opencode_worker"}, "Global.", runtime, resolved,
-		map[string]string{"workspace": t.TempDir()}, time.Minute, acpAgentArgs{Project: "workspace", Task: "inspect"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if result.Result != "" || result.ResultHandle == nil || result.ResultHandle.ResultID != handle.ResultID || result.ResultHandle.JobID != "job_native" {
-		t.Fatalf("native ACP result = %+v", result)
-	}
-}
-
-func TestDurableACPAgentCopiesTrustedCompletionBinding(t *testing.T) {
-	starter := &recordingJobStarter{}
-	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}}
-	result, err := invokeACPAgentForInvocation(t.Context(),
-		agentdef.AgentDef{Name: "opencode_worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		"Global.", &fakeExternalRuntime{}, resolved, map[string]string{"workspace": t.TempDir()}, time.Minute, "registry-1", starter,
-		fixedCompletionBindingResolver{binding: domain.ExternalAgentJobCompletionBinding{WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1", AdmissionRevision: 4}, found: true},
-		"U12345678", "slack:T12345678:dm:D12345678", acpAgentArgs{Project: "workspace", Task: "inspect"},
-	)
-	if err != nil || result.Result == "" {
-		t.Fatalf("result = %#v, err = %v", result, err)
-	}
-	if starter.request.WorkstreamID != "ws-1" || starter.request.TaskID != "task-1" || starter.request.ExecutionIdentity != "exec-1" || starter.request.AdmissionRevision != 4 {
-		t.Fatalf("durable request binding = %+v", starter.request)
-	}
-}
-
 func TestResolveACPProjectRejectsUnknownName(t *testing.T) {
 	root := t.TempDir()
 	projects := map[string]string{"workspace": root}
 	if _, err := resolveACPProject(projects, "missing"); err == nil {
 		t.Fatal("expected unknown project rejection")
-	}
-}
-
-// TestAcpDelegationConfirmationPinsDurableDelegationContent pins hallazgo 9:
-// the durable ACP delegation confirmation must show workstream, expected
-// revision, project, bounded task, and source result identities, and must
-// never carry a path, URL, or credential.
-func TestAcpDelegationConfirmationPinsDurableDelegationContent(t *testing.T) {
-	resolver := fixedCompletionBindingResolver{found: true, binding: domain.ExternalAgentJobCompletionBinding{
-		WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1", AdmissionRevision: 4,
-		RequiredInputs: []string{strings.Repeat("a", 64), strings.Repeat("b", 64)},
-	}}
-	hint, payload := acpDelegationConfirmation(t.Context(), resolver, "U12345678", "slack:T12345678:dm:D12345678", acpAgentArgs{
-		Project: "workspace", Task: "review the failing integration test",
-	})
-	wantHint := `Approve delegating workstream "ws-1" task "review the failing integration test" (project "workspace") to an external agent at revision 4.`
-	if hint != wantHint {
-		t.Fatalf("hint = %q, want %q", hint, wantHint)
-	}
-	if payload["workstream_id"] != "ws-1" || payload["task_id"] != "task-1" || payload["expected_revision"] != 4 || payload["project"] != "workspace" || payload["task"] != "review the failing integration test" {
-		t.Fatalf("payload = %#v", payload)
-	}
-	sourceResults, ok := payload["source_result_identities"].([]string)
-	if !ok || len(sourceResults) != 2 || sourceResults[0] != strings.Repeat("a", 64) || sourceResults[1] != strings.Repeat("b", 64) {
-		t.Fatalf("payload source result identities = %#v", payload["source_result_identities"])
-	}
-	encoded, err := json.Marshal(payload)
-	if err != nil {
-		t.Fatal(err)
-	}
-	combined := hint + " " + string(encoded)
-	for _, forbidden := range []string{"/", "://", "primary", "additional", t.TempDir()} {
-		if strings.Contains(combined, forbidden) {
-			t.Fatalf("confirmation leaked a path-shaped value %q: %q", forbidden, combined)
-		}
-	}
-}
-
-// TestAcpDelegationConfirmationWithoutWorkstreamBindingShowsProjectAndTask
-// pins the degraded case: a foreground or unbound durable delegation still
-// gets a real confirmation showing project and task, without fabricating
-// workstream fields.
-func TestAcpDelegationConfirmationWithoutWorkstreamBindingShowsProjectAndTask(t *testing.T) {
-	hint, payload := acpDelegationConfirmation(t.Context(), nil, "", "", acpAgentArgs{Project: "workspace", Task: "run the linter"})
-	wantHint := `Approve delegating task "run the linter" in project "workspace" to an external agent.`
-	if hint != wantHint {
-		t.Fatalf("hint = %q, want %q", hint, wantHint)
-	}
-	if payload["project"] != "workspace" || payload["task"] != "run the linter" {
-		t.Fatalf("payload = %#v", payload)
-	}
-	if _, ok := payload["workstream_id"]; ok {
-		t.Fatalf("payload carries workstream_id with no bound task: %#v", payload)
-	}
-}
-
-func TestACPAgentToolRequiresADKConfirmationBeforeRuntime(t *testing.T) {
-	runtime := &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "should not run"}}
-	resolved := &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}, PermissionOptionKind: domain.ACPPermissionAllowOnce}
-	toolValue, err := newAcpAgentTool(agentdef.AgentDef{Name: "opencode_worker", Description: "Runs OpenCode.", Instruction: "Do work."}, "Global.", runtime, resolved, map[string]string{"workspace": t.TempDir()}, time.Minute)
-	if err != nil {
-		t.Fatal(err)
-	}
-	root, err := llmagent.New(llmagent.Config{Name: "root_agent", Model: &acpCallingRootModel{}, Instruction: "Delegate.", Mode: llmagent.ModeChat, Tools: []tool.Tool{toolValue}})
-	if err != nil {
-		t.Fatal(err)
-	}
-	sessions := session.InMemoryService()
-	created, err := sessions.Create(t.Context(), &session.CreateRequest{AppName: "acp-confirmation-test", UserID: "U123"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	run, err := runner.New(runner.Config{AppName: "acp-confirmation-test", Agent: root, SessionService: sessions})
-	if err != nil {
-		t.Fatal(err)
-	}
-	foundConfirmation := false
-	for event, runErr := range run.Run(t.Context(), "U123", created.Session.ID(), genai.NewContentFromText("use OpenCode", genai.RoleUser), agent.RunConfig{StreamingMode: agent.StreamingModeNone}) {
-		if runErr != nil {
-			t.Fatal(runErr)
-		}
-		if event == nil || event.Content == nil {
-			continue
-		}
-		for _, part := range event.Content.Parts {
-			if part != nil && part.FunctionCall != nil && part.FunctionCall.Name == "adk_request_confirmation" {
-				foundConfirmation = true
-			}
-		}
-	}
-	if !foundConfirmation || runtime.runs != 0 {
-		t.Fatalf("confirmation=%v runtime runs=%d", foundConfirmation, runtime.runs)
 	}
 }
 

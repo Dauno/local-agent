@@ -35,13 +35,10 @@ import (
 type preparedWorkflowTool struct {
 	blueprint         *agentdef.WorkflowBlueprint
 	models            map[string]model.LLM
-	acpRuntimes       map[string]port.ExternalAgentRuntime
-	acpResolved       map[string]*agentdef.ResolvedModel
 	modelResolved     map[string]*agentdef.ResolvedModel
 	projectRoots      map[string]string
 	timeout           time.Duration
 	globalInstruction string
-	coordinator       port.OpenCodeCoordinator
 }
 
 type runnableWorkflowTool interface {
@@ -90,8 +87,6 @@ type invocationScope struct {
 	globalInstruction string
 	toolIndex         map[string]tool.Tool
 	validateOnly      bool
-	acpRuntimes       map[string]port.ExternalAgentRuntime
-	acpResolved       map[string]*agentdef.ResolvedModel
 	// modelResolved carries the resolved definition behind each prepared LLM
 	// model reference. A node builder needs it to tell an agent CLI step from
 	// an ordinary in-process step.
@@ -111,8 +106,6 @@ func prepareRootWorkflowTools(
 	sanitize func(string) string,
 	describedCLIProviders map[string]bool,
 	stateDir string,
-	acpRuntimeFactory func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error),
-	coordinator port.OpenCodeCoordinator,
 ) ([]preparedWorkflowTool, error) {
 	if defs == nil || len(root.WorkflowTools) == 0 {
 		return nil, nil
@@ -132,29 +125,8 @@ func prepareRootWorkflowTools(
 
 	models := make(map[string]model.LLM)
 	modelResolved := make(map[string]*agentdef.ResolvedModel)
-	acpRuntimes := make(map[string]port.ExternalAgentRuntime)
-	acpResolved := make(map[string]*agentdef.ResolvedModel)
 	for _, blueprint := range blueprints {
 		for _, doc := range blueprint.OrderedDocuments() {
-			if doc.AgentClass == agentdef.AgentClassAcp && doc.ACP != nil {
-				if _, exists := acpRuntimes[doc.ACP.Runtime]; exists {
-					continue
-				}
-				if acpRuntimeFactory == nil {
-					return nil, fmt.Errorf("workflow %q agent %q: ACP runtime factory is not configured", blueprint.ID, doc.Name)
-				}
-				resolved, err := defs.ResolveModel(doc.ACP.Runtime)
-				if err != nil {
-					return nil, fmt.Errorf("workflow %q agent %q: resolve ACP runtime: %w", blueprint.ID, doc.Name, err)
-				}
-				runtime, err := acpRuntimeFactory(resolved)
-				if err != nil {
-					return nil, fmt.Errorf("workflow %q agent %q: build ACP runtime: %w", blueprint.ID, doc.Name, err)
-				}
-				acpRuntimes[doc.ACP.Runtime] = runtime
-				acpResolved[doc.ACP.Runtime] = resolved
-				continue
-			}
 			if doc.AgentClass != agentdef.AgentClassLLM || doc.LLM == nil {
 				continue
 			}
@@ -184,8 +156,6 @@ func prepareRootWorkflowTools(
 		if _, err := buildWorkflowAgent(blueprint, models, invocationScope{
 			globalInstruction: root.EffectiveDelegatedGlobalInstruction(),
 			validateOnly:      true,
-			acpRuntimes:       acpRuntimes,
-			acpResolved:       acpResolved,
 			modelResolved:     modelResolved,
 			projectRoots:      paths.SandboxProjectRoots,
 			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
@@ -196,13 +166,10 @@ func prepareRootWorkflowTools(
 		prepared = append(prepared, preparedWorkflowTool{
 			blueprint:         blueprint,
 			models:            models,
-			acpRuntimes:       acpRuntimes,
-			acpResolved:       acpResolved,
 			modelResolved:     modelResolved,
 			projectRoots:      paths.SandboxProjectRoots,
 			timeout:           time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second,
 			globalInstruction: root.EffectiveDelegatedGlobalInstruction(),
-			coordinator:       coordinator,
 		})
 	}
 	return prepared, nil
@@ -212,8 +179,6 @@ func (p *preparedWorkflowTool) buildAgentTool(scope invocationScope) (tool.Tool,
 	if p == nil || p.blueprint == nil {
 		return nil, errors.New("workflow tool is not prepared")
 	}
-	scope.acpRuntimes = p.acpRuntimes
-	scope.acpResolved = p.acpResolved
 	scope.modelResolved = p.modelResolved
 	scope.projectRoots = p.projectRoots
 	scope.timeout = p.timeout
@@ -248,13 +213,6 @@ func (p *preparedWorkflowTool) buildTRDTool(scope invocationScope) (tool.Tool, e
 		Description:         p.blueprint.Description + " Requires confirmation before drafting or any Git mutation.",
 		RequireConfirmation: true,
 	}, func(ctx agent.Context, args trdArgs) (trdResult, error) {
-		if p.coordinator != nil {
-			release, acquired := p.coordinator.TryInvocation()
-			if !acquired {
-				return trdResult{}, errors.New("OpenCode maintenance is in progress")
-			}
-			defer release()
-		}
 		primaryPath, err := resolveACPProject(p.projectRoots, args.Project)
 		if err != nil {
 			return trdResult{}, err
@@ -266,15 +224,6 @@ func (p *preparedWorkflowTool) buildTRDTool(scope invocationScope) (tool.Tool, e
 		if err != nil {
 			return trdResult{}, err
 		}
-		runtime, resolved, err := p.workflowACPRuntime()
-		if err != nil {
-			return trdResult{}, err
-		}
-		options := domainConfigOptions(resolved)
-		if err := runtime.Probe(ctx, primaryPath, options); err != nil {
-			return trdResult{}, fmt.Errorf("OpenCode ACP preflight failed: %w", err)
-		}
-
 		workflowRoot, err := buildWorkflowAgent(p.blueprint, p.models, scope)
 		if err != nil {
 			return trdResult{}, err
@@ -289,21 +238,6 @@ func (p *preparedWorkflowTool) buildTRDTool(scope invocationScope) (tool.Tool, e
 		}
 		return trdResult{Result: text}, nil
 	})
-}
-
-func (p *preparedWorkflowTool) workflowACPRuntime() (port.ExternalAgentRuntime, *agentdef.ResolvedModel, error) {
-	for _, doc := range p.blueprint.OrderedDocuments() {
-		if doc.ACP == nil {
-			continue
-		}
-		runtime := p.acpRuntimes[doc.ACP.Runtime]
-		resolved := p.acpResolved[doc.ACP.Runtime]
-		if runtime == nil || resolved == nil {
-			return nil, nil, fmt.Errorf("workflow ACP runtime %q is not prepared", doc.ACP.Runtime)
-		}
-		return runtime, resolved, nil
-	}
-	return nil, nil, errors.New("TRD workflow has no ACP node")
 }
 
 func createWorkflowWorktreeRoot(projectRoot, callID string) (string, error) {
@@ -377,8 +311,6 @@ func buildWorkflowNode(doc agentdef.AgentDocument, bp *agentdef.WorkflowBlueprin
 	switch doc.AgentClass {
 	case agentdef.AgentClassLLM:
 		return buildLLMNode(doc, models, scope, loopAncestor)
-	case agentdef.AgentClassAcp:
-		return buildACPNode(doc, scope)
 	case agentdef.AgentClassSequential:
 		return buildSequentialNode(doc, bp, models, scope, loopAncestor)
 	case agentdef.AgentClassLoop:
@@ -389,88 +321,6 @@ func buildWorkflowNode(doc agentdef.AgentDocument, bp *agentdef.WorkflowBlueprin
 	default:
 		return nil, fmt.Errorf("agent %q: unsupported agent class %q", doc.Name, doc.AgentClass)
 	}
-}
-
-func buildACPNode(doc agentdef.AgentDocument, scope invocationScope) (agent.Agent, error) {
-	if doc.ACP == nil {
-		return nil, fmt.Errorf("agent %q: ACP document is missing", doc.Name)
-	}
-	runtime := scope.acpRuntimes[doc.ACP.Runtime]
-	resolved := scope.acpResolved[doc.ACP.Runtime]
-	if runtime == nil || resolved == nil {
-		return nil, fmt.Errorf("agent %q: ACP runtime %q is not prepared", doc.Name, doc.ACP.Runtime)
-	}
-	if doc.ACP.Project != "{target_project}" {
-		return nil, fmt.Errorf("agent %q: project must be the trusted {target_project} state template", doc.Name)
-	}
-	for _, directory := range doc.ACP.AdditionalDirectories {
-		if directory != "{worktree_root}" {
-			return nil, fmt.Errorf("agent %q: additional_directories may only contain {worktree_root}", doc.Name)
-		}
-	}
-	return agent.New(agent.Config{
-		Name:        doc.Name,
-		Description: doc.Description,
-		Run: func(ctx agent.InvocationContext) iter.Seq2[*session.Event, error] {
-			return func(yield func(*session.Event, error) bool) {
-				project, err := stateString(ctx.Session().State(), "target_project")
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				primaryPath, err := resolveACPProject(scope.projectRoots, project)
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				instruction := renderWorkflowState(doc.ACP.Instruction, ctx.Session().State())
-				result, err := runtime.Run(ctx, domain.AcpInvocationRequest{
-					PrimaryProject: project,
-					PrimaryPath:    primaryPath,
-					ProfileName:    doc.ACP.Runtime, ProviderName: resolved.Provider.Name,
-					ConfigOptions:        domainConfigOptions(resolved),
-					PermissionOptionKind: resolved.PermissionOptionKind,
-					GlobalInstruction:    scope.globalInstruction,
-					AgentInstruction:     instruction,
-					Task:                 "Complete the trusted workflow step and return only the requested result.",
-					Timeout:              scope.timeout,
-				})
-				if err != nil {
-					yield(nil, err)
-					return
-				}
-				output := result.Text
-				if doc.ACP.OutputSchema == "git_delivery_result" {
-					worktreeRoot, stateErr := stateString(ctx.Session().State(), "worktree_root")
-					if stateErr != nil {
-						yield(nil, stateErr)
-						return
-					}
-					parsed, parseErr := domain.ParseGitDeliveryResult([]byte(output), project, worktreeRoot)
-					if parseErr != nil {
-						yield(nil, parseErr)
-						return
-					}
-					canonical, marshalErr := json.Marshal(parsed)
-					if marshalErr != nil {
-						yield(nil, marshalErr)
-						return
-					}
-					output = string(canonical)
-				}
-				event := session.NewEvent(ctx, ctx.InvocationID())
-				event.LLMResponse = model.LLMResponse{
-					Content:      genai.NewContentFromText(output, genai.RoleModel),
-					FinishReason: genai.FinishReasonStop,
-					TurnComplete: true,
-				}
-				if doc.ACP.OutputKey != "" {
-					event.Actions.StateDelta[doc.ACP.OutputKey] = output
-				}
-				yield(event, nil)
-			}
-		},
-	})
 }
 
 // buildAgentCLINode runs one workflow step on an agent CLI. It mirrors
@@ -546,14 +396,6 @@ func canonicalGitDeliveryResult(output, project string, state session.ReadonlySt
 		return "", err
 	}
 	return string(canonical), nil
-}
-
-func domainConfigOptions(resolved *agentdef.ResolvedModel) []domain.ACPConfigOption {
-	options := make([]domain.ACPConfigOption, 0, len(resolved.ConfigOptions))
-	for _, option := range resolved.ConfigOptions {
-		options = append(options, domain.ACPConfigOption{ID: option.ID, Value: option.Value})
-	}
-	return options
 }
 
 func stateString(state session.ReadonlyState, key string) (string, error) {

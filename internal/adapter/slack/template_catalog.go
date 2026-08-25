@@ -1460,9 +1460,9 @@ func validateTemplateRepresentatives(doc templateDocument) error {
 	if doc.Name == "builder_modal" {
 		profiles := []BuilderProviderProfile{
 			{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-			{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeACP},
+			{Reference: "codex/default", ProviderType: agentdef.ProviderTypeAgentCLI},
 		}
-		for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindACP} {
+		for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindAgentCLI} {
 			ctx := TemplateContext{
 				Kind:     kind,
 				Profiles: profiles,

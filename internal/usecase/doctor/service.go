@@ -374,34 +374,6 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	if !s.checkSQLite(ctx, &report, cfg, pathErr, paths, redactor) {
 		return report
 	}
-	if pathErr == nil {
-		var acpModels []selectedModel
-		for _, selected := range selectedModels {
-			if selected.resolved.IsACP() {
-				acpModels = append(acpModels, selected)
-			}
-		}
-		if len(acpModels) > 0 && s.deps.ACP == nil {
-			report.fail("ACP provider", "ACP checker is unavailable", "Reinstall local-agent with ACP support.", false)
-		}
-		// Probing an ACP provider starts its agent server and completes a
-		// JSON-RPC handshake, so it is a live check. Running it offline broke
-		// the documented contract of `doctor` and made the offline command wait
-		// up to the client's two-minute probe bound for every ACP provider that
-		// did not answer.
-		for _, selected := range acpModels {
-			if s.deps.ACP == nil || !includeLive {
-				break
-			}
-			detail, err := s.deps.ACP.CheckProvider(ctx, selected.resolved, paths.SandboxProjectRoots)
-			if err != nil {
-				report.fail("ACP provider ("+selected.agent+")", redactor.String(err.Error()), "Verify the ACP command, saved OpenCode authentication, profile options, and registered projects.", false)
-				continue
-			}
-			report.pass("ACP provider ("+selected.agent+")", detail)
-		}
-		report.pass("OpenCode management operators", fmt.Sprintf("%d configured", len(cfg.OpenCode.Management.AllowedUserIDs)))
-	}
 
 	providerNames := make(map[string]string)
 	if pathErr == nil {
@@ -842,14 +814,12 @@ func (s *Service) checkSecrets(report *Report, cfg config.Config, defs *agentdef
 	case rootCLIProvider:
 		// agent_cli providers require no model API key.
 		report.pass("model API key", "agent CLI provider requires no model API key")
-	case resolvedModel.IsACP():
-		report.pass("model API key", "ACP provider requires no model API key")
 	default:
 		checkSecret("model API key", modelAPIKeyEnv, "", "Set "+modelAPIKeyEnv+" in the process environment or .env.")
 		checkedModelAPIKeys[modelAPIKeyEnv] = true
 	}
 	for _, selected := range selectedModels {
-		if selected.resolved.IsAgentCLI() || selected.resolved.IsACP() || checkedModelAPIKeys[selected.resolved.APIKeyEnv] {
+		if selected.resolved.IsAgentCLI() || checkedModelAPIKeys[selected.resolved.APIKeyEnv] {
 			continue
 		}
 		key := selected.resolved.APIKeyEnv
@@ -1013,15 +983,6 @@ func (s *Service) checkDefinitions(report *Report, cfg config.Config, paths conf
 			}
 			blueprints = append(blueprints, bp)
 			for _, doc := range bp.OrderedDocuments() {
-				if doc.AgentClass == agentdef.AgentClassAcp && doc.ACP != nil {
-					workflowResolved, resolveErr := defs.ResolveModel(doc.ACP.Runtime)
-					if resolveErr != nil {
-						defsErr = fmt.Errorf("workflow %q agent %q: resolve runtime %q: %w", workflowID, doc.Name, doc.ACP.Runtime, resolveErr)
-						break
-					}
-					result.selectedModels = append(result.selectedModels, selectedModel{agent: "workflow:" + doc.Name, resolved: workflowResolved})
-					continue
-				}
 				if doc.AgentClass != agentdef.AgentClassLLM || doc.LLM == nil {
 					continue
 				}

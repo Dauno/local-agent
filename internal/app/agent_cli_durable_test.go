@@ -21,12 +21,14 @@ type captureModel struct {
 	request *model.LLMRequest
 	text    string
 	err     error
+	runs    int
 }
 
 func (m *captureModel) Name() string { return "capture" }
 
 func (m *captureModel) GenerateContent(_ context.Context, request *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
 	m.request = request
+	m.runs++
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if m.err != nil {
 			yield(nil, m.err)
@@ -108,23 +110,19 @@ func TestDurableAgentCLIJobPropagatesFailure(t *testing.T) {
 	}
 }
 
-// The durable worker is composed from one child list. An agent CLI leaf used to
-// be dropped from it, so its enqueued jobs found no runtime and failed within
-// milliseconds of being approved.
-func TestExternalAgentChildrenKeepsBothFamilies(t *testing.T) {
+// The durable worker is composed from one child list. An external-agent leaf
+// used to be dropped from it, so its enqueued jobs found no runtime and failed
+// within milliseconds of being approved.
+func TestExternalAgentChildrenSelectsExternalLeaves(t *testing.T) {
 	t.Parallel()
 	prepared := []preparedAgentTool{
 		{definition: agentdef.AgentDef{Name: "plain_leaf", Model: "deepseek/chat"}, model: &captureModel{text: "x"}},
-		{definition: agentdef.AgentDef{Name: "acp_leaf", Runtime: "opencode/build"}, acpRuntime: &fakeExternalRuntime{}},
 		durableCLIChild(&captureModel{text: "x"}),
 	}
 
 	children := externalAgentChildren(prepared)
-	if len(children) != 2 {
-		t.Fatalf("children = %d, want the ACP leaf and the CLI leaf", len(children))
-	}
-	if children[0].definition.Name != "acp_leaf" || children[1].definition.Name != "cli_leaf" {
-		t.Fatalf("children = %q, %q", children[0].definition.Name, children[1].definition.Name)
+	if len(children) != 1 || children[0].definition.Name != "cli_leaf" {
+		t.Fatalf("children = %#v, want only the external-agent leaf", children)
 	}
 }
 
@@ -136,7 +134,7 @@ func TestDurableConfiguredCoversAgentCLI(t *testing.T) {
 	models := newRuntimeModels()
 	models.preparedAgentTools = []preparedAgentTool{child}
 
-	if !durableACPConfigured(models) {
+	if !durableExternalAgentConfigured(models) {
 		t.Fatal("a durable agent_cli leaf must require the durable delivery scope")
 	}
 }
@@ -148,7 +146,7 @@ func TestDurableAgentCLIReconcileReportsNoSessionRecovery(t *testing.T) {
 	dispatcher := &acpJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
 
 	_, err := dispatcher.Reconcile(context.Background(), durableCLIJob())
-	if err == nil || !strings.Contains(err.Error(), "session recovery is not supported for agent_cli job") {
+	if err == nil || !strings.Contains(err.Error(), "session recovery is not supported for job") {
 		t.Fatalf("err = %v, want the explicit agent_cli recovery refusal", err)
 	}
 }

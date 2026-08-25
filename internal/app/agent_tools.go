@@ -63,8 +63,6 @@ type preparedAgentTool struct {
 	contextCounter   port.RequestTokenCounter
 	contextBudget    domain.RequestBudget
 	cliTool          tool.Tool
-	acpRuntime       port.ExternalAgentRuntime
-	acpResolved      *agentdef.ResolvedModel
 	cliResolved      *agentdef.ResolvedModel
 	projectRoots     map[string]string
 	acpTimeout       time.Duration
@@ -118,7 +116,6 @@ func prepareRootAgentTools(
 	logger port.Logger,
 	sanitize func(string) string,
 	describedCLIProviders map[string]bool,
-	acpRuntimeFactory func(resolved *agentdef.ResolvedModel) (port.ExternalAgentRuntime, error),
 ) ([]preparedAgentTool, error) {
 	if defs == nil {
 		return nil, nil
@@ -133,34 +130,6 @@ func prepareRootAgentTools(
 		definition, exists := defs.Agents[name]
 		if !exists {
 			return nil, fmt.Errorf("agent tool %q is not defined", name)
-		}
-
-		if definition.AgentClass == "AcpAgent" {
-			resolved, err := defs.ResolveModel(definition.Runtime)
-			if err != nil {
-				return nil, fmt.Errorf("resolve agent tool %q runtime: %w", name, err)
-			}
-			if acpRuntimeFactory == nil {
-				return nil, fmt.Errorf("agent tool %q: ACP runtime factory is not configured", name)
-			}
-			runtime, err := acpRuntimeFactory(resolved)
-			if err != nil {
-				return nil, fmt.Errorf("agent tool %q: create ACP runtime: %w", name, err)
-			}
-			revision, err := agentExecutionFingerprint(definition, resolved, paths.SandboxProjectRoots, cfg)
-			if err != nil {
-				return nil, fmt.Errorf("fingerprint agent tool %q scope: %w", name, err)
-			}
-			prepared = append(prepared, preparedAgentTool{
-				definition:       definition,
-				acpRuntime:       runtime,
-				acpResolved:      resolved,
-				projectRoots:     paths.SandboxProjectRoots,
-				acpTimeout:       acpAgentTimeout(definition, acpAgentFallback(definition, cfg)),
-				executionMode:    definition.ExecutionMode,
-				registryRevision: revision,
-			})
-			continue
 		}
 
 		resolved, err := defs.ResolveModel(definition.Model)
@@ -321,14 +290,6 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 
 	combined := make([]any, 0, len(f.children)+len(f.workflowChildren)+len(baseRaw))
 	for _, child := range f.children {
-		if child.acpRuntime != nil {
-			acpTool, err := newAcpAgentToolForInvocation(child.definition, f.delegatedGlobalInstruction, child.acpRuntime, child.acpResolved, child.projectRoots, child.acpTimeout, child.registryRevision, f.jobStarter, f.completionBindings, actor, key)
-			if err != nil {
-				return nil, fmt.Errorf("build ACP agent tool %q: %w", child.definition.Name, err)
-			}
-			combined = append(combined, acpTool)
-			continue
-		}
 		if child.cliTool != nil {
 			// A durable agent CLI leaf needs invocation identity for the
 			// confirmation gate and the job record, so it is rebuilt per call.
@@ -384,70 +345,6 @@ func (f *compositeAgentToolFactory) ToolsForActivation(actor string, key domain.
 	return factory.ToolsForActivation(actor, key, activation)
 }
 
-func newAcpAgentTool(
-	definition agentdef.AgentDef,
-	globalInstruction string,
-	runtime port.ExternalAgentRuntime,
-	resolved *agentdef.ResolvedModel,
-	projectRoots map[string]string,
-	timeout time.Duration,
-) (tool.Tool, error) {
-	return newAcpAgentToolForInvocation(definition, globalInstruction, runtime, resolved, projectRoots, timeout, "", nil, nil, "", "")
-}
-
-func newAcpAgentToolForInvocation(
-	definition agentdef.AgentDef,
-	globalInstruction string,
-	runtime port.ExternalAgentRuntime,
-	resolved *agentdef.ResolvedModel,
-	projectRoots map[string]string,
-	timeout time.Duration,
-	registryRevision string,
-	jobStarter port.ExternalAgentJobStarter,
-	completionBindings port.ExternalAgentJobCompletionBindingResolver,
-	actor string,
-	key domain.ConversationKey,
-) (tool.Tool, error) {
-	if runtime == nil || resolved == nil {
-		return nil, errors.New("ACP runtime and profile are required")
-	}
-	if len(projectRoots) == 0 {
-		return nil, errors.New("ACP agent tools require at least one registered sandbox project")
-	}
-	return functiontool.New(functiontool.Config{
-		Name:        definition.Name,
-		Description: definition.Description + " Requires confirmation because OpenCode may modify files, run commands, access configured MCP servers, and use the network within its policy.",
-	}, func(ctx agent.Context, args acpAgentArgs) (acpAgentResult, error) {
-		if _, err := resolveACPProject(projectRoots, args.Project); err != nil {
-			return acpAgentResult{}, err
-		}
-		if strings.TrimSpace(args.Task) == "" {
-			return acpAgentResult{}, errors.New("ACP task must not be empty")
-		}
-		confirmation := ctx.ToolConfirmation()
-		if confirmation == nil {
-			hint, payload := acpDelegationConfirmation(ctx, completionBindings, actor, key, args)
-			if err := ctx.RequestConfirmation(hint, payload); err != nil {
-				return acpAgentResult{}, err
-			}
-			return acpAgentResult{}, nil
-		}
-		if !confirmation.Confirmed {
-			return acpAgentResult{}, errors.New("ACP delegation confirmation was rejected")
-		}
-		return invokeACPAgentForInvocation(ctx, definition, globalInstruction, runtime, resolved, projectRoots, timeout, registryRevision, jobStarter, completionBindings, actor, key, args)
-	})
-}
-
-// acpDelegationConfirmation builds the TRD 04 §Confirmation payload for a
-// durable or foreground ACP delegation: workstream, expected revision,
-// target project, bounded task, and source result identities when the call
-// is bound to a running workstream task, reusing the same
-// ExternalAgentJobCompletionBindingResolver path invokeACPAgentForInvocation
-// uses to start the job. It carries no path, URL, or credential — only the
-// registered project name and the bounded task text. Expiration is the
-// host-set PendingConfirmation.Expiry rendered separately by the caller;
-// it is not part of this payload.
 func acpDelegationConfirmation(ctx context.Context, completionBindings port.ExternalAgentJobCompletionBindingResolver, actor string, key domain.ConversationKey, args acpAgentArgs) (string, map[string]any) {
 	task := boundedConfirmationText(args.Task, maxConfirmationTaskRunes)
 	payload := map[string]any{
@@ -484,81 +381,6 @@ func boundedConfirmationText(value string, maxRunes int) string {
 		return value
 	}
 	return string(runes[:maxRunes]) + "…"
-}
-
-func invokeACPAgent(ctx context.Context, definition agentdef.AgentDef, globalInstruction string, runtime port.ExternalAgentRuntime, resolved *agentdef.ResolvedModel, projectRoots map[string]string, timeout time.Duration, args acpAgentArgs) (acpAgentResult, error) {
-	return invokeACPAgentForInvocation(ctx, definition, globalInstruction, runtime, resolved, projectRoots, timeout, "", nil, nil, "", "", args)
-}
-
-func invokeACPAgentForInvocation(ctx context.Context, definition agentdef.AgentDef, globalInstruction string, runtime port.ExternalAgentRuntime, resolved *agentdef.ResolvedModel, projectRoots map[string]string, timeout time.Duration, registryRevision string, jobStarter port.ExternalAgentJobStarter, completionBindings port.ExternalAgentJobCompletionBindingResolver, actor string, key domain.ConversationKey, args acpAgentArgs) (acpAgentResult, error) {
-	primaryPath, err := resolveACPProject(projectRoots, args.Project)
-	if err != nil {
-		return acpAgentResult{}, err
-	}
-	if strings.TrimSpace(args.Task) == "" {
-		return acpAgentResult{}, errors.New("ACP task must not be empty")
-	}
-	configOptions := make([]domain.ACPConfigOption, 0, len(resolved.ConfigOptions))
-	for _, option := range resolved.ConfigOptions {
-		configOptions = append(configOptions, domain.ACPConfigOption{ID: option.ID, Value: option.Value})
-	}
-	if definition.ExecutionMode == agentdef.ExecutionModeDurableJob {
-		if jobStarter == nil || actor == "" || key == "" || registryRevision == "" {
-			return acpAgentResult{}, errors.New("durable ACP execution is not configured for this invocation")
-		}
-		request := domain.ExternalAgentJobRequest{
-			Provider: resolved.Provider.Name, Profile: definition.Runtime, PrimaryProject: args.Project,
-			RegistryRevision: registryRevision, Task: args.Task, Mode: domain.JobDetached,
-			PermissionOptionKind: resolved.PermissionOptionKind, Timeout: timeout, PrimaryPath: primaryPath,
-			WrapperCallID: ctxFunctionCallID(ctx), OriginalCallID: ctxFunctionCallID(ctx), Actor: actor,
-			TeamID: teamIDFromConversation(key), ConversationKey: key,
-		}
-		if completionBindings != nil {
-			binding, found, bindingErr := completionBindings.CompletionBindingForTask(ctx, actor, key, args.Project, args.Task)
-			if bindingErr != nil {
-				return acpAgentResult{}, fmt.Errorf("resolve external-agent completion binding: %w", bindingErr)
-			}
-			if found {
-				request.WorkstreamID = binding.WorkstreamID
-				request.TaskID = binding.TaskID
-				request.ExecutionIdentity = binding.ExecutionIdentity
-				request.AdmissionRevision = binding.AdmissionRevision
-			}
-		}
-		job, err := jobStarter.Start(ctx, request)
-		if err != nil {
-			return acpAgentResult{}, err
-		}
-		encoded, _ := json.Marshal(map[string]any{"status": "accepted", "job_id": job.ID, "request_sha256": job.RequestSHA256})
-		return acpAgentResult{Result: string(encoded)}, nil
-	}
-	result, err := runtime.Run(ctx, domain.AcpInvocationRequest{
-		PrimaryProject: args.Project,
-		PrimaryPath:    primaryPath,
-		ProfileName:    definition.Runtime, ProviderName: resolved.Provider.Name, RegistryRevision: registryRevision,
-		ConfigOptions:        configOptions,
-		PermissionOptionKind: resolved.PermissionOptionKind,
-		GlobalInstruction:    globalInstruction,
-		AgentInstruction:     definition.Instruction,
-		Task:                 args.Task,
-		Timeout:              timeout,
-		Actor:                actor, TeamID: teamIDFromConversation(key), ConversationKey: key,
-		OriginalCallID: ctxFunctionCallID(ctx),
-	})
-	if err != nil {
-		return acpAgentResult{}, err
-	}
-	if result.NativeResultID != "" {
-		handle := result.NativeResultHandle
-		if err := handle.Validate(); err != nil || handle.ResultID != result.NativeResultID || strings.TrimSpace(result.NativeJobID) == "" {
-			return acpAgentResult{}, domain.ErrResultUnavailable
-		}
-		return acpAgentResult{ResultHandle: &boundedResultHandle{
-			JobID: result.NativeJobID, ResultID: handle.ResultID, SHA256: handle.SHA256, Bytes: handle.Bytes, MediaType: handle.MediaType,
-			Availability: append([]domain.ResultAvailability(nil), handle.Availability...),
-		}}, nil
-	}
-	return acpAgentResult{Result: result.Text}, nil
 }
 
 func acpAgentTimeout(definition agentdef.AgentDef, fallback time.Duration) time.Duration {

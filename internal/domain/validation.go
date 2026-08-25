@@ -12,11 +12,11 @@ const (
 	MaxACPTimeoutSeconds     = 86400
 )
 
-var errBadAgentKind = errors.New("agent kind must be llm or acp")
+var errBadAgentKind = errors.New("agent kind must be llm or agent_cli")
 
 // ValidateAgentKind validates the builder agent kind.
 func ValidateAgentKind(kind AgentKind) error {
-	if kind == AgentKindLLM || kind == AgentKindACP {
+	if kind == AgentKindLLM || kind == AgentKindAgentCLI {
 		return nil
 	}
 	return errBadAgentKind
@@ -27,7 +27,7 @@ func ValidateProviderKind(kind AgentKind, providerType string) error {
 	if err := ValidateAgentKind(kind); err != nil {
 		return err
 	}
-	if (kind == AgentKindLLM && providerType == "openai_compatible") || (kind == AgentKindACP && providerType == "acp") {
+	if (kind == AgentKindLLM && providerType == "openai_compatible") || (kind == AgentKindAgentCLI && providerType == "agent_cli") {
 		return nil
 	}
 	return fmt.Errorf("provider type %q is not valid for agent kind %q", providerType, kind)
@@ -38,7 +38,7 @@ func ValidateExecutionMode(kind AgentKind, mode string) error {
 	if err := ValidateAgentKind(kind); err != nil {
 		return err
 	}
-	if (kind == AgentKindLLM && mode == ExecutionModeForeground) || (kind == AgentKindACP && (mode == ExecutionModeForeground || mode == ExecutionModeDurableJob)) {
+	if (kind == AgentKindLLM && mode == ExecutionModeForeground) || (kind == AgentKindAgentCLI && (mode == ExecutionModeForeground || mode == ExecutionModeDurableJob)) {
 		return nil
 	}
 	return fmt.Errorf("execution mode %q is not valid for agent kind %q", mode, kind)

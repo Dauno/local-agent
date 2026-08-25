@@ -1307,8 +1307,25 @@ func (r *detachedFakeACP) callStats() (int, string) {
 // domain.SanitizeResultText, exact UTF-8 bytes, lowercase hex SHA-256,
 // canonical Markdown, policy fields). It is the test twin of the detached
 // materialize path and produces the same persisted identity as the real host.
+// externalAgentInvoker is the shape the durable dispatcher needs from a
+// prepared external agent. The production interface it used to mirror was
+// removed with the ACP transport; this fake keeps the same contract so the
+// detached delivery identity stays under test.
+type externalAgentInvoker interface {
+	Run(ctx context.Context, request domain.AcpInvocationRequest) (domain.AcpInvocationResult, error)
+}
+
+// externalAgentRuntime is the full prepared-agent contract the removed ACP
+// transport used to satisfy. These integration fakes keep it so the durable
+// worker paths they cover stay exercised.
+type externalAgentRuntime interface {
+	externalAgentInvoker
+	Probe(ctx context.Context, primaryPath string, configOptions []domain.ACPConfigOption) error
+	Describe(ctx context.Context) (domain.ACPInitResult, error)
+}
+
 type detachedDispatcherRuntime struct {
-	acp    port.ExternalAgentRuntime
+	acp    externalAgentInvoker
 	redact func(string) string
 }
 
@@ -1460,7 +1477,7 @@ func (r *foregroundFakeACP) callStats() (int, string) {
 // bytes and SHA-256 only over the final post-redaction, post-sanitization
 // text. It is the test twin of normalizeForegroundResult (FR-03).
 type foregroundDispatcherRuntime struct {
-	acp    port.ExternalAgentRuntime
+	acp    externalAgentInvoker
 	redact func(string) string
 }
 
@@ -1499,7 +1516,7 @@ var _ port.ExternalAgentJobRuntime = (*foregroundDispatcherRuntime)(nil)
 // synchronously, while worker dispatches carry JobID and reach the direct ACP
 // runtime. The facade never runs the direct runtime for the root path.
 type foregroundFacadeRuntime struct {
-	direct port.ExternalAgentRuntime
+	direct externalAgentRuntime
 	jobs   foregroundSynchronousJobRunner
 }
 
@@ -1534,7 +1551,7 @@ func (r *foregroundFacadeRuntime) Describe(ctx context.Context) (domain.ACPInitR
 	return r.direct.Describe(ctx)
 }
 
-var _ port.ExternalAgentRuntime = (*foregroundFacadeRuntime)(nil)
+var _ externalAgentRuntime = (*foregroundFacadeRuntime)(nil)
 
 // foregroundRootModel scripts the original root turn: one function call to
 // the foreground ACP tool, then one final response. Every model call is
@@ -1602,7 +1619,7 @@ type foregroundACPToolResult struct {
 
 // newForegroundACPTool builds the confirmable root tool that invokes the
 // durable facade, mirroring the foreground branch of the ACP agent tool.
-func newForegroundACPTool(t *testing.T, runtime port.ExternalAgentRuntime, key domain.ConversationKey, actor string) tool.Tool {
+func newForegroundACPTool(t *testing.T, runtime externalAgentRuntime, key domain.ConversationKey, actor string) tool.Tool {
 	t.Helper()
 	projectRoot := t.TempDir()
 	created, err := functiontool.New(functiontool.Config{
@@ -1789,7 +1806,7 @@ func (*drainActivationHandler) ReconcileJobCompletion(context.Context, domain.Ex
 
 var _ model.LLM = (*activationRootModel)(nil)
 var _ port.ExternalAgentJobRuntime = (*detachedDispatcherRuntime)(nil)
-var _ port.ExternalAgentRuntime = (*detachedFakeACP)(nil)
+var _ externalAgentRuntime = (*detachedFakeACP)(nil)
 var _ port.JobNotificationPublisher = (*jobActivationNotificationPublisher)(nil)
 var _ port.ResponsePublisher = (*jobActivationResponsePublisher)(nil)
 var _ port.ExternalAgentJobActivationStore = (*drainActivationStore)(nil)

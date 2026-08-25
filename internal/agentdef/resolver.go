@@ -38,14 +38,6 @@ func (d *Definitions) ResolveModel(modelRef string) (*ResolvedModel, error) {
 	}
 
 	switch provider.Type {
-	case ProviderTypeACP:
-		resolved.Command = provider.Command
-		resolved.Args = provider.Args
-		resolved.ConfigOptions = profile.ConfigOptions
-		resolved.PermissionOptionKind = profile.PermissionOptionKind
-		if resolved.PermissionOptionKind == "" {
-			resolved.PermissionOptionKind = "reject_once"
-		}
 	case ProviderTypeAgentCLI:
 		resolved.Executable = provider.Executable
 		if provider.Version != nil {
@@ -89,7 +81,7 @@ func (d *Definitions) RequiredAPIKeyEnvs() []string {
 	seen := make(map[string]struct{})
 	var envs []string
 	for _, p := range d.Providers {
-		if p.Type == ProviderTypeAgentCLI || p.Type == ProviderTypeACP {
+		if p.Type == ProviderTypeAgentCLI {
 			continue
 		}
 		if strings.TrimSpace(p.APIKeyEnv) == "" {

@@ -17,10 +17,10 @@ import (
 
 func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
-		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
 		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "agent-cli/ignored", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "codex/b", ProviderType: agentdef.ProviderTypeAgentCLI},
 	})
 	view := presenter.BuildViewForKind(domain.AgentKindLLM, map[string]string{
 		"name":        "incident_analyst",
@@ -76,16 +76,16 @@ func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 
 func TestBuilderModalPresenterRendersACPParity(t *testing.T) {
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
-		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/ignored", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeACP},
-		{Reference: "other/ignored", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "other/ignored", ProviderType: "unsupported"},
 	})
-	view := presenter.BuildViewForKind(domain.AgentKindACP, map[string]string{
+	view := presenter.BuildViewForKind(domain.AgentKindAgentCLI, map[string]string{
 		"name":            "incident_analyst",
 		"description":     "Description",
 		"instruction":     "Instruction",
-		"agent_type":      string(domain.AgentKindACP),
+		"agent_type":      string(domain.AgentKindAgentCLI),
 		"model":           "opencode/z",
 		"execution_mode":  domain.ExecutionModeDurableJob,
 		"timeout_seconds": "86400",
@@ -119,7 +119,7 @@ func TestBuilderModalPresenterPreservesValuesAndPrivateMetadata(t *testing.T) {
 	const metadata = `{"v":1,"actor_id":"U12345678","conversation_key":"slack:T12345678:dm:D12345678"}`
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
 		{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeAgentCLI},
 	})
 	callback := slackapi.InteractionCallback{
 		View: slackapi.View{
@@ -127,13 +127,13 @@ func TestBuilderModalPresenterPreservesValuesAndPrivateMetadata(t *testing.T) {
 			State:           &slackapi.ViewState{Values: map[string]map[string]slackapi.BlockAction{}},
 		},
 		ActionCallback: slackapi.ActionCallbacks{
-			BlockActions: []*slackapi.BlockAction{{BlockID: "agent_type", ActionID: "agent_type", SelectedOption: slackapi.OptionBlockObject{Value: string(domain.AgentKindACP)}}},
+			BlockActions: []*slackapi.BlockAction{{BlockID: "agent_type", ActionID: "agent_type", SelectedOption: slackapi.OptionBlockObject{Value: string(domain.AgentKindAgentCLI)}}},
 		},
 		BlockActionState: &slackapi.BlockActionStates{Values: map[string]map[string]slackapi.BlockAction{
 			"name":            {"name": {BlockID: "name", ActionID: "name", Value: "preserved_name"}},
 			"description":     {"description": {BlockID: "description", ActionID: "description", Value: "preserved description"}},
 			"instruction":     {"instruction": {BlockID: "instruction", ActionID: "instruction", Value: "preserved instruction"}},
-			"agent_type":      {"agent_type": {BlockID: "agent_type", ActionID: "agent_type", SelectedOption: slackapi.OptionBlockObject{Value: string(domain.AgentKindACP)}}},
+			"agent_type":      {"agent_type": {BlockID: "agent_type", ActionID: "agent_type", SelectedOption: slackapi.OptionBlockObject{Value: string(domain.AgentKindAgentCLI)}}},
 			"model":           {"model": {BlockID: "model", ActionID: "model", SelectedOption: slackapi.OptionBlockObject{Value: "opencode/default"}}},
 			"execution_mode":  {"execution_mode": {BlockID: "execution_mode", ActionID: "execution_mode", SelectedOption: slackapi.OptionBlockObject{Value: domain.ExecutionModeDurableJob}}},
 			"timeout_seconds": {"timeout_seconds": {BlockID: "timeout_seconds", ActionID: "timeout_seconds", Value: "1234"}},
@@ -241,7 +241,7 @@ func TestBuilderModalUpdateRejectsMissingViewIdentity(t *testing.T) {
 func testBuilderProviderProfiles() []BuilderProviderProfile {
 	return []BuilderProviderProfile{
 		{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeAgentCLI},
 	}
 }
 
@@ -255,7 +255,7 @@ func TestBuilderModalUpdateRejectsUnavailableKindBeforeSlack(t *testing.T) {
 		Type: slackapi.InteractionTypeBlockActions,
 		View: slackapi.View{CallbackID: builderSubmitCallbackID, ID: "V123", Hash: "hash-1"},
 		ActionCallback: slackapi.ActionCallbacks{BlockActions: []*slackapi.BlockAction{{
-			BlockID: "agent_type", ActionID: "agent_type", Value: string(domain.AgentKindACP),
+			BlockID: "agent_type", ActionID: "agent_type", Value: string(domain.AgentKindAgentCLI),
 		}}},
 	}
 
@@ -311,16 +311,16 @@ func TestBuilderModalTemplateCopyAndOrderChangesDriveRenderer(t *testing.T) {
 
 func TestBuilderModalPresenterIsDeterministic(t *testing.T) {
 	profiles := []BuilderProviderProfile{
-		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeACP},
+		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
 	}
 	first := NewBuilderModalPresenterWithProviders(profiles)
 	second := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{profiles[3], profiles[1], profiles[2], profiles[0]})
-	for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindACP} {
+	for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindAgentCLI} {
 		values := map[string]string{"agent_type": string(kind), "model": "openai/a"}
-		if kind == domain.AgentKindACP {
+		if kind == domain.AgentKindAgentCLI {
 			values["model"] = "opencode/a"
 		}
 		firstJSON, err := json.Marshal(first.BuildViewForKind(kind, values))

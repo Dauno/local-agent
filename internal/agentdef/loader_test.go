@@ -1142,75 +1142,6 @@ func TestAgentContextBudgetInheritsRootPercent(t *testing.T) {
 	}
 }
 
-func TestLoadValidACPDefinition(t *testing.T) {
-	agentsDir := filepath.Join(t.TempDir(), "agents")
-	providersDir := filepath.Join(t.TempDir(), "providers")
-	_ = os.MkdirAll(agentsDir, 0o755)
-	_ = os.MkdirAll(providersDir, 0o755)
-	writeFile(t, providersDir, "opencode.yaml", `
-name: opencode
-type: acp
-command: opencode
-args: [acp]
-profiles:
-  build:
-    config_options:
-      - id: model
-        value: test/model
-      - id: enabled
-        value: true
-    permission_option_kind: allow_once
-`)
-	writeFile(t, agentsDir, "worker.yaml", `
-agent_class: AcpAgent
-name: worker
-runtime: opencode/build
-description: Test worker.
-instruction: Complete the task.
-confirmation: required
-`)
-	defs, err := agentdef.LoadFromDirs(agentsDir, providersDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resolved, err := defs.ResolveModel("opencode/build")
-	if err != nil || !resolved.IsACP() || resolved.Model != "" {
-		t.Fatalf("resolved = %+v, error = %v", resolved, err)
-	}
-}
-
-func TestRejectInvalidACPDefinitionContracts(t *testing.T) {
-	tests := []struct {
-		name        string
-		profileBody string
-		agentBody   string
-		want        string
-	}{
-		{name: "legacy model", profileBody: "    model: old/model\n    config_options:\n      - id: model\n        value: new/model\n", want: "model is invalid for acp"},
-		{name: "duplicate option", profileBody: "    config_options:\n      - id: model\n        value: one\n      - id: model\n        value: two\n", want: "duplicate config option"},
-		{name: "unsupported value", profileBody: "    config_options:\n      - id: model\n        value: [one]\n", want: "must be a string or boolean"},
-		{name: "missing confirmation", profileBody: "    config_options:\n      - id: model\n        value: one\n", agentBody: "agent_class: AcpAgent\nname: worker\nruntime: opencode/build\ninstruction: test\n", want: "confirmation must be required"},
-	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			agentsDir := filepath.Join(t.TempDir(), "agents")
-			providersDir := filepath.Join(t.TempDir(), "providers")
-			_ = os.MkdirAll(agentsDir, 0o755)
-			_ = os.MkdirAll(providersDir, 0o755)
-			writeFile(t, providersDir, "opencode.yaml", "name: opencode\ntype: acp\ncommand: opencode\nprofiles:\n  build:\n"+test.profileBody)
-			agentBody := test.agentBody
-			if agentBody == "" {
-				agentBody = "agent_class: AcpAgent\nname: worker\nruntime: opencode/build\ninstruction: test\nconfirmation: required\n"
-			}
-			writeFile(t, agentsDir, "worker.yaml", agentBody)
-			_, err := agentdef.LoadFromDirs(agentsDir, providersDir)
-			if err == nil || !strings.Contains(err.Error(), test.want) {
-				t.Fatalf("error = %v, want %q", err, test.want)
-			}
-		})
-	}
-}
-
 func TestValidateAgentName(t *testing.T) {
 	t.Parallel()
 
@@ -1382,14 +1313,21 @@ func TestValidateAgentEligibility(t *testing.T) {
 			agent.ToolScope = nil
 			return agent
 		}(), providers: agentCLIEligibilityProviders(), want: false},
-		{name: "acp missing confirmation", agent: func() agentdef.AgentDef {
+		{name: "durable agent_cli missing confirmation", agent: func() agentdef.AgentDef {
+			agent := base
+			agent.Model = "cli/p1"
+			agent.ToolScope = nil
+			agent.ExecutionMode = agentdef.ExecutionModeDurableJob
+			agent.Confirmation = ""
+			return agent
+		}(), providers: agentCLIEligibilityProviders(), want: true},
+		{name: "retired AcpAgent class", agent: func() agentdef.AgentDef {
 			agent := base
 			agent.AgentClass = "AcpAgent"
 			agent.Model = ""
-			agent.Runtime = "acp/p1"
-			agent.Confirmation = ""
+			agent.Runtime = "cli/p1"
 			return agent
-		}(), providers: acpEligibilityProviders(), want: true},
+		}(), providers: agentCLIEligibilityProviders(), want: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1420,8 +1358,7 @@ func TestValidateAgentEligibilityProviderMatrix(t *testing.T) {
 		{name: "openai llm missing scope", providerType: agentdef.ProviderTypeOpenAICompatible, agentClass: "LlmAgent", wantErr: true},
 		{name: "agent cli llm without scope", providerType: agentdef.ProviderTypeAgentCLI, agentClass: "LlmAgent"},
 		{name: "agent cli llm with scope", providerType: agentdef.ProviderTypeAgentCLI, agentClass: "LlmAgent", toolScope: "invocation_scoped", wantErr: true},
-		{name: "acp agent with confirmation", providerType: agentdef.ProviderTypeACP, agentClass: "AcpAgent", confirmation: "required"},
-		{name: "acp agent without confirmation", providerType: agentdef.ProviderTypeACP, agentClass: "AcpAgent", wantErr: true},
+		{name: "retired AcpAgent class", providerType: agentdef.ProviderTypeAgentCLI, agentClass: "AcpAgent", confirmation: "required", wantErr: true},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -1518,12 +1455,6 @@ func candidateTestDefinitions() *agentdef.Definitions {
 func agentCLIEligibilityProviders() map[string]agentdef.Provider {
 	return map[string]agentdef.Provider{
 		"cli": {Name: "cli", Type: agentdef.ProviderTypeAgentCLI},
-	}
-}
-
-func acpEligibilityProviders() map[string]agentdef.Provider {
-	return map[string]agentdef.Provider{
-		"acp": {Name: "acp", Type: agentdef.ProviderTypeACP},
 	}
 }
 

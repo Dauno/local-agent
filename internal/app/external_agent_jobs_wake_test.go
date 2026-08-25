@@ -104,9 +104,9 @@ func newWakeCompositionModels(t *testing.T, logger *logging.Logger) runtimeModel
 	t.Helper()
 	workspace := t.TempDir()
 	child := preparedAgentTool{
-		definition:   agentdef.AgentDef{Name: "worker", Runtime: "opencode/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
-		acpRuntime:   &fakeExternalRuntime{result: domain.AcpInvocationResult{Text: "done", Inline: true, ResultBytes: 4}},
-		acpResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "opencode", Type: agentdef.ProviderTypeACP}},
+		definition:   agentdef.AgentDef{Name: "worker", Model: "codex/build", ExecutionMode: agentdef.ExecutionModeDurableJob},
+		model:        &captureModel{text: "done"},
+		cliResolved:  &agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
 		projectRoots: map[string]string{"workspace": workspace}, registryRevision: "rev-1",
 	}
 	models := newRuntimeModels()
@@ -120,7 +120,7 @@ func newWakeCompositionModels(t *testing.T, logger *logging.Logger) runtimeModel
 
 func wakeCompositionJobRequest() domain.ExternalAgentJobRequest {
 	return domain.ExternalAgentJobRequest{
-		Provider: "opencode", Profile: "opencode/build", PrimaryProject: "workspace", RegistryRevision: "rev-1",
+		Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1",
 		Task: "task", Mode: domain.JobDetached, WrapperCallID: "wrapper-1", OriginalCallID: "original-1",
 		Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Timeout: time.Minute,
 	}

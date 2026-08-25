@@ -207,13 +207,13 @@ func newRenderEnvironment(templateName string, context TemplateContext) (renderE
 	if kind == "" {
 		kind = domain.AgentKindLLM
 	}
-	if kind != domain.AgentKindLLM && kind != domain.AgentKindACP {
+	if kind != domain.AgentKindLLM && kind != domain.AgentKindAgentCLI {
 		return renderEnvironment{}, fmt.Errorf("unsupported template agent kind %q", kind)
 	}
 	return renderEnvironment{
 		templateName:     templateName,
 		kind:             kind,
-		isACP:            kind == domain.AgentKindACP,
+		isACP:            kind == domain.AgentKindAgentCLI,
 		values:           context.Values,
 		profiles:         append([]BuilderProviderProfile(nil), context.Profiles...),
 		previewYAMLParts: append([]string(nil), context.PreviewYAMLParts...),
@@ -579,7 +579,7 @@ func builderProfilesForKind(kind domain.AgentKind, profiles []BuilderProviderPro
 		if kind == domain.AgentKindLLM && profile.ProviderType == agentdef.ProviderTypeOpenAICompatible {
 			filtered = append(filtered, profile)
 		}
-		if kind == domain.AgentKindACP && profile.ProviderType == agentdef.ProviderTypeACP && strings.HasPrefix(profile.Reference, "opencode/") && len(profile.Reference) > len("opencode/") {
+		if kind == domain.AgentKindAgentCLI && profile.ProviderType == agentdef.ProviderTypeAgentCLI {
 			filtered = append(filtered, profile)
 		}
 	}

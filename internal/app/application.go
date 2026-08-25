@@ -236,7 +236,6 @@ func (a *Application) Doctor(ctx context.Context, includeLive bool) (doctor.Repo
 		Artifacts:       artifactChecker{},
 		Jobs:            jobStoreChecker{},
 		CLI:             cliProviderChecker{},
-		ACP:             acpProviderChecker{},
 		Counter:         counterChecker{},
 		Knowledge:       knowledgeChecker{},
 		ResultRetention: resultRetentionChecker{},

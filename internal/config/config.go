@@ -30,20 +30,11 @@ type Config struct {
 	Sandbox          SandboxConfig           `yaml:"sandbox"`
 	Canvases         CanvasesConfig          `yaml:"canvases"`
 	Exports          ExportsConfig           `yaml:"exports"`
-	OpenCode         OpenCodeConfig          `yaml:"opencode"`
 	ACP              ACPConfig               `yaml:"acp"`
 	CodeIntelligence *CodeIntelligenceConfig `yaml:"code_intelligence"`
 	Orchestration    OrchestrationConfig     `yaml:"orchestration"`
 
 	document *sourceDocument
-}
-
-type OpenCodeConfig struct {
-	Management OpenCodeManagementConfig `yaml:"management"`
-}
-
-type OpenCodeManagementConfig struct {
-	AllowedUserIDs []string `yaml:"allowed_user_ids"`
 }
 
 type CodeIntelligenceConfig struct {
@@ -68,13 +59,10 @@ type LSPRouteConfig struct {
 }
 
 type ACPConfig struct {
-	MaxFrameBytes                int               `yaml:"max_frame_bytes"`
 	MaxInlineResultBytes         int               `yaml:"max_inline_result_bytes"`
 	MaxResultArtifactBytes       int               `yaml:"max_result_artifact_bytes"`
-	StderrTailBytes              int               `yaml:"stderr_tail_bytes"`
 	DefaultJobTimeoutSeconds     int               `yaml:"default_job_timeout_seconds"`
 	MaxJobTimeoutSeconds         int               `yaml:"max_job_timeout_seconds"`
-	IdleTimeoutSeconds           int               `yaml:"idle_timeout_seconds"`
 	ReconciliationTimeoutSeconds int               `yaml:"reconciliation_timeout_seconds"`
 	ProgressWarningSeconds       int               `yaml:"progress_warning_seconds"`
 	WorkerConcurrency            int               `yaml:"worker_concurrency"`
@@ -392,10 +380,9 @@ func Default() Config {
 		Sandbox:  SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 64 * 1024},
 		Canvases: CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
 		Exports:  ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
-		OpenCode: OpenCodeConfig{Management: OpenCodeManagementConfig{AllowedUserIDs: []string{}}},
 		ACP: ACPConfig{
-			MaxFrameBytes: 8 * 1024 * 1024, MaxInlineResultBytes: 64 * 1024,
-			MaxResultArtifactBytes: 16 * 1024 * 1024, StderrTailBytes: 128 * 1024,
+			MaxInlineResultBytes:     64 * 1024,
+			MaxResultArtifactBytes:   16 * 1024 * 1024,
 			DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400,
 			ReconciliationTimeoutSeconds: 1800,
 			ProgressWarningSeconds:       900,
