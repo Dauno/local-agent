@@ -42,7 +42,7 @@ const (
 	protocolActor     = "U12345678"
 	protocolSchema    = "adk-protocol-ledger/v1"
 	protocolADKModule = "google.golang.org/adk/v2"
-	protocolADK       = "google.golang.org/adk/v2@v2.0.0"
+	protocolADK       = "google.golang.org/adk/v2@v2.2.0"
 )
 
 type protocolGoMod struct {

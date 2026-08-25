@@ -1,6 +1,6 @@
 {
   "schema": "adk-protocol-ledger/v1",
-  "adk": "google.golang.org/adk/v2@v2.0.0",
+  "adk": "google.golang.org/adk/v2@v2.2.0",
   "scenario": "normal-call-response",
   "events": [
     {

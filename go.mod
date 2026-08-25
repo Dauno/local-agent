@@ -12,7 +12,7 @@ require (
 	golang.org/x/image v0.45.0
 	golang.org/x/sys v0.47.0
 	golang.org/x/term v0.45.0
-	google.golang.org/adk/v2 v2.0.0
+	google.golang.org/adk/v2 v2.2.0
 	google.golang.org/genai v1.69.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.57.0
