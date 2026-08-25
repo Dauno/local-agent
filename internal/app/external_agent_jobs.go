@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/agentcli"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
@@ -144,9 +145,10 @@ func (d *acpJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob)
 // produced: everything after it (result normalization, native materialization,
 // artifact delivery) is shared with the ACP path above.
 //
-// The CLI has no session and no progress stream today, so this path reports no
-// live progress and does not implement session recovery. A job left in
-// completion_unknown must be closed by an operator.
+// Progress comes from the descriptor's `stream.activity` selection, so a CLI
+// job keeps its projection fresh and its stall warning honest. Session recovery
+// is not implemented: a job left in completion_unknown must be closed by an
+// operator.
 func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalAgentJob, profileMatched *bool) (bool, domain.AcpInvocationResult, error) {
 	for _, child := range d.children {
 		if child.model == nil || child.cliResolved == nil {
@@ -167,8 +169,22 @@ func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalA
 				return true, domain.AcpInvocationResult{}, err
 			}
 		}
-		text, runErr := generateAgentCLIText(ctx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, job.Task)
+		runCtx := ctx
+		recorder := d.newRecorder(job)
+		if recorder != nil {
+			recorder.Start(ctx)
+			defer recorder.Close()
+			runCtx = agentcli.WithActivityReporter(ctx, func(activity agentcli.Activity) {
+				recorder.Record(agentCLIProgressEvent(activity))
+			})
+		}
+		text, runErr := generateAgentCLIText(runCtx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, job.Task)
 		if runErr != nil {
+			if recorder != nil {
+				recorder.Record(domain.ACPProgressEvent{
+					Kind: domain.ACPEventProcessFailed, ErrorClass: acpFailureClass(runErr),
+				})
+			}
 			return true, domain.AcpInvocationResult{}, runErr
 		}
 		result := domain.AcpInvocationResult{Text: text, Inline: true}
@@ -185,6 +201,31 @@ func (d *acpJobDispatcher) runAgentCLI(ctx context.Context, job domain.ExternalA
 		return true, result, runErr
 	}
 	return false, domain.AcpInvocationResult{}, nil
+}
+
+// agentCLIProgressEvent maps one observed agent CLI step onto the host's
+// content-free progress vocabulary. A reported step is always a tool step: the
+// descriptors select command execution, file changes, tool calls, and searches
+// through `report_types`, and never message or reasoning text.
+//
+// The tool identity stays nil. A CLI reports a step that already finished, so
+// there is no call to track from pending to terminal, and the projection reads
+// a nil tool as "the agent did something" without altering the active count.
+func agentCLIProgressEvent(activity agentcli.Activity) domain.ACPProgressEvent {
+	if activity.Kind == agentcli.ActivityProcessStarted {
+		return domain.ACPProgressEvent{Kind: domain.ACPEventProcessStarted, PID: activity.PID}
+	}
+	return domain.ACPProgressEvent{Kind: domain.ACPEventToolCall}
+}
+
+// acpFailureClass is the bounded classification the progress projection stores
+// for a failed run. It never carries the error text.
+func acpFailureClass(err error) string {
+	var acpErr *domain.ACPError
+	if errors.As(err, &acpErr) && acpErr.Code != "" {
+		return string(acpErr.Code)
+	}
+	return string(domain.ACPErrorProcessExit)
 }
 
 // normalizeForegroundResult produces the complete persisted identity for a

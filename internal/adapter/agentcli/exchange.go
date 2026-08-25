@@ -133,13 +133,17 @@ func (l *LLM) exchange(ctx context.Context, request request) (string, error) {
 	if err := cmd.Start(); err != nil {
 		return "", classifyStartError(l.command, err)
 	}
+	report := activityReporterFrom(ctx)
+	if report != nil && cmd.Process != nil {
+		report(Activity{Kind: ActivityProcessStarted, PID: cmd.Process.Pid})
+	}
 	go func() {
 		_, _ = io.WriteString(stdin, prompt)
 		_ = stdin.Close()
 	}()
 	stderrCh := make(chan diagnosticSummary, 1)
 	go func() { stderrCh <- readDiagnostic(stderr, l.maxStderrBytes) }()
-	text, readErr := l.readStdout(stdout)
+	text, readErr := l.readStdout(stdout, report)
 	if readErr != nil {
 		_ = killProcessGroup(cmd)
 		_, _ = io.Copy(io.Discard, stdout)
@@ -250,7 +254,7 @@ func sortedOptionNames(options map[string]agentdef.CLIInvocationOption) []string
 	return names
 }
 
-func (l *LLM) readStdout(reader io.Reader) (string, error) {
+func (l *LLM) readStdout(reader io.Reader, report ActivityReporter) (string, error) {
 	stream := l.provider.Stream
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(make([]byte, 0, 64<<10), l.maxLineBytes)
@@ -271,6 +275,12 @@ func (l *LLM) readStdout(reader io.Reader) (string, error) {
 		if err := json.Unmarshal(line, &event); err != nil {
 			return "", &ProtocolViolation{Reason: "malformed NDJSON line"}
 		}
+		// An ignored type carries nothing this adapter reads. It is skipped
+		// before every other rule, so a trailing bookkeeping event cannot be
+		// mistaken for an event after the terminal one.
+		if eventType, found := stringAt(event, "type"); found && contains(stream.IgnoreTypes, eventType) {
+			continue
+		}
 		if terminal {
 			return "", &ProtocolViolation{Reason: "event after terminal event"}
 		}
@@ -278,15 +288,25 @@ func (l *LLM) readStdout(reader io.Reader) (string, error) {
 			failed = true
 		}
 		if stream.Activity != nil && matchesOne(event, stream.Activity.When) {
+			// Activity is observational. An unresolved type field means this
+			// event cannot be classified, never that the run is invalid, so
+			// the result is still read.
 			kind, found := stringAt(event, stream.Activity.TypeField)
-			if !found {
-				return "", &ProtocolViolation{Reason: "descriptor stream.activity.type_field did not resolve"}
-			}
-			if contains(stream.Activity.DiscardTypes, kind) {
+			switch {
+			case !found:
+				if l.logger != nil {
+					l.logger.Debug("agent CLI activity type field did not resolve",
+						"type_field", stream.Activity.TypeField)
+				}
+			case contains(stream.Activity.DiscardTypes, kind):
 				continue
-			}
-			if contains(stream.Activity.ReportTypes, kind) && l.logger != nil {
-				l.logger.Debug("agent CLI native activity", "kind", kind, "status", "completed")
+			case contains(stream.Activity.ReportTypes, kind):
+				if l.logger != nil {
+					l.logger.Debug("agent CLI native activity", "kind", kind, "status", "completed")
+				}
+				if report != nil {
+					report(Activity{Kind: ActivityStep, Step: kind})
+				}
 			}
 		}
 		if matchesOne(event, stream.FinalText.When) {

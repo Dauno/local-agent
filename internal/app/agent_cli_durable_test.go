@@ -6,10 +6,12 @@ import (
 	"iter"
 	"strings"
 	"testing"
+	"time"
 
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
 
+	"github.com/Dauno/slack-local-agent/internal/adapter/agentcli"
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
@@ -161,5 +163,44 @@ func TestDurableDispatcherKeepsFamiliesApart(t *testing.T) {
 	matched, _, _ := dispatcher.runAgentCLI(context.Background(), job, new(bool))
 	if matched {
 		t.Fatal("a job for another provider must not match the CLI child")
+	}
+}
+
+// A CLI reports a step that already finished, so the tool identity stays nil.
+// The projection reads that as meaningful progress without tracking a call
+// from pending to terminal, which keeps the stall warning honest.
+func TestAgentCLIProgressEventMapping(t *testing.T) {
+	t.Parallel()
+	started := agentCLIProgressEvent(agentcli.Activity{Kind: agentcli.ActivityProcessStarted, PID: 4321})
+	if started.Kind != domain.ACPEventProcessStarted || started.PID != 4321 {
+		t.Fatalf("started = %+v, want the process event and its pid", started)
+	}
+
+	step := agentCLIProgressEvent(agentcli.Activity{Kind: agentcli.ActivityStep, Step: "command_execution"})
+	if step.Kind != domain.ACPEventToolCall || step.Tool != nil {
+		t.Fatalf("step = %+v, want a tool call with no tracked identity", step)
+	}
+
+	var projection domain.ExternalAgentJobProgress
+	now := time.Now().UTC()
+	projection.Apply(step, now)
+	if projection.LastMeaningfulProgressAt != now {
+		t.Fatal("a reported step must count as meaningful progress")
+	}
+	if projection.ActiveToolCount != 0 {
+		t.Fatalf("active tools = %d, want none tracked", projection.ActiveToolCount)
+	}
+}
+
+// The failure class is bounded and never carries the error text.
+func TestAgentCLIFailureClassIsBounded(t *testing.T) {
+	t.Parallel()
+	plain := acpFailureClass(errors.New("codex wrote /etc/passwd"))
+	if plain != string(domain.ACPErrorProcessExit) {
+		t.Fatalf("class = %q, want the default process-exit class", plain)
+	}
+	typed := acpFailureClass(&domain.ACPError{Code: domain.ACPErrorResultTooLarge, Err: errors.New("secret")})
+	if typed != string(domain.ACPErrorResultTooLarge) {
+		t.Fatalf("class = %q, want the typed code", typed)
 	}
 }
