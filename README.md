@@ -18,7 +18,7 @@ in a project-local SQLite database.
 With Go 1.25+ installed, download and build a pinned release:
 
 ```sh
-VERSION=v0.9.0
+VERSION=v0.10.0
 installer="$(mktemp)"
 trap 'rm -f "$installer"' EXIT
 curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 \

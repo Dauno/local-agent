@@ -1,5 +1,13 @@
 # Release Notes
 
+## v0.10.0 (2026-08-25)
+
+- Enabled gofumpt and golines (200-char limit) in the formatter chain and reformatted the tree.
+- Applied Modern Go Guidelines rewrites for Go 1.27: `slices.SortFunc`, `slices.Contains`,
+  `slices.ContainsFunc`, `slices.Reverse`, `slices.Clone`, `slices.Concat`, `wg.Go`,
+  range-over-int, `b.Loop()`, `omitzero` JSON tags, and `fmt.Appendf` in place of an
+  intermediate `Sprintf` allocation.
+
 ## v0.9.0 (2026-08-25)
 
 - Removed the ACP transport. Every external agent now runs through the declarative agent CLI protocol; `agent_class: AcpAgent` and `runtime:` no longer parse.
