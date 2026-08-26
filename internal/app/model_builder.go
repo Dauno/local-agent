@@ -6,11 +6,12 @@ import (
 	"fmt"
 	"strings"
 
+	"google.golang.org/adk/v2/model"
+
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
-	"google.golang.org/adk/v2/model"
 )
 
 // newModelForResolved is the provider-neutral model factory. It returns the

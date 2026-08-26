@@ -77,10 +77,11 @@ go build -trimpath -o bin/local-agent ./cmd/local-agent   # production binary
 go build -trimpath ./cmd/local-agent                        # verify-only (no -o)
 go test ./...                                              # includes architecture dep check
 go vet ./...
+golangci-lint run
 go mod tidy
 ```
 
-No Makefile, no CI workflows, no `.golangci.yml`. `go vet` is the only lint.
+No Makefile or CI workflows. `.golangci.yml` defines the local lint baseline.
 
 ## Commands
 

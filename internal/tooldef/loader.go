@@ -57,7 +57,7 @@ func decodeStrictYAML(data []byte, target any) error {
 		return err
 	}
 	var extra any
-	if err := dec.Decode(&extra); err != io.EOF {
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return errors.New("expected one YAML document")
 		}

@@ -52,6 +52,10 @@ func TestMigrationV37AddsCompletionBindingColumns(t *testing.T) {
 			}
 			found[name] = true
 		}
+		if err := rows.Err(); err != nil {
+			_ = rows.Close()
+			t.Fatalf("iterate table_info(%s): %v", table, err)
+		}
 		if err := rows.Close(); err != nil {
 			t.Fatalf("close table_info(%s): %v", table, err)
 		}

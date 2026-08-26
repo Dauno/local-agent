@@ -158,7 +158,7 @@ func TestComposeKnowledgeServiceSharesCoordinator(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
+	defer func() { _ = store.Close() }()
 	coordinator := botusecase.NewLimiter(2)
 	service, err := composeKnowledgeService(true, adaptersqlite.NewKnowledgeStore(store), coordinator)
 	if err != nil {

@@ -10,8 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 	"github.com/joho/godotenv"
+
+	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 )
 
 func TestCreateFileCreatesParentsAndNeverReplaces(t *testing.T) {

@@ -5,10 +5,10 @@ import (
 	"path/filepath"
 	"testing"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/Dauno/slack-local-agent/internal/adapter/recoverableresult"
 	"github.com/Dauno/slack-local-agent/internal/port"
-
-	_ "modernc.org/sqlite"
 )
 
 // TestPutInsertsResultRowBeforeReturning is the FIND-115 regression: Put's

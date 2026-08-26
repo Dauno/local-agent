@@ -370,6 +370,9 @@ func TestParseHelpersPinDurableFormats(t *testing.T) {
 	if _, ok := ParseBaseline("jobs=-1;activations=0"); ok {
 		t.Fatal("negative counters must not parse")
 	}
+	if _, ok := ParseBaseline("jobs=18446744073709551615;activations=0"); ok {
+		t.Fatal("counters larger than int must not parse")
+	}
 	if _, ok := ParseNonNegativeDecimal("12"); !ok {
 		t.Fatal("decimal must parse")
 	}

@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -266,10 +267,10 @@ func TestKnowledgeCandidateReaderReadItemReauthorizes(t *testing.T) {
 	if err := item.Validate(); err != nil {
 		t.Fatalf("item.Validate() error = %v", err)
 	}
-	if _, err := reader.ReadItem(t.Context(), binding, now, retrievalTestLimits(), domain.KnowledgeRetrievalClaim, "kclaim_foreign"); err != port.ErrKnowledgeNotFound {
+	if _, err := reader.ReadItem(t.Context(), binding, now, retrievalTestLimits(), domain.KnowledgeRetrievalClaim, "kclaim_foreign"); !errors.Is(err, port.ErrKnowledgeNotFound) {
 		t.Fatalf("ReadItem(foreign) error = %v, want ErrKnowledgeNotFound", err)
 	}
-	if _, err := reader.ReadItem(t.Context(), binding, now, retrievalTestLimits(), domain.KnowledgeRetrievalClaim, "missing"); err != port.ErrKnowledgeNotFound {
+	if _, err := reader.ReadItem(t.Context(), binding, now, retrievalTestLimits(), domain.KnowledgeRetrievalClaim, "missing"); !errors.Is(err, port.ErrKnowledgeNotFound) {
 		t.Fatalf("ReadItem(missing) error = %v, want ErrKnowledgeNotFound", err)
 	}
 	preference, err := reader.ReadItem(t.Context(), binding, now, retrievalTestLimits(), domain.KnowledgeRetrievalPreference, "preference:1")
@@ -281,7 +282,7 @@ func TestKnowledgeCandidateReaderReadItemReauthorizes(t *testing.T) {
 	}
 	// Another owner must be indistinguishable from missing.
 	otherBinding := retrievalTestBinding("T00000001", "U99999999", "my-project", "")
-	if _, err := reader.ReadItem(t.Context(), otherBinding, now, retrievalTestLimits(), domain.KnowledgeRetrievalPreference, "preference:1"); err != port.ErrKnowledgeNotFound {
+	if _, err := reader.ReadItem(t.Context(), otherBinding, now, retrievalTestLimits(), domain.KnowledgeRetrievalPreference, "preference:1"); !errors.Is(err, port.ErrKnowledgeNotFound) {
 		t.Fatalf("ReadItem(other owner) error = %v, want ErrKnowledgeNotFound", err)
 	}
 }

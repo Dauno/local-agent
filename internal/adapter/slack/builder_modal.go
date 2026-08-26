@@ -3,8 +3,9 @@ package slack
 import (
 	"fmt"
 
-	"github.com/Dauno/slack-local-agent/internal/domain"
 	slackapi "github.com/slack-go/slack"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 type BuilderProviderProfile struct {

@@ -19,11 +19,11 @@ import (
 )
 
 const (
-	SlackBotTokenEnv      = "SLACK_BOT_TOKEN"
-	SlackAppTokenEnv      = "SLACK_APP_TOKEN"
+	SlackBotTokenEnv      = "SLACK_BOT_TOKEN" //nolint:gosec // this is an environment variable name, not a credential
+	SlackAppTokenEnv      = "SLACK_APP_TOKEN" //nolint:gosec // this is an environment variable name, not a credential
 	defaultModelName      = "deepseek-v4-flash"
 	defaultModelBaseURL   = "https://api.deepseek.com"
-	DefaultModelAPIKeyEnv = "DEEPSEEK_API_KEY"
+	DefaultModelAPIKeyEnv = "DEEPSEEK_API_KEY" //nolint:gosec // this is an environment variable name, not a credential
 )
 
 type ProjectFiles interface {

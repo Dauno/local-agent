@@ -101,7 +101,7 @@ func (c *Compiler) applyKnowledgeSelection(ctx context.Context, state *compilati
 	if err != nil {
 		// A source counter failure omits all knowledge rather than failing
 		// the root request. Final request admission remains authoritative.
-		return nil //nolint:nilerr
+		return nil //nolint:nilerr // knowledge omission is the defined fallback for a source counter failure
 	}
 	state.knowledgeCards = selected
 	if len(selected) > 0 {

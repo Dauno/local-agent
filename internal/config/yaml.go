@@ -319,7 +319,7 @@ func Save(path string, cfg Config) error {
 	}
 
 	directory := filepath.Dir(path)
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+	if err := os.MkdirAll(directory, 0o755); err != nil { //nolint:gosec // the non-sensitive configuration directory is user-readable
 		return fmt.Errorf("save configuration %q: create parent directory: %w", path, err)
 	}
 

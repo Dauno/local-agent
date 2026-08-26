@@ -8,8 +8,9 @@ import (
 	"os"
 	"strings"
 
-	"github.com/Dauno/slack-local-agent/internal/secure"
 	"golang.org/x/term"
+
+	"github.com/Dauno/slack-local-agent/internal/secure"
 )
 
 type Prompter struct {

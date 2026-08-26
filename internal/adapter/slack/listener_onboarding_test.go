@@ -4,9 +4,10 @@ import (
 	"context"
 	"testing"
 
+	slackapi "github.com/slack-go/slack"
+
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
-	slackapi "github.com/slack-go/slack"
 )
 
 type onboardingGuidancePublisherFake struct {

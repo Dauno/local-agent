@@ -2,6 +2,7 @@ package domain
 
 import (
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"strings"
 	"testing"
@@ -95,7 +96,7 @@ func TestResultHandleRejectsUnboundedOrNonOpaqueModelVisibleMetadata(t *testing.
 // ResultAvailabilityInline: there is no admission path left in this package.
 func TestResultInlineAvailabilityRequiresExplicitFrameAdmission(t *testing.T) {
 	identity := testResultIdentity()
-	if _, err := identity.Handle([]ResultAvailability{ResultAvailabilityInline}, nil); err != ErrResultInlineAdmission {
+	if _, err := identity.Handle([]ResultAvailability{ResultAvailabilityInline}, nil); !errors.Is(err, ErrResultInlineAdmission) {
 		t.Fatalf("generic inline handle error = %v, want %v", err, ErrResultInlineAdmission)
 	}
 }
@@ -136,12 +137,12 @@ func TestResultContractsRejectNonCanonicalDigests(t *testing.T) {
 func TestResultIdentityHandleRejectsUnavailableAndLegacyResults(t *testing.T) {
 	identity := testResultIdentity()
 	identity.State = ResultQuarantined
-	if _, err := identity.Handle([]ResultAvailability{ResultAvailabilityRangeRead}, nil); err != ErrResultQuarantined {
+	if _, err := identity.Handle([]ResultAvailability{ResultAvailabilityRangeRead}, nil); !errors.Is(err, ErrResultQuarantined) {
 		t.Fatalf("quarantined result handle error = %v, want %v", err, ErrResultQuarantined)
 	}
 	identity = testResultIdentity()
 	identity.Producer.Kind = ResultProducerLegacyProjection
-	if err := identity.VerifyWorkstreamEligible(); err != ErrResultLegacyNotLinkable {
+	if err := identity.VerifyWorkstreamEligible(); !errors.Is(err, ErrResultLegacyNotLinkable) {
 		t.Fatalf("legacy workstream eligibility error = %v, want %v", err, ErrResultLegacyNotLinkable)
 	}
 }

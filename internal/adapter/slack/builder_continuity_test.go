@@ -6,11 +6,12 @@ import (
 	"testing"
 	"time"
 
+	slackapi "github.com/slack-go/slack"
+
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/usecase/agentbuilder"
-	slackapi "github.com/slack-go/slack"
 )
 
 func TestBuilderInteractionContextRoundTripsConversationIdentity(t *testing.T) {

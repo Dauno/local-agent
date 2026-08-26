@@ -2,6 +2,7 @@ package rollout
 
 import (
 	"fmt"
+	"math"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,7 +25,7 @@ func ParseBaseline(raw string) (IdentityBaseline, bool) {
 	}
 	jobs, jobsErr := strconv.ParseUint(match[1], 10, 64)
 	activations, actErr := strconv.ParseUint(match[2], 10, 64)
-	if jobsErr != nil || actErr != nil {
+	if jobsErr != nil || actErr != nil || jobs > uint64(math.MaxInt) || activations > uint64(math.MaxInt) {
 		return IdentityBaseline{}, false
 	}
 	return IdentityBaseline{JobsCompletedWithoutResultIdentity: int(jobs), ActivationsWithoutContent: int(activations)}, true

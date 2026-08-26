@@ -10,11 +10,11 @@ import (
 	"time"
 	"unicode/utf8"
 
+	_ "modernc.org/sqlite"
+
 	"github.com/Dauno/slack-local-agent/internal/adapter/recoverableresult"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
-
-	_ "modernc.org/sqlite"
 )
 
 func setupTestDB(t *testing.T) (*sql.DB, string) {

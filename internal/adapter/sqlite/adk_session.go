@@ -12,11 +12,10 @@ import (
 	"sync"
 	"time"
 
-	"google.golang.org/genai"
-
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/adk/v2/platform"
 	adksession "google.golang.org/adk/v2/session"
+	"google.golang.org/genai"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )

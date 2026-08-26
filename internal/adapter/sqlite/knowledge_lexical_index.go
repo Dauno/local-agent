@@ -231,7 +231,7 @@ func (s *KnowledgeLexicalIndexStore) SearchSemantic(ctx context.Context, scopes 
 		}
 		dot := 0.0
 		for index, value := range stored {
-			dot += float64(value) * float64(vector[index])
+			dot += float64(value) * float64(vector[index]) //nolint:gosec // dimensions equals the validated vector length
 		}
 		points := int64(math.Round(dot * 10000))
 		if points < int64(minSimilarityBasisPoints) {

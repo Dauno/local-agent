@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/joho/godotenv"
+
 	"github.com/Dauno/slack-local-agent/internal/adapter/envfile"
 	"github.com/Dauno/slack-local-agent/internal/adapter/fsproject"
 	adaptersqlite "github.com/Dauno/slack-local-agent/internal/adapter/sqlite"
@@ -17,7 +19,6 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/config"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/manifest"
-	"github.com/joho/godotenv"
 )
 
 func TestEnsureBaseArtifactsFirstRun(t *testing.T) {

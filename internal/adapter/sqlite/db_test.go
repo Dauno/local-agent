@@ -58,6 +58,7 @@ func TestInitializeMigratesVersionZeroAndIsIdempotent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = rows.Close() }()
 	var tables []string
 	for rows.Next() {
 		var name string
@@ -66,6 +67,9 @@ func TestInitializeMigratesVersionZeroAndIsIdempotent(t *testing.T) {
 			t.Fatal(err)
 		}
 		tables = append(tables, name)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
 	}
 	if err := rows.Close(); err != nil {
 		t.Fatal(err)

@@ -73,6 +73,9 @@ func NewResultAnalyzer(llm model.LLM, config ResultAnalyzerConfig) (*ResultAnaly
 	if config.MaxOutputTokens <= 0 {
 		config.MaxOutputTokens = 2_048
 	}
+	if _, err := int32OutputTokenLimit(config.MaxOutputTokens); err != nil {
+		return nil, fmt.Errorf("result analyzer max output tokens: %w", err)
+	}
 	if config.MaxLeafAttempts <= 0 {
 		config.MaxLeafAttempts = 2
 	}
@@ -267,9 +270,13 @@ func reductionPrompt(input port.AnalysisReductionInput) string {
 }
 
 func collectJSONResponse(ctx context.Context, llm model.LLM, prompt string, maxOutputTokens int) (string, error) {
+	outputTokenLimit, err := int32OutputTokenLimit(maxOutputTokens)
+	if err != nil {
+		return "", err
+	}
 	request := &model.LLMRequest{
 		Contents: []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)},
-		Config:   &genai.GenerateContentConfig{MaxOutputTokens: int32(maxOutputTokens), ResponseMIMEType: "application/json"},
+		Config:   &genai.GenerateContentConfig{MaxOutputTokens: outputTokenLimit, ResponseMIMEType: "application/json"},
 	}
 	var text strings.Builder
 	for response, err := range llm.GenerateContent(ctx, request, false) {

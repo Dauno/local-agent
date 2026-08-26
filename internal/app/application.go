@@ -449,7 +449,7 @@ func (a *Application) ResetState(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("render canonical configuration: %w", err)
 	}
-	if err := os.WriteFile(configPath, canonicalConfig, 0o644); err != nil {
+	if err := os.WriteFile(configPath, canonicalConfig, 0o644); err != nil { //nolint:gosec // canonical configuration contains no credentials
 		return fmt.Errorf("rewrite canonical configuration: %w", err)
 	}
 

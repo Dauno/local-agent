@@ -7,10 +7,11 @@ import (
 	"testing"
 	"time"
 
+	slackapi "github.com/slack-go/slack"
+
 	adapterslack "github.com/Dauno/slack-local-agent/internal/adapter/slack"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
-	slackapi "github.com/slack-go/slack"
 )
 
 func TestSlackMarkdownPublicationReconcilesTranslatedHistory(t *testing.T) {

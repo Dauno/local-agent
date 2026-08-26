@@ -1,6 +1,7 @@
 package sqlite
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -185,7 +186,7 @@ func TestContinuityCommitReplacesRefIndexOnRevision(t *testing.T) {
 	// index for the still-live v1 row must be untouched.
 	if err := continuity.Commit(ctx, sessionID, domain.ContinuityCapsule{Revision: 3}, 1); err == nil {
 		t.Fatal("commit with wrong expectedRevision unexpectedly succeeded")
-	} else if err != ErrContinuityCAS {
+	} else if !errors.Is(err, ErrContinuityCAS) {
 		t.Fatalf("commit with wrong expectedRevision error = %v, want ErrContinuityCAS", err)
 	}
 	referenced, err = store.IsRecoverableResultReferenced(ctx, ref)

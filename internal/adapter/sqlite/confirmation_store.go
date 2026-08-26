@@ -265,6 +265,7 @@ func (s *ConfirmationStore) ListExpired(ctx context.Context, now time.Time) ([]p
 	if err != nil {
 		return nil, err
 	}
+	defer func() { _ = rows.Close() }()
 	var wrapperIDs []string
 	for rows.Next() {
 		var wrapperCallID string
@@ -273,6 +274,9 @@ func (s *ConfirmationStore) ListExpired(ctx context.Context, now time.Time) ([]p
 			return nil, err
 		}
 		wrapperIDs = append(wrapperIDs, wrapperCallID)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	if err := rows.Close(); err != nil {
 		return nil, err

@@ -314,6 +314,7 @@ func (s *Store) DeleteExpired(ctx context.Context, cutoff time.Time, batchSize i
 	if err != nil {
 		return 0, fmt.Errorf("%w: query candidates", errCleanup)
 	}
+	defer func() { _ = rows.Close() }()
 
 	var candidates []cleanupCandidate
 	for rows.Next() {

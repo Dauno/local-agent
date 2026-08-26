@@ -5,9 +5,10 @@ import (
 	"strings"
 	"testing"
 
+	slackapi "github.com/slack-go/slack"
+
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
-	slackapi "github.com/slack-go/slack"
 )
 
 func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {

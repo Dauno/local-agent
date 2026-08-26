@@ -11,6 +11,7 @@ import (
 	"image/jpeg"
 	"image/png"
 	"iter"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -18,16 +19,26 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/openai/openai-go/v3"
 	"google.golang.org/adk/v2/model"
 	"google.golang.org/genai"
-
-	"github.com/openai/openai-go/v3"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/adkagent"
 	"github.com/Dauno/slack-local-agent/internal/adapter/tokencounter"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
+
+func TestInt32OutputTokenLimitRejectsOutOfRangeValues(t *testing.T) {
+	if limit, err := int32OutputTokenLimit(math.MaxInt32); err != nil || limit != math.MaxInt32 {
+		t.Fatalf("maximum limit = %d, %v", limit, err)
+	}
+	for _, tokens := range []int{-1, math.MaxInt32 + 1} {
+		if _, err := int32OutputTokenLimit(tokens); err == nil {
+			t.Fatalf("token limit %d was accepted", tokens)
+		}
+	}
+}
 
 func TestGenerateContentSendsConfiguredChatCompletionAndReturnsOnlyAssistantText(t *testing.T) {
 	t.Parallel()

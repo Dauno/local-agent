@@ -9,9 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Dauno/slack-local-agent/internal/domain"
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 func TestInteractiveDispatcherRejectsInvalidRegistrations(t *testing.T) {

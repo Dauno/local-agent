@@ -8,9 +8,10 @@ import (
 	"strings"
 	"unicode/utf8"
 
+	slackapi "github.com/slack-go/slack"
+
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
-	slackapi "github.com/slack-go/slack"
 )
 
 const (

@@ -4,30 +4,71 @@ run:
   timeout: 5m
 
 linters:
+  default: none
   enable:
+    - bidichk
+    - bodyclose
+    - copyloopvar
+    - durationcheck
     - errcheck
+    - errorlint
+    - gocheckcompilerdirectives
+    - gocyclo
+    - gosec
     - govet
     - ineffassign
+    - makezero
+    - nilerr
+    - nilnesserr
+    - noctx
+    - nolintlint
+    - rowserrcheck
     - staticcheck
     - unused
     - whitespace
-    - nilerr
-    - prealloc
-    - copyloopvar
-  disable:
-    - gocyclo
-    - funlen
-    - gocognit
+  settings:
+    errorlint:
+      errorf: false
+    gocyclo:
+      min-complexity: 50
+    gosec:
+      excludes:
+        - G104 # errcheck owns unchecked errors.
+        - G201 # Internal SQL identifiers come from fixed registries.
+        - G202 # Internal SQL fragments come from fixed registries.
+        - G204 # Executables and arguments pass through trusted registries.
+        - G304 # File paths pass through adapter-specific trust checks.
+        - G404 # Random values are used only for retry jitter.
+    nolintlint:
+      require-explanation: true
+      require-specific: true
   exclusions:
+    rules:
+      - path: '_test\.go$'
+        linters:
+          - gocyclo
+          - gosec
+          - noctx
     paths:
-      - vendor
-      - bin
+      - '^vendor/'
+      - '^bin/'
 
 formatters:
   enable:
-    - goimports
+    - gci
     - gofmt
+    - goimports
+  settings:
+    gci:
+      sections:
+        - standard
+        - default
+        - localmodule
+      custom-order: true
+    goimports:
+      local-prefixes:
+        - github.com/Dauno/slack-local-agent
   exclusions:
     paths:
-      - vendor
-      - bin
+      - '^vendor/'
+      - '^bin/'

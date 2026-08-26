@@ -1,6 +1,7 @@
 package agentdef
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -313,7 +314,7 @@ func inspectWorkflowDocument(data []byte, displayPath string) (map[string]struct
 		return nil, fmt.Errorf("parse %q: %w", displayPath, err)
 	}
 	var extra yaml.Node
-	if err := dec.Decode(&extra); err != io.EOF {
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
 		if err == nil {
 			return nil, fmt.Errorf("parse %q: expected one YAML document", displayPath)
 		}

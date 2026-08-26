@@ -76,6 +76,7 @@ func TestMigrationV42RemovesLegacyProvenanceFromSchemaAndQueuesProjection(t *tes
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = rows.Close() }()
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {

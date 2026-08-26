@@ -8,8 +8,9 @@ import (
 	"regexp"
 	"strings"
 
-	"github.com/Dauno/slack-local-agent/internal/domain"
 	slackapi "github.com/slack-go/slack"
+
+	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
 const builderInteractionContextVersion = 1

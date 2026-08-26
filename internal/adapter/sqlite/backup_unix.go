@@ -116,7 +116,8 @@ func (FileDatabaseBackupper) VerifyBackup(ctx context.Context, backupPath string
 		return rollout.BackupIdentity{}, fmt.Errorf("%w: recorded backup %q carries group or other write bits", rollout.ErrBackupVerificationFailed, absPath)
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	effectiveUID := os.Geteuid()
+	if !ok || effectiveUID < 0 || uint64(stat.Uid) != uint64(effectiveUID) {
 		return rollout.BackupIdentity{}, fmt.Errorf("%w: recorded backup %q is not owned by this process's effective user", rollout.ErrBackupVerificationFailed, absPath)
 	}
 	bytes, digest, verifyErr := verifyBackupArtifact(ctx, absPath, wantSourceVersion)
@@ -167,13 +168,18 @@ func verifyBackupArtifact(ctx context.Context, path string, wantSourceVersion in
 	if err != nil {
 		return 0, "", fmt.Errorf("%w: foreign key check on %q: %v", rollout.ErrBackupVerificationFailed, path, err)
 	}
+	defer func() { _ = fkRows.Close() }()
 	hasFKRows := fkRows.Next()
-	fkClose := fkRows.Close()
+	fkIterationErr := fkRows.Err()
+	fkCloseErr := fkRows.Close()
 	if hasFKRows {
 		return 0, "", fmt.Errorf("%w: foreign key check on %q returned rows", rollout.ErrBackupVerificationFailed, path)
 	}
-	if fkClose != nil {
-		return 0, "", fmt.Errorf("%w: finish foreign key check on %q: %v", rollout.ErrBackupVerificationFailed, path, fkClose)
+	if fkIterationErr != nil {
+		return 0, "", fmt.Errorf("%w: run foreign key check on %q: %v", rollout.ErrBackupVerificationFailed, path, fkIterationErr)
+	}
+	if fkCloseErr != nil {
+		return 0, "", fmt.Errorf("%w: finish foreign key check on %q: %v", rollout.ErrBackupVerificationFailed, path, fkCloseErr)
 	}
 	var version int
 	if err := store.DB().QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {

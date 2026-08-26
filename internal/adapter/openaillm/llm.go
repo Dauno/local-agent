@@ -149,11 +149,19 @@ func (m *OpenAICompatibleLLM) ConfigureDefaultMaxOutputTokens(tokens int) error 
 	if m == nil {
 		return errors.New("OpenAI-compatible model is nil")
 	}
-	if tokens < 0 {
-		return errors.New("OpenAI-compatible max output tokens must not be negative")
+	limit, err := int32OutputTokenLimit(tokens)
+	if err != nil {
+		return fmt.Errorf("OpenAI-compatible max output tokens: %w", err)
 	}
-	m.defaultMaxOutputTokens = int32(tokens)
+	m.defaultMaxOutputTokens = limit
 	return nil
+}
+
+func int32OutputTokenLimit(tokens int) (int32, error) {
+	if tokens < 0 || tokens > math.MaxInt32 {
+		return 0, errors.New("token limit must be between zero and 2147483647")
+	}
+	return int32(tokens), nil
 }
 
 // CountLLMRequest counts the exact provider-shaped envelope used by the final

@@ -8,11 +8,12 @@ import (
 	"testing"
 	"time"
 
+	slackapi "github.com/slack-go/slack"
+	"github.com/slack-go/slack/socketmode"
+
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/usecase/agentbuilder"
-	slackapi "github.com/slack-go/slack"
-	"github.com/slack-go/slack/socketmode"
 )
 
 func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {

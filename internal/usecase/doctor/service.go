@@ -17,8 +17,8 @@ import (
 )
 
 const (
-	SlackBotTokenKey                    = "SLACK_BOT_TOKEN"
-	SlackAppTokenKey                    = "SLACK_APP_TOKEN"
+	SlackBotTokenKey                    = "SLACK_BOT_TOKEN" //nolint:gosec // this is an environment variable name, not a credential
+	SlackAppTokenKey                    = "SLACK_APP_TOKEN" //nolint:gosec // this is an environment variable name, not a credential
 	defaultAuxiliaryModelTimeoutSeconds = 120
 )
 

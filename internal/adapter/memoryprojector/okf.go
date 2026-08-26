@@ -273,6 +273,12 @@ func writeRootIndex(dir string, hasKnowledge bool) error {
 // owns. Root index.md plus the fixed knowledge file set are the only wanted
 // paths; anything else, including residue from older bundles, is removed.
 func removeStaleOKFFiles(rootDir string, hasKnowledge bool) error {
+	root, err := os.OpenRoot(rootDir)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = root.Close() }()
+
 	wanted := map[string]struct{}{
 		"index.md": {},
 	}
@@ -299,7 +305,7 @@ func removeStaleOKFFiles(rootDir string, hasKnowledge bool) error {
 		if d.Type()&os.ModeSymlink != 0 {
 			return fmt.Errorf("stale projection %q is a symlink", rel)
 		}
-		return os.Remove(path)
+		return root.Remove(rel)
 	})
 }
 

@@ -2,6 +2,7 @@ package openaillm
 
 import (
 	"context"
+	"errors"
 	"iter"
 	"strings"
 	"testing"
@@ -187,7 +188,7 @@ func TestAnalyzeLeafReleasesLimiterPermitOnLimitReached(t *testing.T) {
 		t.Fatal(err)
 	}
 	_, err = analyzer.AnalyzeLeaf(context.Background(), testLeafInput())
-	if err != port.ErrModelCallLimitReached {
+	if !errors.Is(err, port.ErrModelCallLimitReached) {
 		t.Fatalf("expected ErrModelCallLimitReached while the only permit is held, got %v", err)
 	}
 	if fake.calls != 0 {

@@ -53,6 +53,9 @@ func NewSummarizer(llm model.LLM, config SummarizerConfig) (*Summarizer, error) 
 	if config.MaxOutputTokens <= 0 {
 		config.MaxOutputTokens = 2_048
 	}
+	if _, err := int32OutputTokenLimit(config.MaxOutputTokens); err != nil {
+		return nil, fmt.Errorf("summary max output tokens: %w", err)
+	}
 	return &Summarizer{llm: llm, config: config}, nil
 }
 
@@ -113,7 +116,11 @@ func (s *Summarizer) prompt(request port.ConversationSummaryRequest) string {
 }
 
 func collectSummaryResponse(ctx context.Context, llm model.LLM, prompt string, maxChars, maxOutputTokens int) (string, error) {
-	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)}, Config: &genai.GenerateContentConfig{MaxOutputTokens: int32(maxOutputTokens)}}
+	outputTokenLimit, err := int32OutputTokenLimit(maxOutputTokens)
+	if err != nil {
+		return "", err
+	}
+	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(prompt, genai.RoleUser)}, Config: &genai.GenerateContentConfig{MaxOutputTokens: outputTokenLimit}}
 	var text strings.Builder
 	for response, err := range llm.GenerateContent(ctx, request, false) {
 		if err != nil {

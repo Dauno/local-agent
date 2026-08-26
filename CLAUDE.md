@@ -95,9 +95,8 @@ go test ./internal/usecase/workstream/...
 go test ./internal/adapter/sqlite/... -run TestExternalAgentJobStore -v
 ```
 
-No Makefile, no CI workflows. `go vet` plus `.golangci.yml` (errcheck, staticcheck, gosimple, govet,
-ineffassign, unused, misspell, goimports, gofmt, whitespace, nilerr, prealloc, exportloopref) define
-lint; `gocyclo`/`funlen`/`gocognit` are explicitly disabled.
+No Makefile or CI workflows. `go vet` plus `.golangci.yml` define lint. The configuration owns the exact
+linter list, security rules, formatter list, and the initial `gocyclo` complexity baseline.
 
 ## CLI commands
 

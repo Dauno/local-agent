@@ -287,6 +287,9 @@ func dumpRuntimeState(t *testing.T, dbPath string) string {
 		}
 		lines = append(lines, line)
 	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
 	return strings.Join(lines, ";")
 }
 
