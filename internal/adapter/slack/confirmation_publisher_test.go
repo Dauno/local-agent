@@ -592,7 +592,8 @@ func TestConfirmationPublisherRecoversMatchingPrompt(t *testing.T) {
 		RendererMode: confirmationRenderMode, Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
 	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery)}}}
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
+	}}}
 	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
 
 	result, found, err := pub.RecoverConfirmation(t.Context(), delivery)
@@ -612,7 +613,8 @@ func TestConfirmationPublisherRecoveryFailsClosed(t *testing.T) {
 	metadata := confirmationMetadata(delivery)
 	metadata.EventPayload["content_sha256"] = strings.Repeat("0", 64)
 	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: metadata}}}
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: metadata,
+	}}}
 	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
 
 	if _, _, err := pub.RecoverConfirmation(t.Context(), delivery); err == nil {
@@ -626,7 +628,8 @@ func TestConfirmationPublisherRecoveryFailsClosed(t *testing.T) {
 	}
 
 	client.messages = []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery)}}
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
+	}}
 	if _, _, err := pub.RecoverConfirmation(t.Context(), delivery); err == nil {
 		t.Fatal("RecoverConfirmation accepted a match from incomplete history")
 	}

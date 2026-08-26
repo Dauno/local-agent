@@ -86,7 +86,12 @@ func (s *wakeSummaryStore) ClaimSummaryJob(context.Context, time.Time) (port.Sum
 func (s *wakeSummaryStore) CommitSummary(_ context.Context, commit port.SummaryCommit) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.record = port.SummaryRecord{SessionIdentity: commit.SessionIdentity, CoveredThroughOrdinal: commit.Summary.CoveredThroughOrdinal, SourceDigest: commit.Summary.SourceDigest, SanitizedText: commit.Summary.Text}
+	s.record = port.SummaryRecord{
+		SessionIdentity:       commit.SessionIdentity,
+		CoveredThroughOrdinal: commit.Summary.CoveredThroughOrdinal,
+		SourceDigest:          commit.Summary.SourceDigest,
+		SanitizedText:         commit.Summary.Text,
+	}
 	s.hasRecord = true
 	return true, nil
 }

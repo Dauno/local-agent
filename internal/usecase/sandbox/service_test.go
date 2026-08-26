@@ -19,10 +19,12 @@ func (a *auditFake) InsertAudit(_ context.Context, record domain.ToolAuditRecord
 	a.record = &record
 	return nil
 }
+
 func (a *auditFake) UpdateAuditState(_ context.Context, _ string, state domain.ToolLifecycleState, _ time.Time) error {
 	a.updates = append(a.updates, state)
 	return a.err
 }
+
 func (a *auditFake) GetAuditByCallID(context.Context, string) (*domain.ToolAuditRecord, error) {
 	return nil, nil
 }

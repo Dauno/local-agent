@@ -115,7 +115,10 @@ func TestWorkerDrainsAnalysisEndToEnd(t *testing.T) {
 	content := "short source text for one leaf"
 	dbStore, analysisID, sourceID := setupWorkerFixture(t, content)
 	sum := sha256.Sum256([]byte(content))
-	source := &fakeTrustedResultSourceStore{identity: domain.ResultIdentity{ResultID: sourceID, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(content)), MediaType: "text/plain"}, content: content}
+	source := &fakeTrustedResultSourceStore{
+		identity: domain.ResultIdentity{ResultID: sourceID, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(content)), MediaType: "text/plain"},
+		content:  content,
+	}
 	analyzer := &fixedAnalyzer{}
 	worker := newTestWorker(t, dbStore, source, analyzer, port.SystemClock{})
 
@@ -196,7 +199,10 @@ func TestWorkerPermitExhaustionReturnsStepToPreparedWithoutConsumingAttempt(t *t
 	content := "short source text for one leaf"
 	dbStore, analysisID, sourceID := setupWorkerFixture(t, content)
 	sum := sha256.Sum256([]byte(content))
-	source := &fakeTrustedResultSourceStore{identity: domain.ResultIdentity{ResultID: sourceID, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(content)), MediaType: "text/plain"}, content: content}
+	source := &fakeTrustedResultSourceStore{
+		identity: domain.ResultIdentity{ResultID: sourceID, SHA256: hex.EncodeToString(sum[:]), Bytes: int64(len(content)), MediaType: "text/plain"},
+		content:  content,
+	}
 	analyzer := &permitExhaustedThenFixedAnalyzer{exhausted: make(chan struct{})}
 	clock := &workerFakeClock{now: time.Now().UTC()}
 	worker := newTestWorker(t, dbStore, source, analyzer, clock)

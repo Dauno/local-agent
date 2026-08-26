@@ -1,12 +1,13 @@
 package sqlite
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/binary"
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -14,8 +15,10 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var _ port.KnowledgeIndex = (*KnowledgeLexicalIndexStore)(nil)
-var _ port.KnowledgeLexicalIndex = (*KnowledgeLexicalIndexStore)(nil)
+var (
+	_ port.KnowledgeIndex        = (*KnowledgeLexicalIndexStore)(nil)
+	_ port.KnowledgeLexicalIndex = (*KnowledgeLexicalIndexStore)(nil)
+)
 
 // KnowledgeLexicalIndexStore implements the reconstructible lexical FTS5
 // surface and the fingerprint-bound linear semantic surface: worker-owned
@@ -128,7 +131,13 @@ func (s *KnowledgeLexicalIndexStore) SearchLexical(ctx context.Context, scopes [
 // threshold, sorted by similarity descending with kind and identity as
 // stable tie-breaks, and capped at the bounded limit. Malformed stored rows
 // are skipped defensively and never fail the whole search.
-func (s *KnowledgeLexicalIndexStore) SearchSemantic(ctx context.Context, scopes []domain.KnowledgeScopeRef, ownerKey string, vector []float32, minSimilarityBasisPoints, limit int) ([]port.KnowledgeIndexHit, error) {
+func (s *KnowledgeLexicalIndexStore) SearchSemantic(
+	ctx context.Context,
+	scopes []domain.KnowledgeScopeRef,
+	ownerKey string,
+	vector []float32,
+	minSimilarityBasisPoints, limit int,
+) ([]port.KnowledgeIndexHit, error) {
 	if s.fingerprint == "" {
 		return nil, fmt.Errorf("%w: semantic search is not configured", port.ErrKnowledgeUnavailable)
 	}
@@ -242,14 +251,14 @@ func (s *KnowledgeLexicalIndexStore) SearchSemantic(ctx context.Context, scopes 
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("%w: semantic hit scan: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	sort.Slice(scored, func(i, j int) bool {
-		if scored[i].basisPoints != scored[j].basisPoints {
-			return scored[i].basisPoints > scored[j].basisPoints
+	slices.SortFunc(scored, func(a, b scoredHit) int {
+		if a.basisPoints != b.basisPoints {
+			return cmp.Compare(b.basisPoints, a.basisPoints)
 		}
-		if scored[i].hit.Kind != scored[j].hit.Kind {
-			return scored[i].hit.Kind < scored[j].hit.Kind
+		if a.hit.Kind != b.hit.Kind {
+			return cmp.Compare(a.hit.Kind, b.hit.Kind)
 		}
-		return scored[i].hit.ID < scored[j].hit.ID
+		return cmp.Compare(a.hit.ID, b.hit.ID)
 	})
 	hits := make([]port.KnowledgeIndexHit, 0, min(len(scored), limit))
 	for index, candidate := range scored {

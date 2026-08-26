@@ -222,7 +222,11 @@ func collectContentParts(content *genai.Content) (contentParts, error) {
 				return contentParts{}, ErrUnsupportedPart
 			}
 		default:
-			if part.ToolCall != nil || part.ToolResponse != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+			if part.ToolCall != nil || part.ToolResponse != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil ||
+				part.MediaResolution != nil ||
+				part.Thought ||
+				len(part.ThoughtSignature) > 0 ||
+				len(part.PartMetadata) > 0 {
 				return contentParts{}, ErrUnsupportedPart
 			}
 			result.texts = append(result.texts, part.Text)
@@ -418,7 +422,9 @@ func textFromContent(content *genai.Content) (string, error) {
 			}
 			return "", ErrUnsupportedPart
 		}
-		if part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+		if part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought ||
+			len(part.ThoughtSignature) > 0 ||
+			len(part.PartMetadata) > 0 {
 			return "", ErrUnsupportedPart
 		}
 		text.WriteString(part.Text)
@@ -437,7 +443,12 @@ func applyGenerateConfig(params *openai.ChatCompletionNewParams, cfg *genai.Gene
 			if tool == nil {
 				return fmt.Errorf("tool %d is nil", toolIndex)
 			}
-			if tool.Retrieval != nil || tool.ComputerUse != nil || tool.FileSearch != nil || tool.GoogleSearch != nil || tool.GoogleMaps != nil || tool.CodeExecution != nil || tool.EnterpriseWebSearch != nil || tool.GoogleSearchRetrieval != nil || tool.ParallelAISearch != nil || tool.URLContext != nil || len(tool.MCPServers) > 0 {
+			if tool.Retrieval != nil || tool.ComputerUse != nil || tool.FileSearch != nil || tool.GoogleSearch != nil || tool.GoogleMaps != nil || tool.CodeExecution != nil ||
+				tool.EnterpriseWebSearch != nil ||
+				tool.GoogleSearchRetrieval != nil ||
+				tool.ParallelAISearch != nil ||
+				tool.URLContext != nil ||
+				len(tool.MCPServers) > 0 {
 				return fmt.Errorf("tool %d uses an unsupported non-function variant", toolIndex)
 			}
 			if len(tool.FunctionDeclarations) == 0 {

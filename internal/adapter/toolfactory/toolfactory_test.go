@@ -65,14 +65,29 @@ func (r stubExternalJobReader) ReadResultChunk(context.Context, string, string, 
 	return r.chunk, nil
 }
 
-func (r stubExternalJobReader) StatusAtRevision(_ context.Context, _ string, _ string, _ domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus) (*domain.ExternalAgentJob, error) {
+func (r stubExternalJobReader) StatusAtRevision(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ domain.ConversationKey,
+	expectedRevision int,
+	expectedStatus domain.ExternalAgentJobStatus,
+) (*domain.ExternalAgentJob, error) {
 	if r.job == nil || r.job.StatusRevision != expectedRevision || r.job.Status != expectedStatus {
 		return nil, errors.New("external-agent job revision is no longer current")
 	}
 	return r.job, nil
 }
 
-func (r stubExternalJobReader) ReadResultChunkAtRevision(_ context.Context, _ string, _ string, _ domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus, _, _ int64) (domain.ResultChunk, error) {
+func (r stubExternalJobReader) ReadResultChunkAtRevision(
+	_ context.Context,
+	_ string,
+	_ string,
+	_ domain.ConversationKey,
+	expectedRevision int,
+	expectedStatus domain.ExternalAgentJobStatus,
+	_, _ int64,
+) (domain.ResultChunk, error) {
 	if r.job == nil || r.job.StatusRevision != expectedRevision || r.job.Status != expectedStatus {
 		return domain.ResultChunk{}, errors.New("external-agent job revision is no longer current")
 	}
@@ -88,12 +103,15 @@ var _ port.ConversationStore = (*stubConversationStore)(nil)
 func (s *stubConversationStore) ClaimDedupe(_ context.Context, _ []string, _, _ time.Time) (bool, error) {
 	return true, nil
 }
+
 func (s *stubConversationStore) HasAssistantMessage(_ context.Context, _ domain.ConversationKey) (bool, error) {
 	return false, nil
 }
+
 func (s *stubConversationStore) RecentMessages(_ context.Context, _ domain.ConversationKey, limit int) ([]domain.Message, error) {
 	return s.messages[:min(limit, len(s.messages))], nil
 }
+
 func (s *stubConversationStore) AppendMessage(_ context.Context, _ domain.ConversationMetadata, _ domain.Message, _ int) error {
 	return nil
 }
@@ -108,10 +126,12 @@ func (s *stubAuditStore) InsertAudit(_ context.Context, record domain.ToolAuditR
 	s.records = append(s.records, record)
 	return nil
 }
+
 func (s *stubAuditStore) UpdateAuditState(_ context.Context, _ string, state domain.ToolLifecycleState, _ time.Time) error {
 	s.updates = append(s.updates, state)
 	return nil
 }
+
 func (s *stubAuditStore) GetAuditByCallID(_ context.Context, _ string) (*domain.ToolAuditRecord, error) {
 	return nil, nil
 }
@@ -161,9 +181,11 @@ type failingCodeIntelligence struct{}
 func (failingCodeIntelligence) Symbols(context.Context, domain.SymbolRequest) (domain.SymbolResult, error) {
 	return domain.SymbolResult{}, errors.New("LSP unavailable")
 }
+
 func (failingCodeIntelligence) Definition(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
 	return domain.LocationResult{}, errors.New("LSP unavailable")
 }
+
 func (failingCodeIntelligence) References(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
 	return domain.LocationResult{}, errors.New("LSP unavailable")
 }
@@ -182,6 +204,7 @@ func (*toolMetricCapture) Snapshot() []port.MetricSample              { return n
 func (stubCodeIntelligence) Definition(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
 	return domain.LocationResult{}, nil
 }
+
 func (stubCodeIntelligence) References(context.Context, domain.LocationRequest) (domain.LocationResult, error) {
 	return domain.LocationResult{}, nil
 }
@@ -190,6 +213,7 @@ func (stubCanvasStore) CreateOperation(context.Context, domain.CanvasOperation) 
 func (stubCanvasStore) UpdateOperationStatus(context.Context, string, domain.CanvasOperationStatus, string) error {
 	return nil
 }
+
 func (stubCanvasStore) GetOperation(context.Context, string) (*domain.CanvasOperation, error) {
 	return nil, nil
 }
@@ -336,7 +360,8 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("planning transition failed: %v", err)
 	}
-	if store.lastTransition.Actor != "U12345678" || store.lastTransition.Project != "workspace" || store.lastTransition.ConversationKey != key || store.lastTransition.Source != domain.WorkstreamSourceRoot {
+	if store.lastTransition.Actor != "U12345678" || store.lastTransition.Project != "workspace" || store.lastTransition.ConversationKey != key ||
+		store.lastTransition.Source != domain.WorkstreamSourceRoot {
 		t.Fatalf("tool supplied untrusted transition binding: %+v", store.lastTransition)
 	}
 	if _, err := byName["workstream_transition"].Run(&stubToolContext{callID: "unverified-result-1"}, map[string]any{

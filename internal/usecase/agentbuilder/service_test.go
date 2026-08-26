@@ -74,7 +74,8 @@ func TestPreviewBuildsAgentCLILeaf(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.AgentDef.AgentClass != "LlmAgent" || result.AgentDef.Model != "opencode/default" || result.AgentDef.ExecutionMode != domain.ExecutionModeDurableJob || result.AgentDef.TimeoutSec != domain.DefaultExternalAgentTimeoutSeconds {
+	if result.AgentDef.AgentClass != "LlmAgent" || result.AgentDef.Model != "opencode/default" || result.AgentDef.ExecutionMode != domain.ExecutionModeDurableJob ||
+		result.AgentDef.TimeoutSec != domain.DefaultExternalAgentTimeoutSeconds {
 		t.Fatalf("preview identity = %#v", result.AgentDef)
 	}
 	if !strings.Contains(result.YAML, "model: opencode/default") || !strings.Contains(result.YAML, "confirmation: required") {
@@ -116,12 +117,21 @@ func TestPreviewRejectsInvalidV2Drafts(t *testing.T) {
 		{name: "ACP provider outside allowlist", draft: func() domain.AgentDraft { d := base; d.ProviderProfile = "other-acp/default"; return d }()},
 		{name: "ACP timeout too high", draft: func() domain.AgentDraft { d := base; d.TimeoutSeconds = 86401; return d }()},
 		{name: "ACP timeout negative", draft: func() domain.AgentDraft { d := base; d.TimeoutSeconds = -1; return d }()},
-		{name: "LLM timeout", draft: domain.AgentDraft{Name: "builder_worker", Kind: domain.AgentKindLLM, ProviderProfile: "openai/fast", ExecutionMode: domain.ExecutionModeForeground, TimeoutSeconds: 1}},
+		{
+			name:  "LLM timeout",
+			draft: domain.AgentDraft{Name: "builder_worker", Kind: domain.AgentKindLLM, ProviderProfile: "openai/fast", ExecutionMode: domain.ExecutionModeForeground, TimeoutSeconds: 1},
+		},
 		{name: "LLM durable job", draft: domain.AgentDraft{Name: "builder_worker", Kind: domain.AgentKindLLM, ProviderProfile: "openai/fast", ExecutionMode: domain.ExecutionModeDurableJob}},
-		{name: "provider profile and model conflict", draft: domain.AgentDraft{Name: "builder_worker", Kind: domain.AgentKindLLM, ProviderProfile: "openai/fast", Model: "openai/other", ExecutionMode: domain.ExecutionModeForeground}},
+		{
+			name:  "provider profile and model conflict",
+			draft: domain.AgentDraft{Name: "builder_worker", Kind: domain.AgentKindLLM, ProviderProfile: "openai/fast", Model: "openai/other", ExecutionMode: domain.ExecutionModeForeground},
+		},
 		{name: "ACP model", draft: func() domain.AgentDraft { d := base; d.Model = "openai/fast"; return d }()},
 		{name: "ACP provider profile missing", draft: func() domain.AgentDraft { d := base; d.ProviderProfile = ""; return d }()},
-		{name: "invalid provider profile format", draft: domain.AgentDraft{Name: "builder_worker", Kind: domain.AgentKindLLM, ProviderProfile: "openai", ExecutionMode: domain.ExecutionModeForeground}},
+		{
+			name:  "invalid provider profile format",
+			draft: domain.AgentDraft{Name: "builder_worker", Kind: domain.AgentKindLLM, ProviderProfile: "openai", ExecutionMode: domain.ExecutionModeForeground},
+		},
 	}
 
 	for _, tt := range tests {

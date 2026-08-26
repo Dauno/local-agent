@@ -23,7 +23,14 @@ import (
 // completed: the result digest is stored as content_sha256, the row is stuck
 // in publishing (stale lease) or unknown, and the Slack evidence was already
 // emitted under the v30 metadata contract.
-func insertV30CR1Notification(t *testing.T, db *sql.DB, id, terminalStatus, markdown, contentSHA string, policy, deliveryMode, artifactRef string, resultBytes int64, publishState, slackFileID string) {
+func insertV30CR1Notification(
+	t *testing.T,
+	db *sql.DB,
+	id, terminalStatus, markdown, contentSHA string,
+	policy, deliveryMode, artifactRef string,
+	resultBytes int64,
+	publishState, slackFileID string,
+) {
 	t.Helper()
 	uploadState := "not_applicable"
 	if deliveryMode == "file" {
@@ -134,7 +141,8 @@ func TestUpgradeV30ToV32ReconcilesPreV32MarkdownEvidence(t *testing.T) {
 	jobStore := NewExternalAgentJobStore(store)
 	evidence := slackapi.Message{
 		User: "B12345678", Timestamp: "1710000000.000001",
-		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-markdown", 1, markdown, resultDigest, "markdown", "")}}
+		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-markdown", 1, markdown, resultDigest, "markdown", "")},
+	}
 	server := newSlackHistoryServer(t, evidence)
 
 	claimed, err := jobStore.ClaimNextNotification(ctx, time.Now().UTC(), "test-worker", time.Minute)
@@ -144,7 +152,17 @@ func TestUpgradeV30ToV32ReconcilesPreV32MarkdownEvidence(t *testing.T) {
 	if !claimed.NeedsReconciliation {
 		t.Fatal("claimed pre-v32 delivery is not flagged for reconciliation")
 	}
-	ts, found, err := slackadapter.NewDurableJobNotificationPublisher(nil, slackadapter.NewHistoryReader(slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.BaseURL())), "B12345678", time.Second, nil, false), nil, nil, jobStore, nil).Reconcile(ctx, *claimed)
+	ts, found, err := slackadapter.NewDurableJobNotificationPublisher(
+		nil,
+		slackadapter.NewHistoryReader(slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.BaseURL())), "B12345678", time.Second, nil, false),
+		nil,
+		nil,
+		jobStore,
+		nil,
+	).Reconcile(
+		ctx,
+		*claimed,
+	)
 	if err != nil || !found || ts != evidence.Timestamp {
 		t.Fatalf("pre-v32 Markdown reconcile = %q, found=%v, err=%v", ts, found, err)
 	}
@@ -178,7 +196,8 @@ func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 	jobStore := NewExternalAgentJobStore(store)
 	evidence := slackapi.Message{
 		User: "B12345678", Timestamp: "1710000000.000001",
-		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-file", 1, markdown, resultDigest, "file", "F123")}}
+		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-file", 1, markdown, resultDigest, "file", "F123")},
+	}
 	server := newSlackHistoryServer(t, evidence)
 	server.fileInfo = `{"ok":true,"file":{"id":"F123","name":"opencode-upgrade-file.md","size":` + fmt.Sprint(len(resultContent)) + `,"user":"B12345678","channels":["D12345678"]}}`
 	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.BaseURL()))
@@ -190,7 +209,17 @@ func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 	if !claimed.NeedsReconciliation {
 		t.Fatal("claimed pre-v32 file delivery is not flagged for reconciliation")
 	}
-	ts, found, err := slackadapter.NewDurableJobNotificationPublisher(nil, slackadapter.NewHistoryReader(fileClient, "B12345678", time.Second, nil, false), nil, nil, jobStore, fileClient).Reconcile(ctx, *claimed)
+	ts, found, err := slackadapter.NewDurableJobNotificationPublisher(
+		nil,
+		slackadapter.NewHistoryReader(fileClient, "B12345678", time.Second, nil, false),
+		nil,
+		nil,
+		jobStore,
+		fileClient,
+	).Reconcile(
+		ctx,
+		*claimed,
+	)
 	if err != nil || !found || ts != evidence.Timestamp {
 		t.Fatalf("pre-v32 file reconcile = %q, found=%v, err=%v", ts, found, err)
 	}
@@ -238,15 +267,30 @@ func TestUpgradeV30ToV32V32EvidenceStillVerifiedStrictly(t *testing.T) {
 				notificationDigest = strings.Repeat("a", 64)
 			}
 			evidence := slackapi.Message{
-				User: "B12345678", Timestamp: "1710000000.000001",
-				Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v32EraEvidencePayload("upgrade-strict", 1, markdown, resultDigest, notificationDigest, "markdown", "")}}
+				User:      "B12345678",
+				Timestamp: "1710000000.000001",
+				Metadata: slackapi.SlackMetadata{
+					EventType:    "local_agent_external_agent_job",
+					EventPayload: v32EraEvidencePayload("upgrade-strict", 1, markdown, resultDigest, notificationDigest, "markdown", ""),
+				},
+			}
 			server := newSlackHistoryServer(t, evidence)
 
 			claimed, err := jobStore.ClaimNextNotification(ctx, time.Now().UTC(), "test-worker", time.Minute)
 			if err != nil || claimed == nil {
 				t.Fatalf("claim notification = %#v, err=%v", claimed, err)
 			}
-			ts, found, err := slackadapter.NewDurableJobNotificationPublisher(nil, slackadapter.NewHistoryReader(slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.BaseURL())), "B12345678", time.Second, nil, false), nil, nil, jobStore, nil).Reconcile(ctx, *claimed)
+			ts, found, err := slackadapter.NewDurableJobNotificationPublisher(
+				nil,
+				slackadapter.NewHistoryReader(slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.BaseURL())), "B12345678", time.Second, nil, false),
+				nil,
+				nil,
+				jobStore,
+				nil,
+			).Reconcile(
+				ctx,
+				*claimed,
+			)
 			if scenario.wantError {
 				if err == nil || found {
 					t.Fatalf("tampered v32 evidence found=%v err=%v, want fail-closed", found, err)
@@ -320,7 +364,14 @@ func (s *slackHistoryServer) serve(w http.ResponseWriter, request *http.Request)
 func assertPublishedDelivery(t *testing.T, store *Store, jobID, wantTS string) {
 	t.Helper()
 	var state, recovered string
-	if err := store.db.QueryRowContext(context.Background(), `SELECT publish_state, recovered_slack_ts FROM external_agent_job_notifications WHERE job_id = ?`, jobID).Scan(&state, &recovered); err != nil {
+	if err := store.db.QueryRowContext(
+		context.Background(),
+		`SELECT publish_state, recovered_slack_ts FROM external_agent_job_notifications WHERE job_id = ?`,
+		jobID,
+	).Scan(
+		&state,
+		&recovered,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if state != string(domain.NotificationPublished) || recovered != wantTS {

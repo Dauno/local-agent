@@ -13,18 +13,29 @@ import (
 
 type wakeAnalysisStore struct{ createErr error }
 
-func (s wakeAnalysisStore) Create(_ context.Context, identity domain.AnalysisIdentity, limits domain.AnalysisLimits, _ string, scope domain.ResultScope, workstreamID string, now time.Time) (port.AnalysisRecord, error) {
+func (s wakeAnalysisStore) Create(
+	_ context.Context,
+	identity domain.AnalysisIdentity,
+	limits domain.AnalysisLimits,
+	_ string,
+	scope domain.ResultScope,
+	workstreamID string,
+	now time.Time,
+) (port.AnalysisRecord, error) {
 	if s.createErr != nil {
 		return port.AnalysisRecord{}, s.createErr
 	}
 	return port.AnalysisRecord{AnalysisID: "analysis-wake", Identity: identity, Limits: limits, Scope: scope, WorkstreamID: workstreamID, State: domain.AnalysisPreparing, CreatedAt: now}, nil
 }
+
 func (wakeAnalysisStore) Get(context.Context, string, domain.ResultScope) (port.AnalysisRecord, error) {
 	return port.AnalysisRecord{}, errors.New("not implemented")
 }
+
 func (wakeAnalysisStore) Complete(context.Context, string, domain.ResultScope, time.Time) (port.AnalysisRecord, error) {
 	return port.AnalysisRecord{}, errors.New("not implemented")
 }
+
 func (wakeAnalysisStore) Fail(context.Context, string, domain.ResultScope, domain.AnalysisFailureCode, time.Time) (port.AnalysisRecord, error) {
 	return port.AnalysisRecord{}, errors.New("not implemented")
 }

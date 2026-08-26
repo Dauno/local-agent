@@ -37,12 +37,15 @@ func New(output io.Writer, level string, redactor secure.Redactor) *Logger {
 func (l *Logger) Debug(msg string, args ...any) {
 	l.inner.Debug(l.redactor.String(msg), l.clean(args)...)
 }
+
 func (l *Logger) Info(msg string, args ...any) {
 	l.inner.Info(l.redactor.String(msg), l.clean(args)...)
 }
+
 func (l *Logger) Warn(msg string, args ...any) {
 	l.inner.Warn(l.redactor.String(msg), l.clean(args)...)
 }
+
 func (l *Logger) Error(msg string, args ...any) {
 	l.inner.Error(l.redactor.String(msg), l.clean(args)...)
 }

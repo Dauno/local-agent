@@ -234,8 +234,10 @@ func (r *Reader) ReadRange(ctx context.Context, req domain.SourceRangeRequest) (
 	if content == "" {
 		returnedEndLine = startLine - 1
 	}
-	location := domain.CodeLocation{Project: req.Project, Path: cleanPath, StartByte: startByte, EndByte: resultEndByte,
-		StartLine: startLine, EndLine: returnedEndLine, FileSHA256: fileSHA256}
+	location := domain.CodeLocation{
+		Project: req.Project, Path: cleanPath, StartByte: startByte, EndByte: resultEndByte,
+		StartLine: startLine, EndLine: returnedEndLine, FileSHA256: fileSHA256,
+	}
 
 	resultRef := ""
 	if r.resultStore != nil {

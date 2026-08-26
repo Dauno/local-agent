@@ -118,7 +118,23 @@ func backfillV32NotificationIdentities(ctx context.Context, tx *sql.Tx) error {
 		var jobResultBytes int64
 		var policyVersion, deliveryMode, uploadState, contentSHA string
 		var rowResultBytes int64
-		if err := rows.Scan(&jobID, &revision, &kind, &terminalStatus, &markdown, &jobMode, &jobRevision, &jobStatus, &jobResultSHA, &jobResultBytes, &policyVersion, &deliveryMode, &uploadState, &contentSHA, &rowResultBytes); err != nil {
+		if err := rows.Scan(
+			&jobID,
+			&revision,
+			&kind,
+			&terminalStatus,
+			&markdown,
+			&jobMode,
+			&jobRevision,
+			&jobStatus,
+			&jobResultSHA,
+			&jobResultBytes,
+			&policyVersion,
+			&deliveryMode,
+			&uploadState,
+			&contentSHA,
+			&rowResultBytes,
+		); err != nil {
 			return fmt.Errorf("scan external-agent notification identity: %w", err)
 		}
 		// Grandfathered file-mode rows that normalization could not repair

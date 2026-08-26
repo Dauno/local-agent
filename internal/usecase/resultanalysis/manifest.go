@@ -21,7 +21,14 @@ const readChunkMaxBytes = 1 << 20
 // domain.AnalysisFailureSourceTooLarge before a single byte is read, so an
 // oversized source never reaches the model. The assembled source's digest
 // is checked against the resolved identity before segmenting.
-func BuildManifest(ctx context.Context, store port.TrustedResultStore, resultID string, scope domain.ResultScope, segmenterVersion string, limits domain.AnalysisLimits) (domain.AnalysisSegmentManifest, domain.ResultIdentity, error) {
+func BuildManifest(
+	ctx context.Context,
+	store port.TrustedResultStore,
+	resultID string,
+	scope domain.ResultScope,
+	segmenterVersion string,
+	limits domain.AnalysisLimits,
+) (domain.AnalysisSegmentManifest, domain.ResultIdentity, error) {
 	var zero domain.AnalysisSegmentManifest
 	if store == nil {
 		return zero, domain.ResultIdentity{}, fmt.Errorf("%w: manifest build requires a source store", domain.ErrAnalysisUnavailable)

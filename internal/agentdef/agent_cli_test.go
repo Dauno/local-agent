@@ -84,7 +84,12 @@ func TestRejectShimAndDescriptorSchemaGaps(t *testing.T) {
 		{"shim deprecated", "executable: codex", "shim:\n  command: codex\nexecutable: codex", "shim is invalid"},
 		{"missing discard types", "    discard_types: [reasoning]\n", "", "discard_types is required"},
 		{"unsupported prompt", "prompt: stdin", "prompt: argument", "invocation.prompt must be stdin"},
-		{"session disables persistence", "profiles:", "session:\n  id: {when: {type: thread.started}, path: thread_id}\n  transcript: {path_glob: '~/.codex/{{session_id}}.jsonl'}\n  resume: {resume_flag: [--resume, '{{session_id}}']}\nprofiles:", "session requires an invocation that persists sessions"},
+		{
+			"session disables persistence",
+			"profiles:",
+			"session:\n  id: {when: {type: thread.started}, path: thread_id}\n  transcript: {path_glob: '~/.codex/{{session_id}}.jsonl'}\n  resume: {resume_flag: [--resume, '{{session_id}}']}\nprofiles:",
+			"session requires an invocation that persists sessions",
+		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

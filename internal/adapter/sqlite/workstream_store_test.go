@@ -233,8 +233,10 @@ func TestWorkstreamResultLinkCommitIsAtomicAndBindsVerifiedIdentity(t *testing.T
 	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-result-link"); err != nil {
 		t.Fatal(err)
 	}
-	verification := port.WorkstreamResultVerification{ResultID: handle.ResultID, WorkstreamID: workstream.ID,
-		Actor: materialization.Scope.Actor, TeamID: materialization.Scope.TeamID, Conversation: materialization.Scope.ConversationKey, Project: materialization.Scope.Project}
+	verification := port.WorkstreamResultVerification{
+		ResultID: handle.ResultID, WorkstreamID: workstream.ID,
+		Actor: materialization.Scope.Actor, TeamID: materialization.Scope.TeamID, Conversation: materialization.Scope.ConversationKey, Project: materialization.Scope.Project,
+	}
 	transition := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionLinkCompletedResult, 0)
 	transition.SourceID = "link-result-1"
 	transition.ResultLink = &domain.WorkstreamResultLink{ID: "result-link-1", ResultIdentity: handle.ResultID, Description: "verified output"}
@@ -244,7 +246,13 @@ func TestWorkstreamResultLinkCommitIsAtomicAndBindsVerifiedIdentity(t *testing.T
 
 	forged := identity
 	forged.SHA256 = strings.Repeat("a", 64)
-	if _, err := workstreams.CommitVerifiedResultLink(ctx, port.WorkstreamResultLinkCommit{Verification: verification, VerifiedIdentity: forged, Transition: transition, Limits: domain.DefaultWorkstreamLimits(), Now: time.Unix(10, 0).UTC()}); !errors.Is(err, domain.ErrResultUnavailable) {
+	if _, err := workstreams.CommitVerifiedResultLink(
+		ctx,
+		port.WorkstreamResultLinkCommit{Verification: verification, VerifiedIdentity: forged, Transition: transition, Limits: domain.DefaultWorkstreamLimits(), Now: time.Unix(10, 0).UTC()},
+	); !errors.Is(
+		err,
+		domain.ErrResultUnavailable,
+	) {
 		t.Fatalf("forged commit error = %v", err)
 	}
 	var revision, links, bindings, references int
@@ -264,17 +272,35 @@ func TestWorkstreamResultLinkCommitIsAtomicAndBindsVerifiedIdentity(t *testing.T
 		t.Fatalf("forged commit persisted revision/links/bindings/references = %d/%d/%d/%d", revision, links, bindings, references)
 	}
 
-	record, err := workstreams.CommitVerifiedResultLink(ctx, port.WorkstreamResultLinkCommit{Verification: verification, VerifiedIdentity: identity, Transition: transition, Limits: domain.DefaultWorkstreamLimits(), Now: time.Unix(11, 0).UTC()})
+	record, err := workstreams.CommitVerifiedResultLink(
+		ctx,
+		port.WorkstreamResultLinkCommit{Verification: verification, VerifiedIdentity: identity, Transition: transition, Limits: domain.DefaultWorkstreamLimits(), Now: time.Unix(11, 0).UTC()},
+	)
 	if err != nil {
 		t.Fatalf("verified commit: %v", err)
 	}
 	if record.ToRevision != 1 {
 		t.Fatalf("verified record = %+v", record)
 	}
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM workstream_result_link_results WHERE workstream_id = ? AND result_id = ?`, workstream.ID, handle.ResultID).Scan(&bindings); err != nil || bindings != 1 {
+	if err := store.DB().QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM workstream_result_link_results WHERE workstream_id = ? AND result_id = ?`,
+		workstream.ID,
+		handle.ResultID,
+	).Scan(
+		&bindings,
+	); err != nil ||
+		bindings != 1 {
 		t.Fatalf("verified result binding = %d, %v", bindings, err)
 	}
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM result_references WHERE result_id = ? AND owner_kind = 'workstream_result_link' AND state = 'live'`, handle.ResultID).Scan(&references); err != nil || references != 1 {
+	if err := store.DB().QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM result_references WHERE result_id = ? AND owner_kind = 'workstream_result_link' AND state = 'live'`,
+		handle.ResultID,
+	).Scan(
+		&references,
+	); err != nil ||
+		references != 1 {
 		t.Fatalf("verified result reference = %d, %v", references, err)
 	}
 }
@@ -370,7 +396,9 @@ func TestWorkstreamStoreJournalIsReconstructibleAndTransitionsAreIdempotent(t *t
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(records) != 2 || records[0].Action != domain.WorkstreamActionCreateWorkstream || records[0].PayloadJSON == "" || records[1].PayloadDigest == "" || records[1].PayloadJSON == "" || records[1].StateDigest == "" || records[1].StateJSON == "" {
+	if len(records) != 2 || records[0].Action != domain.WorkstreamActionCreateWorkstream || records[0].PayloadJSON == "" || records[1].PayloadDigest == "" || records[1].PayloadJSON == "" ||
+		records[1].StateDigest == "" ||
+		records[1].StateJSON == "" {
 		t.Fatalf("journal records = %+v", records)
 	}
 	if err := workstreams.Create(ctx, workstream, domain.WorkstreamSourceHuman, "create-1"); err != nil {

@@ -192,7 +192,18 @@ type ReductionRunner struct {
 // construction, so domain.AnalysisPacket.Coverage is left at its zero value
 // for every non-root node. domain.AnalysisPacket.Validate does not inspect
 // Coverage, so this never blocks an intermediate node from completing.
-func (r *ReductionRunner) RunReduction(ctx context.Context, claim domain.AnalysisStepClaim, children []port.AnalysisStep, isRoot bool, identity domain.AnalysisIdentity, objectiveText string, constraints []string, promptVersion string, sourceCoverage domain.AnalysisCoverage, now time.Time) (domain.AnalysisPacket, error) {
+func (r *ReductionRunner) RunReduction(
+	ctx context.Context,
+	claim domain.AnalysisStepClaim,
+	children []port.AnalysisStep,
+	isRoot bool,
+	identity domain.AnalysisIdentity,
+	objectiveText string,
+	constraints []string,
+	promptVersion string,
+	sourceCoverage domain.AnalysisCoverage,
+	now time.Time,
+) (domain.AnalysisPacket, error) {
 	childSummaries, err := r.loadChildSummaries(ctx, claim.AnalysisID, children)
 	if err != nil {
 		return domain.AnalysisPacket{}, err

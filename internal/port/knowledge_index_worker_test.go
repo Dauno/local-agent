@@ -1,9 +1,11 @@
 package port
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sort"
 	"testing"
 
@@ -149,7 +151,7 @@ func (f *fakeKnowledgeIdentityLister) ListTruthIdentities(_ context.Context, kin
 }
 
 func sortKnowledgeTruthIdentities(identities []KnowledgeTruthIdentity) {
-	sort.Slice(identities, func(i, j int) bool { return identities[i].ID < identities[j].ID })
+	slices.SortFunc(identities, func(a, b KnowledgeTruthIdentity) int { return cmp.Compare(a.ID, b.ID) })
 }
 
 func sortStrings(values []string) {
@@ -160,7 +162,18 @@ func sortStrings(values []string) {
 // contract: identity reads carry no scope predicates and missing identities
 // report the not-found sentinel.
 func TestKnowledgeIndexSourceReadsByIdentityWithoutScopes(t *testing.T) {
-	claim := domain.KnowledgeClaim{ID: "kclaim_1", Subject: "db host", Predicate: domain.KnowledgePredicateIs, Value: domain.KnowledgeValue{Kind: domain.KnowledgeValueString, Text: "db.internal"}, ScopeKind: domain.KnowledgeScopeProject, ScopeID: "my-project", SourceClass: domain.KnowledgeSourceHuman, SourceRef: "slack:msg:1", Status: domain.KnowledgeClaimAsserted, Revision: 1}
+	claim := domain.KnowledgeClaim{
+		ID:          "kclaim_1",
+		Subject:     "db host",
+		Predicate:   domain.KnowledgePredicateIs,
+		Value:       domain.KnowledgeValue{Kind: domain.KnowledgeValueString, Text: "db.internal"},
+		ScopeKind:   domain.KnowledgeScopeProject,
+		ScopeID:     "my-project",
+		SourceClass: domain.KnowledgeSourceHuman,
+		SourceRef:   "slack:msg:1",
+		Status:      domain.KnowledgeClaimAsserted,
+		Revision:    1,
+	}
 	if err := claim.Validate(); err != nil {
 		t.Fatalf("claim.Validate() error = %v", err)
 	}

@@ -26,23 +26,28 @@ type fakeReductionStepStore struct {
 func (f *fakeReductionStepStore) Prepare(context.Context, port.AnalysisStep) (port.AnalysisStep, error) {
 	return port.AnalysisStep{}, errors.New("not implemented")
 }
+
 func (f *fakeReductionStepStore) ClaimNext(context.Context, string, time.Time, time.Duration) (port.AnalysisStep, bool, error) {
 	return port.AnalysisStep{}, false, errors.New("not implemented")
 }
+
 func (f *fakeReductionStepStore) Complete(_ context.Context, _ domain.AnalysisStepClaim, outputDigest string, _ time.Time) (port.AnalysisStep, error) {
 	f.completeCalls++
 	f.completedDigest = outputDigest
 	return port.AnalysisStep{State: domain.AnalysisStepCompleted, OutputDigest: outputDigest}, nil
 }
+
 func (f *fakeReductionStepStore) Retry(context.Context, domain.AnalysisStepClaim, time.Time, bool) error {
 	f.retryCalls++
 	return nil
 }
+
 func (f *fakeReductionStepStore) Fail(_ context.Context, _ domain.AnalysisStepClaim, code domain.AnalysisFailureCode, _ time.Time) error {
 	f.failCalls++
 	f.failCode = code
 	return nil
 }
+
 func (f *fakeReductionStepStore) List(context.Context, string, string, int) ([]port.AnalysisStep, error) {
 	return nil, errors.New("not implemented")
 }
@@ -58,6 +63,7 @@ func (f *fakePayloadStore) WritePayload(_ context.Context, claim domain.Analysis
 	f.byStep[claim.StepID] = append([]byte{}, payload...)
 	return nil
 }
+
 func (f *fakePayloadStore) ReadPayload(_ context.Context, _ string, stepID string) ([]byte, error) {
 	payload, ok := f.byStep[stepID]
 	if !ok {
@@ -79,6 +85,7 @@ func (f *fakeEvidenceLister) Write(_ context.Context, _ string, leafStepID strin
 	f.byLeafStep[leafStepID] = append(f.byLeafStep[leafStepID], excerpt)
 	return nil
 }
+
 func (f *fakeEvidenceLister) ListByLeafStep(_ context.Context, _ string, leafStepID string) ([]port.AnalysisEvidenceExcerpt, error) {
 	return f.byLeafStep[leafStepID], nil
 }
@@ -93,6 +100,7 @@ type fakeReductionAnalyzer struct {
 func (f *fakeReductionAnalyzer) AnalyzeLeaf(context.Context, port.AnalysisLeafInput) (domain.AnalysisLeaf, error) {
 	return domain.AnalysisLeaf{}, errors.New("not implemented")
 }
+
 func (f *fakeReductionAnalyzer) Reduce(context.Context, port.AnalysisReductionInput) (domain.AnalysisPacket, error) {
 	return f.packet, f.err
 }

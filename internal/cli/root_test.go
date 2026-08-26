@@ -61,6 +61,7 @@ func (f *fakeBackend) PrepareSetup(context.Context) (bootstrap.Snapshot, bootstr
 	f.prepared++
 	return f.snapshot, f.setupSecrets, f.prepareErr
 }
+
 func (f *fakeBackend) ApplySetup(_ context.Context, _ bootstrap.Snapshot, identity bootstrap.Identity, access bootstrap.AccessControl, secrets bootstrap.Secrets) error {
 	f.applyCalls++
 	f.identity, f.access, f.secrets = identity, access, secrets
@@ -69,6 +70,7 @@ func (f *fakeBackend) ApplySetup(_ context.Context, _ bootstrap.Snapshot, identi
 	}
 	return f.applyErr
 }
+
 func (f *fakeBackend) Doctor(context.Context, bool) (doctor.Report, error) {
 	return f.report, f.doctorErr
 }
@@ -395,8 +397,10 @@ func TestJobsReconcileRendersStrictResultAvailability(t *testing.T) {
 		},
 		{
 			name: "complete identity projects the result",
-			view: domain.ExternalAgentJobStatusView{JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5,
-				ResultAvailable: true, ResultSHA256: strings.Repeat("a", 64), ResultBytes: 1024, DeliveryMode: domain.JobResultDeliveryMarkdown},
+			view: domain.ExternalAgentJobStatusView{
+				JobID: "job_123", Status: domain.JobCompleted, StatusRevision: 5,
+				ResultAvailable: true, ResultSHA256: strings.Repeat("a", 64), ResultBytes: 1024, DeliveryMode: domain.JobResultDeliveryMarkdown,
+			},
 			want: "result_available: true",
 		},
 	} {

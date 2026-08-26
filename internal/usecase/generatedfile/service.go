@@ -108,14 +108,27 @@ func (s *Service) Export(ctx context.Context, request ExportRequest) (ExportResu
 	}
 	digest := sha256.Sum256(content)
 	now := s.clock.Now().UTC()
-	op := domain.GeneratedFileOperation{ID: request.OperationID, ConversationKey: request.ConversationKey, Actor: request.Actor, Filename: filename, MediaType: mediaType, ContentSHA256: fmt.Sprintf("%x", digest), SizeBytes: len(content), Status: domain.GeneratedFileOpPendingConfirmation, CreatedAt: now, UpdatedAt: now}
+	op := domain.GeneratedFileOperation{
+		ID:              request.OperationID,
+		ConversationKey: request.ConversationKey,
+		Actor:           request.Actor,
+		Filename:        filename,
+		MediaType:       mediaType,
+		ContentSHA256:   fmt.Sprintf("%x", digest),
+		SizeBytes:       len(content),
+		Status:          domain.GeneratedFileOpPendingConfirmation,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
 	if err := s.store.CreateGeneratedFileOperation(ctx, op); err != nil {
 		if errors.Is(err, port.ErrGeneratedFileOperationExists) {
 			existing, getErr := s.store.GetGeneratedFileOperation(ctx, request.OperationID)
 			if getErr != nil {
 				return ExportResult{}, fmt.Errorf("get existing generated file operation: %w", getErr)
 			}
-			if existing == nil || existing.ConversationKey != request.ConversationKey || existing.Actor != request.Actor || existing.Filename != filename || existing.MediaType != mediaType || existing.ContentSHA256 != op.ContentSHA256 || existing.SizeBytes != op.SizeBytes {
+			if existing == nil || existing.ConversationKey != request.ConversationKey || existing.Actor != request.Actor || existing.Filename != filename || existing.MediaType != mediaType ||
+				existing.ContentSHA256 != op.ContentSHA256 ||
+				existing.SizeBytes != op.SizeBytes {
 				return ExportResult{}, fmt.Errorf("generated file operation %q does not match the confirmed request", request.OperationID)
 			}
 			if existing.Status == domain.GeneratedFileOpCompleted && existing.SlackFileID != "" {
@@ -162,7 +175,8 @@ func (s *Service) Validate(filename string, format domain.GeneratedFileFormat, c
 
 func (s *Service) prepare(filename string, format domain.GeneratedFileFormat, content []byte) (string, string, []byte, error) {
 	filename = strings.TrimSpace(path.Base(strings.ReplaceAll(filename, "\\", "/")))
-	if filename == "." || filename == "" || !utf8.ValidString(filename) || strings.ContainsAny(filename, "\x00\r\n") || strings.IndexFunc(filename, func(r rune) bool { return unicode.IsControl(r) }) >= 0 {
+	if filename == "." || filename == "" || !utf8.ValidString(filename) || strings.ContainsAny(filename, "\x00\r\n") ||
+		strings.IndexFunc(filename, func(r rune) bool { return unicode.IsControl(r) }) >= 0 {
 		return "", "", nil, &ExportError{Message: "filename must be a non-empty single-line UTF-8 basename"}
 	}
 	if utf8.RuneCountInString(filename) > s.cfg.MaxFilenameChars {

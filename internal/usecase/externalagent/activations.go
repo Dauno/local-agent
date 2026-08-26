@@ -355,7 +355,13 @@ func (w *ActivationWorker) invokeWithLease(ctx context.Context, activation *doma
 	return err
 }
 
-func (w *ActivationWorker) renewLease(ctx context.Context, store port.ExternalAgentJobActivationLeaseStore, activation *domain.ExternalAgentJobActivation, done <-chan struct{}, cancel context.CancelFunc) {
+func (w *ActivationWorker) renewLease(
+	ctx context.Context,
+	store port.ExternalAgentJobActivationLeaseStore,
+	activation *domain.ExternalAgentJobActivation,
+	done <-chan struct{},
+	cancel context.CancelFunc,
+) {
 	interval := w.cfg.LeaseTTL / 3
 	if interval <= 0 {
 		interval = time.Second

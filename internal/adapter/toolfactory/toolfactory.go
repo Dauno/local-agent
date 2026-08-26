@@ -451,7 +451,7 @@ func (f *Factory) syntaxQueryTool(actor string, key domain.ConversationKey) (too
 		Project     string `json:"project"`
 		Path        string `json:"path"`
 		Query       string `json:"query"`
-		IncludeText bool   `json:"include_text,omitempty"`
+		IncludeText bool   `json:"include_text,omitzero"`
 		MaxResults  int    `json:"max_results,omitempty"`
 	}
 	return functiontool.New(functiontool.Config{Name: "syntax_query", Description: "Runs a bounded project-scoped syntax operation (outline or symbol)."},
@@ -507,20 +507,36 @@ func (f *Factory) readFileRangeTool(actor string, key domain.ConversationKey) (t
 		MaxLines       int    `json:"max_lines"`
 		ExpectedSHA256 string `json:"expected_sha256,omitempty"`
 	}
-	return functiontool.New(functiontool.Config{Name: "read_file_range", Description: "Reads a bounded line range from an immutable project-relative source snapshot. If next_offset_bytes is nonzero, continue the result_ref with read_result_chunk."},
+	return functiontool.New(
+		functiontool.Config{
+			Name:        "read_file_range",
+			Description: "Reads a bounded line range from an immutable project-relative source snapshot. If next_offset_bytes is nonzero, continue the result_ref with read_result_chunk.",
+		},
 		func(ctx agent.Context, input args) (domain.SourceRange, error) {
 			reader := f.codeReaders[input.Project]
 			if reader == nil {
 				return domain.SourceRange{}, fmt.Errorf("project is unavailable")
 			}
-			return reader.ReadRange(ctx, domain.SourceRangeRequest{Project: input.Project, Path: input.Path, StartLine: input.StartLine, MaxLines: input.MaxLines, ExpectedSHA256: input.ExpectedSHA256, Actor: actor, ConversationKey: string(key)})
-		})
+			return reader.ReadRange(
+				ctx,
+				domain.SourceRangeRequest{
+					Project:         input.Project,
+					Path:            input.Path,
+					StartLine:       input.StartLine,
+					MaxLines:        input.MaxLines,
+					ExpectedSHA256:  input.ExpectedSHA256,
+					Actor:           actor,
+					ConversationKey: string(key),
+				},
+			)
+		},
+	)
 }
 
 func (f *Factory) readResultChunkTool(actor string, key domain.ConversationKey) (tool.Tool, error) {
 	type args struct {
 		ResultRef   string `json:"result_ref" jsonschema:"opaque recoverable result reference"`
-		OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"server-provided continuation offset"`
+		OffsetBytes int64  `json:"offset_bytes,omitzero" jsonschema:"server-provided continuation offset"`
 		MaxBytes    int    `json:"max_bytes,omitempty" jsonschema:"maximum bytes requested"`
 	}
 	type result struct {
@@ -532,7 +548,10 @@ func (f *Factory) readResultChunkTool(actor string, key domain.ConversationKey) 
 	}
 	return functiontool.New(functiontool.Config{Name: "read_result_chunk", Description: "Reads a bounded UTF-8 chunk from an owner-bound recoverable result."},
 		func(ctx agent.Context, input args) (result, error) {
-			chunk, err := f.recoverableResults.ReadChunk(ctx, domain.ResultChunkRequest{Ref: input.ResultRef, Actor: actor, ConversationKey: string(key), OffsetBytes: input.OffsetBytes, MaxBytes: input.MaxBytes})
+			chunk, err := f.recoverableResults.ReadChunk(
+				ctx,
+				domain.ResultChunkRequest{Ref: input.ResultRef, Actor: actor, ConversationKey: string(key), OffsetBytes: input.OffsetBytes, MaxBytes: input.MaxBytes},
+			)
 			if err != nil {
 				return result{}, err
 			}
@@ -559,8 +578,10 @@ func (f *Factory) codeSymbolsTool(actor string, key domain.ConversationKey) (too
 				maxResults = 200
 			}
 			if f.codeIntelligence != nil {
-				semantic, semanticErr := f.codeIntelligence.Symbols(ctx, domain.SymbolRequest{Project: input.Project, Path: input.Path,
-					MaxResults: maxResults, Actor: actor, ConversationKey: string(key)})
+				semantic, semanticErr := f.codeIntelligence.Symbols(ctx, domain.SymbolRequest{
+					Project: input.Project, Path: input.Path,
+					MaxResults: maxResults, Actor: actor, ConversationKey: string(key),
+				})
 				if semanticErr == nil {
 					return result{Symbols: semantic.Symbols, TotalCount: semantic.TotalCount, Truncated: semantic.Truncated, ResultRef: semantic.ResultRef}, nil
 				}
@@ -572,8 +593,10 @@ func (f *Factory) codeSymbolsTool(actor string, key domain.ConversationKey) (too
 					f.metrics.AddCounter(domain.MetricLSPFallbackTotal, 1, port.MetricLabels{"language": language})
 				}
 			}
-			syntaxResult, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{Project: input.Project, Path: input.Path, Query: "outline",
-				MaxResults: maxResults, Actor: actor, ConversationKey: string(key)})
+			syntaxResult, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{
+				Project: input.Project, Path: input.Path, Query: "outline",
+				MaxResults: maxResults, Actor: actor, ConversationKey: string(key),
+			})
 			if err != nil {
 				return result{}, err
 			}
@@ -597,8 +620,10 @@ func (f *Factory) readSymbolTool(actor string, key domain.ConversationKey) (tool
 			if reader == nil {
 				return domain.SourceRange{}, errors.New("project is unavailable")
 			}
-			result, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{Project: input.Project, Path: input.Path, Query: "outline",
-				MaxResults: 200, Actor: actor, ConversationKey: string(key)})
+			result, err := f.syntaxEngine.Query(ctx, domain.SyntaxQueryRequest{
+				Project: input.Project, Path: input.Path, Query: "outline",
+				MaxResults: 200, Actor: actor, ConversationKey: string(key),
+			})
 			if err != nil {
 				return domain.SourceRange{}, err
 			}
@@ -607,9 +632,11 @@ func (f *Factory) readSymbolTool(actor string, key domain.ConversationKey) (tool
 					continue
 				}
 				lines := capture.Location.EndLine - capture.Location.StartLine + 1
-				return reader.ReadRange(ctx, domain.SourceRangeRequest{Project: input.Project, Path: input.Path,
+				return reader.ReadRange(ctx, domain.SourceRangeRequest{
+					Project: input.Project, Path: input.Path,
 					StartLine: capture.Location.StartLine, MaxLines: lines, ExpectedSHA256: capture.Location.FileSHA256,
-					Actor: actor, ConversationKey: string(key)})
+					Actor: actor, ConversationKey: string(key),
+				})
 			}
 			return domain.SourceRange{}, errors.New("symbol is unavailable")
 		})
@@ -625,8 +652,10 @@ func (f *Factory) codeLocationTool(actor string, key domain.ConversationKey, nam
 	}
 	return functiontool.New(functiontool.Config{Name: name, Description: "Returns bounded, project-scoped LSP code locations."},
 		func(ctx agent.Context, input args) (domain.LocationResult, error) {
-			request := domain.LocationRequest{Project: input.Project, Path: input.Path, Line: input.Line, Column: input.Column,
-				MaxResults: input.MaxResults, Actor: actor, ConversationKey: string(key)}
+			request := domain.LocationRequest{
+				Project: input.Project, Path: input.Path, Line: input.Line, Column: input.Column,
+				MaxResults: input.MaxResults, Actor: actor, ConversationKey: string(key),
+			}
 			if references {
 				return f.codeIntelligence.References(ctx, request)
 			}
@@ -991,7 +1020,7 @@ type jobStatusResult struct {
 	ProcessAlive           *bool  `json:"process_alive"`
 	ResultAvailable        bool   `json:"result_available"`
 	ResultSHA256           string `json:"result_sha256,omitempty"`
-	ResultBytes            int64  `json:"result_bytes,omitempty"`
+	ResultBytes            int64  `json:"result_bytes,omitzero"`
 	DeliveryMode           string `json:"delivery_mode,omitempty"`
 	ErrorCode              string `json:"error_code,omitempty"`
 	FinishedAt             string `json:"finished_at,omitempty"`
@@ -1125,7 +1154,7 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 
 type readJobResultChunkArgs struct {
 	JobID       string `json:"job_id" jsonschema:"durable external-agent job ID returned when the job was accepted"`
-	OffsetBytes int64  `json:"offset_bytes,omitempty" jsonschema:"server-provided UTF-8 continuation offset"`
+	OffsetBytes int64  `json:"offset_bytes,omitzero" jsonschema:"server-provided UTF-8 continuation offset"`
 	MaxBytes    int64  `json:"max_bytes,omitempty" jsonschema:"maximum bytes requested for this bounded chunk"`
 }
 
@@ -1324,7 +1353,7 @@ func splitNonEmpty(s string) []string {
 func splitLines(s string) []string {
 	var lines []string
 	start := 0
-	for i := 0; i < len(s); i++ {
+	for i := range len(s) {
 		if s[i] == '\n' {
 			lines = append(lines, s[start:i])
 			start = i + 1
@@ -1462,13 +1491,24 @@ func (f *Factory) generatedFileTools(actor string, key domain.ConversationKey) (
 	return []any{textTool, markdownTool, csvTool, jsonTool}, nil
 }
 
-func executeExport(ctx agent.Context, svc *generatedfileusecase.Service, actor string, key domain.ConversationKey, filename string, format domain.GeneratedFileFormat, content []byte) (exportFileResult, error) {
+func executeExport(
+	ctx agent.Context,
+	svc *generatedfileusecase.Service,
+	actor string,
+	key domain.ConversationKey,
+	filename string,
+	format domain.GeneratedFileFormat,
+	content []byte,
+) (exportFileResult, error) {
 	callID := ctx.FunctionCallID()
 	if callID == "" {
 		return exportFileResult{}, fmt.Errorf("export generated file: function call ID is required")
 	}
 	digest := sha256.Sum256([]byte(string(key) + "\x00" + callID))
-	result, err := svc.Export(ctx, generatedfileusecase.ExportRequest{OperationID: fmt.Sprintf("file:%x", digest), ConversationKey: key, Actor: actor, Filename: filename, Format: format, Content: content})
+	result, err := svc.Export(
+		ctx,
+		generatedfileusecase.ExportRequest{OperationID: fmt.Sprintf("file:%x", digest), ConversationKey: key, Actor: actor, Filename: filename, Format: format, Content: content},
+	)
 	if err != nil {
 		return exportFileResult{Message: fmt.Sprintf("Failed to export file: %v", err)}, err
 	}

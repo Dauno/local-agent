@@ -17,7 +17,10 @@ func TestJobStatusAndCancellationRequireActorAndConversation(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1},
+		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

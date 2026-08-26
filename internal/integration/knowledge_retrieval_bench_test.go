@@ -170,7 +170,8 @@ func seedKnowledgeBenchCorpus() (knowledgeBenchCorpus, error) {
 		prefsUnauthorized:  knowledgeBenchPrefsTotal - knowledgeBenchPrefsAuth,
 		docsAuthorized:     knowledgeBenchDocsAuth,
 		docsUnauthorized:   knowledgeBenchDocsTotal - knowledgeBenchDocsAuth,
-		exactSubjectRows:   500}
+		exactSubjectRows:   500,
+	}
 
 	db := store.DB()
 	tx, err := db.BeginTx(ctx, nil)

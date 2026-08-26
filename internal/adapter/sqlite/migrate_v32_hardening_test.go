@@ -68,7 +68,19 @@ func seedGrandfatheredV25DeliveryRows(t *testing.T, db *sql.DB) {
 	// must leave it untouched (never block the upgrade, never lose the audit
 	// row) rather than fabricate upload evidence.
 	insertJob("gf-file-published", "detached", fileDigest, int64(len(fileContent)))
-	insertNotification("gf-file-published", publishedMarkdown, fileDigest, "file", "delivery_v1", "gf-file-published-delivery.result", int64(len(fileContent)), "published", "not_applicable", "F999", "1710000000.000001")
+	insertNotification(
+		"gf-file-published",
+		publishedMarkdown,
+		fileDigest,
+		"file",
+		"delivery_v1",
+		"gf-file-published-delivery.result",
+		int64(len(fileContent)),
+		"published",
+		"not_applicable",
+		"F999",
+		"1710000000.000001",
+	)
 
 	// Control rows with trigger-valid shapes: markdown delivery_v1, legacy
 	// markdown, and a foreground delivery_v1 row.

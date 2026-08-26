@@ -215,7 +215,12 @@ func TestTemplateRendererRejectsSurfaceAndMessageBlockViolations(t *testing.T) {
 	files := embeddedTemplateFiles(t)
 	message := string(files["templates/confirmation_message.json"])
 	message = strings.Replace(message, `"type": "section"`, `"type": "input"`, 1)
-	message = strings.Replace(message, `"text": {"type": "mrkdwn", "text": "{{value.summary}}"}`, `"label": {"type": "plain_text", "text": "Nombre", "emoji": false}, "block_id": "name", "element": {"type": "plain_text_input", "action_id": "name"}`, 1)
+	message = strings.Replace(
+		message,
+		`"text": {"type": "mrkdwn", "text": "{{value.summary}}"}`,
+		`"label": {"type": "plain_text", "text": "Nombre", "emoji": false}, "block_id": "name", "element": {"type": "plain_text_input", "action_id": "name"}`,
+		1,
+	)
 	files["templates/confirmation_message.json"] = []byte(message)
 	if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err == nil {
 		t.Fatal("message input block was accepted")

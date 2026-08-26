@@ -24,7 +24,13 @@ import (
 // heavier Slack and ADK setup, lets a test build the exact same production
 // wiring and prove the gate is reachable end to end, not only through the
 // workstream package's own unit tests.
-func composeWorkstream(cfg config.Config, paths config.Paths, store *adaptersqlite.Store, resultPayloadStore port.ResultPayloadStore, analysisGate port.AnalysesByWorkstream) (*workstreamusecase.Service, error) {
+func composeWorkstream(
+	cfg config.Config,
+	paths config.Paths,
+	store *adaptersqlite.Store,
+	resultPayloadStore port.ResultPayloadStore,
+	analysisGate port.AnalysesByWorkstream,
+) (*workstreamusecase.Service, error) {
 	if !cfg.Orchestration.Workstreams.Enabled {
 		return nil, nil
 	}

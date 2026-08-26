@@ -7,6 +7,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"time"
 
@@ -261,12 +262,7 @@ type liveCheckState struct {
 }
 
 func selectedModelAlreadyIncluded(selected []selectedModel, agent string) bool {
-	for _, model := range selected {
-		if model.agent == agent {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(selected, func(model selectedModel) bool { return model.agent == agent })
 }
 
 func New(deps Dependencies) (*Service, error) {
@@ -370,7 +366,20 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	}
 	embeddingCfg := cfg.Orchestration.Knowledge.Retrieval.Embedding
 	embeddingEnabled := embeddingCfg.Enabled && strings.TrimSpace(embeddingCfg.APIKeyEnv) != ""
-	values, redactor, validSecrets, audioTranscriptionReady, secretsOK := s.checkSecrets(&report, cfg, defs, resolvedModel, selectedModels, modelAPIKeyEnv, rootCLIProvider, transcriptionProfile, transcriptionResolved, transcriptionResolveErr, embeddingCfg, embeddingEnabled)
+	values, redactor, validSecrets, audioTranscriptionReady, secretsOK := s.checkSecrets(
+		&report,
+		cfg,
+		defs,
+		resolvedModel,
+		selectedModels,
+		modelAPIKeyEnv,
+		rootCLIProvider,
+		transcriptionProfile,
+		transcriptionResolved,
+		transcriptionResolveErr,
+		embeddingCfg,
+		embeddingEnabled,
+	)
 	if !secretsOK {
 		return report
 	}
@@ -468,7 +477,12 @@ func (s *Service) runLiveChecks(ctx context.Context, report *Report, state liveC
 		err := s.deps.Live.CheckSlackCanvas(liveCtx, state.values[SlackBotTokenKey])
 		cancel()
 		if err != nil {
-			report.fail("Slack Canvas", state.redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with canvases:write, and verify Canvas availability for the workspace.", false)
+			report.fail(
+				"Slack Canvas",
+				state.redactor.String(err.Error()),
+				"Regenerate the manifest, reinstall the Slack app with canvases:write, and verify Canvas availability for the workspace.",
+				false,
+			)
 		} else {
 			report.pass("Slack Canvas", "canvases:write scope check passed")
 		}
@@ -488,7 +502,12 @@ func (s *Service) runLiveChecks(ctx context.Context, report *Report, state liveC
 		err := s.deps.Live.CheckSlackExports(liveCtx, state.values[SlackBotTokenKey])
 		cancel()
 		if err != nil {
-			report.fail("Slack external-agent result delivery", state.redactor.String(err.Error()), "Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.", false)
+			report.fail(
+				"Slack external-agent result delivery",
+				state.redactor.String(err.Error()),
+				"Regenerate the manifest, reinstall the Slack app with files:write, and verify the bot token.",
+				false,
+			)
 		} else {
 			report.pass("Slack external-agent result delivery", "files:write scope check passed")
 		}
@@ -660,9 +679,27 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 		runIfSchema("knowledge retrieval state", minimumSchemaKnowledge, func() {
 			health, healthErr := s.deps.Knowledge.CheckKnowledgeRetrievalState(ctx, paths.DatabaseFile)
 			if healthErr != nil {
-				report.fail("knowledge retrieval state", redactor.String(healthErr.Error()), "Run: local-agent knowledge rebuild-index to rebuild the reconstructible lexical index, or restart the agent so the lexical and embedding workers can reconcile normally.", false)
+				report.fail(
+					"knowledge retrieval state",
+					redactor.String(healthErr.Error()),
+					"Run: local-agent knowledge rebuild-index to rebuild the reconstructible lexical index, or restart the agent so the lexical and embedding workers can reconcile normally.",
+					false,
+				)
 			} else {
-				report.pass("knowledge retrieval state", fmt.Sprintf("lexical queue pending=%d processing=%d stale=%d repairable=%d; embedding queue pending=%d processing=%d stale=%d repairable=%d", health.LexicalQueuePending, health.LexicalQueueProcessing, health.LexicalQueueStaleProcessing, health.LexicalRepairableMismatch, health.EmbeddingQueuePending, health.EmbeddingQueueProcessing, health.EmbeddingQueueStaleProcessing, health.EmbeddingRepairableMismatch))
+				report.pass(
+					"knowledge retrieval state",
+					fmt.Sprintf(
+						"lexical queue pending=%d processing=%d stale=%d repairable=%d; embedding queue pending=%d processing=%d stale=%d repairable=%d",
+						health.LexicalQueuePending,
+						health.LexicalQueueProcessing,
+						health.LexicalQueueStaleProcessing,
+						health.LexicalRepairableMismatch,
+						health.EmbeddingQueuePending,
+						health.EmbeddingQueueProcessing,
+						health.EmbeddingQueueStaleProcessing,
+						health.EmbeddingRepairableMismatch,
+					),
+				)
 			}
 		})
 	}
@@ -709,10 +746,14 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 			case refErr != nil:
 				report.fail("recoverable reference index", redactDoctorPathError(redactor, refErr.Error(), paths.DatabaseFile), "Fix the configured database path and retry.", false)
 			case health.DanglingRefs > 0 || health.DanglingOwners > 0:
-				report.fail("recoverable reference index", fmt.Sprintf(
-					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d dangling_refs=%d dangling_owners=%d",
-					health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners, health.DanglingRefs, health.DanglingOwners),
-					"Stop retention cleanup now. Restore a verified backup, or rebuild state through the repair path TRD 09 decides. Do not hand-edit recoverable_result_refs or its owner tables.", false)
+				report.fail(
+					"recoverable reference index",
+					fmt.Sprintf(
+						"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d dangling_refs=%d dangling_owners=%d",
+						health.TotalRefRows, health.DistinctRefs, health.EventOwners, health.CapsuleOwners, health.DanglingRefs, health.DanglingOwners),
+					"Stop retention cleanup now. Restore a verified backup, or rebuild state through the repair path TRD 09 decides. Do not hand-edit recoverable_result_refs or its owner tables.",
+					false,
+				)
 			default:
 				report.pass("recoverable reference index", fmt.Sprintf(
 					"total_ref_rows=%d distinct_refs=%d adk_event_owners=%d continuity_capsule_owners=%d",
@@ -741,7 +782,18 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 				if healthErr != nil {
 					report.fail("external-agent activations", redactor.String(healthErr.Error()), "Drain or investigate the activation outbox before starting the agent.", false)
 				} else if health.Stuck > 0 {
-					report.fail("external-agent activations", fmt.Sprintf("activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)", health.Stuck, health.Pending, health.Processed, health.CompletionUnknown), "Inspect the activation worker and let expired leases become reclaimable.", false)
+					report.fail(
+						"external-agent activations",
+						fmt.Sprintf(
+							"activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)",
+							health.Stuck,
+							health.Pending,
+							health.Processed,
+							health.CompletionUnknown,
+						),
+						"Inspect the activation worker and let expired leases become reclaimable.",
+						false,
+					)
 				} else {
 					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
 				}
@@ -761,13 +813,54 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 				identity, identityErr := identityChecker.CheckExternalAgentResultIdentityHealth(ctx, paths.DatabaseFile)
 				switch {
 				case identityErr != nil:
-					report.fail("external-agent result identity", redactor.String(identityErr.Error()), "Repair the configured database so every durable result carries a complete identity, or reset state after backup.", false)
+					report.fail(
+						"external-agent result identity",
+						redactor.String(identityErr.Error()),
+						"Repair the configured database so every durable result carries a complete identity, or reset state after backup.",
+						false,
+					)
 				case identity.ForegroundActivationsActive > 0:
-					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d non-terminal foreground activations (defect), %d notifications without identity, %d activations without content, %d activations without identity, %d retired foreground activations, %d current completed jobs without result identity", identity.ForegroundActivationsActive, identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity), "Stop the agent and restore the foreground-suppression build: foreground jobs must never produce claimable activations.", false)
+					report.fail(
+						"external-agent result identity",
+						fmt.Sprintf(
+							"identity health: %d non-terminal foreground activations (defect), %d notifications without identity, %d activations without content, %d activations without identity, %d retired foreground activations, %d current completed jobs without result identity",
+							identity.ForegroundActivationsActive,
+							identity.NotificationsWithoutIdentity,
+							identity.ActivationsWithoutContent,
+							identity.ActivationsWithoutIdentity,
+							identity.RetiredForegroundActivations,
+							identity.JobsCompletedWithoutResultIdentity,
+						),
+						"Stop the agent and restore the foreground-suppression build: foreground jobs must never produce claimable activations.",
+						false,
+					)
 				case identity.NotificationsWithoutIdentity > 0 || identity.ActivationsWithoutContent > 0 || identity.ActivationsWithoutIdentity > 0 || identity.JobsCompletedWithoutResultIdentity > 0:
-					report.fail("external-agent result identity", fmt.Sprintf("identity health: %d notifications without identity, %d activations without content, %d activations without identity, %d non-terminal foreground activations, %d retired foreground activations, %d current completed jobs without result identity, %d historical completed jobs without result identity, %d historical activations without content", identity.NotificationsWithoutIdentity, identity.ActivationsWithoutContent, identity.ActivationsWithoutIdentity, identity.ForegroundActivationsActive, identity.RetiredForegroundActivations, identity.JobsCompletedWithoutResultIdentity, identity.JobsCompletedWithoutResultIdentityLegacy, identity.ActivationsWithoutContentLegacy), "Do not start the agent until incomplete delivery identity is repaired; results must carry bytes and SHA-256 after transformation.", false)
+					report.fail(
+						"external-agent result identity",
+						fmt.Sprintf(
+							"identity health: %d notifications without identity, %d activations without content, %d activations without identity, %d non-terminal foreground activations, %d retired foreground activations, %d current completed jobs without result identity, %d historical completed jobs without result identity, %d historical activations without content",
+							identity.NotificationsWithoutIdentity,
+							identity.ActivationsWithoutContent,
+							identity.ActivationsWithoutIdentity,
+							identity.ForegroundActivationsActive,
+							identity.RetiredForegroundActivations,
+							identity.JobsCompletedWithoutResultIdentity,
+							identity.JobsCompletedWithoutResultIdentityLegacy,
+							identity.ActivationsWithoutContentLegacy,
+						),
+						"Do not start the agent until incomplete delivery identity is repaired; results must carry bytes and SHA-256 after transformation.",
+						false,
+					)
 				default:
-					report.pass("external-agent result identity", fmt.Sprintf("result identity is complete (informational: %d historical completed jobs without result identity, %d historical activations without content, %d retired foreground activations)", identity.JobsCompletedWithoutResultIdentityLegacy, identity.ActivationsWithoutContentLegacy, identity.RetiredForegroundActivations))
+					report.pass(
+						"external-agent result identity",
+						fmt.Sprintf(
+							"result identity is complete (informational: %d historical completed jobs without result identity, %d historical activations without content, %d retired foreground activations)",
+							identity.JobsCompletedWithoutResultIdentityLegacy,
+							identity.ActivationsWithoutContentLegacy,
+							identity.RetiredForegroundActivations,
+						),
+					)
 				}
 			}
 		})
@@ -775,7 +868,20 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 	return true
 }
 
-func (s *Service) checkSecrets(report *Report, cfg config.Config, defs *agentdef.Definitions, resolvedModel *agentdef.ResolvedModel, selectedModels []selectedModel, modelAPIKeyEnv string, rootCLIProvider bool, transcriptionProfile string, transcriptionResolved *agentdef.ResolvedModel, transcriptionResolveErr error, embeddingCfg config.KnowledgeEmbeddingConfig, embeddingEnabled bool) (map[string]string, secure.Redactor, map[string]bool, bool, bool) {
+func (s *Service) checkSecrets(
+	report *Report,
+	cfg config.Config,
+	defs *agentdef.Definitions,
+	resolvedModel *agentdef.ResolvedModel,
+	selectedModels []selectedModel,
+	modelAPIKeyEnv string,
+	rootCLIProvider bool,
+	transcriptionProfile string,
+	transcriptionResolved *agentdef.ResolvedModel,
+	transcriptionResolveErr error,
+	embeddingCfg config.KnowledgeEmbeddingConfig,
+	embeddingEnabled bool,
+) (map[string]string, secure.Redactor, map[string]bool, bool, bool) {
 	keys := []string{modelAPIKeyEnv, SlackBotTokenKey, SlackAppTokenKey}
 	if defs != nil {
 		keys = append(keys, defs.RequiredAPIKeyEnvs()...)
@@ -839,17 +945,30 @@ func (s *Service) checkSecrets(report *Report, cfg config.Config, defs *agentdef
 	if transcriptionProfile != "" {
 		switch {
 		case transcriptionResolveErr != nil:
-			report.fail("audio transcription profile", redactor.String(fmt.Sprintf("resolve %q: %v", transcriptionProfile, transcriptionResolveErr)), "Fix slack.files.transcription_profile and its openai_compatible provider definition.", false)
+			report.fail(
+				"audio transcription profile",
+				redactor.String(fmt.Sprintf("resolve %q: %v", transcriptionProfile, transcriptionResolveErr)),
+				"Fix slack.files.transcription_profile and its openai_compatible provider definition.",
+				false,
+			)
 		case cfg.Slack.Files.TranscriptionTimeoutSeconds <= 0:
 			report.fail("audio transcription profile", "transcription timeout must be greater than zero", "Set slack.files.transcription_timeout_seconds to a positive value.", false)
 		case transcriptionResolved.Type() != agentdef.ProviderTypeOpenAICompatible:
 			report.fail("audio transcription profile", "profile must resolve to an openai_compatible provider", "Select an openai_compatible profile in slack.files.transcription_profile.", false)
 		case !validSecrets[transcriptionResolved.APIKeyEnv]:
-			report.fail("audio transcription profile", fmt.Sprintf("profile %q requires %s, which is not set", transcriptionProfile, transcriptionResolved.APIKeyEnv), "Set the transcription provider API key in the process environment or .env.", false)
+			report.fail(
+				"audio transcription profile",
+				fmt.Sprintf("profile %q requires %s, which is not set", transcriptionProfile, transcriptionResolved.APIKeyEnv),
+				"Set the transcription provider API key in the process environment or .env.",
+				false,
+			)
 		default:
 			validSecrets[transcriptionResolved.APIKeyEnv] = true
 			audioTranscriptionReady = true
-			report.pass("audio transcription profile", fmt.Sprintf("profile %q resolved to %s/%s; dedicated multipart STT is configured", transcriptionProfile, transcriptionResolved.Provider.Name, transcriptionResolved.Model))
+			report.pass(
+				"audio transcription profile",
+				fmt.Sprintf("profile %q resolved to %s/%s; dedicated multipart STT is configured", transcriptionProfile, transcriptionResolved.Provider.Name, transcriptionResolved.Model),
+			)
 		}
 	}
 	return values, redactor, validSecrets, audioTranscriptionReady, true
@@ -866,7 +985,10 @@ func (s *Service) checkOfflineContext(report *Report, cfg config.Config, defs *a
 		}
 	}
 	if cfg.Context.RecoverableResults != nil {
-		report.pass("recoverable results", fmt.Sprintf("store configured: %d bytes max, %d retention days", cfg.Context.RecoverableResults.MaxResultBytes, cfg.Context.RecoverableResults.RetentionDays))
+		report.pass(
+			"recoverable results",
+			fmt.Sprintf("store configured: %d bytes max, %d retention days", cfg.Context.RecoverableResults.MaxResultBytes, cfg.Context.RecoverableResults.RetentionDays),
+		)
 	}
 	if cfg.Context.ModelBudget != nil && resolvedModel != nil && resolvedModel.Type() == agentdef.ProviderTypeOpenAICompatible {
 		if capabilityProblems := agentdef.ValidateProfileCapability(resolvedModel); len(capabilityProblems) > 0 {
@@ -883,12 +1005,24 @@ func (s *Service) checkOfflineContext(report *Report, cfg config.Config, defs *a
 			if counterCheck == "" {
 				report.fail("token counter", "no token_counter configured for root openai_compatible model", "Add token_counter.strategy (e.g. byte_bound) to the root profile YAML.", false)
 			} else {
-				s.checkTokenCounter(report, redactor, "token counter", counterCheck, resolvedModel.CounterID, "Use a strategy and id implemented by this release, or roll back to a binary that implements the configured combination. There is no silent fallback.")
+				s.checkTokenCounter(
+					report,
+					redactor,
+					"token counter",
+					counterCheck,
+					resolvedModel.CounterID,
+					"Use a strategy and id implemented by this release, or roll back to a binary that implements the configured combination. There is no silent fallback.",
+				)
 			}
 			if attachment, exists := defs.Agents["attachment_analyzer"]; exists {
 				if attachmentResolved, resolveErr := defs.ResolveModel(attachment.Model); resolveErr == nil {
 					if problems := agentdef.ValidateAttachmentModelCapability(attachmentResolved); len(problems) > 0 {
-						report.fail("attachment_analyzer capability", strings.Join(problems, "; "), "Configure the attachment_analyzer profile with token_counter.strategy: estimator and id: "+agentdef.VisualEstimatorID+" before rollout.", false)
+						report.fail(
+							"attachment_analyzer capability",
+							strings.Join(problems, "; "),
+							"Configure the attachment_analyzer profile with token_counter.strategy: estimator and id: "+agentdef.VisualEstimatorID+" before rollout.",
+							false,
+						)
 					} else {
 						report.pass("attachment_analyzer capability", fmt.Sprintf("visual estimator %s is configured and media-capable", agentdef.VisualEstimatorID))
 					}
@@ -905,7 +1039,14 @@ func (s *Service) checkOfflineContext(report *Report, cfg config.Config, defs *a
 				continue
 			}
 			agentName := "token counter (" + selected.agent + ")"
-			s.checkTokenCounter(report, redactor, agentName, selected.resolved.CounterStrategy, selected.resolved.CounterID, "Use a strategy and id implemented by this release; there is no silent fallback.")
+			s.checkTokenCounter(
+				report,
+				redactor,
+				agentName,
+				selected.resolved.CounterStrategy,
+				selected.resolved.CounterID,
+				"Use a strategy and id implemented by this release; there is no silent fallback.",
+			)
 		}
 	}
 	if cfg.CodeIntelligence != nil && cfg.CodeIntelligence.Enabled {

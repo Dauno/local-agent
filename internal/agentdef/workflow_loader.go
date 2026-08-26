@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"slices"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -126,7 +127,7 @@ func loadWorkflowDocument(path string, canonicalRoot string, documents map[strin
 		return nil, fmt.Errorf("file %q escapes workflow directory", path)
 	}
 	if cycleStart, exists := active[canonical]; exists {
-		chain := append(append([]string{}, stack[cycleStart:]...), canonical)
+		chain := slices.Concat(stack[cycleStart:], []string{canonical})
 		for index := range chain {
 			if relative, relErr := filepath.Rel(canonicalRoot, chain[index]); relErr == nil {
 				chain[index] = filepath.ToSlash(relative)

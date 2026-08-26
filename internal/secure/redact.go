@@ -2,8 +2,9 @@
 package secure
 
 import (
+	"cmp"
 	"regexp"
-	"sort"
+	"slices"
 	"strings"
 	"unicode/utf8"
 )
@@ -64,8 +65,8 @@ func NewRedactor(secrets ...string) Redactor {
 	for secret := range unique {
 		ordered = append(ordered, secret)
 	}
-	sort.Slice(ordered, func(i, j int) bool {
-		return len(ordered[i]) > len(ordered[j])
+	slices.SortFunc(ordered, func(a, b string) int {
+		return cmp.Compare(len(b), len(a))
 	})
 
 	return Redactor{secrets: ordered}

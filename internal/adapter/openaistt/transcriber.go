@@ -143,7 +143,10 @@ func classifyError(ctx context.Context, err error) error {
 	if strings.Contains(message, "error reading response body") {
 		return &Error{Category: "transport"}
 	}
-	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) || strings.Contains(message, "parse response json") || strings.Contains(message, "expected destination type") || strings.Contains(message, "unexpected end") || strings.Contains(message, "unexpected eof") || strings.Contains(message, "invalid character") {
+	if errors.As(err, &syntaxErr) || errors.As(err, &typeErr) || strings.Contains(message, "parse response json") || strings.Contains(message, "expected destination type") ||
+		strings.Contains(message, "unexpected end") ||
+		strings.Contains(message, "unexpected eof") ||
+		strings.Contains(message, "invalid character") {
 		return &Error{Category: "protocol"}
 	}
 	return &Error{Category: "transport"}

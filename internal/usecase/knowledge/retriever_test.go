@@ -34,7 +34,14 @@ func (f *retrievalFakeReader) key(kind domain.KnowledgeRetrievalItemKind, id str
 	return string(kind) + "\x00" + id
 }
 
-func (f *retrievalFakeReader) ReadExact(ctx context.Context, _ domain.KnowledgeWriteBinding, _ time.Time, _ domain.KnowledgeRetrievalLimits, _ string, _ []string) ([]port.KnowledgeEligibleCandidate, error) {
+func (f *retrievalFakeReader) ReadExact(
+	ctx context.Context,
+	_ domain.KnowledgeWriteBinding,
+	_ time.Time,
+	_ domain.KnowledgeRetrievalLimits,
+	_ string,
+	_ []string,
+) ([]port.KnowledgeEligibleCandidate, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads++
@@ -45,11 +52,24 @@ func (f *retrievalFakeReader) ReadExact(ctx context.Context, _ domain.KnowledgeW
 	return append([]port.KnowledgeEligibleCandidate(nil), f.exact...), f.exactErr
 }
 
-func (f *retrievalFakeReader) ReadRelated(_ context.Context, _ domain.KnowledgeWriteBinding, _ time.Time, _ domain.KnowledgeRetrievalLimits, _ []port.KnowledgeEligibleCandidate) ([]port.KnowledgeEligibleCandidate, error) {
+func (f *retrievalFakeReader) ReadRelated(
+	_ context.Context,
+	_ domain.KnowledgeWriteBinding,
+	_ time.Time,
+	_ domain.KnowledgeRetrievalLimits,
+	_ []port.KnowledgeEligibleCandidate,
+) ([]port.KnowledgeEligibleCandidate, error) {
 	return append([]port.KnowledgeEligibleCandidate(nil), f.related...), f.relatedErr
 }
 
-func (f *retrievalFakeReader) ReadItem(_ context.Context, _ domain.KnowledgeWriteBinding, _ time.Time, _ domain.KnowledgeRetrievalLimits, kind domain.KnowledgeRetrievalItemKind, id string) (port.KnowledgeAuthoritativeItem, error) {
+func (f *retrievalFakeReader) ReadItem(
+	_ context.Context,
+	_ domain.KnowledgeWriteBinding,
+	_ time.Time,
+	_ domain.KnowledgeRetrievalLimits,
+	kind domain.KnowledgeRetrievalItemKind,
+	id string,
+) (port.KnowledgeAuthoritativeItem, error) {
 	if err := f.itemErr[f.key(kind, id)]; err != nil {
 		return port.KnowledgeAuthoritativeItem{}, err
 	}
@@ -268,7 +288,9 @@ func TestRetrieverEmptyQueryTouchesNothing(t *testing.T) {
 func TestRetrieverOptionalChannelFailuresPreserveSafeChannels(t *testing.T) {
 	limits := domain.DefaultKnowledgeRetrievalLimits()
 	reader := newRetrievalFakeReader()
-	reader.exact = []port.KnowledgeEligibleCandidate{{Kind: domain.KnowledgeRetrievalClaim, ID: "kclaim_000000000000000000000005", Subject: "safe subject", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "my-project", Revision: 1}}
+	reader.exact = []port.KnowledgeEligibleCandidate{
+		{Kind: domain.KnowledgeRetrievalClaim, ID: "kclaim_000000000000000000000005", Subject: "safe subject", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "my-project", Revision: 1},
+	}
 	reader.items[reader.key(domain.KnowledgeRetrievalClaim, "kclaim_000000000000000000000005")] = retrievalTestProjectClaim("kclaim_000000000000000000000005", "safe subject", "value")
 	reader.relatedErr = errors.New("relation exploded")
 	index := &retrievalFakeIndex{err: errors.New("fts exploded")}
@@ -306,7 +328,16 @@ func TestRetrieverStaleLexicalHitsExcludedAndReenqueued(t *testing.T) {
 	text, _ := BuildKnowledgeIndexText(domain.KnowledgeRetrievalClaim, retrievalTestProjectClaim("kclaim_000000000000000000000007", "fresh subject", "value"), "", nil)
 	index.hits[1].SourceDigest = text.SourceDigest
 	// A hit whose authoritative row vanished is stale too.
-	index.hits = append(index.hits, port.KnowledgeIndexHit{Kind: domain.KnowledgeRetrievalClaim, ID: "kclaim_000000000000000000000008", Rank: 3, Revision: 1, SourceDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"})
+	index.hits = append(
+		index.hits,
+		port.KnowledgeIndexHit{
+			Kind:         domain.KnowledgeRetrievalClaim,
+			ID:           "kclaim_000000000000000000000008",
+			Rank:         3,
+			Revision:     1,
+			SourceDigest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+		},
+	)
 
 	resolver := &retrievalFakeResolver{content: map[string]string{}, err: map[string]error{}}
 	queue := &retrievalFakeQueue{}
@@ -745,8 +776,10 @@ func TestRetrieverStaleLexicalHitOnExactIdentityRepairEnqueues(t *testing.T) {
 		{Kind: domain.KnowledgeRetrievalClaim, ID: identity, Subject: "shared subject", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "my-project", Revision: 1},
 	}
 	index := &retrievalFakeIndex{hits: []port.KnowledgeIndexHit{
-		{Kind: domain.KnowledgeRetrievalClaim, ID: identity, Rank: 1, Revision: 1,
-			SourceDigest: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef"},
+		{
+			Kind: domain.KnowledgeRetrievalClaim, ID: identity, Rank: 1, Revision: 1,
+			SourceDigest: "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+		},
 	}}
 	reader.items[reader.key(domain.KnowledgeRetrievalClaim, identity)] = retrievalTestProjectClaim(identity, "shared subject", "value")
 
@@ -784,12 +817,15 @@ type retrievalMetricCapture struct {
 func (m *retrievalMetricCapture) AddCounter(name string, delta int64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: labels})
 }
+
 func (m *retrievalMetricCapture) SetGauge(name string, value int64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: labels})
 }
+
 func (m *retrievalMetricCapture) Observe(name string, value float64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: labels})
 }
+
 func (m *retrievalMetricCapture) Snapshot() []port.MetricSample {
 	return append([]port.MetricSample(nil), m.samples...)
 }
@@ -887,24 +923,41 @@ func TestRetrieverEmitsChannelFailureAndStaleMetrics(t *testing.T) {
 	}}
 	reader.items[reader.key(domain.KnowledgeRetrievalClaim, identity)] = retrievalTestProjectClaim(identity, "shared subject", "value")
 	metrics := &retrievalMetricCapture{}
-	retriever, err := NewRetriever(RetrieverDependencies{Reader: reader, Index: index, Resolver: &retrievalFakeResolver{}, Queue: &retrievalFakeQueue{}, Clock: retrievalTestClock{now: time.Now()}, Metrics: metrics})
+	retriever, err := NewRetriever(
+		RetrieverDependencies{Reader: reader, Index: index, Resolver: &retrievalFakeResolver{}, Queue: &retrievalFakeQueue{}, Clock: retrievalTestClock{now: time.Now()}, Metrics: metrics},
+	)
 	if err != nil {
 		t.Fatalf("NewRetriever() error = %v", err)
 	}
 	if _, err := retriever.Retrieve(t.Context(), retrievalTestRequest("shared subject", nil, limits)); err != nil {
 		t.Fatalf("Retrieve() error = %v", err)
 	}
-	if _, ok := metrics.findWithLabels(domain.MetricKnowledgeRetrievalChannelFailure, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelRelation), domain.MetricLabelReason: string(domain.KnowledgeRetrievalRelationUnavailable)}); !ok {
+	if _, ok := metrics.findWithLabels(
+		domain.MetricKnowledgeRetrievalChannelFailure,
+		port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelRelation), domain.MetricLabelReason: string(domain.KnowledgeRetrievalRelationUnavailable)},
+	); !ok {
 		t.Fatal("relation channel failure metric was not emitted with the compatible channel/reason pair")
 	}
-	if _, ok := metrics.findWithLabels(domain.MetricKnowledgeRetrievalStaleIndex, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelLexical), domain.MetricLabelReason: string(domain.KnowledgeRetrievalReasonLabelStaleIndex)}); !ok {
+	if _, ok := metrics.findWithLabels(
+		domain.MetricKnowledgeRetrievalStaleIndex,
+		port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelLexical), domain.MetricLabelReason: string(domain.KnowledgeRetrievalReasonLabelStaleIndex)},
+	); !ok {
 		t.Fatal("stale index metric was not emitted with the lexical channel and stale_index reason")
 	}
 }
 
 func TestRetrieverEmitsValidationRejectedOutcome(t *testing.T) {
 	metrics := &retrievalMetricCapture{}
-	retriever, err := NewRetriever(RetrieverDependencies{Reader: newRetrievalFakeReader(), Index: &retrievalFakeIndex{}, Resolver: &retrievalFakeResolver{}, Queue: &retrievalFakeQueue{}, Clock: retrievalTestClock{now: time.Now()}, Metrics: metrics})
+	retriever, err := NewRetriever(
+		RetrieverDependencies{
+			Reader:   newRetrievalFakeReader(),
+			Index:    &retrievalFakeIndex{},
+			Resolver: &retrievalFakeResolver{},
+			Queue:    &retrievalFakeQueue{},
+			Clock:    retrievalTestClock{now: time.Now()},
+			Metrics:  metrics,
+		},
+	)
 	if err != nil {
 		t.Fatalf("NewRetriever() error = %v", err)
 	}
@@ -929,7 +982,9 @@ func TestRetrieverLateSuccessAfterDeadlineFailsClosed(t *testing.T) {
 		{Kind: domain.KnowledgeRetrievalClaim, ID: identity, Subject: "shared subject", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "my-project", Revision: 1},
 	}
 	reader.items[reader.key(domain.KnowledgeRetrievalClaim, identity)] = retrievalTestProjectClaim(identity, "shared subject", "value")
-	retriever, err := NewRetriever(RetrieverDependencies{Reader: reader, Index: &retrievalFakeIndex{}, Resolver: &retrievalFakeResolver{}, Queue: &retrievalFakeQueue{}, Clock: retrievalTestClock{now: time.Now()}})
+	retriever, err := NewRetriever(
+		RetrieverDependencies{Reader: reader, Index: &retrievalFakeIndex{}, Resolver: &retrievalFakeResolver{}, Queue: &retrievalFakeQueue{}, Clock: retrievalTestClock{now: time.Now()}},
+	)
 	if err != nil {
 		t.Fatalf("NewRetriever() error = %v", err)
 	}

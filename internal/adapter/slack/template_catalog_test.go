@@ -39,7 +39,9 @@ func TestTemplateCatalogRejectsInvalidDocuments(t *testing.T) {
 		{
 			name: "duplicate keys",
 			edit: func(files map[string][]byte) {
-				files["templates/builder_modal.json"] = []byte(strings.Replace(string(files["templates/builder_modal.json"]), `"name": "builder_modal",`, `"name": "builder_modal", "name": "builder_modal",`, 1))
+				files["templates/builder_modal.json"] = []byte(
+					strings.Replace(string(files["templates/builder_modal.json"]), `"name": "builder_modal",`, `"name": "builder_modal", "name": "builder_modal",`, 1),
+				)
 			},
 		},
 		{

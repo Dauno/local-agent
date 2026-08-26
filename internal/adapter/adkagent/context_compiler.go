@@ -94,14 +94,16 @@ func CompilerBeforeModelCallback(cfg CompilerCallbackConfig) llmagent.BeforeMode
 			}
 		}
 		openInvocationIDs := visibleOpenInvocationIDs(contents)
-		compileRequest := domain.CompileRequest{Contents: contents, Continuity: capsule,
+		compileRequest := domain.CompileRequest{
+			Contents: contents, Continuity: capsule,
 			ExistingSummary: summary, Compaction: cfg.Compaction, ModelBudget: cfg.Budget, FixedRequestTokens: fixed, Actor: cfg.Actor,
 			ConversationKey:        conversationKeyFromSession(ctx),
 			OpenInvocationIDs:      openInvocationIDs,
 			Knowledge:              cloneKnowledgeCards(cfg.Knowledge),
 			KnowledgeBudgetTokens:  cfg.KnowledgeBudgetTokens,
 			Workstream:             cfg.Workstream,
-			WorkstreamBudgetTokens: cfg.WorkstreamBudgetTokens}
+			WorkstreamBudgetTokens: cfg.WorkstreamBudgetTokens,
+		}
 		var result domain.CompileResult
 		if exactCompiler, ok := compiler.(port.ContextFrameCompiler); ok {
 			if counter, supported := requestModel.(llmRequestCounter); supported {

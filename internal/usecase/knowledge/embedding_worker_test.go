@@ -1,10 +1,11 @@
 package knowledge
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"math"
-	"sort"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -72,7 +73,7 @@ func (f *workerFakeVectorIndex) ListVector(_ context.Context, kind domain.Knowle
 			sorted = append(sorted, row)
 		}
 	}
-	sort.Slice(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
+	slices.SortFunc(sorted, func(a, b port.KnowledgeVectorIndexRow) int { return cmp.Compare(a.ID, b.ID) })
 	if len(sorted) > limit {
 		sorted = sorted[:limit]
 	}
@@ -107,7 +108,14 @@ func embeddingWorkerFingerprint() string {
 	return domain.ModelFingerprint("acme", "m-3", 3)
 }
 
-func embeddingWorkerTestDependencies(queue port.KnowledgeQueueStore, source *workerFakeSource, index *workerFakeVectorIndex, lister *workerFakeLister, resolver *workerFakeResolver, provider port.EmbeddingProvider) EmbeddingWorkerDependencies {
+func embeddingWorkerTestDependencies(
+	queue port.KnowledgeQueueStore,
+	source *workerFakeSource,
+	index *workerFakeVectorIndex,
+	lister *workerFakeLister,
+	resolver *workerFakeResolver,
+	provider port.EmbeddingProvider,
+) EmbeddingWorkerDependencies {
 	return EmbeddingWorkerDependencies{
 		Queue: queue, Source: source, Index: index, Provider: provider,
 		Resolver: resolver, Lister: lister,
@@ -122,7 +130,15 @@ func embeddingWorkerTestDependencies(queue port.KnowledgeQueueStore, source *wor
 	}
 }
 
-func newEmbeddingWorker(t *testing.T, queue *workerFakeQueue, source *workerFakeSource, index *workerFakeVectorIndex, lister *workerFakeLister, resolver *workerFakeResolver, provider port.EmbeddingProvider) *EmbeddingWorker {
+func newEmbeddingWorker(
+	t *testing.T,
+	queue *workerFakeQueue,
+	source *workerFakeSource,
+	index *workerFakeVectorIndex,
+	lister *workerFakeLister,
+	resolver *workerFakeResolver,
+	provider port.EmbeddingProvider,
+) *EmbeddingWorker {
 	t.Helper()
 	worker, err := NewEmbeddingWorker(embeddingWorkerTestConfig(), embeddingWorkerTestDependencies(queue, source, index, lister, resolver, provider))
 	if err != nil {
@@ -367,7 +383,9 @@ func TestEmbeddingWorkerUnverifiableDocumentFailsSourceInvalid(t *testing.T) {
 			Provenance: domain.KnowledgeProvenanceCurated, Status: domain.KnowledgeDocumentActive, Revision: 1,
 		},
 	}
-	index := newWorkerFakeVectorIndex([]port.KnowledgeVectorIndexRow{{Kind: domain.KnowledgeRetrievalDocument, ID: "kdoc_bad_e", Revision: 1, SourceDigest: validDigest, Fingerprint: embeddingWorkerFingerprint()}})
+	index := newWorkerFakeVectorIndex(
+		[]port.KnowledgeVectorIndexRow{{Kind: domain.KnowledgeRetrievalDocument, ID: "kdoc_bad_e", Revision: 1, SourceDigest: validDigest, Fingerprint: embeddingWorkerFingerprint()}},
+	)
 	resolver := &workerFakeResolver{content: map[string]string{}, err: map[string]error{"kdoc_bad_e": port.ErrKnowledgeUnavailable}}
 	lister := &workerFakeLister{identities: map[domain.KnowledgeRetrievalItemKind][]port.KnowledgeTruthIdentity{}}
 	provider := testutil.NewFakeEmbeddingProvider(3)
@@ -507,7 +525,14 @@ func TestEmbeddingWorkerRunCancellationIsAwaitable(t *testing.T) {
 }
 
 func TestEmbeddingWorkerRejectsInvalidConfiguration(t *testing.T) {
-	deps := embeddingWorkerTestDependencies(newWorkerFakeQueue(nil), newWorkerFakeSource(), newWorkerFakeVectorIndex(nil), &workerFakeLister{}, &workerFakeResolver{}, testutil.NewFakeEmbeddingProvider(3))
+	deps := embeddingWorkerTestDependencies(
+		newWorkerFakeQueue(nil),
+		newWorkerFakeSource(),
+		newWorkerFakeVectorIndex(nil),
+		&workerFakeLister{},
+		&workerFakeResolver{},
+		testutil.NewFakeEmbeddingProvider(3),
+	)
 	cfg := embeddingWorkerTestConfig()
 	cfg.Interval = 0
 	if _, err := NewEmbeddingWorker(cfg, deps); err == nil {
@@ -597,7 +622,14 @@ func TestEmbeddingWorkerObservesEmbeddingRequestDurationOutcomes(t *testing.T) {
 	failureSource := newWorkerFakeSource()
 	failureSource.items[string(domain.KnowledgeRetrievalClaim)+"\x00kclaim_metric_err"] = workerTestProjectClaim("kclaim_metric_err", "subject", "value", domain.KnowledgeClaimAsserted, 1)
 	failureMetrics := &retrievalMetricCapture{}
-	failureDeps := embeddingWorkerTestDependencies(failureQueue, failureSource, newWorkerFakeVectorIndex(nil), &workerFakeLister{}, &workerFakeResolver{}, testutil.NewFakeEmbeddingProvider(3).SetErr(errors.New("provider down")))
+	failureDeps := embeddingWorkerTestDependencies(
+		failureQueue,
+		failureSource,
+		newWorkerFakeVectorIndex(nil),
+		&workerFakeLister{},
+		&workerFakeResolver{},
+		testutil.NewFakeEmbeddingProvider(3).SetErr(errors.New("provider down")),
+	)
 	failureDeps.Metrics = failureMetrics
 	failingWorker, err := NewEmbeddingWorker(embeddingWorkerTestConfig(), failureDeps)
 	if err != nil {

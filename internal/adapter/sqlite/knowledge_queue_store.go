@@ -12,8 +12,10 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var _ port.KnowledgeQueueStore = (*KnowledgeLexicalQueueStore)(nil)
-var _ port.KnowledgeQueueStore = (*KnowledgeEmbeddingQueueStore)(nil)
+var (
+	_ port.KnowledgeQueueStore = (*KnowledgeLexicalQueueStore)(nil)
+	_ port.KnowledgeQueueStore = (*KnowledgeEmbeddingQueueStore)(nil)
+)
 
 // KnowledgeLexicalQueueStore is the generation-CAS queue surface fixed over
 // the lexical queue. Claims receive the bounded injected clock and lease;

@@ -199,7 +199,7 @@ type ExternalAgentJobActivation struct {
 }
 
 func ExternalAgentJobActivationID(jobID string, statusRevision int, kind string) string {
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%s\x00%d\x00%s", jobID, statusRevision, kind)))
+	digest := sha256.Sum256(fmt.Appendf(nil, "%s\x00%d\x00%s", jobID, statusRevision, kind))
 	return "activation_" + hex.EncodeToString(digest[:])
 }
 
@@ -861,7 +861,7 @@ type ExternalAgentJobRequest struct {
 	WorkstreamID         string               `json:"workstream_id,omitempty"`
 	TaskID               string               `json:"task_id,omitempty"`
 	ExecutionIdentity    string               `json:"execution_identity,omitempty"`
-	AdmissionRevision    int                  `json:"admission_revision,omitempty"`
+	AdmissionRevision    int                  `json:"admission_revision,omitzero"`
 }
 
 // ExternalAgentJobCompletionBinding is the trusted workstream execution

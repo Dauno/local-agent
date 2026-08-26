@@ -71,18 +71,30 @@ func TestDefaultMatchesPRD(t *testing.T) {
 				TranscriptionTimeoutSeconds: 120,
 			},
 		},
-		Sandbox:          config.SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
-		Canvases:         config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
-		Exports:          config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
-		ExternalAgent:    config.ExternalAgentConfig{MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 16 * 1024 * 1024, DefaultJobTimeoutSeconds: 7200, MaxJobTimeoutSeconds: 86400, ReconciliationTimeoutSeconds: 1800, ProgressWarningSeconds: 900, WorkerConcurrency: 1, ArtifactRetentionDays: 30, Delivery: config.ExternalAgentDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024}},
+		Sandbox:  config.SandboxConfig{Enabled: true, Projects: map[string]string{"workspace": "."}, CommandTimeoutSeconds: 30, MaxOutputBytes: 65536},
+		Canvases: config.CanvasesConfig{MaxTitleChars: 150, MaxContentChars: 50000, MaxContentBytes: 5 * 1024 * 1024, TimeoutSeconds: 30},
+		Exports:  config.ExportsConfig{MaxFilenameChars: 128, MaxContentBytes: 1024 * 1024, TimeoutSeconds: 30},
+		ExternalAgent: config.ExternalAgentConfig{
+			MaxInlineResultBytes:         64 * 1024,
+			MaxResultArtifactBytes:       16 * 1024 * 1024,
+			DefaultJobTimeoutSeconds:     7200,
+			MaxJobTimeoutSeconds:         86400,
+			ReconciliationTimeoutSeconds: 1800,
+			ProgressWarningSeconds:       900,
+			WorkerConcurrency:            1,
+			ArtifactRetentionDays:        30,
+			Delivery:                     config.ExternalAgentDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
+		},
 		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
 		Orchestration: config.OrchestrationConfig{
 			Workstreams: config.WorkstreamConfig{Enabled: false, MaxNonTerminalTasks: 32, MaxDependenciesPerTask: 8, SnapshotBudgetTokens: domain.DefaultWorkstreamSnapshotBudgetTokens},
-			ResultHandles: config.ResultHandlesConfig{Enabled: false, MaxProducingCallsPerStep: 1, ProducingCallReserveTokens: 2_048,
+			ResultHandles: config.ResultHandlesConfig{
+				Enabled: false, MaxProducingCallsPerStep: 1, ProducingCallReserveTokens: 2_048,
 				Retention: config.ResultRetentionConfig{
 					ContextDays: domain.DefaultResultRetentionContextDays, ConversationDays: domain.DefaultResultRetentionConversationDays,
 					WorkstreamDays: domain.DefaultResultRetentionWorkstreamDays, ExportedDays: domain.DefaultResultRetentionExportedDays,
-				}},
+				},
+			},
 			Knowledge: config.KnowledgeConfig{
 				Enabled:                   false,
 				ProjectionIntervalSeconds: 60,
@@ -140,7 +152,10 @@ func TestDefaultMatchesPRD(t *testing.T) {
 func TestADKCompactionDefaultsAndProductionValidation(t *testing.T) {
 	t.Parallel()
 	cfg := config.Default()
-	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.RecentTurns != 8 || !cfg.Context.ADKCompaction.SummaryEnabled || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 || cfg.Context.ADKCompaction.SummaryBudgetTokens != 2048 {
+	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.RecentTurns != 8 ||
+		!cfg.Context.ADKCompaction.SummaryEnabled ||
+		cfg.Context.ADKCompaction.SummaryMaxChars != 8000 ||
+		cfg.Context.ADKCompaction.SummaryBudgetTokens != 2048 {
 		t.Fatalf("unexpected ADK compaction defaults: %#v", cfg.Context.ADKCompaction)
 	}
 	cfg.Context.ADKCompaction.Enabled = false
@@ -399,7 +414,8 @@ func TestParseAppliesOnlyMissingDefaults(t *testing.T) {
 	if cfg.Slack.AllowedUserIDs == nil || len(cfg.Slack.AllowedUserIDs) != 0 {
 		t.Fatalf("allowed_user_ids should normalize to an empty slice: %#v", cfg.Slack.AllowedUserIDs)
 	}
-	if cfg.Slack.Files.MaxBytesPerFile != 1048576 || cfg.Slack.Files.MaxProcessedChars != 4096 || cfg.Slack.Files.TranscriptionProfile != "openai/stt" || cfg.Slack.Files.TranscriptionTimeoutSeconds != 45 {
+	if cfg.Slack.Files.MaxBytesPerFile != 1048576 || cfg.Slack.Files.MaxProcessedChars != 4096 || cfg.Slack.Files.TranscriptionProfile != "openai/stt" ||
+		cfg.Slack.Files.TranscriptionTimeoutSeconds != 45 {
 		t.Fatalf("slack.files overrides not decoded: %#v", cfg.Slack.Files)
 	}
 }
@@ -446,7 +462,8 @@ func TestParseLegacyYAMLReceivesADKCompactionDefaults(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 || cfg.Context.ADKCompaction.SummaryBudgetTokens != 2048 {
+	if cfg.Context.ADKCompaction == nil || !cfg.Context.ADKCompaction.Enabled || cfg.Context.ADKCompaction.MaxHistoryChars != 120000 || cfg.Context.ADKCompaction.SummaryMaxChars != 8000 ||
+		cfg.Context.ADKCompaction.SummaryBudgetTokens != 2048 {
 		t.Fatalf("legacy compaction defaults = %#v", cfg.Context.ADKCompaction)
 	}
 }
@@ -719,7 +736,8 @@ func TestValidateWorkstreamLimitsAndParseGate(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !parsed.Orchestration.Workstreams.Enabled || parsed.Orchestration.Workstreams.MaxNonTerminalTasks != 12 || parsed.Orchestration.Workstreams.MaxDependenciesPerTask != 4 || !parsed.Orchestration.ResultHandles.Enabled {
+	if !parsed.Orchestration.Workstreams.Enabled || parsed.Orchestration.Workstreams.MaxNonTerminalTasks != 12 || parsed.Orchestration.Workstreams.MaxDependenciesPerTask != 4 ||
+		!parsed.Orchestration.ResultHandles.Enabled {
 		t.Fatalf("parsed orchestration config = %+v", parsed.Orchestration)
 	}
 	if parsed.Orchestration.ResultHandles.MaxProducingCallsPerStep != 1 || parsed.Orchestration.ResultHandles.ProducingCallReserveTokens != 2_048 {

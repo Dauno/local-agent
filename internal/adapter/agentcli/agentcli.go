@@ -3,6 +3,7 @@
 package agentcli
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -10,7 +11,7 @@ import (
 	"iter"
 	"os/exec"
 	"reflect"
-	"sort"
+	"slices"
 	"strings"
 	"time"
 
@@ -123,7 +124,7 @@ func New(cfg Config) (*LLM, error) {
 	}
 	workspace := cfg.Workspace
 	workspace.Projects = append([]domain.Project(nil), workspace.Projects...)
-	sort.Slice(workspace.Projects, func(i, j int) bool { return workspace.Projects[i].Name < workspace.Projects[j].Name })
+	slices.SortFunc(workspace.Projects, func(a, b domain.Project) int { return cmp.Compare(a.Name, b.Name) })
 	return &LLM{
 		command: cfg.Command, provider: cfg.Provider, profile: cfg.Profile, workspace: workspace,
 		contextLimits: cfg.ContextLimits, workingDir: cfg.WorkingDir,
@@ -140,6 +141,7 @@ func valueOrDefault(value, fallback int) int {
 	}
 	return fallback
 }
+
 func (l *LLM) Name() string {
 	if l == nil {
 		return ""
@@ -371,7 +373,14 @@ func textOnly(content *genai.Content) (string, error) {
 	}
 	var text strings.Builder
 	for _, part := range content.Parts {
-		if part == nil || part.FunctionCall != nil || part.FunctionResponse != nil || part.ToolCall != nil || part.ToolResponse != nil || part.InlineData != nil || part.FileData != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+		if part == nil || part.FunctionCall != nil || part.FunctionResponse != nil || part.ToolCall != nil || part.ToolResponse != nil || part.InlineData != nil || part.FileData != nil ||
+			part.CodeExecutionResult != nil ||
+			part.ExecutableCode != nil ||
+			part.VideoMetadata != nil ||
+			part.MediaResolution != nil ||
+			part.Thought ||
+			len(part.ThoughtSignature) > 0 ||
+			len(part.PartMetadata) > 0 {
 			return "", ErrUnsupportedPart
 		}
 		text.WriteString(part.Text)

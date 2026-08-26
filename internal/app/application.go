@@ -296,7 +296,11 @@ func (a *Application) Manifest(ctx context.Context, write bool) (string, string,
 		}
 	}
 	rendered, err := manifest.Render(manifest.Identity{
-		AppName: cfg.Slack.AppName, BotDisplayName: cfg.Slack.BotDisplayName, CanvasesEnabled: cfg.Canvases.Enabled, ExportsEnabled: cfg.Exports.Enabled, DurableExternalAgentEnabled: durableExternalAgent,
+		AppName:                     cfg.Slack.AppName,
+		BotDisplayName:              cfg.Slack.BotDisplayName,
+		CanvasesEnabled:             cfg.Canvases.Enabled,
+		ExportsEnabled:              cfg.Exports.Enabled,
+		DurableExternalAgentEnabled: durableExternalAgent,
 	})
 	if err != nil {
 		return "", "", err

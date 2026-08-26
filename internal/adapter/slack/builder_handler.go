@@ -216,7 +216,13 @@ func (h *BuilderSubmissionHandler) HandleInstallRequest(ctx context.Context, cal
 
 	message := fmt.Sprintf(
 		"Se ha solicitado la instalacion del agente `%s` (draft `%s`). Para completar la instalacion, escribe: usa `install_agent_def` con `draft_id` `%s`, `name` `%s` y `definition_hash` `%s`.",
-		neutralizeUnsafeControls(draft.Name), neutralizeUnsafeControls(draftID), neutralizeUnsafeControls(draftID), neutralizeUnsafeControls(draft.Name), neutralizeUnsafeControls(draft.DefinitionHash),
+		neutralizeUnsafeControls(
+			draft.Name,
+		),
+		neutralizeUnsafeControls(draftID),
+		neutralizeUnsafeControls(draftID),
+		neutralizeUnsafeControls(draft.Name),
+		neutralizeUnsafeControls(draft.DefinitionHash),
 	)
 	if _, err := h.publisher.Publish(ctx, target, message); err != nil {
 		return fmt.Errorf("publish agent install request: %w", err)
@@ -426,8 +432,16 @@ func builderPreviewMarkdown(draft domain.AgentDraft, definition port.AgentDefPre
 	if definition.TimeoutSec > 0 {
 		timeout = strconv.Itoa(definition.TimeoutSec) + " segundos"
 	}
-	return fmt.Sprintf("*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\n```yaml\n%s\n```\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
-		neutralizeUnsafeControls(draft.Name), definition.AgentClass, neutralizeUnsafeControls(profile), definition.ExecutionMode, timeout, neutralizeUnsafeControls(yaml), sha256)
+	return fmt.Sprintf(
+		"*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\n```yaml\n%s\n```\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
+		neutralizeUnsafeControls(draft.Name),
+		definition.AgentClass,
+		neutralizeUnsafeControls(profile),
+		definition.ExecutionMode,
+		timeout,
+		neutralizeUnsafeControls(yaml),
+		sha256,
+	)
 }
 
 func (c sdkPostClient) PostBlocks(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
@@ -488,7 +502,13 @@ func compileMessageWithParts(renderer *TemplateRenderer, templateName string, va
 }
 
 func builderPreviewTemplateValues(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) map[string]string {
-	metadata := fmt.Sprintf("*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`", definition.AgentClass, neutralizeUnsafeControls(draft.ProviderProfile), definition.ExecutionMode, previewTimeout(definition.TimeoutSec))
+	metadata := fmt.Sprintf(
+		"*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`",
+		definition.AgentClass,
+		neutralizeUnsafeControls(draft.ProviderProfile),
+		definition.ExecutionMode,
+		previewTimeout(definition.TimeoutSec),
+	)
 	return map[string]string{
 		"name":             fmt.Sprintf("*Previsualizacion del agente `%s`*", neutralizeUnsafeControls(draft.Name)),
 		"agent_class":      metadata,
@@ -510,8 +530,15 @@ func builderPreviewFallbackText(draft domain.AgentDraft, definition port.AgentDe
 	if profile == "" {
 		profile = draft.Model
 	}
-	return fmt.Sprintf("*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\nEl YAML completo se muestra en los bloques del mensaje.\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
-		neutralizeUnsafeControls(draft.Name), definition.AgentClass, neutralizeUnsafeControls(profile), definition.ExecutionMode, previewTimeout(definition.TimeoutSec), sha256)
+	return fmt.Sprintf(
+		"*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\nEl YAML completo se muestra en los bloques del mensaje.\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
+		neutralizeUnsafeControls(draft.Name),
+		definition.AgentClass,
+		neutralizeUnsafeControls(profile),
+		definition.ExecutionMode,
+		previewTimeout(definition.TimeoutSec),
+		sha256,
+	)
 }
 
 func previewTimeout(seconds int) string {

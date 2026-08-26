@@ -142,16 +142,31 @@ func TestMigrationV38ConstraintNegatives(t *testing.T) {
 	}
 	insert("unknown predicate", `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
 		VALUES ('c1', 'api', 'invented', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now)
-	insert("removed curator claim source", `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'curator', 'r1', 'asserted', ?, ?)`, now, now)
+	insert(
+		"removed curator claim source",
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'curator', 'r1', 'asserted', ?, ?)`,
+		now,
+		now,
+	)
 	insert("expired status", `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
 		VALUES ('c2', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r2', 'expired', ?, ?)`, now, now)
 	insert("global with identity", `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
 		VALUES ('c3', 'api', 'is', 'string', 'x', 'global', 'p', 'human', 'r3', 'asserted', ?, ?)`, now, now)
-	insert("reference predicate with scalar", `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c4', 'api', 'owns', 'string', 'x', 'project', 'p', 'human', 'r4', 'asserted', ?, ?)`, now, now)
-	insert("ambiguous union value", `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, value_number, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c5', 'api', 'is', 'string', 'x', 5, 'project', 'p', 'human', 'r5', 'asserted', ?, ?)`, now, now)
+	insert(
+		"reference predicate with scalar",
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c4', 'api', 'owns', 'string', 'x', 'project', 'p', 'human', 'r4', 'asserted', ?, ?)`,
+		now,
+		now,
+	)
+	insert(
+		"ambiguous union value",
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, value_number, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c5', 'api', 'is', 'string', 'x', 5, 'project', 'p', 'human', 'r5', 'asserted', ?, ?)`,
+		now,
+		now,
+	)
 	insert("legacy document without source", `INSERT INTO knowledge_documents (id, subject, scope_kind, scope_id, content_digest, content_handle, provenance, status, created_at, updated_at)
 		VALUES ('d1', 'doc', 'global', '', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'h', 'legacy_curated_document', 'active', ?, ?)`, now, now)
 	insert("tombstone short digest", `INSERT INTO knowledge_tombstones (subject_digest, scope_kind, scope_id, forgotten_at, source_ref)
@@ -159,21 +174,42 @@ func TestMigrationV38ConstraintNegatives(t *testing.T) {
 	insert("preference reference value", `INSERT INTO knowledge_preferences (owner_key, key, value_kind, value_text, status, source_ref, created_at, updated_at)
 		VALUES ('o', 'k', 'reference', 'x', 'active', 'r', ?, ?)`, now, now)
 
-	valid, err := db.ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c6', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r6', 'asserted', ?, ?)`, now, now)
+	valid, err := db.ExecContext(
+		t.Context(),
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c6', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r6', 'asserted', ?, ?)`,
+		now,
+		now,
+	)
 	if err != nil || valid == nil {
 		t.Fatalf("valid claim insert failed: %v", err)
 	}
-	if _, err := db.ExecContext(t.Context(), `INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
-		VALUES ('c6', 1, 'api', 'is', 'string', 'x', 0, 0, '', 'asserted', 'human', 'create', 'created', 'r6', ?)`, now); err != nil {
+	if _, err := db.ExecContext(
+		t.Context(),
+		`INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
+		VALUES ('c6', 1, 'api', 'is', 'string', 'x', 0, 0, '', 'asserted', 'human', 'create', 'created', 'r6', ?)`,
+		now,
+	); err != nil {
 		t.Fatal(err)
 	}
-	insert("removed curator claim revision source", `INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
-		VALUES ('c6', 4, 'api', 'is', 'string', 'x', 0, 0, '', 'asserted', 'curator', 'create', 'created', 'r8', ?)`, now)
-	insert("duplicate claim revision source", `INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
-		VALUES ('c6', 2, 'api', 'is', 'string', 'x', 0, 0, '', 'verified', 'human', 'transition', 'transition', 'r6', ?)`, now)
-	insert("unknown revision operation", `INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
-		VALUES ('c6', 3, 'api', 'is', 'string', 'x', 0, 0, '', 'verified', 'human', 'invented', 'transition', 'r7', ?)`, now)
+	insert(
+		"removed curator claim revision source",
+		`INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
+		VALUES ('c6', 4, 'api', 'is', 'string', 'x', 0, 0, '', 'asserted', 'curator', 'create', 'created', 'r8', ?)`,
+		now,
+	)
+	insert(
+		"duplicate claim revision source",
+		`INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
+		VALUES ('c6', 2, 'api', 'is', 'string', 'x', 0, 0, '', 'verified', 'human', 'transition', 'transition', 'r6', ?)`,
+		now,
+	)
+	insert(
+		"unknown revision operation",
+		`INSERT INTO knowledge_claim_revisions (claim_id, revision_number, subject, predicate, value_kind, value_text, value_number, value_boolean, value_reference, status, source_class, operation, change_reason, source_ref, created_at)
+		VALUES ('c6', 3, 'api', 'is', 'string', 'x', 0, 0, '', 'verified', 'human', 'invented', 'transition', 'r7', ?)`,
+		now,
+	)
 	insert("preference revision without status", `INSERT INTO knowledge_preference_revisions (preference_id, revision_number, value_kind, value_text, source_ref, created_at)
 		VALUES (1, 1, 'string', 'x', 'r7', ?)`, now)
 	var revisionID int

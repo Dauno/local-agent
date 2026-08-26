@@ -152,7 +152,13 @@ func SeedOpenCodeProviderExample() Provider {
 		Executable: "opencode",
 		Version:    &CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "0.0.0"},
 		Invocation: &CLIInvocation{Prompt: "stdin", Args: []string{"run", "-"}},
-		Stream:     &CLIStream{Format: "ndjson", FinalText: CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"}, Failure: CLIFailure{WhenAny: []map[string]string{{"type": "error"}}}, Activity: &CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{}}, TerminalTypes: []string{"result", "error"}},
+		Stream: &CLIStream{
+			Format:        "ndjson",
+			FinalText:     CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"},
+			Failure:       CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
+			Activity:      &CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{}},
+			TerminalTypes: []string{"result", "error"},
+		},
 		// `doctor --live` runs this to report saved-login status. It reads only
 		// the exit status, because the native output can carry account
 		// identifiers.

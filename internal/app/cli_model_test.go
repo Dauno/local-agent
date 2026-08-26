@@ -181,13 +181,30 @@ func TestNewModelForResolvedAgentCLINeedsNoKey(t *testing.T) {
 	paths := testPathsFor(t, cfg, root)
 
 	provider := agentdef.Provider{
-		Name: "opencode", Type: agentdef.ProviderTypeAgentCLI, Executable: "go",
+		Name:       "opencode",
+		Type:       agentdef.ProviderTypeAgentCLI,
+		Executable: "go",
 		Version:    &agentdef.CLIVersion{Command: []string{"version"}, Pattern: `go version go(?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
 		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"version"}},
-		Stream:     &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{}}, TerminalTypes: []string{"result"}},
-		Profiles:   map[string]agentdef.Profile{"build": {Model: "anthropic/model-name", Approval: agentdef.ApprovalAuto}},
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{}},
+			TerminalTypes: []string{"result"},
+		},
+		Profiles: map[string]agentdef.Profile{"build": {Model: "anthropic/model-name", Approval: agentdef.ApprovalAuto}},
 	}
-	resolved := &agentdef.ResolvedModel{Provider: provider, Profile: provider.Profiles["build"], Model: "anthropic/model-name", Executable: "go", Version: *provider.Version, Invocation: *provider.Invocation, Stream: *provider.Stream, Approval: agentdef.ApprovalAuto}
+	resolved := &agentdef.ResolvedModel{
+		Provider:   provider,
+		Profile:    provider.Profiles["build"],
+		Model:      "anthropic/model-name",
+		Executable: "go",
+		Version:    *provider.Version,
+		Invocation: *provider.Invocation,
+		Stream:     *provider.Stream,
+		Approval:   agentdef.ApprovalAuto,
+	}
 
 	built, secret, err := newModelForResolved(context.Background(), resolved, map[string]string{}, cfg, paths, nil, nil)
 	if err != nil {
@@ -257,7 +274,10 @@ func TestValidateTranscriptionModelRequiresDedicatedOpenAIConfiguration(t *testi
 	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeAgentCLI}}); err == nil || !strings.Contains(err.Error(), "openai_compatible") {
 		t.Fatalf("ACP transcription validation = %v", err)
 	}
-	if err := validateTranscriptionModel(&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible}, Model: "stt"}); err == nil || !strings.Contains(err.Error(), "base URL") {
+	if err := validateTranscriptionModel(
+		&agentdef.ResolvedModel{Provider: agentdef.Provider{Type: agentdef.ProviderTypeOpenAICompatible}, Model: "stt"},
+	); err == nil ||
+		!strings.Contains(err.Error(), "base URL") {
 		t.Fatalf("incomplete transcription configuration = %v", err)
 	}
 	valid := &agentdef.ResolvedModel{

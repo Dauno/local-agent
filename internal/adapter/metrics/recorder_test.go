@@ -167,8 +167,14 @@ func TestKnowledgeMetricsEnforceExactFrozenLabelContract(t *testing.T) {
 		{domain.MetricKnowledgeRetrievalCandidates, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelLexical)}},
 		{domain.MetricKnowledgeRetrievalSelected, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelExact)}},
 		{domain.MetricKnowledgeRetrievalEmptyTotal, port.MetricLabels{domain.MetricLabelOutcome: string(domain.KnowledgeRetrievalOutcomeEmpty)}},
-		{domain.MetricKnowledgeRetrievalChannelFailure, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelRelation), domain.MetricLabelReason: string(domain.KnowledgeRetrievalRelationUnavailable)}},
-		{domain.MetricKnowledgeRetrievalStaleIndex, port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelLexical), domain.MetricLabelReason: string(domain.KnowledgeRetrievalReasonLabelStaleIndex)}},
+		{
+			domain.MetricKnowledgeRetrievalChannelFailure,
+			port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelRelation), domain.MetricLabelReason: string(domain.KnowledgeRetrievalRelationUnavailable)},
+		},
+		{
+			domain.MetricKnowledgeRetrievalStaleIndex,
+			port.MetricLabels{domain.MetricLabelChannel: string(domain.KnowledgeRetrievalChannelLexical), domain.MetricLabelReason: string(domain.KnowledgeRetrievalReasonLabelStaleIndex)},
+		},
 		{domain.MetricKnowledgeRetrievalCardTokens, nil},
 		{domain.MetricKnowledgeLexicalQueueDepth, nil},
 		{domain.MetricKnowledgeEmbeddingQueueDepth, nil},

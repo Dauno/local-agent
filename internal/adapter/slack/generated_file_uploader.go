@@ -100,5 +100,7 @@ func ambiguousSlackError(err error) (ambiguous, matched bool) {
 	return strings.Contains(errText, "timeout") || strings.Contains(errText, "connection reset"), false
 }
 
-var _ port.GeneratedFileUploader = (*GeneratedFileUploader)(nil)
-var _ port.MarkdownResultUploader = (*GeneratedFileUploader)(nil)
+var (
+	_ port.GeneratedFileUploader  = (*GeneratedFileUploader)(nil)
+	_ port.MarkdownResultUploader = (*GeneratedFileUploader)(nil)
+)

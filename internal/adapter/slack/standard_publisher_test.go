@@ -286,7 +286,8 @@ func TestStandardPublisherAcceptsProgressLabelAtLimitAfterNeutralization(t *test
 func TestStandardPublisherRecoversProgressByExactMetadata(t *testing.T) {
 	operation := domain.ProgressOperation{ID: "progress-1", ChannelID: "D00000001", ThreadTS: "1700000000.000001", State: domain.ProgressWorking}
 	client := &fakeStandardMessageClient{messages: []slackapi.Message{{
-		User: "U00000001", Timestamp: "1700000001.000001", Metadata: progressMetadata(operation)}}}
+		User: "U00000001", Timestamp: "1700000001.000001", Metadata: progressMetadata(operation),
+	}}}
 	publisher := &StandardPublisher{client: client, botUserID: "U00000001"}
 
 	published, found, err := publisher.RecoverProgress(t.Context(), operation)
@@ -382,7 +383,8 @@ func TestIncrementalPublisherEnforcesObservedLimitAndCanonicalFinalMetadata(t *t
 	if err := publisher.FinalizeIncremental(t.Context(), operation, "final answer", "assistant-correlation"); err != nil {
 		t.Fatal(err)
 	}
-	if client.updatedMeta.EventType != assistantMetadataEventType || client.updatedMeta.EventPayload["correlation_id"] != "assistant-correlation" || client.updatedMeta.EventPayload["part_count"] != 1 {
+	if client.updatedMeta.EventType != assistantMetadataEventType || client.updatedMeta.EventPayload["correlation_id"] != "assistant-correlation" ||
+		client.updatedMeta.EventPayload["part_count"] != 1 {
 		t.Fatalf("final metadata=%#v", client.updatedMeta)
 	}
 }

@@ -149,7 +149,11 @@ func TestProcessorRejectsInvalidTextAndUnconfiguredImages(t *testing.T) {
 		{name: "NUL", file: port.LoadedAttachment{ID: "F2", Name: "bad.go", MIMEType: "text/plain", Data: []byte{'x', 0}}, want: "NUL"},
 		{name: "image without analyzer", file: port.LoadedAttachment{ID: "F3", Name: "image.png", MIMEType: "image/png", Data: realPNG(t, 4, 4)}, want: "not configured"},
 		{name: "audio without transcription profile", file: port.LoadedAttachment{ID: "F4", Name: "meeting.mp3", MIMEType: "audio/mpeg", Data: []byte("mp3")}, want: "transcription_profile"},
-		{name: "audio extension without audio MIME", file: port.LoadedAttachment{ID: "F5", Name: "meeting.mp3", MIMEType: "application/octet-stream", Data: []byte("mp3")}, want: "unsupported file type"},
+		{
+			name: "audio extension without audio MIME",
+			file: port.LoadedAttachment{ID: "F5", Name: "meeting.mp3", MIMEType: "application/octet-stream", Data: []byte("mp3")},
+			want: "unsupported file type",
+		},
 		{name: "fake png bytes rejected by content sniff", file: port.LoadedAttachment{ID: "F6", Name: "image.png", MIMEType: "image/png", Data: []byte("png")}, want: "not a real image"},
 	}
 	for index, tt := range tests {
@@ -259,7 +263,15 @@ func TestProcessorSavesOnlyNormalizedDerivativeForImages(t *testing.T) {
 		wantMIME      string
 		wantExtension string
 	}{
-		{name: "jpeg under declared png uses real identity", fileName: "photo.png", mimeType: "image/png", data: realJPEG(t, 12, 8), wantArtifact: "photo.jpg", wantMIME: "image/jpeg", wantExtension: ".jpg"},
+		{
+			name:          "jpeg under declared png uses real identity",
+			fileName:      "photo.png",
+			mimeType:      "image/png",
+			data:          realJPEG(t, 12, 8),
+			wantArtifact:  "photo.jpg",
+			wantMIME:      "image/jpeg",
+			wantExtension: ".jpg",
+		},
 		{name: "png keeps png identity", fileName: "photo.bin", mimeType: "image/png", data: realPNG(t, 12, 8), wantArtifact: "photo.png", wantMIME: "image/png", wantExtension: ".png"},
 	}
 	for _, tt := range tests {

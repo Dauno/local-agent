@@ -1,9 +1,10 @@
 package memoryprojector
 
 import (
+	"cmp"
 	"fmt"
 	"path/filepath"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -170,21 +171,20 @@ func knowledgeValueLabel(value domain.KnowledgeValue) string {
 
 func writeKnowledgeClaims(dir string, claims []domain.KnowledgeClaim, now time.Time) error {
 	ordered := append([]domain.KnowledgeClaim(nil), claims...)
-	sort.Slice(ordered, func(i, j int) bool {
-		a, b := ordered[i], ordered[j]
+	slices.SortFunc(ordered, func(a, b domain.KnowledgeClaim) int {
 		if a.ScopeKind != b.ScopeKind {
-			return a.ScopeKind < b.ScopeKind
+			return cmp.Compare(a.ScopeKind, b.ScopeKind)
 		}
 		if a.ScopeID != b.ScopeID {
-			return a.ScopeID < b.ScopeID
+			return cmp.Compare(a.ScopeID, b.ScopeID)
 		}
 		if a.Subject != b.Subject {
-			return a.Subject < b.Subject
+			return cmp.Compare(a.Subject, b.Subject)
 		}
 		if a.SourceRef != b.SourceRef {
-			return a.SourceRef < b.SourceRef
+			return cmp.Compare(a.SourceRef, b.SourceRef)
 		}
-		return a.ID < b.ID
+		return cmp.Compare(a.ID, b.ID)
 	})
 	var b strings.Builder
 	b.WriteString("# Knowledge Claims\n\n")
@@ -213,12 +213,11 @@ func writeKnowledgeClaims(dir string, claims []domain.KnowledgeClaim, now time.T
 
 func writeKnowledgePreferences(dir string, preferences []domain.KnowledgePreference) error {
 	ordered := append([]domain.KnowledgePreference(nil), preferences...)
-	sort.Slice(ordered, func(i, j int) bool {
-		a, b := ordered[i], ordered[j]
+	slices.SortFunc(ordered, func(a, b domain.KnowledgePreference) int {
 		if a.Key != b.Key {
-			return a.Key < b.Key
+			return cmp.Compare(a.Key, b.Key)
 		}
-		return a.ID < b.ID
+		return cmp.Compare(a.ID, b.ID)
 	})
 	var b strings.Builder
 	b.WriteString("# Knowledge Preferences\n\n")
@@ -234,18 +233,17 @@ func writeKnowledgePreferences(dir string, preferences []domain.KnowledgePrefere
 
 func writeKnowledgeDocuments(dir string, documents []domain.KnowledgeDocument) error {
 	ordered := append([]domain.KnowledgeDocument(nil), documents...)
-	sort.Slice(ordered, func(i, j int) bool {
-		a, b := ordered[i], ordered[j]
+	slices.SortFunc(ordered, func(a, b domain.KnowledgeDocument) int {
 		if a.Subject != b.Subject {
-			return a.Subject < b.Subject
+			return cmp.Compare(a.Subject, b.Subject)
 		}
 		if a.ScopeKind != b.ScopeKind {
-			return a.ScopeKind < b.ScopeKind
+			return cmp.Compare(a.ScopeKind, b.ScopeKind)
 		}
 		if a.ScopeID != b.ScopeID {
-			return a.ScopeID < b.ScopeID
+			return cmp.Compare(a.ScopeID, b.ScopeID)
 		}
-		return a.ID < b.ID
+		return cmp.Compare(a.ID, b.ID)
 	})
 	var b strings.Builder
 	b.WriteString("# Knowledge Documents\n\n")
@@ -267,18 +265,17 @@ func writeKnowledgeDocuments(dir string, documents []domain.KnowledgeDocument) e
 
 func writeKnowledgeEvidence(dir string, evidence []port.KnowledgeEvidenceRef) error {
 	ordered := append([]port.KnowledgeEvidenceRef(nil), evidence...)
-	sort.Slice(ordered, func(i, j int) bool {
-		a, b := ordered[i], ordered[j]
+	slices.SortFunc(ordered, func(a, b port.KnowledgeEvidenceRef) int {
 		if a.ClaimID != b.ClaimID {
-			return a.ClaimID < b.ClaimID
+			return cmp.Compare(a.ClaimID, b.ClaimID)
 		}
 		if a.RevisionNumber != b.RevisionNumber {
-			return a.RevisionNumber < b.RevisionNumber
+			return cmp.Compare(a.RevisionNumber, b.RevisionNumber)
 		}
 		if a.ExchangeTS != b.ExchangeTS {
-			return a.ExchangeTS < b.ExchangeTS
+			return cmp.Compare(a.ExchangeTS, b.ExchangeTS)
 		}
-		return a.Kind < b.Kind
+		return cmp.Compare(a.Kind, b.Kind)
 	})
 	var b strings.Builder
 	b.WriteString("# Knowledge Evidence\n\n")

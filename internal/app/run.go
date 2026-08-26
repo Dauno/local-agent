@@ -98,7 +98,23 @@ func (a *Application) Run(ctx context.Context) error {
 		activationHealth, healthErr := composition.ActivationHealth(healthCtx)
 		cancelHealth()
 		if healthErr == nil {
-			models.logger.Info("external-agent activation shutdown", "pending", activationHealth.Pending, "processing", activationHealth.Processing, "model_started", activationHealth.ModelStarted, "response_prepared", activationHealth.ResponsePrepared, "processed", activationHealth.Processed, "completion_unknown", activationHealth.CompletionUnknown, "stuck", activationHealth.Stuck)
+			models.logger.Info(
+				"external-agent activation shutdown",
+				"pending",
+				activationHealth.Pending,
+				"processing",
+				activationHealth.Processing,
+				"model_started",
+				activationHealth.ModelStarted,
+				"response_prepared",
+				activationHealth.ResponsePrepared,
+				"processed",
+				activationHealth.Processed,
+				"completion_unknown",
+				activationHealth.CompletionUnknown,
+				"stuck",
+				activationHealth.Stuck,
+			)
 		}
 	}
 	if composition == nil {

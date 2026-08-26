@@ -973,7 +973,7 @@ func validHeaderName(value string) bool {
 	if value == "" {
 		return false
 	}
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		char := value[i]
 		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') || (char >= '0' && char <= '9') {
 			continue
@@ -1028,7 +1028,13 @@ func ValidateAttachmentModelCapability(resolved *ResolvedModel) []string {
 		return errs
 	}
 	if resolved.CounterStrategy != "estimator" {
-		errs = append(errs, fmt.Sprintf("attachment_analyzer profile %q must configure token_counter.strategy: estimator because image requests need a visual token estimate; byte_bound cannot value media", resolved.Model))
+		errs = append(
+			errs,
+			fmt.Sprintf(
+				"attachment_analyzer profile %q must configure token_counter.strategy: estimator because image requests need a visual token estimate; byte_bound cannot value media",
+				resolved.Model,
+			),
+		)
 	} else if resolved.CounterID != VisualEstimatorID {
 		errs = append(errs, fmt.Sprintf("attachment_analyzer profile %q must configure token_counter.id: %s; %q is not implemented for media", resolved.Model, VisualEstimatorID, resolved.CounterID))
 	}

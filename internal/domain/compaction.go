@@ -177,7 +177,14 @@ type ConversationTurn struct {
 }
 
 func (t ConversationTurn) Clone() ConversationTurn {
-	clone := ConversationTurn{Ordinal: t.Ordinal, CharCount: t.CharCount, Closed: t.Closed, HasOpenConfirmation: t.HasOpenConfirmation, HasOpenInvocation: t.HasOpenInvocation, Contents: make([]Content, len(t.Contents))}
+	clone := ConversationTurn{
+		Ordinal:             t.Ordinal,
+		CharCount:           t.CharCount,
+		Closed:              t.Closed,
+		HasOpenConfirmation: t.HasOpenConfirmation,
+		HasOpenInvocation:   t.HasOpenInvocation,
+		Contents:            make([]Content, len(t.Contents)),
+	}
 	for i, content := range t.Contents {
 		clone.Contents[i] = content.Clone()
 	}

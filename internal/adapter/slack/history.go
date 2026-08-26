@@ -514,5 +514,7 @@ func parseSlackTimestamp(timestamp string) time.Time {
 	return time.Unix(seconds, nanoseconds).UTC()
 }
 
-var _ port.HistoryReader = (*HistoryReader)(nil)
-var _ port.AssistantExchangeFinder = (*HistoryReader)(nil)
+var (
+	_ port.HistoryReader           = (*HistoryReader)(nil)
+	_ port.AssistantExchangeFinder = (*HistoryReader)(nil)
+)

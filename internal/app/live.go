@@ -134,7 +134,13 @@ func (liveChecker) CheckAttachmentAnalyzer(ctx context.Context, resolved *agentd
 		return err
 	}
 	tracker := &toolCallTrackingModel{delegate: llm}
-	processor := adkartifact.NewProcessor(artifact.InMemoryService(), tracker, "Load the image artifact named in the current request and describe it.", defaultAttachmentTimeout, modelcalllimiter.New(1))
+	processor := adkartifact.NewProcessor(
+		artifact.InMemoryService(),
+		tracker,
+		"Load the image artifact named in the current request and describe it.",
+		defaultAttachmentTimeout,
+		modelcalllimiter.New(1),
+	)
 	_, err = processor.Process(ctx, port.AttachmentRequest{
 		ProcessingID: "doctor-attachment-check",
 		Attachment: port.LoadedAttachment{

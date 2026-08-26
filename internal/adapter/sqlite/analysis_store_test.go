@@ -145,9 +145,9 @@ func TestAnalysisStoreScopeIsolation(t *testing.T) {
 		})
 	}
 
-	missingErr := (func() error { _, err := store.Get(t.Context(), strings.Repeat("f", 64), scope); return err })()
+	missingErr := func() error { _, err := store.Get(t.Context(), strings.Repeat("f", 64), scope); return err }()
 	for name, wrongScope := range variants {
-		crossErr := (func() error { _, err := store.Get(t.Context(), created.AnalysisID, wrongScope); return err })()
+		crossErr := func() error { _, err := store.Get(t.Context(), created.AnalysisID, wrongScope); return err }()
 		if crossErr.Error() != missingErr.Error() {
 			t.Fatalf("cross-scope error for %s (%v) is distinguishable from a missing row (%v)", name, crossErr, missingErr)
 		}

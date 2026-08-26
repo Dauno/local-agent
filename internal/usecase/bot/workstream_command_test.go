@@ -9,7 +9,9 @@ import (
 )
 
 func TestParseHumanWorkstreamCommandBuildsTypedTransition(t *testing.T) {
-	command, handled, err := parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":4,"action":"resolve_question","question_id":"q-1","question_resolution":"approved by owner"}`)
+	command, handled, err := parseHumanWorkstreamCommand(
+		`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":4,"action":"resolve_question","question_id":"q-1","question_resolution":"approved by owner"}`,
+	)
 	if err != nil || !handled {
 		t.Fatalf("parse command: handled=%v err=%v", handled, err)
 	}
@@ -52,7 +54,9 @@ func TestParseHumanWorkstreamCommandStartTask(t *testing.T) {
 
 func TestParseHumanWorkstreamCommandBindsSourceResultIdentity(t *testing.T) {
 	const identity = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
-	command, handled, err := parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":3,"action":"propose_task","task_id":"task-2","task_description":"verify","source_result_identity":"` + identity + `"}`)
+	command, handled, err := parseHumanWorkstreamCommand(
+		`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":3,"action":"propose_task","task_id":"task-2","task_description":"verify","source_result_identity":"` + identity + `"}`,
+	)
 	if err != nil || !handled {
 		t.Fatalf("parse propose with source identity: handled=%v err=%v", handled, err)
 	}
@@ -60,7 +64,9 @@ func TestParseHumanWorkstreamCommandBindsSourceResultIdentity(t *testing.T) {
 		t.Fatalf("source identity was not bound as required input: %+v", command.Transition.Task)
 	}
 
-	_, handled, err = parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":3,"action":"propose_task","task_id":"task-2","task_description":"verify","source_result_identity":"not-hex"}`)
+	_, handled, err = parseHumanWorkstreamCommand(
+		`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":3,"action":"propose_task","task_id":"task-2","task_description":"verify","source_result_identity":"not-hex"}`,
+	)
 	if !handled || err == nil {
 		t.Fatalf("invalid source identity accepted: handled=%v err=%v", handled, err)
 	}

@@ -31,10 +31,12 @@ func (f *fakeUploader) RequestUploadURL(context.Context, string, int) (port.Gene
 	}
 	return f.target, f.err
 }
+
 func (f *fakeUploader) UploadBytes(_ context.Context, _ port.GeneratedFileUploadTarget, content []byte) error {
 	f.content = append([]byte(nil), content...)
 	return f.uploadErr
 }
+
 func (f *fakeUploader) CompleteUpload(_ context.Context, fileID, channel, thread, _ string) error {
 	f.completedID, f.channel, f.thread = fileID, channel, thread
 	return f.completeErr
@@ -54,6 +56,7 @@ func (f *fakeStore) CreateGeneratedFileOperation(_ context.Context, op domain.Ge
 	f.operations[op.ID] = op
 	return nil
 }
+
 func (f *fakeStore) UpdateGeneratedFileOperation(ctx context.Context, id string, status domain.GeneratedFileOperationStatus, fileID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -63,6 +66,7 @@ func (f *fakeStore) UpdateGeneratedFileOperation(ctx context.Context, id string,
 	f.operations[id] = op
 	return nil
 }
+
 func (f *fakeStore) GetGeneratedFileOperation(_ context.Context, id string) (*domain.GeneratedFileOperation, error) {
 	op, ok := f.operations[id]
 	if !ok {
@@ -74,11 +78,24 @@ func (f *fakeStore) GetGeneratedFileOperation(_ context.Context, id string) (*do
 func TestExportRedactsBeforeUploadAndSharesOnlyConversation(t *testing.T) {
 	uploader := &fakeUploader{target: port.GeneratedFileUploadTarget{FileID: "F123", UploadURL: "https://upload.example.test/secret"}}
 	store := &fakeStore{}
-	svc, err := generatedfile.New(generatedfile.Config{}, generatedfile.Dependencies{Uploader: uploader, Store: store, SanitizeContent: func(value string) string { return strings.ReplaceAll(value, "secret", "[REDACTED]") }})
+	svc, err := generatedfile.New(
+		generatedfile.Config{},
+		generatedfile.Dependencies{Uploader: uploader, Store: store, SanitizeContent: func(value string) string { return strings.ReplaceAll(value, "secret", "[REDACTED]") }},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	result, err := svc.Export(context.Background(), generatedfile.ExportRequest{OperationID: "file:1", ConversationKey: "slack:T1:channel:C1:thread:1.2", Actor: "U1", Filename: "../report.json", Format: domain.GeneratedFileJSON, Content: []byte(`{"token":"secret","b":2}`)})
+	result, err := svc.Export(
+		context.Background(),
+		generatedfile.ExportRequest{
+			OperationID:     "file:1",
+			ConversationKey: "slack:T1:channel:C1:thread:1.2",
+			Actor:           "U1",
+			Filename:        "../report.json",
+			Format:          domain.GeneratedFileJSON,
+			Content:         []byte(`{"token":"secret","b":2}`),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,7 +132,10 @@ func TestExportRejectsInvalidDestinationBeforeCreatingOrUploading(t *testing.T) 
 	store := &fakeStore{}
 	svc, _ := generatedfile.New(generatedfile.Config{}, generatedfile.Dependencies{Uploader: uploader, Store: store, SanitizeContent: func(value string) string { return value }})
 
-	_, err := svc.Export(context.Background(), generatedfile.ExportRequest{OperationID: "file:1", ConversationKey: "not-slack", Actor: "U1", Filename: "report.txt", Format: domain.GeneratedFileText, Content: []byte("body")})
+	_, err := svc.Export(
+		context.Background(),
+		generatedfile.ExportRequest{OperationID: "file:1", ConversationKey: "not-slack", Actor: "U1", Filename: "report.txt", Format: domain.GeneratedFileText, Content: []byte("body")},
+	)
 	if err == nil || !strings.Contains(err.Error(), "canonical Slack conversation") {
 		t.Fatalf("Export() error = %v", err)
 	}
@@ -130,7 +150,10 @@ func TestExportPersistsUnknownStateAfterCancellation(t *testing.T) {
 	store := &fakeStore{}
 	svc, _ := generatedfile.New(generatedfile.Config{}, generatedfile.Dependencies{Uploader: uploader, Store: store, SanitizeContent: func(value string) string { return value }})
 
-	_, err := svc.Export(ctx, generatedfile.ExportRequest{OperationID: "file:1", ConversationKey: "slack:T1:dm:D1", Actor: "U1", Filename: "report.txt", Format: domain.GeneratedFileText, Content: []byte("body")})
+	_, err := svc.Export(
+		ctx,
+		generatedfile.ExportRequest{OperationID: "file:1", ConversationKey: "slack:T1:dm:D1", Actor: "U1", Filename: "report.txt", Format: domain.GeneratedFileText, Content: []byte("body")},
+	)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("Export() error = %v, want context cancellation", err)
 	}
@@ -143,7 +166,17 @@ func TestExportJSONPreservesLargeIntegerPrecision(t *testing.T) {
 	uploader := &fakeUploader{target: port.GeneratedFileUploadTarget{FileID: "F123", UploadURL: "https://upload.example.test"}}
 	svc, _ := generatedfile.New(generatedfile.Config{}, generatedfile.Dependencies{Uploader: uploader, Store: &fakeStore{}, SanitizeContent: func(value string) string { return value }})
 
-	_, err := svc.Export(context.Background(), generatedfile.ExportRequest{OperationID: "file:1", ConversationKey: "slack:T1:dm:D1", Actor: "U1", Filename: "report.json", Format: domain.GeneratedFileJSON, Content: []byte(`{"value":9007199254740993}`)})
+	_, err := svc.Export(
+		context.Background(),
+		generatedfile.ExportRequest{
+			OperationID:     "file:1",
+			ConversationKey: "slack:T1:dm:D1",
+			Actor:           "U1",
+			Filename:        "report.json",
+			Format:          domain.GeneratedFileJSON,
+			Content:         []byte(`{"value":9007199254740993}`),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

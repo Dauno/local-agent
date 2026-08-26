@@ -101,7 +101,16 @@ func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing
 }
 
 func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testing.T) {
-	job := domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678", WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1"}
+	job := domain.ExternalAgentJob{
+		ID:                "job_1",
+		Mode:              domain.JobDetached,
+		Status:            domain.JobCompleted,
+		StatusRevision:    2,
+		ConversationKey:   "slack:T12345678:dm:D12345678",
+		WorkstreamID:      "ws-1",
+		TaskID:            "task-1",
+		ExecutionIdentity: "exec-1",
+	}
 	resultText := "safe &lt;result>"
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(resultText)))
 	notification, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
@@ -163,7 +172,18 @@ func TestDetachedActivationLegacyNotificationUsesTerminalMarker(t *testing.T) {
 
 func TestLegacyNotificationConstructorSetsRouteAndIdentityByMode(t *testing.T) {
 	now := time.Now().UTC()
-	base := domain.ExternalAgentJob{ID: "job_1", Status: domain.JobFailed, StatusRevision: 1, ConversationKey: "slack:T12345678:dm:D12345678", WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1", ErrorCode: "acp_process_exit", CreatedAt: now, UpdatedAt: now}
+	base := domain.ExternalAgentJob{
+		ID:                "job_1",
+		Status:            domain.JobFailed,
+		StatusRevision:    1,
+		ConversationKey:   "slack:T12345678:dm:D12345678",
+		WorkstreamID:      "ws-1",
+		TaskID:            "task-1",
+		ExecutionIdentity: "exec-1",
+		ErrorCode:         "acp_process_exit",
+		CreatedAt:         now,
+		UpdatedAt:         now,
+	}
 
 	foreground := base
 	foreground.Mode = domain.JobForeground
@@ -174,7 +194,8 @@ func TestLegacyNotificationConstructorSetsRouteAndIdentityByMode(t *testing.T) {
 	if foregroundNotification.RootActivationRequired {
 		t.Fatal("foreground notification is marked activation-required")
 	}
-	if foregroundNotification.NotificationSHA256 != domain.NotificationIdentitySHA256(foregroundNotification.CanonicalMarkdown) || foregroundNotification.NotificationBytes != int64(len([]byte(foregroundNotification.CanonicalMarkdown))) {
+	if foregroundNotification.NotificationSHA256 != domain.NotificationIdentitySHA256(foregroundNotification.CanonicalMarkdown) ||
+		foregroundNotification.NotificationBytes != int64(len([]byte(foregroundNotification.CanonicalMarkdown))) {
 		t.Fatalf("foreground notification identity = %q/%d", foregroundNotification.NotificationSHA256, foregroundNotification.NotificationBytes)
 	}
 	if foregroundNotification.ResultSHA256 != "" || foregroundNotification.ResultBytes != 0 {
@@ -369,8 +390,16 @@ func TestStatusViewPromisesResultOnlyForStrictIdentity(t *testing.T) {
 		},
 		{
 			name: "completed with wrong SHA value",
-			job:  domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: fmt.Sprintf("%x", sha256.Sum256([]byte("other"))), ResultBytes: bytes},
-			want: false, wantMode: domain.JobResultDeliveryMarkdown,
+			job: domain.ExternalAgentJob{
+				ID:             "job_1",
+				Status:         domain.JobCompleted,
+				StatusRevision: 4,
+				ResultSummary:  summary,
+				ResultSHA256:   fmt.Sprintf("%x", sha256.Sum256([]byte("other"))),
+				ResultBytes:    bytes,
+			},
+			want:     false,
+			wantMode: domain.JobResultDeliveryMarkdown,
 		},
 		{
 			name: "completed with zero bytes",
@@ -399,8 +428,17 @@ func TestStatusViewPromisesResultOnlyForStrictIdentity(t *testing.T) {
 		},
 		{
 			name: "incoherent artifact does not fall back to inline",
-			job:  domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: digest, ResultBytes: bytes, ResultArtifact: "bad/ref.result"},
-			want: false, wantMode: domain.JobResultDeliveryFile,
+			job: domain.ExternalAgentJob{
+				ID:             "job_1",
+				Status:         domain.JobCompleted,
+				StatusRevision: 4,
+				ResultSummary:  summary,
+				ResultSHA256:   digest,
+				ResultBytes:    bytes,
+				ResultArtifact: "bad/ref.result",
+			},
+			want:     false,
+			wantMode: domain.JobResultDeliveryFile,
 		},
 		{
 			name: "non-completed status with complete identity",

@@ -75,7 +75,9 @@ func TestHelperProcess(t *testing.T) {
 		}
 		_, _ = os.Stdout.WriteString(`{"type":"thread.started","thread_id":"` + sessionID + `"}` + "\n" + `{"type":"result","is_error":false,"result":"resumed text"}` + "\n")
 	default:
-		_, _ = os.Stdout.WriteString(`{"type":"assistant","message":{"content":[{"type":"thinking","text":"secret reasoning"}]}}` + "\n" + `{"type":"result","is_error":false,"result":"final text"}` + "\n")
+		_, _ = os.Stdout.WriteString(
+			`{"type":"assistant","message":{"content":[{"type":"thinking","text":"secret reasoning"}]}}` + "\n" + `{"type":"result","is_error":false,"result":"final text"}` + "\n",
+		)
 	}
 	os.Exit(0)
 }
@@ -84,13 +86,33 @@ func sessionLLM(t *testing.T, invocationArgs []string, resume agentdef.CLISessio
 	t.Helper()
 	dir := t.TempDir()
 	provider := agentdef.Provider{
-		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Name:       "fake",
+		Type:       agentdef.ProviderTypeAgentCLI,
 		Version:    &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
 		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: invocationArgs},
-		Stream:     &agentdef.CLIStream{Format: "ndjson", IgnoreTypes: []string{"thread.started"}, FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "kind", DiscardTypes: []string{}}, TerminalTypes: []string{"result"}},
-		Session:    &agentdef.CLISession{ID: agentdef.CLISessionID{When: map[string]string{"type": "thread.started"}, Path: "thread_id"}, Transcript: agentdef.CLISessionTranscript{PathGlob: transcriptGlob}, Resume: resume},
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
+			IgnoreTypes:   []string{"thread.started"},
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "kind", DiscardTypes: []string{}},
+			TerminalTypes: []string{"result"},
+		},
+		Session: &agentdef.CLISession{
+			ID:         agentdef.CLISessionID{When: map[string]string{"type": "thread.started"}, Path: "thread_id"},
+			Transcript: agentdef.CLISessionTranscript{PathGlob: transcriptGlob},
+			Resume:     resume,
+		},
 	}
-	llm, err := agentcli.New(agentcli.Config{Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"}, Workspace: domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}}, WorkingDir: dir})
+	llm, err := agentcli.New(
+		agentcli.Config{
+			Command:    os.Args[0],
+			Provider:   provider,
+			Profile:    agentdef.Profile{Model: "fake-model"},
+			Workspace:  domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}},
+			WorkingDir: dir,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -191,8 +213,37 @@ func TestInvalidStreamSessionIDFailsBeforePathResolution(t *testing.T) {
 func testLLM(t *testing.T, mode, dump string) *agentcli.LLM {
 	t.Helper()
 	dir := t.TempDir()
-	provider := agentdef.Provider{Name: "fake", Type: agentdef.ProviderTypeAgentCLI, Version: &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0", Max: "1.9.9"}, Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=" + mode, "dump=" + dump}, Options: map[string]agentdef.CLIInvocationOption{"model": {Flag: "--model"}}}, Stream: &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}}}
-	llm, err := agentcli.New(agentcli.Config{Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"}, Workspace: domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}}, WorkingDir: dir})
+	provider := agentdef.Provider{
+		Name: "fake",
+		Type: agentdef.ProviderTypeAgentCLI,
+		Version: &agentdef.CLIVersion{
+			Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"},
+			Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`,
+			Min:     "1.0.0",
+			Max:     "1.9.9",
+		},
+		Invocation: &agentdef.CLIInvocation{
+			Prompt:  "stdin",
+			Args:    []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=" + mode, "dump=" + dump},
+			Options: map[string]agentdef.CLIInvocationOption{"model": {Flag: "--model"}},
+		},
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}},
+			TerminalTypes: []string{"result"},
+		},
+	}
+	llm, err := agentcli.New(
+		agentcli.Config{
+			Command:    os.Args[0],
+			Provider:   provider,
+			Profile:    agentdef.Profile{Model: "fake-model"},
+			Workspace:  domain.Workspace{WorkingDirectory: dir, Projects: []domain.Project{{Name: "workspace", Path: dir}}},
+			WorkingDir: dir,
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,14 +319,21 @@ func systemPromptLLM(t *testing.T, dumpStdin, dumpArgv string) *agentcli.LLM {
 	t.Helper()
 	dir := t.TempDir()
 	provider := agentdef.Provider{
-		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Name:    "fake",
+		Type:    agentdef.ProviderTypeAgentCLI,
 		Version: &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
 		Invocation: &agentdef.CLIInvocation{
 			Prompt:       "stdin",
 			SystemPrompt: &agentdef.CLISystemPrompt{Flag: "--append-system-prompt"},
 			Args:         []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=success", "dump=" + dumpStdin, "dumpargv=" + dumpArgv},
 		},
-		Stream: &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}},
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}},
+			TerminalTypes: []string{"result"},
+		},
 	}
 	llm, err := agentcli.New(agentcli.Config{
 		Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"},
@@ -367,10 +425,17 @@ func twoProjectLLM(t *testing.T, dumpCWD string) (*agentcli.LLM, string, string)
 	t.Helper()
 	alpha, beta := t.TempDir(), t.TempDir()
 	provider := agentdef.Provider{
-		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Name:       "fake",
+		Type:       agentdef.ProviderTypeAgentCLI,
 		Version:    &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
 		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=success", "dumpcwd=" + dumpCWD}},
-		Stream:     &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}},
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}},
+			TerminalTypes: []string{"result"},
+		},
 	}
 	llm, err := agentcli.New(agentcli.Config{
 		Command: os.Args[0], Provider: provider, Profile: agentdef.Profile{Model: "fake-model"},
@@ -580,7 +645,8 @@ func TestMappingOptionsAreAppliedBeforePlainOptions(t *testing.T) {
 	dumpArgv := filepath.Join(t.TempDir(), "argv")
 	dir := t.TempDir()
 	provider := agentdef.Provider{
-		Name: "fake", Type: agentdef.ProviderTypeAgentCLI,
+		Name:    "fake",
+		Type:    agentdef.ProviderTypeAgentCLI,
 		Version: &agentdef.CLIVersion{Command: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "--version"}, Pattern: `fake-cli (?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
 		Invocation: &agentdef.CLIInvocation{
 			Prompt: "stdin",
@@ -594,7 +660,13 @@ func TestMappingOptionsAreAppliedBeforePlainOptions(t *testing.T) {
 			},
 			Args: []string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=success", "dumpargv=" + dumpArgv},
 		},
-		Stream: &agentdef.CLIStream{Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}}, TerminalTypes: []string{"result"}},
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"is_error": "true"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "assistant"}, TypeField: "message.content.0.type", DiscardTypes: []string{"thinking"}},
+			TerminalTypes: []string{"result"},
+		},
 	}
 	llm, err := agentcli.New(agentcli.Config{
 		Command: os.Args[0], Provider: provider,

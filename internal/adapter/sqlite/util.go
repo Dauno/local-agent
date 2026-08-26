@@ -33,7 +33,7 @@ func parseStrictPositiveDecimal(value string) (int64, bool) {
 	if value[0] == '0' && len(value) > 1 {
 		return 0, false
 	}
-	for i := 0; i < len(value); i++ {
+	for i := range len(value) {
 		if value[i] < '0' || value[i] > '9' {
 			return 0, false
 		}

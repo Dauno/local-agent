@@ -352,10 +352,12 @@ func slackTimeout(ctx context.Context, timeout time.Duration) (context.Context, 
 	return context.WithTimeout(ctx, timeout)
 }
 
-var _ port.ProgressPublisher = (*StandardPublisher)(nil)
-var _ port.SuggestedPromptPublisher = (*StandardPublisher)(nil)
-var _ port.OnboardingPublisher = (*StandardPublisher)(nil)
-var _ port.IncrementalPublisher = (*StandardPublisher)(nil)
+var (
+	_ port.ProgressPublisher        = (*StandardPublisher)(nil)
+	_ port.SuggestedPromptPublisher = (*StandardPublisher)(nil)
+	_ port.OnboardingPublisher      = (*StandardPublisher)(nil)
+	_ port.IncrementalPublisher     = (*StandardPublisher)(nil)
+)
 
 func (*StandardPublisher) ValidateIncrementalText(text string) error {
 	_, err := incrementalMarkdown(text)

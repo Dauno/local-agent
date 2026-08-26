@@ -345,10 +345,17 @@ func toDomainContents(contents []*genai.Content) ([]domain.Content, error) {
 				continue
 			}
 			if part.FunctionResponse != nil && part.FunctionCall == nil && part.ToolCall == nil && part.ToolResponse == nil {
-				result[i].Parts[j].FunctionResponse = &domain.FunctionResponse{ID: part.FunctionResponse.ID, Name: part.FunctionResponse.Name, Response: cloneAnyMap(part.FunctionResponse.Response), WillContinue: part.FunctionResponse.WillContinue}
+				result[i].Parts[j].FunctionResponse = &domain.FunctionResponse{
+					ID:           part.FunctionResponse.ID,
+					Name:         part.FunctionResponse.Name,
+					Response:     cloneAnyMap(part.FunctionResponse.Response),
+					WillContinue: part.FunctionResponse.WillContinue,
+				}
 				continue
 			}
-			if part.Text != "" && part.FunctionCall == nil && part.FunctionResponse == nil && part.ToolCall == nil && part.ToolResponse == nil && part.InlineData == nil && part.FileData == nil && part.ExecutableCode == nil && part.CodeExecutionResult == nil {
+			if part.Text != "" && part.FunctionCall == nil && part.FunctionResponse == nil && part.ToolCall == nil && part.ToolResponse == nil && part.InlineData == nil && part.FileData == nil &&
+				part.ExecutableCode == nil &&
+				part.CodeExecutionResult == nil {
 				continue
 			}
 			encoded, marshalErr := json.Marshal(part)
@@ -371,7 +378,14 @@ func fromDomainContents(contents []domain.Content) ([]*genai.Content, error) {
 			case part.FunctionCall != nil:
 				result[i].Parts[j] = &genai.Part{FunctionCall: &genai.FunctionCall{ID: part.FunctionCall.ID, Name: part.FunctionCall.Name, Args: cloneAnyMap(part.FunctionCall.Args)}}
 			case part.FunctionResponse != nil:
-				result[i].Parts[j] = &genai.Part{FunctionResponse: &genai.FunctionResponse{ID: part.FunctionResponse.ID, Name: part.FunctionResponse.Name, Response: cloneAnyMap(part.FunctionResponse.Response), WillContinue: part.FunctionResponse.WillContinue}}
+				result[i].Parts[j] = &genai.Part{
+					FunctionResponse: &genai.FunctionResponse{
+						ID:           part.FunctionResponse.ID,
+						Name:         part.FunctionResponse.Name,
+						Response:     cloneAnyMap(part.FunctionResponse.Response),
+						WillContinue: part.FunctionResponse.WillContinue,
+					},
+				}
 			case len(part.StructuredJSON) > 0:
 				var output genai.Part
 				if err := json.Unmarshal(part.StructuredJSON, &output); err != nil {

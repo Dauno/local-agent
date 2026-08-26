@@ -8,11 +8,13 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
-var ErrNotificationStateConflict = errors.New("external-agent notification state conflict")
-var ErrNotificationClaimConflict = ErrNotificationStateConflict
-var ErrExternalAgentJobRevisionConflict = errors.New("external-agent job status revision conflict")
-var ErrActivationStateConflict = errors.New("external-agent activation state conflict")
-var ErrActivationClaimConflict = ErrActivationStateConflict
+var (
+	ErrNotificationStateConflict        = errors.New("external-agent notification state conflict")
+	ErrNotificationClaimConflict        = ErrNotificationStateConflict
+	ErrExternalAgentJobRevisionConflict = errors.New("external-agent job status revision conflict")
+	ErrActivationStateConflict          = errors.New("external-agent activation state conflict")
+	ErrActivationClaimConflict          = ErrActivationStateConflict
+)
 
 // ActivationProcessError classifies a host-completion failure without making
 // provider details part of the durable activation error code.
@@ -91,7 +93,14 @@ type ExternalAgentJobActivationClaimStore interface {
 // and committing fallback_slack_ts by CAS.
 type ExternalAgentJobActivationFallbackStore interface {
 	ClaimNextActivationFallback(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error)
-	PrepareActivationFallbackExchange(ctx context.Context, activation *domain.ExternalAgentJobActivation, metadata domain.ConversationMetadata, message domain.Message, retain int, now time.Time) (PreparedAssistantExchange, error)
+	PrepareActivationFallbackExchange(
+		ctx context.Context,
+		activation *domain.ExternalAgentJobActivation,
+		metadata domain.ConversationMetadata,
+		message domain.Message,
+		retain int,
+		now time.Time,
+	) (PreparedAssistantExchange, error)
 	CompleteActivationFallback(ctx context.Context, activation *domain.ExternalAgentJobActivation, exchangeIntentID, slackTS string, now time.Time) error
 }
 
@@ -122,7 +131,14 @@ type ExternalAgentJobActivationStore interface {
 // must derive the exchange identity from the activation, and must persist the
 // exchange as memory-ineligible.
 type ExternalAgentJobActivationExchangeStore interface {
-	PrepareActivationResponseWithExchange(ctx context.Context, activation *domain.ExternalAgentJobActivation, metadata domain.ConversationMetadata, message domain.Message, retain int, now time.Time) (PreparedAssistantExchange, error)
+	PrepareActivationResponseWithExchange(
+		ctx context.Context,
+		activation *domain.ExternalAgentJobActivation,
+		metadata domain.ConversationMetadata,
+		message domain.Message,
+		retain int,
+		now time.Time,
+	) (PreparedAssistantExchange, error)
 }
 
 // ExternalAgentJobActivationLeaseStore supports bounded work that must renew
@@ -134,7 +150,14 @@ type ExternalAgentJobActivationLeaseStore interface {
 // ExternalAgentJobActivationReconciler claims a specific durable activation
 // only after revalidating its persisted actor/team/conversation binding.
 type ExternalAgentJobActivationReconciler interface {
-	ReconcileActivation(ctx context.Context, activationID, actor, teamID string, conversationKey domain.ConversationKey, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error)
+	ReconcileActivation(
+		ctx context.Context,
+		activationID, actor, teamID string,
+		conversationKey domain.ConversationKey,
+		now time.Time,
+		owner string,
+		leaseTTL time.Duration,
+	) (*domain.ExternalAgentJobActivation, error)
 }
 
 // ExternalAgentJobCompletionHandler is the use-case boundary for a root turn
@@ -248,7 +271,15 @@ type ExternalAgentJobReconciler interface {
 // by operator and Slack entry points. Production stores implement the CAS in
 // the same transaction as the reconciling transition.
 type ExternalAgentJobExpectedReconciler interface {
-	BeginReconciliationExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error)
+	BeginReconciliationExpected(
+		ctx context.Context,
+		jobID, actor string,
+		conversationKey domain.ConversationKey,
+		expectedRevision int,
+		now time.Time,
+		owner string,
+		leaseTTL time.Duration,
+	) (*domain.ExternalAgentJob, error)
 }
 
 // ExternalAgentJobAbandoner closes a completion-unknown job without resuming
@@ -305,8 +336,21 @@ type ExternalAgentJobNativeResultReader interface {
 // ExternalAgentJobActivationReader reads a job only when its durable revision
 // and terminal status still match the activation that requested the read.
 type ExternalAgentJobActivationReader interface {
-	StatusAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus) (*domain.ExternalAgentJob, error)
-	ReadResultChunkAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus, offsetBytes, maxBytes int64) (domain.ResultChunk, error)
+	StatusAtRevision(
+		ctx context.Context,
+		jobID, actor string,
+		conversationKey domain.ConversationKey,
+		expectedRevision int,
+		expectedStatus domain.ExternalAgentJobStatus,
+	) (*domain.ExternalAgentJob, error)
+	ReadResultChunkAtRevision(
+		ctx context.Context,
+		jobID, actor string,
+		conversationKey domain.ConversationKey,
+		expectedRevision int,
+		expectedStatus domain.ExternalAgentJobStatus,
+		offsetBytes, maxBytes int64,
+	) (domain.ResultChunk, error)
 }
 
 // ExternalAgentJobHostCompleter is the deterministic response phase after a

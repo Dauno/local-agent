@@ -61,7 +61,15 @@ func (s *ContextEpochStore) Append(ctx context.Context, epoch domain.ContextEpoc
 	}
 
 	var current int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(epoch_number), 0) FROM context_epochs WHERE app_name = ? AND user_id = ? AND session_id = ?`, epoch.AppName, epoch.UserID, epoch.SessionID).Scan(&current); err != nil {
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COALESCE(MAX(epoch_number), 0) FROM context_epochs WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+		epoch.AppName,
+		epoch.UserID,
+		epoch.SessionID,
+	).Scan(
+		&current,
+	); err != nil {
 		return fmt.Errorf("%w: inspect epoch head: %v", port.ErrContextEpochUnavailable, err)
 	}
 	if current != expectedPreviousEpoch {
@@ -71,7 +79,15 @@ func (s *ContextEpochStore) Append(ctx context.Context, epoch domain.ContextEpoc
 		return fmt.Errorf("%w: epoch number %d does not follow %d", port.ErrContextEpochValidation, epoch.EpochNumber, expectedPreviousEpoch)
 	}
 	var eventHead int64
-	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(MAX(ordinal), -1) FROM adk_events WHERE app_name = ? AND user_id = ? AND session_id = ?`, epoch.AppName, epoch.UserID, epoch.SessionID).Scan(&eventHead); err != nil {
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT COALESCE(MAX(ordinal), -1) FROM adk_events WHERE app_name = ? AND user_id = ? AND session_id = ?`,
+		epoch.AppName,
+		epoch.UserID,
+		epoch.SessionID,
+	).Scan(
+		&eventHead,
+	); err != nil {
 		return fmt.Errorf("%w: inspect event head: %v", port.ErrContextEpochUnavailable, err)
 	}
 	if epoch.CoveredThroughOrdinal > eventHead {
@@ -79,7 +95,15 @@ func (s *ContextEpochStore) Append(ctx context.Context, epoch domain.ContextEpoc
 	}
 	if current > 0 {
 		var previousCovered int64
-		if err := tx.QueryRowContext(ctx, `SELECT covered_through_ordinal FROM context_epochs WHERE app_name = ? AND user_id = ? AND session_id = ? ORDER BY epoch_number DESC LIMIT 1`, epoch.AppName, epoch.UserID, epoch.SessionID).Scan(&previousCovered); err != nil {
+		if err := tx.QueryRowContext(
+			ctx,
+			`SELECT covered_through_ordinal FROM context_epochs WHERE app_name = ? AND user_id = ? AND session_id = ? ORDER BY epoch_number DESC LIMIT 1`,
+			epoch.AppName,
+			epoch.UserID,
+			epoch.SessionID,
+		).Scan(
+			&previousCovered,
+		); err != nil {
 			return fmt.Errorf("%w: inspect previous coverage: %v", port.ErrContextEpochUnavailable, err)
 		}
 		if epoch.CoveredThroughOrdinal < previousCovered {

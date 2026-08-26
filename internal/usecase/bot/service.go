@@ -176,8 +176,10 @@ type expiredConfirmationLister interface {
 	ListExpired(context.Context, time.Time) ([]port.ConfirmationDelivery, error)
 }
 
-var errConversationBusy = errors.New("conversation already has an active root turn")
-var confirmationAlreadyProcessedMessage = "This confirmation has already been processed."
+var (
+	errConversationBusy                 = errors.New("conversation already has an active root turn")
+	confirmationAlreadyProcessedMessage = "This confirmation has already been processed."
+)
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.Store == nil {
@@ -601,7 +603,21 @@ func (s *Service) logKnowledgeRetrievalDiagnostics(diag domain.KnowledgeRetrieva
 	)
 }
 
-func (s *Service) handleRuntimeTurn(ctx context.Context, modelCtx context.Context, cancel func(), invocation domain.Invocation, key domain.ConversationKey, modelContext []domain.Message, agentContext domain.AgentContext, metadata domain.ConversationMetadata, modelRelease func(), progress *domain.ProgressOperation, knowledge []domain.KnowledgeFrameCard, workstreamRevision int64, workstreamSnapshot *domain.WorkstreamSnapshot) (Outcome, error) {
+func (s *Service) handleRuntimeTurn(
+	ctx context.Context,
+	modelCtx context.Context,
+	cancel func(),
+	invocation domain.Invocation,
+	key domain.ConversationKey,
+	modelContext []domain.Message,
+	agentContext domain.AgentContext,
+	metadata domain.ConversationMetadata,
+	modelRelease func(),
+	progress *domain.ProgressOperation,
+	knowledge []domain.KnowledgeFrameCard,
+	workstreamRevision int64,
+	workstreamSnapshot *domain.WorkstreamSnapshot,
+) (Outcome, error) {
 	turn, modelErr := func() (port.AgentTurn, error) {
 		defer modelRelease()
 		return s.runtime.Run(modelCtx, port.AgentRequest{
@@ -1482,7 +1498,13 @@ func (s *Service) validConfirmationInteraction(delivery port.ConfirmationDeliver
 	return "", false
 }
 
-func (s *Service) handleExpiredConfirmation(ctx context.Context, invocation domain.Invocation, interactive *domain.ConfirmationInteractiveAction, wrapperCallID string, delivery port.ConfirmationDelivery) Outcome {
+func (s *Service) handleExpiredConfirmation(
+	ctx context.Context,
+	invocation domain.Invocation,
+	interactive *domain.ConfirmationInteractiveAction,
+	wrapperCallID string,
+	delivery port.ConfirmationDelivery,
+) Outcome {
 	expiredDelivery := delivery
 	expiredDelivery.Status = port.ConfirmationExpired
 	publishExpired := func() error {
@@ -1509,7 +1531,15 @@ func (s *Service) handleExpiredConfirmation(ctx context.Context, invocation doma
 	return OutcomeIgnoredFollowup
 }
 
-func (s *Service) resumeConfirmation(ctx context.Context, invocation domain.Invocation, interactive *domain.ConfirmationInteractiveAction, wrapperCallID string, approved bool, actor string, delivery port.ConfirmationDelivery) Outcome {
+func (s *Service) resumeConfirmation(
+	ctx context.Context,
+	invocation domain.Invocation,
+	interactive *domain.ConfirmationInteractiveAction,
+	wrapperCallID string,
+	approved bool,
+	actor string,
+	delivery port.ConfirmationDelivery,
+) Outcome {
 	modelCtx := ctx
 	cancel := func() {}
 	if s.cfg.ModelTimeout > 0 {

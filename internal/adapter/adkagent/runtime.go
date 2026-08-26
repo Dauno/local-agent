@@ -89,9 +89,11 @@ type Runtime struct {
 	workstreamBudgetTokens           int
 }
 
-var _ port.AgentRuntime = (*Runtime)(nil)
-var _ port.AgentActivationRecovery = (*Runtime)(nil)
-var _ port.StreamingAgentRuntime = (*Runtime)(nil)
+var (
+	_ port.AgentRuntime            = (*Runtime)(nil)
+	_ port.AgentActivationRecovery = (*Runtime)(nil)
+	_ port.StreamingAgentRuntime   = (*Runtime)(nil)
+)
 
 // NewRuntime creates an ADK-backed agent runtime.
 func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
@@ -344,7 +346,20 @@ func (r *Runtime) recordEpoch(recorder *epochRecorder) llmagent.AfterModelCallba
 			return nil, fmt.Errorf("read epoch head: %w", err)
 		}
 		idDigest := sha256.Sum256([]byte(ctx.SessionID() + "\x00" + strconv.FormatInt(number, 10) + "\x00" + digest))
-		epoch := domain.ContextEpoch{EpochID: "epoch-" + fmt.Sprintf("%x", idDigest[:16]), AppName: applicationName, UserID: ephemeralUserID, SessionID: ctx.SessionID(), EpochNumber: number, CoveredThroughOrdinal: head, CompilerVersion: "context-compiler-v1", CounterVersion: "provider-shaped-v1", SourceDigest: digest, FrameCodePoints: codePoints, Reason: "model_step", CreatedAt: time.Now().UTC()}
+		epoch := domain.ContextEpoch{
+			EpochID:               "epoch-" + fmt.Sprintf("%x", idDigest[:16]),
+			AppName:               applicationName,
+			UserID:                ephemeralUserID,
+			SessionID:             ctx.SessionID(),
+			EpochNumber:           number,
+			CoveredThroughOrdinal: head,
+			CompilerVersion:       "context-compiler-v1",
+			CounterVersion:        "provider-shaped-v1",
+			SourceDigest:          digest,
+			FrameCodePoints:       codePoints,
+			Reason:                "model_step",
+			CreatedAt:             time.Now().UTC(),
+		}
 		if compiled {
 			epoch.WorkstreamRevision = workstreamRevision
 			epoch.KnowledgeIdentities = identities
@@ -651,7 +666,7 @@ func (r *Runtime) updateContinuity(ctx context.Context, sessionID, currentText, 
 		return
 	}
 	revision := prior.Revision + 1
-	digest := sha256.Sum256([]byte(fmt.Sprintf("%d\x00%s\x00%s", sourceRevision, currentText, finalText)))
+	digest := sha256.Sum256(fmt.Appendf(nil, "%d\x00%s\x00%s", sourceRevision, currentText, finalText))
 	sourceDigest := fmt.Sprintf("%x", digest[:])
 	candidate := prior
 	candidate.Revision = revision
@@ -724,9 +739,11 @@ func (r *Runtime) recordContinuityFallback() {
 }
 
 func continuityItem(kind domain.ContinuityItemKind, prefix, text string, ordinal, sourceRevision int64, digest string) (domain.ContinuityItem, bool) {
-	return domain.SanitizeContinuityItem(domain.ContinuityItem{ID: prefix + digest[:16], Kind: kind,
+	return domain.SanitizeContinuityItem(domain.ContinuityItem{
+		ID: prefix + digest[:16], Kind: kind,
 		Text: boundedContinuityText(text), SourceEventOrdinal: ordinal, SourceSessionRevision: sourceRevision,
-		SourceDigest: digest, Status: domain.ContinuityStatusCurrent})
+		SourceDigest: digest, Status: domain.ContinuityStatusCurrent,
+	})
 }
 
 func applyContinuityOutcome(capsule *domain.ContinuityCapsule, finalText string, ordinal, sourceRevision int64, digest string) {

@@ -536,8 +536,10 @@ func TestQuarantineCLICommands(t *testing.T) {
 		h := newUpgradeHarness(t)
 		before := buildQuarantineFixture(t, h, completeQuarantineStateSeeds())
 
-		code, out, _ := executeUpgradeCLI(t, h, []string{"jobs", "quarantine-legacy-identity",
-			"--apply", "--expect-jobs-matched", "2", "--expect-activations-matched", "3"}, "n\n")
+		code, out, _ := executeUpgradeCLI(t, h, []string{
+			"jobs", "quarantine-legacy-identity",
+			"--apply", "--expect-jobs-matched", "2", "--expect-activations-matched", "3",
+		}, "n\n")
 		if code != 0 {
 			t.Fatalf("exit=%d stdout=%q", code, out)
 		}
@@ -556,8 +558,10 @@ func TestQuarantineCLICommands(t *testing.T) {
 		if code != 1 || !strings.Contains(stderr, "--expect-jobs-matched is required with --apply") {
 			t.Fatalf("exit=%d stderr=%q, want the missing-flag failure", code, stderr)
 		}
-		code, _, stderr = executeUpgradeCLI(t, h, []string{"jobs", "quarantine-legacy-identity",
-			"--apply", "--yes", "--expect-jobs-matched", "2"}, "")
+		code, _, stderr = executeUpgradeCLI(t, h, []string{
+			"jobs", "quarantine-legacy-identity",
+			"--apply", "--yes", "--expect-jobs-matched", "2",
+		}, "")
 		if code != 1 || !strings.Contains(stderr, "--expect-activations-matched is required with --apply") {
 			t.Fatalf("exit=%d stderr=%q, want the second missing-flag failure", code, stderr)
 		}
@@ -567,8 +571,10 @@ func TestQuarantineCLICommands(t *testing.T) {
 		h := newUpgradeHarness(t)
 		buildQuarantineFixture(t, h, completeQuarantineStateSeeds())
 
-		args := []string{"jobs", "quarantine-legacy-identity",
-			"--apply", "--yes", "--expect-jobs-matched", "2", "--expect-activations-matched", "3"}
+		args := []string{
+			"jobs", "quarantine-legacy-identity",
+			"--apply", "--yes", "--expect-jobs-matched", "2", "--expect-activations-matched", "3",
+		}
 		code, out, stderr := executeUpgradeCLI(t, h, args, "")
 		if code != 0 {
 			t.Fatalf("exit=%d stdout=%q stderr=%q", code, out, stderr)
@@ -600,8 +606,10 @@ func TestQuarantineCLICommands(t *testing.T) {
 		h := newUpgradeHarness(t)
 		buildQuarantineFixture(t, h, completeQuarantineStateSeeds())
 
-		code, _, stderr := executeUpgradeCLI(t, h, []string{"jobs", "quarantine-legacy-identity",
-			"--apply", "--yes", "--expect-jobs-matched", "5", "--expect-activations-matched", "3"}, "")
+		code, _, stderr := executeUpgradeCLI(t, h, []string{
+			"jobs", "quarantine-legacy-identity",
+			"--apply", "--yes", "--expect-jobs-matched", "5", "--expect-activations-matched", "3",
+		}, "")
 		if code != 1 {
 			t.Fatalf("exit=%d, want 1", code)
 		}

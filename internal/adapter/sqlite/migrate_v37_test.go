@@ -66,7 +66,12 @@ func TestMigrationV37AddsCompletionBindingColumns(t *testing.T) {
 		}
 	}
 	var triggerSQL string
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'external_agent_job_notifications_completion_binding_immutable'`).Scan(&triggerSQL); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'external_agent_job_notifications_completion_binding_immutable'`,
+	).Scan(
+		&triggerSQL,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(triggerSQL, "result_sha256") {
@@ -141,7 +146,12 @@ func TestMigrationV37FailureRollsBackWithoutPartialSchema(t *testing.T) {
 	if err := check.QueryRowContext(t.Context(), `PRAGMA user_version`).Scan(&version); err != nil {
 		t.Fatal(err)
 	}
-	if err := check.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM pragma_table_info('external_agent_jobs') WHERE name IN ('workstream_id', 'task_id', 'execution_identity', 'admission_revision')`).Scan(&columns); err != nil {
+	if err := check.QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM pragma_table_info('external_agent_jobs') WHERE name IN ('workstream_id', 'task_id', 'execution_identity', 'admission_revision')`,
+	).Scan(
+		&columns,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if version != 36 || columns != 0 {

@@ -91,9 +91,11 @@ func NewNotificationWorker(cfg NotificationConfig, deps NotificationDependencies
 	if deps.Scheduler == nil {
 		deps.Scheduler, _ = workpoll.New(cfg.PollInterval, workpoll.Options{})
 	}
-	return &NotificationWorker{cfg: cfg, store: deps.Store, publisher: deps.Publisher, completer: deps.HostCompleter,
+	return &NotificationWorker{
+		cfg: cfg, store: deps.Store, publisher: deps.Publisher, completer: deps.HostCompleter,
 		logger: logger, metrics: metrics, owner: "notification-worker", stopClaims: make(chan struct{}), stopped: make(chan struct{}),
-		scheduler: deps.Scheduler, activationWake: deps.ActivationWake}, nil
+		scheduler: deps.Scheduler, activationWake: deps.ActivationWake,
+	}, nil
 }
 
 func (w *NotificationWorker) Run(ctx context.Context) {
@@ -165,7 +167,10 @@ func (w *NotificationWorker) processOne(ctx context.Context) (bool, error) {
 			// An ambiguous URL request did not leave a durable Slack file ID.
 			// Reissuing it could create a duplicate file that cannot be
 			// reconciled by identity, so fail closed instead.
-			return true, wrapNotificationError(notification, w.recordFailure(ctx, notification, port.NewNotificationPublishError("result_file_upload_unknown", false, false, errors.New("slack file identity is unavailable"))))
+			return true, wrapNotificationError(
+				notification,
+				w.recordFailure(ctx, notification, port.NewNotificationPublishError("result_file_upload_unknown", false, false, errors.New("slack file identity is unavailable"))),
+			)
 		}
 		ts, found, reconcileErr := w.publisher.Reconcile(ctx, *notification)
 		if reconcileErr != nil {

@@ -105,7 +105,15 @@ func TestMultipartNotificationActivatesOnce(t *testing.T) {
 		t.Fatal(err)
 	}
 	var count int
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM external_agent_job_activations WHERE job_id = ? AND status_revision = ? AND kind = ?`, job.ID, notification.StatusRevision, notification.Kind).Scan(&count); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM external_agent_job_activations WHERE job_id = ? AND status_revision = ? AND kind = ?`,
+		job.ID,
+		notification.StatusRevision,
+		notification.Kind,
+	).Scan(
+		&count,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if count != 1 {
@@ -291,7 +299,17 @@ func TestActivationReconciliationBindsActorTeamAndConversation(t *testing.T) {
 		{"conversation", job.Actor, job.TeamID, "slack:T12345678:dm:other"},
 	} {
 		t.Run(test.name, func(t *testing.T) {
-			if activation, err := jobs.ReconcileActivation(t.Context(), activationID, test.actor, test.team, test.key, now.Add(4*time.Second), "reconciler", time.Minute); err == nil || activation != nil {
+			if activation, err := jobs.ReconcileActivation(
+				t.Context(),
+				activationID,
+				test.actor,
+				test.team,
+				test.key,
+				now.Add(4*time.Second),
+				"reconciler",
+				time.Minute,
+			); err == nil ||
+				activation != nil {
 				t.Fatalf("unauthorized reconciliation = %#v, err=%v", activation, err)
 			}
 		})
@@ -356,7 +374,13 @@ func TestActivationFallbackClaimAndPublicationCAS(t *testing.T) {
 	}
 	// The message persisted exactly once and the intent was consumed.
 	var messageCount, intentCount int
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages WHERE conversation_key = ? AND role = 'assistant' AND content = 'fallback closing update'`, string(fallbackClaim.ConversationKey)).Scan(&messageCount); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM messages WHERE conversation_key = ? AND role = 'assistant' AND content = 'fallback closing update'`,
+		string(fallbackClaim.ConversationKey),
+	).Scan(
+		&messageCount,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM memory_exchange_intents WHERE id = ?`, intent.ID).Scan(&intentCount); err != nil {
@@ -489,7 +513,13 @@ func assertFallbackIntentState(t *testing.T, store *Store, key domain.Conversati
 		t.Fatal(err)
 	}
 	var messageCount int
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM messages WHERE conversation_key = ? AND role = 'assistant' AND content = 'fallback closing update'`, string(key)).Scan(&messageCount); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM messages WHERE conversation_key = ? AND role = 'assistant' AND content = 'fallback closing update'`,
+		string(key),
+	).Scan(
+		&messageCount,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if exists == 1 {
@@ -709,7 +739,16 @@ func seedActivationTestBinding(t *testing.T, jobs *ExternalAgentJobStore, job do
 	}
 }
 
-func transitionTerminalTestJob(t *testing.T, jobs *ExternalAgentJobStore, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) {
+func transitionTerminalTestJob(
+	t *testing.T,
+	jobs *ExternalAgentJobStore,
+	jobID, owner string,
+	attempt int,
+	next domain.ExternalAgentJobStatus,
+	result *domain.ExternalAgentInvocationResult,
+	errorCode string,
+	now time.Time,
+) {
 	t.Helper()
 	if err := jobs.Transition(t.Context(), jobID, owner, attempt, next, result, errorCode, now); err != nil {
 		t.Fatalf("transition %s to %s: %v", jobID, next, err)

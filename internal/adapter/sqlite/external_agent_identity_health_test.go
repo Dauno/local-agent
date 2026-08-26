@@ -49,7 +49,15 @@ func insertIdentityNotificationRowWithResult(t *testing.T, db *sql.DB, id, notif
 // insertIdentityNotificationRowWithResultAtRevision is the revision-scoped
 // variant used to prove that legacy provenance markers bind to the exact
 // (job_id, status_revision) of a notification row.
-func insertIdentityNotificationRowWithResultAtRevision(t *testing.T, db *sql.DB, id, notificationSHA string, notificationBytes int64, terminalStatus, resultSHA string, resultBytes int64, revision int) {
+func insertIdentityNotificationRowWithResultAtRevision(
+	t *testing.T,
+	db *sql.DB,
+	id, notificationSHA string,
+	notificationBytes int64,
+	terminalStatus, resultSHA string,
+	resultBytes int64,
+	revision int,
+) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO external_agent_job_notifications (
 		job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256,

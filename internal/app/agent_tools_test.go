@@ -170,8 +170,10 @@ type fakeBaseFactory struct {
 	withCanvas bool
 }
 
-var _ port.AgentToolFactory = (*fakeBaseFactory)(nil)
-var _ port.ActivationAgentToolFactory = (*fakeBaseFactory)(nil)
+var (
+	_ port.AgentToolFactory           = (*fakeBaseFactory)(nil)
+	_ port.ActivationAgentToolFactory = (*fakeBaseFactory)(nil)
+)
 
 func (f *fakeBaseFactory) ToolsForInvocation(actor string, key domain.ConversationKey) ([]any, error) {
 	if f.err != nil {

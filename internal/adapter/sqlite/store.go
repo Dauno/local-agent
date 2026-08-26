@@ -13,9 +13,11 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var _ port.ConversationStore = (*Store)(nil)
-var _ port.JobCompletionMessageWriter = (*Store)(nil)
-var _ port.AssistantExchangeWriter = (*Store)(nil)
+var (
+	_ port.ConversationStore          = (*Store)(nil)
+	_ port.JobCompletionMessageWriter = (*Store)(nil)
+	_ port.AssistantExchangeWriter    = (*Store)(nil)
+)
 
 func (s *Store) ClaimDedupe(
 	ctx context.Context,
@@ -226,7 +228,13 @@ type sourceMessagesWrapper struct {
 	Messages []json.RawMessage `json:"messages"`
 }
 
-func (s *Store) prepareAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int) (port.PreparedAssistantExchange, error) {
+func (s *Store) prepareAssistantExchange(
+	ctx context.Context,
+	metadata domain.ConversationMetadata,
+	message domain.Message,
+	presentationJSON string,
+	retain int,
+) (port.PreparedAssistantExchange, error) {
 	if message.Role != domain.RoleAssistant {
 		return port.PreparedAssistantExchange{}, fmt.Errorf("assistant exchange requires assistant role, got %q", message.Role)
 	}
@@ -272,7 +280,13 @@ func (s *Store) PrepareAssistantExchange(ctx context.Context, metadata domain.Co
 	return s.prepareAssistantExchange(ctx, metadata, message, "", retain)
 }
 
-func (s *Store) PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int) (port.PreparedAssistantExchange, error) {
+func (s *Store) PrepareStructuredAssistantExchange(
+	ctx context.Context,
+	metadata domain.ConversationMetadata,
+	message domain.Message,
+	presentationJSON string,
+	retain int,
+) (port.PreparedAssistantExchange, error) {
 	return s.prepareAssistantExchange(ctx, metadata, message, presentationJSON, retain)
 }
 
@@ -457,7 +471,8 @@ func (s *Store) getAssistantExchangeIntent(ctx context.Context, intentID string)
 
 func loadAssistantExchangeIntent(ctx context.Context, queryer interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
-}, intentID string) (assistantExchangeIntent, error) {
+}, intentID string,
+) (assistantExchangeIntent, error) {
 	var intent assistantExchangeIntent
 	var kind string
 	var createdNanos int64

@@ -239,10 +239,59 @@ func TestWorkstreamDecisionAndQuestionLifecyclesArePersistible(t *testing.T) {
 			t.Fatalf("apply %s: %v", transition.Action, err)
 		}
 	}
-	apply(domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 0, Source: domain.WorkstreamSourceHuman, SourceID: "propose-decision", Actor: workstream.OwnerActor, ConversationKey: workstream.ConversationKey, Project: workstream.Project, Action: domain.WorkstreamActionProposeDecision, Decision: &domain.WorkstreamDecision{ID: "decision-1", Proposal: "ship", Status: domain.DecisionProposed}})
-	apply(domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 1, Source: domain.WorkstreamSourceHuman, SourceID: "approve-decision", Actor: workstream.OwnerActor, ConversationKey: workstream.ConversationKey, Project: workstream.Project, Action: domain.WorkstreamActionApproveDecision, DecisionID: "decision-1"})
-	apply(domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 2, Source: domain.WorkstreamSourceHuman, SourceID: "ask-question", Actor: workstream.OwnerActor, ConversationKey: workstream.ConversationKey, Project: workstream.Project, Action: domain.WorkstreamActionRequestHumanDecision, Question: &domain.WorkstreamQuestion{ID: "question-1", Text: "ship now", Status: domain.QuestionOpen}})
-	apply(domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 3, Source: domain.WorkstreamSourceHuman, SourceID: "resolve-question", Actor: workstream.OwnerActor, ConversationKey: workstream.ConversationKey, Project: workstream.Project, Action: domain.WorkstreamActionResolveQuestion, QuestionID: "question-1", QuestionResolution: "yes"})
+	apply(
+		domain.WorkstreamTransition{
+			WorkstreamID:     "ws-1",
+			ExpectedRevision: 0,
+			Source:           domain.WorkstreamSourceHuman,
+			SourceID:         "propose-decision",
+			Actor:            workstream.OwnerActor,
+			ConversationKey:  workstream.ConversationKey,
+			Project:          workstream.Project,
+			Action:           domain.WorkstreamActionProposeDecision,
+			Decision:         &domain.WorkstreamDecision{ID: "decision-1", Proposal: "ship", Status: domain.DecisionProposed},
+		},
+	)
+	apply(
+		domain.WorkstreamTransition{
+			WorkstreamID:     "ws-1",
+			ExpectedRevision: 1,
+			Source:           domain.WorkstreamSourceHuman,
+			SourceID:         "approve-decision",
+			Actor:            workstream.OwnerActor,
+			ConversationKey:  workstream.ConversationKey,
+			Project:          workstream.Project,
+			Action:           domain.WorkstreamActionApproveDecision,
+			DecisionID:       "decision-1",
+		},
+	)
+	apply(
+		domain.WorkstreamTransition{
+			WorkstreamID:     "ws-1",
+			ExpectedRevision: 2,
+			Source:           domain.WorkstreamSourceHuman,
+			SourceID:         "ask-question",
+			Actor:            workstream.OwnerActor,
+			ConversationKey:  workstream.ConversationKey,
+			Project:          workstream.Project,
+			Action:           domain.WorkstreamActionRequestHumanDecision,
+			Question:         &domain.WorkstreamQuestion{ID: "question-1", Text: "ship now", Status: domain.QuestionOpen},
+		},
+	)
+	apply(
+		domain.WorkstreamTransition{
+			WorkstreamID:       "ws-1",
+			ExpectedRevision:   3,
+			Source:             domain.WorkstreamSourceHuman,
+			SourceID:           "resolve-question",
+			Actor:              workstream.OwnerActor,
+			ConversationKey:    workstream.ConversationKey,
+			Project:            workstream.Project,
+			Action:             domain.WorkstreamActionResolveQuestion,
+			QuestionID:         "question-1",
+			QuestionResolution: "yes",
+		},
+	)
 
 	if workstream.Decisions[0].Status != domain.DecisionApproved || workstream.OpenQuestions[0].Status != domain.QuestionResolved || workstream.OpenQuestions[0].Resolution != "yes" {
 		t.Fatalf("lifecycle state = %+v", workstream)
@@ -385,7 +434,11 @@ func TestWorkstreamTransitionPayloadDigestCanonicalStability(t *testing.T) {
 		transition domain.WorkstreamTransition
 		wantDigest string
 	}{
-		{"create_workstream", domain.WorkstreamTransition{Action: domain.WorkstreamActionCreateWorkstream, Objective: "ship the audit repairs"}, "edf629477e824bc09458526e94b2e3f94f5ee08d504d1aec5a2a7d9e97e13949"},
+		{
+			"create_workstream",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionCreateWorkstream, Objective: "ship the audit repairs"},
+			"edf629477e824bc09458526e94b2e3f94f5ee08d504d1aec5a2a7d9e97e13949",
+		},
 		{"activate_workstream", domain.WorkstreamTransition{Action: domain.WorkstreamActionActivateWorkstream}, "3f2c0da30a39067d21b42ae24bce5338766d8bcc00e0fbba837e50c459bf072e"},
 		{"pause_workstream", domain.WorkstreamTransition{Action: domain.WorkstreamActionPauseWorkstream}, "29a2c179c19bc0b2a806a0c33d7eedbbf86a36f2228d3c0fc76d434ae4f5d997"},
 		{"resume_workstream", domain.WorkstreamTransition{Action: domain.WorkstreamActionResumeWorkstream}, "d16e8ea4d361033d244615457761e7a99682fc2d74caf28d8930847a5ae7afdf"},
@@ -395,15 +448,31 @@ func TestWorkstreamTransitionPayloadDigestCanonicalStability(t *testing.T) {
 		{"unblock_workstream", domain.WorkstreamTransition{Action: domain.WorkstreamActionUnblockWorkstream}, "5c08df25e994aef77a201a46e32e0f47dbc9951a63b1f602670357b58d41388b"},
 		{"propose_task", domain.WorkstreamTransition{Action: domain.WorkstreamActionProposeTask, Task: task, TaskID: task.ID}, "a3d3b959490be4bdd711685fa2c1e999ad4481479ec5af1b94ca04c203e2a83c"},
 		{"reject_task", domain.WorkstreamTransition{Action: domain.WorkstreamActionRejectTask, TaskID: "task-1"}, "463cb167bde829db04efdeec582fb48212066bb2efe64f44e59de4028233a3e9"},
-		{"start_task", domain.WorkstreamTransition{Action: domain.WorkstreamActionStartTask, TaskID: "task-1", ExecutionIdentity: "exec-1"}, "024b2f76feea3423b340dd381ee4c54d1551f9ff6cc09366f0f77f0ddc02f05c"},
+		{
+			"start_task",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionStartTask, TaskID: "task-1", ExecutionIdentity: "exec-1"},
+			"024b2f76feea3423b340dd381ee4c54d1551f9ff6cc09366f0f77f0ddc02f05c",
+		},
 		{"revise_plan", domain.WorkstreamTransition{Action: domain.WorkstreamActionRevisePlan, CurrentPhase: "phase 2"}, "e75a1e0ef0c3c162ac0864c270eba48e905bc34f0db3d9d59e11e9006af396ac"},
 		{"record_constraint", domain.WorkstreamTransition{Action: domain.WorkstreamActionRecordConstraint, Constraint: constraint}, "2d9c955fa4e673963e926b6eeb38f13715b92f6a0bb9a9d8fa9f92c1a71d6176"},
 		{"propose_decision", domain.WorkstreamTransition{Action: domain.WorkstreamActionProposeDecision, Decision: decision}, "74cab6cac243b7993a98adee07bf71b1464521526a87eb75001a8bdcd15f12d2"},
-		{"request_human_decision", domain.WorkstreamTransition{Action: domain.WorkstreamActionRequestHumanDecision, Question: question}, "00cab649ffd25a0237ff1285eec8e0b5ec4eb077b6e7ecb33ee1dd1c3ef33c2f"},
+		{
+			"request_human_decision",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionRequestHumanDecision, Question: question},
+			"00cab649ffd25a0237ff1285eec8e0b5ec4eb077b6e7ecb33ee1dd1c3ef33c2f",
+		},
 		{"approve_decision", domain.WorkstreamTransition{Action: domain.WorkstreamActionApproveDecision, DecisionID: "decision-1"}, "a8b4a5995974bfdb467620594bc751c9c1f875ad24806d091af9c583015e7dc7"},
 		{"reject_decision", domain.WorkstreamTransition{Action: domain.WorkstreamActionRejectDecision, DecisionID: "decision-1"}, "d520b0414b5ceb2b5f47237d75da085abebb605dad07f661dad6e07ff0d4dae7"},
-		{"resolve_question", domain.WorkstreamTransition{Action: domain.WorkstreamActionResolveQuestion, QuestionID: "question-1", QuestionResolution: "answered"}, "ec3e1d2679ca951bbc4a1ac3d3dda14c300c280a165fb3919705f4313dd20940"},
-		{"link_completed_result", domain.WorkstreamTransition{Action: domain.WorkstreamActionLinkCompletedResult, ResultLink: resultLink}, "56a7b00d14e7271e211fc904cc70e9f6cf2b0da1226fce1d040084329890a3a1"},
+		{
+			"resolve_question",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionResolveQuestion, QuestionID: "question-1", QuestionResolution: "answered"},
+			"ec3e1d2679ca951bbc4a1ac3d3dda14c300c280a165fb3919705f4313dd20940",
+		},
+		{
+			"link_completed_result",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionLinkCompletedResult, ResultLink: resultLink},
+			"56a7b00d14e7271e211fc904cc70e9f6cf2b0da1226fce1d040084329890a3a1",
+		},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

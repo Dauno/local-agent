@@ -232,7 +232,14 @@ func (s *Service) interruptIncremental(ctx context.Context, operation *domain.In
 	}
 }
 
-func (s *Service) finalizeIncrementalTurn(ctx context.Context, invocation domain.Invocation, key domain.ConversationKey, metadata domain.ConversationMetadata, operation *domain.IncrementalOperation, finalText string) (Outcome, error) {
+func (s *Service) finalizeIncrementalTurn(
+	ctx context.Context,
+	invocation domain.Invocation,
+	key domain.ConversationKey,
+	metadata domain.ConversationMetadata,
+	operation *domain.IncrementalOperation,
+	finalText string,
+) (Outcome, error) {
 	var prepared port.PreparedAssistantExchange
 	if s.exchange != nil {
 		var err error

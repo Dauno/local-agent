@@ -108,9 +108,17 @@ func dumpResultAnalysisV40Tables(t *testing.T, store *adaptersqlite.Store) strin
 		columns string
 		order   string
 	}{
-		{"result_analyses", "analysis_id, source_result_id, source_sha256, source_bytes, objective_class, objective_digest, objective_text, segmentation_version, prompt_version, model_fingerprint, limits_digest, limits_json, actor, team_id, conversation_key, project, workstream_id, state, failure_code, created_at, updated_at", "analysis_id"},
+		{
+			"result_analyses",
+			"analysis_id, source_result_id, source_sha256, source_bytes, objective_class, objective_digest, objective_text, segmentation_version, prompt_version, model_fingerprint, limits_digest, limits_json, actor, team_id, conversation_key, project, workstream_id, state, failure_code, created_at, updated_at",
+			"analysis_id",
+		},
 		{"analysis_segments", "analysis_id, ordinal, offset_bytes, length_bytes, sha256, segmenter_version, overlap_prev_bytes", "analysis_id, ordinal"},
-		{"analysis_steps", "analysis_id, step_id, kind, state, attempt, generation, next_attempt, lease_until, segment_ordinal, failure_code, output_digest, output_payload, created_at, updated_at", "analysis_id, step_id"},
+		{
+			"analysis_steps",
+			"analysis_id, step_id, kind, state, attempt, generation, next_attempt, lease_until, segment_ordinal, failure_code, output_digest, output_payload, created_at, updated_at",
+			"analysis_id, step_id",
+		},
 		{"analysis_step_children", "analysis_id, parent_step_id, ordinal, child_step_id", "analysis_id, parent_step_id, ordinal"},
 		{"analysis_evidence", "evidence_id, analysis_id, leaf_step_id, segment_ordinal, offset_bytes, length_bytes, sha256, excerpt_bytes, created_at", "evidence_id"},
 		{"analysis_bundles", "bundle_id, analysis_id, actor, team_id, conversation_key, project, state, content_sha256, content_bytes, created_at", "bundle_id"},

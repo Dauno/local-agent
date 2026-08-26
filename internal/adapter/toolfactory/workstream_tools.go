@@ -68,8 +68,8 @@ type workstreamResultChunkArgs struct {
 	WorkstreamID string `json:"workstream_id" jsonschema:"durable workstream selector"`
 	Project      string `json:"project" jsonschema:"registered project bound to the workstream"`
 	ResultID     string `json:"result_id" jsonschema:"opaque verified result handle identity"`
-	OffsetBytes  int64  `json:"offset_bytes,omitempty" jsonschema:"server-provided UTF-8 continuation offset"`
-	MaxBytes     int64  `json:"max_bytes,omitempty" jsonschema:"maximum bytes requested for this bounded chunk"`
+	OffsetBytes  int64  `json:"offset_bytes,omitzero" jsonschema:"server-provided UTF-8 continuation offset"`
+	MaxBytes     int64  `json:"max_bytes,omitzero" jsonschema:"maximum bytes requested for this bounded chunk"`
 }
 
 type workstreamConstraintResult struct {
@@ -231,7 +231,12 @@ func (f *Factory) workstreamTransitionTool(actor string, key domain.Conversation
 		if workstreamActionRequiresConfirmation(action) {
 			confirmation := ctx.ToolConfirmation()
 			if confirmation == nil {
-				if err := f.workstreams.ValidateProposal(ctx, workstreamusecase.Binding{Actor: actor, ConversationKey: key, Project: args.Project}, domain.WorkstreamSourceRoot, transition); err != nil {
+				if err := f.workstreams.ValidateProposal(
+					ctx,
+					workstreamusecase.Binding{Actor: actor, ConversationKey: key, Project: args.Project},
+					domain.WorkstreamSourceRoot,
+					transition,
+				); err != nil {
 					return workstreamTransitionResult{}, err
 				}
 				if err := ctx.RequestConfirmation(workstreamConfirmationText(transition), workstreamConfirmationPayload(transition)); err != nil {
@@ -242,7 +247,13 @@ func (f *Factory) workstreamTransitionTool(actor string, key domain.Conversation
 			if !confirmation.Confirmed {
 				return workstreamTransitionResult{}, errors.New("workstream transition confirmation was rejected")
 			}
-			record, snapshot, err := f.workstreams.ApplyHostConfirmed(ctx, workstreamusecase.Binding{Actor: actor, ConversationKey: key, Project: args.Project}, domain.WorkstreamSourceRoot, transition, callID)
+			record, snapshot, err := f.workstreams.ApplyHostConfirmed(
+				ctx,
+				workstreamusecase.Binding{Actor: actor, ConversationKey: key, Project: args.Project},
+				domain.WorkstreamSourceRoot,
+				transition,
+				callID,
+			)
 			if err != nil {
 				return workstreamTransitionResult{}, err
 			}
@@ -308,7 +319,13 @@ func (f *Factory) workstreamResultHandleTool(actor string, key domain.Conversati
 		if err != nil {
 			return workstreamResultHandleResult{}, err
 		}
-		return workstreamResultHandleResult{ResultID: handle.ResultID, SHA256: handle.SHA256, Bytes: handle.Bytes, MediaType: handle.MediaType, Availability: append([]domain.ResultAvailability(nil), handle.Availability...)}, nil
+		return workstreamResultHandleResult{
+			ResultID:     handle.ResultID,
+			SHA256:       handle.SHA256,
+			Bytes:        handle.Bytes,
+			MediaType:    handle.MediaType,
+			Availability: append([]domain.ResultAvailability(nil), handle.Availability...),
+		}, nil
 	})
 }
 
@@ -330,7 +347,13 @@ func (f *Factory) workstreamReadResultChunkTool(actor string, key domain.Convers
 }
 
 func workstreamConfirmationHint(workstreamID string, expectedRevision int, project string, action domain.WorkstreamAction) string {
-	return fmt.Sprintf("Approve workstream %q action %q at revision %d for registered project %q. This confirmation is bound to the current actor and conversation.", workstreamID, action, expectedRevision, project)
+	return fmt.Sprintf(
+		"Approve workstream %q action %q at revision %d for registered project %q. This confirmation is bound to the current actor and conversation.",
+		workstreamID,
+		action,
+		expectedRevision,
+		project,
+	)
 }
 
 func workstreamConfirmationPayload(transition domain.WorkstreamTransition) map[string]any {
@@ -379,7 +402,14 @@ func workstreamTransitionFromArgs(args workstreamTransitionArgs, action domain.W
 	}
 	switch action {
 	case domain.WorkstreamActionProposeTask:
-		transition.Task = &domain.WorkstreamTask{ID: args.TaskID, Project: args.Project, Description: args.TaskDescription, Status: domain.TaskProposed, Dependencies: args.Dependencies, RequiredInputs: args.RequiredInputs}
+		transition.Task = &domain.WorkstreamTask{
+			ID:             args.TaskID,
+			Project:        args.Project,
+			Description:    args.TaskDescription,
+			Status:         domain.TaskProposed,
+			Dependencies:   args.Dependencies,
+			RequiredInputs: args.RequiredInputs,
+		}
 	case domain.WorkstreamActionRecordConstraint:
 		transition.Constraint = &domain.WorkstreamConstraint{ID: args.ConstraintID, Text: args.ConstraintText, SourceID: sourceID}
 	case domain.WorkstreamActionProposeDecision:
@@ -419,7 +449,14 @@ func workstreamActionRequiresConfirmation(action domain.WorkstreamAction) bool {
 }
 
 func renderWorkstreamState(snapshot domain.WorkstreamSnapshot) workstreamStateResult {
-	result := workstreamStateResult{WorkstreamID: snapshot.ID, Project: snapshot.Project, Status: string(snapshot.Status), Revision: snapshot.Revision, Objective: snapshot.Objective, CurrentPhase: snapshot.CurrentPhase}
+	result := workstreamStateResult{
+		WorkstreamID: snapshot.ID,
+		Project:      snapshot.Project,
+		Status:       string(snapshot.Status),
+		Revision:     snapshot.Revision,
+		Objective:    snapshot.Objective,
+		CurrentPhase: snapshot.CurrentPhase,
+	}
 	for _, constraint := range snapshot.Constraints {
 		result.Constraints = append(result.Constraints, workstreamConstraintResult{ID: constraint.ID, Text: constraint.Text})
 	}
@@ -427,7 +464,19 @@ func renderWorkstreamState(snapshot domain.WorkstreamSnapshot) workstreamStateRe
 		result.Decisions = append(result.Decisions, workstreamDecisionResult{ID: decision.ID, Status: string(decision.Status), Proposal: decision.Proposal})
 	}
 	for _, task := range snapshot.Tasks {
-		result.Tasks = append(result.Tasks, workstreamTaskResult{ID: task.ID, Project: task.Project, Description: task.Description, Status: string(task.Status), Dependencies: append([]string(nil), task.Dependencies...), RequiredInputs: append([]string(nil), task.RequiredInputs...), ResultIdentity: task.ResultIdentity, Integrated: task.Integrated})
+		result.Tasks = append(
+			result.Tasks,
+			workstreamTaskResult{
+				ID:             task.ID,
+				Project:        task.Project,
+				Description:    task.Description,
+				Status:         string(task.Status),
+				Dependencies:   append([]string(nil), task.Dependencies...),
+				RequiredInputs: append([]string(nil), task.RequiredInputs...),
+				ResultIdentity: task.ResultIdentity,
+				Integrated:     task.Integrated,
+			},
+		)
 	}
 	for _, question := range snapshot.OpenQuestions {
 		result.OpenQuestions = append(result.OpenQuestions, workstreamQuestionResult{ID: question.ID, Text: question.Text, Status: string(question.Status), Resolution: question.Resolution})

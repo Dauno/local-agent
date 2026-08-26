@@ -54,7 +54,16 @@ const RunLeafRetryBackoff = 5 * time.Second
 //     digest. Evidence and payload writes happen while the step is still
 //     claimed, before Complete, so the v40
 //     analysis_steps_completed_immutable trigger can never block them.
-func (r *LeafRunner) RunLeaf(ctx context.Context, claim domain.AnalysisStepClaim, segment domain.AnalysisSegment, input port.AnalysisLeafInput, resultID string, scope domain.ResultScope, limits domain.AnalysisLimits, now time.Time) (domain.AnalysisLeaf, EvidenceResolution, error) {
+func (r *LeafRunner) RunLeaf(
+	ctx context.Context,
+	claim domain.AnalysisStepClaim,
+	segment domain.AnalysisSegment,
+	input port.AnalysisLeafInput,
+	resultID string,
+	scope domain.ResultScope,
+	limits domain.AnalysisLimits,
+	now time.Time,
+) (domain.AnalysisLeaf, EvidenceResolution, error) {
 	leaf, err := r.Analyzer.AnalyzeLeaf(ctx, input)
 	if err != nil {
 		if errors.Is(err, port.ErrModelCallLimitReached) {

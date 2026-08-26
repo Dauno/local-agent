@@ -26,11 +26,18 @@ func (s *summaryStoreFake) LatestSummary(context.Context, string) (port.SummaryR
 	}
 	return s.record, nil
 }
+
 func (s *summaryStoreFake) CommitSummary(_ context.Context, commit port.SummaryCommit) (bool, error) {
-	s.record = port.SummaryRecord{SessionIdentity: commit.SessionIdentity, CoveredThroughOrdinal: commit.Summary.CoveredThroughOrdinal, SourceDigest: commit.Summary.SourceDigest, SanitizedText: commit.Summary.Text}
+	s.record = port.SummaryRecord{
+		SessionIdentity:       commit.SessionIdentity,
+		CoveredThroughOrdinal: commit.Summary.CoveredThroughOrdinal,
+		SourceDigest:          commit.Summary.SourceDigest,
+		SanitizedText:         commit.Summary.Text,
+	}
 	s.hasRecord = true
 	return true, nil
 }
+
 func (s *summaryStoreFake) ScheduleSummaryJob(context.Context, string, int64, time.Time) (bool, error) {
 	s.scheduled++
 	return s.scheduleErr == nil, s.scheduleErr
@@ -69,13 +76,16 @@ func TestScheduleConversationWakesOnlyAfterCommittedInsert(t *testing.T) {
 		})
 	}
 }
+
 func (s *summaryStoreFake) ClaimSummaryJob(context.Context, time.Time) (port.SummaryJob, error) {
 	return s.job, nil
 }
+
 func (s *summaryStoreFake) CompleteSummaryJob(context.Context, port.SummaryJob) error {
 	s.completed = true
 	return nil
 }
+
 func (s *summaryStoreFake) FailSummaryJob(context.Context, port.SummaryJob, time.Time) error {
 	s.failed = true
 	return nil
@@ -92,7 +102,11 @@ func (s summarySourceFake) ClosedTurns(context.Context, string, int64, int64) ([
 type summarizerFake struct{}
 
 func (summarizerFake) Summarize(_ context.Context, request port.ConversationSummaryRequest) (port.ConversationSummary, error) {
-	return port.ConversationSummary{Text: "The user stated a goal.", CoveredThroughOrdinal: request.ClosedTurns[len(request.ClosedTurns)-1].Ordinal, SourceDigest: domain.ConversationSummarySourceDigest(request.PreviousSummary, request.ClosedTurns)}, nil
+	return port.ConversationSummary{
+		Text:                  "The user stated a goal.",
+		CoveredThroughOrdinal: request.ClosedTurns[len(request.ClosedTurns)-1].Ordinal,
+		SourceDigest:          domain.ConversationSummarySourceDigest(request.PreviousSummary, request.ClosedTurns),
+	}, nil
 }
 
 type recordingSummarizer struct {
@@ -110,7 +124,14 @@ func (s *recordingSummarizer) Summarize(_ context.Context, request port.Conversa
 
 func TestServiceSchedulesOnlyClosedPrefixOutsideRecentWindow(t *testing.T) {
 	store := &summaryStoreFake{}
-	service, err := New(Config{MaxChars: 100, RecentTurns: 2}, Dependencies{Store: store, Summarizer: summarizerFake{}, TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}, {Ordinal: 2, Closed: true}, {Ordinal: 3, Closed: true}}}})
+	service, err := New(
+		Config{MaxChars: 100, RecentTurns: 2},
+		Dependencies{
+			Store:      store,
+			Summarizer: summarizerFake{},
+			TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}, {Ordinal: 2, Closed: true}, {Ordinal: 3, Closed: true}}},
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +145,10 @@ func TestServiceSchedulesOnlyClosedPrefixOutsideRecentWindow(t *testing.T) {
 
 func TestServiceIncrementallyCommitsSummaryAndLeavesFailureRetryable(t *testing.T) {
 	store := &summaryStoreFake{job: port.SummaryJob{SessionIdentity: "session-1", TargetOrdinal: 2, Attempts: 1}}
-	service, err := New(Config{MaxChars: 100, RecentTurns: 1}, Dependencies{Store: store, Summarizer: summarizerFake{}, TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}, {Ordinal: 2, Closed: true}}}})
+	service, err := New(
+		Config{MaxChars: 100, RecentTurns: 1},
+		Dependencies{Store: store, Summarizer: summarizerFake{}, TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}, {Ordinal: 2, Closed: true}}}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -136,7 +160,10 @@ func TestServiceIncrementallyCommitsSummaryAndLeavesFailureRetryable(t *testing.
 	}
 
 	failedStore := &summaryStoreFake{job: port.SummaryJob{SessionIdentity: "session-2", TargetOrdinal: 1, Attempts: 1}}
-	failing, err := New(Config{MaxChars: 100, RecentTurns: 1}, Dependencies{Store: failedStore, Summarizer: failingSummarizer{}, TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}}}})
+	failing, err := New(
+		Config{MaxChars: 100, RecentTurns: 1},
+		Dependencies{Store: failedStore, Summarizer: failingSummarizer{}, TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}}}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -152,7 +179,10 @@ func TestServiceBatchesLargeSummarySourceAndSchedulesRemainder(t *testing.T) {
 	}
 	store := &summaryStoreFake{job: port.SummaryJob{SessionIdentity: "large", TargetOrdinal: 331, Attempts: 1}}
 	summarizer := &recordingSummarizer{}
-	service, err := New(Config{MaxChars: 100, RecentTurns: 1, MaxSourceTurns: 50, MaxPromptChars: 100000}, Dependencies{Store: store, Summarizer: summarizer, TurnSource: summarySourceFake{turns: turns}})
+	service, err := New(
+		Config{MaxChars: 100, RecentTurns: 1, MaxSourceTurns: 50, MaxPromptChars: 100000},
+		Dependencies{Store: store, Summarizer: summarizer, TurnSource: summarySourceFake{turns: turns}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -178,7 +208,10 @@ func (invalidDigestSummarizer) Summarize(context.Context, port.ConversationSumma
 
 func TestServiceRejectsInvalidSummaryDigest(t *testing.T) {
 	store := &summaryStoreFake{job: port.SummaryJob{SessionIdentity: "digest", TargetOrdinal: 1, Attempts: 1}}
-	service, err := New(Config{MaxChars: 100, RecentTurns: 1}, Dependencies{Store: store, Summarizer: invalidDigestSummarizer{}, TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}}}})
+	service, err := New(
+		Config{MaxChars: 100, RecentTurns: 1},
+		Dependencies{Store: store, Summarizer: invalidDigestSummarizer{}, TurnSource: summarySourceFake{turns: []domain.ConversationTurn{{Ordinal: 1, Closed: true}}}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

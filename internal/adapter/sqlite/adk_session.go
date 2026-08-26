@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"iter"
 	"maps"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -189,7 +190,7 @@ func (s *AdkSessionService) Get(ctx context.Context, req *adksession.GetRequest)
 	}
 
 	// Events were fetched in DESC order; reverse to ASC.
-	reverseEvents(loadedEvents)
+	slices.Reverse(loadedEvents)
 	sess.events = loadedEvents
 
 	return &adksession.GetResponse{Session: sess}, nil
@@ -825,7 +826,7 @@ func (e sessionEvents) At(i int) *adksession.Event {
 var (
 	_ adksession.Session = (*localSession)(nil)
 	_ adksession.State   = (*sessionState)(nil)
-	_ adksession.Events  = (sessionEvents)(nil)
+	_ adksession.Events  = sessionEvents(nil)
 )
 
 // --- utility functions ---
@@ -1014,15 +1015,9 @@ func scanEventsOrdered(rows *sql.Rows, after time.Time, reverse bool) ([]*adkses
 		loaded = append(loaded, event)
 	}
 	if reverse {
-		reverseEvents(loaded)
+		slices.Reverse(loaded)
 	}
 	return loaded, nil
-}
-
-func reverseEvents(events []*adksession.Event) {
-	for i, j := 0, len(events)-1; i < j; i, j = i+1, j-1 {
-		events[i], events[j] = events[j], events[i]
-	}
 }
 
 func nullIfEmpty(b []byte) any {

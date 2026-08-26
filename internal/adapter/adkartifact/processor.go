@@ -42,7 +42,15 @@ func NewProcessor(artifactService art.Service, analyzerModel model.LLM, analyzer
 	return NewProcessorWithTranscription(artifactService, analyzerModel, analyzerInstruction, analyzerTimeout, nil, 0, modelCalls)
 }
 
-func NewProcessorWithTranscription(artifactService art.Service, analyzerModel model.LLM, analyzerInstruction string, analyzerTimeout time.Duration, transcriber port.AudioTranscriber, transcriptionTimeout time.Duration, modelCalls port.ModelCallLimiter) *Processor {
+func NewProcessorWithTranscription(
+	artifactService art.Service,
+	analyzerModel model.LLM,
+	analyzerInstruction string,
+	analyzerTimeout time.Duration,
+	transcriber port.AudioTranscriber,
+	transcriptionTimeout time.Duration,
+	modelCalls port.ModelCallLimiter,
+) *Processor {
 	return &Processor{
 		artifactService:      artifactService,
 		analyzerModel:        analyzerModel,

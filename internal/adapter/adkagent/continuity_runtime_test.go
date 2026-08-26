@@ -54,7 +54,13 @@ func (m *continuityMetricCapture) Snapshot() []port.MetricSample            { re
 
 func TestApplyContinuityOutcomeClassifiesStructuredProgress(t *testing.T) {
 	capsule := domain.ContinuityCapsule{}
-	applyContinuityOutcome(&capsule, "Constraint: Context stays bounded\nDecision: Use stable references\nPending: Wire LSP\nOpen question: Which server is available?\nCompleted: Added ranged reads", 12, 20, "0123456789abcdef0123456789abcdef")
+	applyContinuityOutcome(
+		&capsule,
+		"Constraint: Context stays bounded\nDecision: Use stable references\nPending: Wire LSP\nOpen question: Which server is available?\nCompleted: Added ranged reads",
+		12,
+		20,
+		"0123456789abcdef0123456789abcdef",
+	)
 	if len(capsule.Constraints) != 1 || len(capsule.Decisions) != 1 || len(capsule.Pending) != 1 || len(capsule.OpenQuestions) != 1 || len(capsule.Completed) != 1 {
 		t.Fatalf("classified capsule = %#v", capsule)
 	}
@@ -102,7 +108,10 @@ func TestRuntimeClassifiesContinuityCommitFailuresWithoutFailingTurn(t *testing.
 			if err != nil {
 				t.Fatal(err)
 			}
-			turn, err := runtime.Run(t.Context(), port.AgentRequest{ConversationKey: "slack:T12345678:dm:D12345678", Messages: []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "safe turn"}}})
+			turn, err := runtime.Run(
+				t.Context(),
+				port.AgentRequest{ConversationKey: "slack:T12345678:dm:D12345678", Messages: []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "safe turn"}}},
+			)
 			if err != nil || turn.Text == "" {
 				t.Fatalf("Run() = %#v, error = %v", turn, err)
 			}
@@ -120,7 +129,10 @@ func TestRuntimeClassifiesContinuityLoadValidationFailure(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	turn, err := runtime.Run(t.Context(), port.AgentRequest{ConversationKey: "slack:T12345678:dm:D12345678", Messages: []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "safe turn"}}})
+	turn, err := runtime.Run(
+		t.Context(),
+		port.AgentRequest{ConversationKey: "slack:T12345678:dm:D12345678", Messages: []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "safe turn"}}},
+	)
 	if err != nil || turn.Text == "" {
 		t.Fatalf("Run() = %#v, error = %v", turn, err)
 	}
@@ -136,7 +148,10 @@ func TestRuntimeRecordsSuccessfulContinuityCommit(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := runtime.Run(t.Context(), port.AgentRequest{ConversationKey: "slack:T12345678:dm:D12345678", Messages: []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "safe turn"}}}); err != nil {
+	if _, err := runtime.Run(
+		t.Context(),
+		port.AgentRequest{ConversationKey: "slack:T12345678:dm:D12345678", Messages: []domain.Message{{Role: domain.RoleUser, UserID: "U12345678", Content: "safe turn"}}},
+	); err != nil {
 		t.Fatal(err)
 	}
 	if store.commits != 1 || capture.counts[domain.MetricContinuityCheckpointCommitTotal] != 1 {

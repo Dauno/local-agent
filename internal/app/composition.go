@@ -670,10 +670,13 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		if summaryErr != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize ADK summarizer: %w", summaryErr))
 		}
-		worker, workerErr := contextsummary.New(contextsummary.Config{MaxChars: cfg.Context.ADKCompaction.SummaryMaxChars, RecentTurns: cfg.Context.ADKCompaction.RecentTurns, WorkerInterval: time.Second}, contextsummary.Dependencies{
-			Store: infra.store, Summarizer: summarizer,
-			TurnSource: adkagent.DurableTurnSource{Service: infra.sessionSvc, AppName: "local-agent", UserID: "local_user", Redact: models.redactor.String},
-		})
+		worker, workerErr := contextsummary.New(
+			contextsummary.Config{MaxChars: cfg.Context.ADKCompaction.SummaryMaxChars, RecentTurns: cfg.Context.ADKCompaction.RecentTurns, WorkerInterval: time.Second},
+			contextsummary.Dependencies{
+				Store: infra.store, Summarizer: summarizer,
+				TurnSource: adkagent.DurableTurnSource{Service: infra.sessionSvc, AppName: "local-agent", UserID: "local_user", Redact: models.redactor.String},
+			},
+		)
 		if workerErr != nil {
 			return nil, models.redactor.Error(fmt.Errorf("initialize ADK summary worker: %w", workerErr))
 		}
@@ -729,7 +732,30 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 			}
 		}
 	}
-	runtime, err := adkagent.NewRuntime(adkagent.RuntimeConfig{AgentName: models.agentName, Instruction: rtInstruction, GlobalInstruction: rtGlobalInstruction, SessionService: infra.sessionSvc, Model: models.rootModel, ToolFactory: toolFactory, ContextProjector: projector, ContextCompiler: compiler, ContextBudget: contextBudget, ContextCompaction: contextCompaction, ContinuityStore: continuityStore, SummaryStore: infra.store, EpochStore: adaptersqlite.NewContextEpochStore(infra.store), Metrics: models.metrics, ProviderFamily: models.rootFamily, ResultProducingToolNames: resultProducingTools, ResultProducingCallsPerStep: cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep, ResultProducingCallReserveTokens: cfg.Orchestration.ResultHandles.ProducingCallReserveTokens, KnowledgeBudgetTokens: cfg.Orchestration.Knowledge.MaxCardTokens, WorkstreamBudgetTokens: cfg.Orchestration.Workstreams.SnapshotBudgetTokens})
+	runtime, err := adkagent.NewRuntime(
+		adkagent.RuntimeConfig{
+			AgentName:                        models.agentName,
+			Instruction:                      rtInstruction,
+			GlobalInstruction:                rtGlobalInstruction,
+			SessionService:                   infra.sessionSvc,
+			Model:                            models.rootModel,
+			ToolFactory:                      toolFactory,
+			ContextProjector:                 projector,
+			ContextCompiler:                  compiler,
+			ContextBudget:                    contextBudget,
+			ContextCompaction:                contextCompaction,
+			ContinuityStore:                  continuityStore,
+			SummaryStore:                     infra.store,
+			EpochStore:                       adaptersqlite.NewContextEpochStore(infra.store),
+			Metrics:                          models.metrics,
+			ProviderFamily:                   models.rootFamily,
+			ResultProducingToolNames:         resultProducingTools,
+			ResultProducingCallsPerStep:      cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep,
+			ResultProducingCallReserveTokens: cfg.Orchestration.ResultHandles.ProducingCallReserveTokens,
+			KnowledgeBudgetTokens:            cfg.Orchestration.Knowledge.MaxCardTokens,
+			WorkstreamBudgetTokens:           cfg.Orchestration.Workstreams.SnapshotBudgetTokens,
+		},
+	)
 	if err != nil {
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}
@@ -819,11 +845,27 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	// completion frames. The resolved declarative root profile is authoritative;
 	// absence is zero and never transformed into a default.
 	service, err := botusecase.New(botusecase.Config{
-		AccessPolicy:   domain.AccessPolicy{AllowAllUsers: cfg.Slack.AllowAllUsers, AllowedUserIDs: cfg.Slack.AllowedUserIDs, AllowedTeamIDs: cfg.Slack.AllowedTeamIDs, AllowedChannelIDs: cfg.Slack.AllowedChannelIDs},
-		ContextLimits:  domain.ContextLimits{MaxMessages: cfg.Context.MaxMessages, MaxChars: cfg.Context.MaxChars},
-		RetainMessages: cfg.Context.RetainMessagesPerConversation, MaxConcurrentCalls: cfg.Runtime.MaxConcurrentModelCalls,
-		ModelTimeout: time.Duration(cfg.Runtime.ModelTimeoutSeconds) * time.Second, BusyMessage: cfg.Runtime.BusyMessage, ModelErrorMessage: cfg.Runtime.ModelErrorMessage, UnauthorizedMessage: cfg.Slack.UnauthorizedMessage,
-		ProgressEnabled: cfg.Slack.StandardAgent.ProgressEnabled, PromptsEnabled: cfg.Slack.StandardAgent.PromptsEnabled, SuggestedPrompts: cfg.Slack.StandardAgent.SuggestedPrompts, StreamingEnabled: cfg.Slack.StandardAgent.StreamingEnabled, UpdateInterval: time.Duration(cfg.Slack.StandardAgent.UpdateIntervalSeconds) * time.Second, StreamingCarryRunes: models.redactor.StreamingCarryRunes(),
+		AccessPolicy: domain.AccessPolicy{
+			AllowAllUsers:     cfg.Slack.AllowAllUsers,
+			AllowedUserIDs:    cfg.Slack.AllowedUserIDs,
+			AllowedTeamIDs:    cfg.Slack.AllowedTeamIDs,
+			AllowedChannelIDs: cfg.Slack.AllowedChannelIDs,
+		},
+		ContextLimits:      domain.ContextLimits{MaxMessages: cfg.Context.MaxMessages, MaxChars: cfg.Context.MaxChars},
+		RetainMessages:     cfg.Context.RetainMessagesPerConversation,
+		MaxConcurrentCalls: cfg.Runtime.MaxConcurrentModelCalls,
+		ModelTimeout: time.Duration(
+			cfg.Runtime.ModelTimeoutSeconds,
+		) * time.Second,
+		BusyMessage:              cfg.Runtime.BusyMessage,
+		ModelErrorMessage:        cfg.Runtime.ModelErrorMessage,
+		UnauthorizedMessage:      cfg.Slack.UnauthorizedMessage,
+		ProgressEnabled:          cfg.Slack.StandardAgent.ProgressEnabled,
+		PromptsEnabled:           cfg.Slack.StandardAgent.PromptsEnabled,
+		SuggestedPrompts:         cfg.Slack.StandardAgent.SuggestedPrompts,
+		StreamingEnabled:         cfg.Slack.StandardAgent.StreamingEnabled,
+		UpdateInterval:           time.Duration(cfg.Slack.StandardAgent.UpdateIntervalSeconds) * time.Second,
+		StreamingCarryRunes:      models.redactor.StreamingCarryRunes(),
 		ResultHandlesEnabled:     cfg.Orchestration.ResultHandles.Enabled,
 		MaxDirectInlineBytes:     models.rootDirectInlineBytes,
 		KnowledgeRetrievalLimits: knowledgeRetrievalLimits,
@@ -860,7 +902,18 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	if activationWorker != nil {
 		go activationWorker.Run(ctx)
 	}
-	return &runtimeComposition{service: service, agentBuilderSvc: agentBuilderSvc, externalJobService: externalJobService, notificationWorker: notificationWorker, activationWorker: activationWorker, knowledgeRetriever: knowledgeRetriever, lexicalWorker: knowledgeLexicalWorker, embeddingWorker: knowledgeEmbeddingWorker, resultAnalysisWorker: resultAnalysisWorker, notificationDone: notificationDone}, nil
+	return &runtimeComposition{
+		service:              service,
+		agentBuilderSvc:      agentBuilderSvc,
+		externalJobService:   externalJobService,
+		notificationWorker:   notificationWorker,
+		activationWorker:     activationWorker,
+		knowledgeRetriever:   knowledgeRetriever,
+		lexicalWorker:        knowledgeLexicalWorker,
+		embeddingWorker:      knowledgeEmbeddingWorker,
+		resultAnalysisWorker: resultAnalysisWorker,
+		notificationDone:     notificationDone,
+	}, nil
 }
 
 func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup, models runtimeModels, infra *runtimeInfrastructure) (rootRuntimeComposition, error) {
@@ -887,7 +940,15 @@ func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup
 	}
 	if !models.rootIsAgentCLI && features != nil && features.RecoverableResultsEnabled {
 		resultsCfg := cfg.Context.RecoverableResults
-		result.resultStore = recoverableresult.NewStore(infra.store.DB(), filepath.Join(paths.StateDir, "recoverable-results"), resultsCfg.MaxResultBytes, resultsCfg.ChunkMaxBytes, resultsCfg.RetentionDays, resultsCfg.CleanupBatchSize, models.metrics)
+		result.resultStore = recoverableresult.NewStore(
+			infra.store.DB(),
+			filepath.Join(paths.StateDir, "recoverable-results"),
+			resultsCfg.MaxResultBytes,
+			resultsCfg.ChunkMaxBytes,
+			resultsCfg.RetentionDays,
+			resultsCfg.CleanupBatchSize,
+			models.metrics,
+		)
 		if _, cleanupErr := bindAndCleanupRecoverableResults(ctx, infra.store, result.resultStore, time.Now().UTC(), resultsCfg.CleanupBatchSize); cleanupErr != nil {
 			return rootRuntimeComposition{}, models.redactor.Error(cleanupErr)
 		}
@@ -928,7 +989,10 @@ func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup
 	var canvasService *canvasusecase.Service
 	if cfg.Canvases.Enabled {
 		canvasCreator := slackadapter.NewCanvasCreator(infra.api, time.Duration(cfg.Canvases.TimeoutSeconds)*time.Second)
-		canvasService, err = canvasusecase.New(canvasusecase.Config{MaxTitleChars: cfg.Canvases.MaxTitleChars, MaxContentChars: cfg.Canvases.MaxContentChars, MaxContentBytes: cfg.Canvases.MaxContentBytes}, canvasusecase.Dependencies{Creator: canvasCreator, Store: adaptersqlite.NewCanvasOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String})
+		canvasService, err = canvasusecase.New(
+			canvasusecase.Config{MaxTitleChars: cfg.Canvases.MaxTitleChars, MaxContentChars: cfg.Canvases.MaxContentChars, MaxContentBytes: cfg.Canvases.MaxContentBytes},
+			canvasusecase.Dependencies{Creator: canvasCreator, Store: adaptersqlite.NewCanvasOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String},
+		)
 		if err != nil {
 			return rootRuntimeComposition{}, models.redactor.Error(fmt.Errorf("initialize canvas service: %w", err))
 		}
@@ -936,7 +1000,10 @@ func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup
 	var generatedFileService *generatedfileusecase.Service
 	if cfg.Exports.Enabled {
 		uploader := slackadapter.NewGeneratedFileUploader(infra.api, time.Duration(cfg.Exports.TimeoutSeconds)*time.Second)
-		generatedFileService, err = generatedfileusecase.New(generatedfileusecase.Config{MaxFilenameChars: cfg.Exports.MaxFilenameChars, MaxContentBytes: cfg.Exports.MaxContentBytes}, generatedfileusecase.Dependencies{Uploader: uploader, Store: adaptersqlite.NewGeneratedFileOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String})
+		generatedFileService, err = generatedfileusecase.New(
+			generatedfileusecase.Config{MaxFilenameChars: cfg.Exports.MaxFilenameChars, MaxContentBytes: cfg.Exports.MaxContentBytes},
+			generatedfileusecase.Dependencies{Uploader: uploader, Store: adaptersqlite.NewGeneratedFileOperationStore(infra.store), Logger: models.logger, SanitizeContent: models.redactor.String},
+		)
 		if err != nil {
 			return rootRuntimeComposition{}, models.redactor.Error(fmt.Errorf("initialize generated file export service: %w", err))
 		}
@@ -949,7 +1016,24 @@ func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup
 		result.resultAnalysisWorker = resultAnalysisComp.worker
 		go result.resultAnalysisWorker.Run(ctx)
 	}
-	factory := toolfactory.New(infra.store, sandboxService, canvasService, generatedFileService).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs).WithRecoverableResults(result.resultStore).WithCodeReaders(codeReaders).WithSyntaxEngine(syntaxEngine).WithCodeIntelligence(codeIntelligence).WithMetrics(models.metrics)
+	factory := toolfactory.New(
+		infra.store,
+		sandboxService,
+		canvasService,
+		generatedFileService,
+	).WithAllowedUserIDs(
+		cfg.Slack.AllowedUserIDs,
+	).WithRecoverableResults(
+		result.resultStore,
+	).WithCodeReaders(
+		codeReaders,
+	).WithSyntaxEngine(
+		syntaxEngine,
+	).WithCodeIntelligence(
+		codeIntelligence,
+	).WithMetrics(
+		models.metrics,
+	)
 	if resultAnalysisComp != nil {
 		factory = factory.WithResultAnalysis(resultAnalysisComp.service)
 	}
@@ -992,7 +1076,15 @@ func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup
 	return result, nil
 }
 
-func composeExternalAgentRuntime(cfg config.Config, paths config.Paths, defs *agentdef.Definitions, models runtimeModels, infra *runtimeInfrastructure, factory *toolfactory.Factory, result *rootRuntimeComposition) error {
+func composeExternalAgentRuntime(
+	cfg config.Config,
+	paths config.Paths,
+	defs *agentdef.Definitions,
+	models runtimeModels,
+	infra *runtimeInfrastructure,
+	factory *toolfactory.Factory,
+	result *rootRuntimeComposition,
+) error {
 	if err := wireDeclarativeTools(factory, models, paths, result.compositeFactory); err != nil {
 		return models.redactor.Error(err)
 	}
@@ -1021,12 +1113,36 @@ func composeExternalAgentRuntime(cfg config.Config, paths config.Paths, defs *ag
 	return nil
 }
 
-func composeCodeIntelligence(ctx context.Context, cfg config.Config, paths config.Paths, resultStore *recoverableresult.Store, metrics port.MetricRecorder) (map[string]port.CodeReader, port.SyntaxEngine, port.CodeIntelligence, error) {
+func composeCodeIntelligence(
+	ctx context.Context,
+	cfg config.Config,
+	paths config.Paths,
+	resultStore *recoverableresult.Store,
+	metrics port.MetricRecorder,
+) (map[string]port.CodeReader, port.SyntaxEngine, port.CodeIntelligence, error) {
 	codeReaders := make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
 	syntaxReaders := make(map[string]port.CodeReader, len(paths.SandboxProjectRoots))
 	for name, root := range paths.SandboxProjectRoots {
-		codeReaders[name] = rangedreader.NewReader(root, cfg.Sandbox.MaxOutputBytes, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithMetrics(metrics)
-		syntaxReaders[name] = rangedreader.NewReader(root, 1<<20, cfg.Context.RecoverableResults.ChunkMaxBytes, cfg.Context.RecoverableResults.MaxResultBytes).WithResultStore(resultStore).WithPreservedLineEndings().WithMetrics(metrics)
+		codeReaders[name] = rangedreader.NewReader(
+			root,
+			cfg.Sandbox.MaxOutputBytes,
+			cfg.Context.RecoverableResults.ChunkMaxBytes,
+			cfg.Context.RecoverableResults.MaxResultBytes,
+		).WithResultStore(
+			resultStore,
+		).WithMetrics(
+			metrics,
+		)
+		syntaxReaders[name] = rangedreader.NewReader(
+			root,
+			1<<20,
+			cfg.Context.RecoverableResults.ChunkMaxBytes,
+			cfg.Context.RecoverableResults.MaxResultBytes,
+		).WithResultStore(
+			resultStore,
+		).WithPreservedLineEndings().WithMetrics(
+			metrics,
+		)
 	}
 	syntaxEngine := goast.New(syntaxReaders).WithMetrics(metrics)
 	if len(cfg.CodeIntelligence.LSPServers) == 0 {
@@ -1063,10 +1179,12 @@ func composeCodeIntelligence(ctx context.Context, cfg config.Config, paths confi
 	for language, route := range cfg.CodeIntelligence.LSPRoutes {
 		routes[language] = append([]string(nil), route.Priority...)
 	}
-	codeIntelligence, err := lspclient.New(lspclient.Config{Servers: servers, Routes: routes,
+	codeIntelligence, err := lspclient.New(lspclient.Config{
+		Servers: servers, Routes: routes,
 		ProjectRoots: paths.SandboxProjectRoots, Readers: syntaxReaders, ResultStore: resultStore, MaxProcesses: cfg.CodeIntelligence.MaxProcesses,
 		InitTimeout:    time.Duration(cfg.CodeIntelligence.InitTimeoutSeconds) * time.Second,
-		RequestTimeout: time.Duration(cfg.CodeIntelligence.RequestTimeoutSeconds) * time.Second})
+		RequestTimeout: time.Duration(cfg.CodeIntelligence.RequestTimeoutSeconds) * time.Second,
+	})
 	if err != nil {
 		return nil, nil, nil, fmt.Errorf("initialize language server runtime: %w", err)
 	}
@@ -1124,7 +1242,23 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 		return models.redactor.Error(fmt.Errorf("validate Slack interactive dispatcher: %w", err))
 	}
 	modelName := models.rootModelName
-	models.logger.Info("local-agent starting", "agent", models.agentName, "model", modelName, "model_base_url", models.modelBaseURL, "database", setup.paths.DatabaseFile, "allowed_users", len(cfg.Slack.AllowedUserIDs), "allow_all_users", cfg.Slack.AllowAllUsers, "max_concurrent_model_calls", cfg.Runtime.MaxConcurrentModelCalls)
+	models.logger.Info(
+		"local-agent starting",
+		"agent",
+		models.agentName,
+		"model",
+		modelName,
+		"model_base_url",
+		models.modelBaseURL,
+		"database",
+		setup.paths.DatabaseFile,
+		"allowed_users",
+		len(cfg.Slack.AllowedUserIDs),
+		"allow_all_users",
+		cfg.Slack.AllowAllUsers,
+		"max_concurrent_model_calls",
+		cfg.Runtime.MaxConcurrentModelCalls,
+	)
 	models.logger.Info("declarative agent definitions loaded", "providers", len(setup.defs.Providers), "agents", len(setup.defs.Agents))
 	listener = listener.WithResponsePublisher(infra.publisher)
 	listener.SetInteractiveHandler(func(ictx context.Context, action domain.ConfirmationInteractiveAction) error {
@@ -1193,7 +1327,13 @@ func wireDeclarativeTools(factory *toolfactory.Factory, models runtimeModels, pa
 					continue
 				}
 				if _, active := selected[ref.Name]; !active {
-					return fmt.Errorf("workflow %q agent %q: tool %q is not an active declarative tool; add it to root_agent tool_scope or check %s", workflow.blueprint.ID, doc.Name, ref.Name, paths.ToolsDir)
+					return fmt.Errorf(
+						"workflow %q agent %q: tool %q is not an active declarative tool; add it to root_agent tool_scope or check %s",
+						workflow.blueprint.ID,
+						doc.Name,
+						ref.Name,
+						paths.ToolsDir,
+					)
 				}
 			}
 		}

@@ -60,7 +60,8 @@ func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 	instruction := builderInputBlock(t, view, "instruction")
 	assertBuilderInput(t, instruction, "Instruccion", "")
 	instructionElement := instruction.Element.(*slackapi.PlainTextInputBlockElement)
-	if instructionElement.MaxLength != agentdef.MaxInstructionLength || !instructionElement.Multiline || instructionElement.Placeholder == nil || instructionElement.Placeholder.Text != "Instruccion completa del agente..." {
+	if instructionElement.MaxLength != agentdef.MaxInstructionLength || !instructionElement.Multiline || instructionElement.Placeholder == nil ||
+		instructionElement.Placeholder.Text != "Instruccion completa del agente..." {
 		t.Fatalf("instruction element = %#v", instructionElement)
 	}
 
@@ -340,7 +341,9 @@ func TestBuilderModalPresenterIsDeterministic(t *testing.T) {
 
 func assertBuilderModalChrome(t *testing.T, view slackapi.ModalViewRequest) {
 	t.Helper()
-	if view.Type != slackapi.VTModal || view.Title == nil || view.Title.Text != "Crear nuevo agente" || view.Submit == nil || view.Submit.Text != "Previsualizar" || view.Close == nil || view.Close.Text != "Cancelar" || view.CallbackID != builderSubmitCallbackID {
+	if view.Type != slackapi.VTModal || view.Title == nil || view.Title.Text != "Crear nuevo agente" || view.Submit == nil || view.Submit.Text != "Previsualizar" || view.Close == nil ||
+		view.Close.Text != "Cancelar" ||
+		view.CallbackID != builderSubmitCallbackID {
 		t.Fatalf("modal chrome = %#v", view)
 	}
 }

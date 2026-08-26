@@ -14,7 +14,8 @@ import (
 
 func insertResultAnalysis(t *testing.T, db interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, analysisID string, now int64) {
+}, analysisID string, now int64,
+) {
 	t.Helper()
 	_, err := db.ExecContext(context.Background(), `INSERT INTO result_analyses (
 		analysis_id, source_result_id, source_sha256, source_bytes, objective_class, objective_digest,
@@ -283,8 +284,12 @@ func TestMigrationV40UpgradePreservesV39State(t *testing.T) {
 			t.Fatalf("seed v39 row: %v", err)
 		}
 	}
-	insert(`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, valid_from, valid_until, current_rev, created_at, updated_at)
-		VALUES ('claim-a', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', 0, 0, 1, ?, ?)`, now, now)
+	insert(
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, valid_from, valid_until, current_rev, created_at, updated_at)
+		VALUES ('claim-a', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', 0, 0, 1, ?, ?)`,
+		now,
+		now,
+	)
 	// knowledge_claims_enqueue_after_insert already inserts the matching
 	// knowledge_lexical_queue row; seeding it here a second time collides
 	// with its UNIQUE(item_kind, item_id) index.
@@ -380,8 +385,13 @@ func TestMigrationV40RejectedAsFutureSchema(t *testing.T) {
 func TestMigrationV40CrashRollsBackAndReopens(t *testing.T) {
 	path, raw := createSchemaAtVersion(t, 39)
 	now := time.Now().UTC().UnixNano()
-	if _, err := raw.ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now); err != nil {
+	if _, err := raw.ExecContext(
+		t.Context(),
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`,
+		now,
+		now,
+	); err != nil {
 		_ = raw.Close()
 		t.Fatal(err)
 	}

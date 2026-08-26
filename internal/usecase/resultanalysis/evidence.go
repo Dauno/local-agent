@@ -36,7 +36,15 @@ type EvidenceResolution struct {
 // non-rune boundary, or exceeds limits.EvidenceExcerptBytes is rejected
 // with a reason and dropped; it never aborts resolution of the remaining
 // selectors.
-func ResolveEvidence(ctx context.Context, store port.TrustedResultStore, resultID string, scope domain.ResultScope, segment domain.AnalysisSegment, selectors []domain.AnalysisByteRange, limits domain.AnalysisLimits) (EvidenceResolution, error) {
+func ResolveEvidence(
+	ctx context.Context,
+	store port.TrustedResultStore,
+	resultID string,
+	scope domain.ResultScope,
+	segment domain.AnalysisSegment,
+	selectors []domain.AnalysisByteRange,
+	limits domain.AnalysisLimits,
+) (EvidenceResolution, error) {
 	if store == nil {
 		return EvidenceResolution{}, fmt.Errorf("%w: evidence resolution requires a source store", domain.ErrAnalysisUnavailable)
 	}

@@ -118,7 +118,11 @@ func ClassifyBackupIdentity(state RolloutState) (BackupIdentityShape, error) {
 	case notRequired:
 		return 0, corruptState("%s is present together with backup identity keys %s; the two shapes are mutually exclusive", KeyBackupNotRequiredAt, strings.Join(presentNames, ", "))
 	default:
-		return 0, corruptState("backup identity keys are partially present: have [%s], missing [%s]; the writer sets all five together", strings.Join(presentNames, ", "), strings.Join(missingNames, ", "))
+		return 0, corruptState(
+			"backup identity keys are partially present: have [%s], missing [%s]; the writer sets all five together",
+			strings.Join(presentNames, ", "),
+			strings.Join(missingNames, ", "),
+		)
 	}
 }
 
@@ -156,7 +160,12 @@ func ClassifyRollout(schema int, state RolloutState) (RolloutRow, error) {
 	baselineCutoff := state.BaselinePresent && state.CutoffPresent
 	atTarget := schema == TargetVersion
 	misplacedPostflight := func(shapeName string) error {
-		return corruptState("%s=%q is present on the %s shape; a valid status can exist only on row-4/row-5 shape (schema 41 with baseline+cutoff and a backup-identity shape)", KeyPostflightStatus, state.PostflightStatus, shapeName)
+		return corruptState(
+			"%s=%q is present on the %s shape; a valid status can exist only on row-4/row-5 shape (schema 41 with baseline+cutoff and a backup-identity shape)",
+			KeyPostflightStatus,
+			state.PostflightStatus,
+			shapeName,
+		)
 	}
 
 	switch {
@@ -165,10 +174,19 @@ func ClassifyRollout(schema int, state RolloutState) (RolloutRow, error) {
 
 	case !atTarget && baselineCutoff:
 		if shape != BackupIdentityPresent {
-			return RolloutRowFreshCapture, corruptState("baseline+cutoff are present at schema v%d but backup identity keys [%s] are absent; rows 1 and 2 never leave this shape", schema, strings.Join(fiveKeyNames(), ", "))
+			return RolloutRowFreshCapture, corruptState(
+				"baseline+cutoff are present at schema v%d but backup identity keys [%s] are absent; rows 1 and 2 never leave this shape",
+				schema,
+				strings.Join(fiveKeyNames(), ", "),
+			)
 		}
 		if state.BackupSourceVersion != schema {
-			return RolloutRowFreshCapture, corruptState("recorded %s=%d does not equal the live source schema v%d; equality with this invocation's own read is required", KeyBackupSourceVersion, state.BackupSourceVersion, schema)
+			return RolloutRowFreshCapture, corruptState(
+				"recorded %s=%d does not equal the live source schema v%d; equality with this invocation's own read is required",
+				KeyBackupSourceVersion,
+				state.BackupSourceVersion,
+				schema,
+			)
 		}
 		if state.PostflightPresent {
 			return RolloutRowFreshCapture, misplacedPostflight("row-2 resume (schema " + strconv.Itoa(schema) + " with baseline+cutoff+backup identity)")
@@ -177,7 +195,13 @@ func ClassifyRollout(schema int, state RolloutState) (RolloutRow, error) {
 
 	case !atTarget:
 		if shape != BackupIdentityAbsent {
-			return RolloutRowFreshCapture, corruptState("backup identity keys [%s] are present without %s/%s at schema v%d; the two groups are written together", strings.Join(presentIdentityKeys(state), ", "), KeyBaseline, KeyCutoff, schema)
+			return RolloutRowFreshCapture, corruptState(
+				"backup identity keys [%s] are present without %s/%s at schema v%d; the two groups are written together",
+				strings.Join(presentIdentityKeys(state), ", "),
+				KeyBaseline,
+				KeyCutoff,
+				schema,
+			)
 		}
 		if state.PostflightPresent {
 			return RolloutRowFreshCapture, misplacedPostflight("row-1 fresh capture (baseline+cutoff absent)")
@@ -186,7 +210,12 @@ func ClassifyRollout(schema int, state RolloutState) (RolloutRow, error) {
 
 	case !baselineCutoff:
 		if shape != BackupIdentityAbsent {
-			return RolloutRowFreshCapture, corruptState("backup identity keys [%s] are present without %s/%s at schema 41; the two groups are written together", strings.Join(presentIdentityKeys(state), ", "), KeyBaseline, KeyCutoff)
+			return RolloutRowFreshCapture, corruptState(
+				"backup identity keys [%s] are present without %s/%s at schema 41; the two groups are written together",
+				strings.Join(presentIdentityKeys(state), ", "),
+				KeyBaseline,
+				KeyCutoff,
+			)
 		}
 		if state.PostflightPresent {
 			return RolloutRowFreshCapture, misplacedPostflight("row-3 adoption (no rollout keys)")
@@ -194,7 +223,10 @@ func ClassifyRollout(schema int, state RolloutState) (RolloutRow, error) {
 		return RolloutRowAdoption, nil
 
 	case shape == BackupIdentityAbsent:
-		return RolloutRowResumeNeeded, corruptState("baseline+cutoff are present at schema 41 but all five backup identity keys [%s] are absent; no documented crash window leaves this shape", strings.Join(fiveKeyNames(), ", "))
+		return RolloutRowResumeNeeded, corruptState(
+			"baseline+cutoff are present at schema 41 but all five backup identity keys [%s] are absent; no documented crash window leaves this shape",
+			strings.Join(fiveKeyNames(), ", "),
+		)
 
 	case !state.PostflightPresent || state.PostflightStatus == PostflightFailed:
 		return RolloutRowResumeNeeded, nil

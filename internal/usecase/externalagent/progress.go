@@ -83,7 +83,17 @@ type ProgressRecorder struct {
 
 // NewProgressRecorder creates the recorder bound to one job attempt. The
 // owner is the job lease owner captured at claim time.
-func NewProgressRecorder(store port.ExternalAgentJobProgressStore, registry port.ExternalAgentProcessRegistry, clock port.Clock, logger port.Logger, metrics port.MetricRecorder, gauge *ActiveProgressGauge, warnAfter time.Duration, jobID, owner string, attempt int) *ProgressRecorder {
+func NewProgressRecorder(
+	store port.ExternalAgentJobProgressStore,
+	registry port.ExternalAgentProcessRegistry,
+	clock port.Clock,
+	logger port.Logger,
+	metrics port.MetricRecorder,
+	gauge *ActiveProgressGauge,
+	warnAfter time.Duration,
+	jobID, owner string,
+	attempt int,
+) *ProgressRecorder {
 	if clock == nil {
 		clock = port.SystemClock{}
 	}

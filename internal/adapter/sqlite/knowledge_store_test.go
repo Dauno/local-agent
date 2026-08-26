@@ -236,7 +236,17 @@ func TestKnowledgeStoreTransitionClaimStatus(t *testing.T) {
 	if verified.Revision != claim.Revision+1 {
 		t.Fatalf("transitioned revision = %d, want %d", verified.Revision, claim.Revision+1)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, verified.Revision, domain.KnowledgeClaimDisputed, domain.KnowledgeSourceClass("curator"), "exchange-1"); !errors.Is(err, port.ErrKnowledgeValidation) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		verified.Revision,
+		domain.KnowledgeClaimDisputed,
+		domain.KnowledgeSourceClass("curator"),
+		"exchange-1",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeValidation,
+	) {
 		t.Fatalf("removed curator source dispute error = %v, want ErrKnowledgeValidation", err)
 	}
 	disputed, err := store.TransitionClaimStatus(t.Context(), claim.ID, verified.Revision, domain.KnowledgeClaimDisputed, domain.KnowledgeSourceHuman, "slack-human:evt-dispute")
@@ -260,16 +270,56 @@ func TestKnowledgeStoreTransitionClaimStatus(t *testing.T) {
 	if retried.Revision != disputed.Revision {
 		t.Fatalf("transition retry advanced revision to %d; receipts must not bump revisions", retried.Revision)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, disputed.Revision, domain.KnowledgeClaimVerified, domain.KnowledgeSourceHuman, "slack-human:evt-dispute"); !errors.Is(err, port.ErrKnowledgeCASConflict) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		disputed.Revision,
+		domain.KnowledgeClaimVerified,
+		domain.KnowledgeSourceHuman,
+		"slack-human:evt-dispute",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeCASConflict,
+	) {
 		t.Fatalf("same source different transition error = %v, want ErrKnowledgeCASConflict", err)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, disputed.Revision, domain.KnowledgeClaimVerified, domain.KnowledgeSourceHuman, "slack-human:evt-1"); !errors.Is(err, port.ErrKnowledgeCASConflict) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		disputed.Revision,
+		domain.KnowledgeClaimVerified,
+		domain.KnowledgeSourceHuman,
+		"slack-human:evt-1",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeCASConflict,
+	) {
 		t.Fatalf("creation identity reuse error = %v, want ErrKnowledgeCASConflict", err)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, disputed.Revision, domain.KnowledgeClaimSuperseded, domain.KnowledgeSourceHuman, "slack-human:evt-supersede"); !errors.Is(err, port.ErrKnowledgeValidation) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		disputed.Revision,
+		domain.KnowledgeClaimSuperseded,
+		domain.KnowledgeSourceHuman,
+		"slack-human:evt-supersede",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeValidation,
+	) {
 		t.Fatalf("direct supersede error = %v, want ErrKnowledgeValidation", err)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), "kclaim_missing", 1, domain.KnowledgeClaimVerified, domain.KnowledgeSourceHuman, "slack-human:evt-x"); !errors.Is(err, port.ErrKnowledgeNotFound) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		"kclaim_missing",
+		1,
+		domain.KnowledgeClaimVerified,
+		domain.KnowledgeSourceHuman,
+		"slack-human:evt-x",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeNotFound,
+	) {
 		t.Fatalf("missing claim error = %v, want ErrKnowledgeNotFound", err)
 	}
 	var revisionRows int
@@ -1061,7 +1111,17 @@ func TestKnowledgeStoreTransitionReceiptAuthenticatesCommand(t *testing.T) {
 	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, claim.Revision, domain.KnowledgeClaimVerified, domain.KnowledgeSourceHuman, "slack-human:evt-verify"); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, claim.Revision+1, domain.KnowledgeClaimVerified, domain.KnowledgeSourceClass("curator"), "slack-human:evt-verify"); !errors.Is(err, port.ErrKnowledgeCASConflict) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		claim.Revision+1,
+		domain.KnowledgeClaimVerified,
+		domain.KnowledgeSourceClass("curator"),
+		"slack-human:evt-verify",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeCASConflict,
+	) {
 		t.Fatalf("authority-class impostor replay error = %v, want ErrKnowledgeCASConflict", err)
 	}
 	replacement := domain.KnowledgeClaim{
@@ -1078,7 +1138,17 @@ func TestKnowledgeStoreTransitionReceiptAuthenticatesCommand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, superseded.Revision, domain.KnowledgeClaimSuperseded, domain.KnowledgeSourceHuman, "slack-human:evt-2"); !errors.Is(err, port.ErrKnowledgeCASConflict) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		superseded.Revision,
+		domain.KnowledgeClaimSuperseded,
+		domain.KnowledgeSourceHuman,
+		"slack-human:evt-2",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeCASConflict,
+	) {
 		t.Fatalf("supersession row impostor replay error = %v, want ErrKnowledgeCASConflict", err)
 	}
 	var revisionRows int
@@ -1086,7 +1156,14 @@ func TestKnowledgeStoreTransitionReceiptAuthenticatesCommand(t *testing.T) {
 		t.Fatalf("revision rows after impostor attempts = %d, %v; want 3", revisionRows, err)
 	}
 	var operation string
-	if err := store.db.QueryRowContext(t.Context(), `SELECT operation FROM knowledge_claim_revisions WHERE claim_id = ? AND source_ref = ?`, string(claim.ID), "slack-human:evt-2").Scan(&operation); err != nil {
+	if err := store.db.QueryRowContext(
+		t.Context(),
+		`SELECT operation FROM knowledge_claim_revisions WHERE claim_id = ? AND source_ref = ?`,
+		string(claim.ID),
+		"slack-human:evt-2",
+	).Scan(
+		&operation,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if operation != "supersede" {
@@ -1134,10 +1211,30 @@ func TestKnowledgeStoreMutationSourceReferencesAreValidated(t *testing.T) {
 		t.Fatal(err)
 	}
 	oversized := strings.Repeat("x", domain.DefaultMaxKnowledgeSourceRefRunes+1)
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, claim.Revision, domain.KnowledgeClaimVerified, domain.KnowledgeSourceHuman, oversized); !errors.Is(err, port.ErrKnowledgeValidation) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		claim.Revision,
+		domain.KnowledgeClaimVerified,
+		domain.KnowledgeSourceHuman,
+		oversized,
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeValidation,
+	) {
 		t.Fatalf("oversized transition source error = %v, want ErrKnowledgeValidation", err)
 	}
-	if _, err := store.TransitionClaimStatus(t.Context(), claim.ID, claim.Revision, domain.KnowledgeClaimVerified, domain.KnowledgeSourceHuman, "password: hunter2secret"); !errors.Is(err, port.ErrKnowledgeValidation) {
+	if _, err := store.TransitionClaimStatus(
+		t.Context(),
+		claim.ID,
+		claim.Revision,
+		domain.KnowledgeClaimVerified,
+		domain.KnowledgeSourceHuman,
+		"password: hunter2secret",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeValidation,
+	) {
 		t.Fatalf("credential transition source error = %v, want ErrKnowledgeValidation", err)
 	}
 	preference := domain.KnowledgePreference{

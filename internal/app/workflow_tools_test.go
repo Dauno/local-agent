@@ -37,6 +37,7 @@ func (t *stubRunnableWorkflowTool) ProcessRequest(_ agent.Context, req *model.LL
 	req.Tools[t.Name()] = t
 	return nil
 }
+
 func (t *stubRunnableWorkflowTool) Run(agent.Context, any) (map[string]any, error) {
 	return t.result, nil
 }

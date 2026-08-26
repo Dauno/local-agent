@@ -1,10 +1,11 @@
 package knowledge
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -168,7 +169,14 @@ func (f *fakeKnowledgeStore) CorrectClaim(_ context.Context, replacement domain.
 	return replacement, nil
 }
 
-func (f *fakeKnowledgeStore) TransitionClaimStatus(_ context.Context, id domain.KnowledgeClaimID, expectedRev int, next domain.KnowledgeClaimStatus, _ domain.KnowledgeSourceClass, sourceRef string) (domain.KnowledgeClaim, error) {
+func (f *fakeKnowledgeStore) TransitionClaimStatus(
+	_ context.Context,
+	id domain.KnowledgeClaimID,
+	expectedRev int,
+	next domain.KnowledgeClaimStatus,
+	_ domain.KnowledgeSourceClass,
+	sourceRef string,
+) (domain.KnowledgeClaim, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.transitions = append(f.transitions, string(id)+":"+string(next)+":"+sourceRef)
@@ -304,7 +312,7 @@ func (f *fakeKnowledgeStore) ListClaimsInScopes(_ context.Context, scopes []doma
 			listed = append(listed, claim)
 		}
 	}
-	sort.Slice(listed, func(i, j int) bool { return listed[i].ID < listed[j].ID })
+	slices.SortFunc(listed, func(a, b domain.KnowledgeClaim) int { return cmp.Compare(a.ID, b.ID) })
 	maxRows := limits.WithDefaults().MaxClaimsListing + 1
 	if len(listed) > maxRows {
 		listed = listed[:maxRows]
@@ -359,12 +367,15 @@ func (f *fakeKnowledgeStore) EnqueueProjection(context.Context) error { return n
 func (f *fakeKnowledgeStore) ClaimProjectionBatch(context.Context) ([]domain.KnowledgeProjectionItem, error) {
 	return nil, nil
 }
+
 func (f *fakeKnowledgeStore) CompleteProjectionBatch(context.Context, []int, time.Time) error {
 	return nil
 }
+
 func (f *fakeKnowledgeStore) RetryProjectionBatch(context.Context, []int, time.Time, time.Time) error {
 	return nil
 }
+
 func (f *fakeKnowledgeStore) FailProjectionBatch(context.Context, []int, time.Time, string) error {
 	return nil
 }
@@ -479,7 +490,15 @@ func TestExecuteRequiresEnabledBindingAndCoordinator(t *testing.T) {
 	if _, _, err := service.Execute(t.Context(), domain.KnowledgeWriteBinding{Conversation: testConversation}, "evt-1", rememberText("api")); !errors.Is(err, domain.ErrKnowledgeScopeBindingMismatch) {
 		t.Fatalf("missing actor error = %v", err)
 	}
-	if _, _, err := service.Execute(t.Context(), domain.KnowledgeWriteBinding{Actor: testActor, Conversation: "not-canonical"}, "evt-1", rememberText("api")); !errors.Is(err, domain.ErrKnowledgeScopeBindingMismatch) {
+	if _, _, err := service.Execute(
+		t.Context(),
+		domain.KnowledgeWriteBinding{Actor: testActor, Conversation: "not-canonical"},
+		"evt-1",
+		rememberText("api"),
+	); !errors.Is(
+		err,
+		domain.ErrKnowledgeScopeBindingMismatch,
+	) {
 		t.Fatalf("non-canonical conversation error = %v", err)
 	}
 	if _, _, err := service.Execute(t.Context(), testBinding(), strings.Repeat("e", 1100), rememberText("api")); !errors.Is(err, port.ErrKnowledgeValidation) {
@@ -687,8 +706,22 @@ func TestInspectListingIsBindingBound(t *testing.T) {
 		Value:  domain.KnowledgeValue{Kind: domain.KnowledgeValueString, Text: "Spanish"},
 		Status: domain.KnowledgePreferenceActive, Revision: 1,
 	}
-	store.documents["kdoc_1"] = domain.KnowledgeDocument{ID: "kdoc_1", Subject: "runbook", ScopeKind: domain.KnowledgeScopeProject, ScopeID: "proj-a", Revision: 3, Status: domain.KnowledgeDocumentActive}
-	store.documents["kdoc_2"] = domain.KnowledgeDocument{ID: "kdoc_2", Subject: "notes", ScopeKind: domain.KnowledgeScopeUser, ScopeID: testOwnerKey, Revision: 1, Status: domain.KnowledgeDocumentActive}
+	store.documents["kdoc_1"] = domain.KnowledgeDocument{
+		ID:        "kdoc_1",
+		Subject:   "runbook",
+		ScopeKind: domain.KnowledgeScopeProject,
+		ScopeID:   "proj-a",
+		Revision:  3,
+		Status:    domain.KnowledgeDocumentActive,
+	}
+	store.documents["kdoc_2"] = domain.KnowledgeDocument{
+		ID:        "kdoc_2",
+		Subject:   "notes",
+		ScopeKind: domain.KnowledgeScopeUser,
+		ScopeID:   testOwnerKey,
+		Revision:  1,
+		Status:    domain.KnowledgeDocumentActive,
+	}
 	service := newTestService(t, store, newCountingCoordinator())
 	binding := testBinding()
 	binding.Project = "proj-a"
@@ -701,7 +734,12 @@ func TestInspectListingIsBindingBound(t *testing.T) {
 			t.Errorf("listing missing %q: %s", want, listing)
 		}
 	}
-	_, empty, err := service.Execute(t.Context(), domain.KnowledgeWriteBinding{Team: "T00000002", Actor: "U00000009", Conversation: domain.ConversationKey("slack:T00000002:channel:C00000009:thread:1234567890.123456")}, "evt-2", HumanCommandPrefix+`{"action":"inspect"}`)
+	_, empty, err := service.Execute(
+		t.Context(),
+		domain.KnowledgeWriteBinding{Team: "T00000002", Actor: "U00000009", Conversation: domain.ConversationKey("slack:T00000002:channel:C00000009:thread:1234567890.123456")},
+		"evt-2",
+		HumanCommandPrefix+`{"action":"inspect"}`,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

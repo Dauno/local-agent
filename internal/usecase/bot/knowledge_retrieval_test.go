@@ -62,7 +62,12 @@ type fakeRetrievalBindingResolver struct {
 	err     error
 }
 
-func (r *fakeRetrievalBindingResolver) ResolveRetrievalBinding(ctx context.Context, team, actor string, conversation domain.ConversationKey, exchangeTS string) (port.KnowledgeRetrievalBinding, error) {
+func (r *fakeRetrievalBindingResolver) ResolveRetrievalBinding(
+	ctx context.Context,
+	team, actor string,
+	conversation domain.ConversationKey,
+	exchangeTS string,
+) (port.KnowledgeRetrievalBinding, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.calls++

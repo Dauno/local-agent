@@ -399,7 +399,11 @@ func (r *Retriever) searchSemantic(ctx context.Context, scopes []domain.Knowledg
 // one-based semantic rank. The ranker owns cross-channel identity merging
 // and the complete sorted reason set, so this function must never suppress
 // a contribution because another channel already named the identity.
-func buildRankContributions(exactCandidates, relationCandidates []port.KnowledgeEligibleCandidate, verifiedLexical, verifiedSemantic []port.KnowledgeIndexHit, query string) []domain.KnowledgeRankCandidate {
+func buildRankContributions(
+	exactCandidates, relationCandidates []port.KnowledgeEligibleCandidate,
+	verifiedLexical, verifiedSemantic []port.KnowledgeIndexHit,
+	query string,
+) []domain.KnowledgeRankCandidate {
 	contributions := make([]domain.KnowledgeRankCandidate, 0, len(exactCandidates)+len(relationCandidates)+len(verifiedLexical)+len(verifiedSemantic))
 	seenExact := make(map[string]bool)
 	for _, candidate := range exactCandidates {
@@ -528,7 +532,13 @@ func primaryCardReason(reasons []domain.KnowledgeRetrievalReason) domain.Knowled
 // item. Document resolution failures exclude the card and enqueue cleanup
 // without falling back; an omission category is returned for oversized
 // documents.
-func (r *Retriever) buildFrameCard(ctx context.Context, request domain.KnowledgeRetrievalRequest, limits domain.KnowledgeRetrievalLimits, item port.KnowledgeAuthoritativeItem, reasons []domain.KnowledgeRetrievalReason) (*domain.KnowledgeFrameCard, domain.KnowledgeRetrievalOmission, error) {
+func (r *Retriever) buildFrameCard(
+	ctx context.Context,
+	request domain.KnowledgeRetrievalRequest,
+	limits domain.KnowledgeRetrievalLimits,
+	item port.KnowledgeAuthoritativeItem,
+	reasons []domain.KnowledgeRetrievalReason,
+) (*domain.KnowledgeFrameCard, domain.KnowledgeRetrievalOmission, error) {
 	reason := string(primaryCardReason(reasons))
 	switch item.Kind {
 	case domain.KnowledgeRetrievalClaim:

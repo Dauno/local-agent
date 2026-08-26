@@ -37,10 +37,17 @@ type workstreamKnowledgeBindingResolver struct {
 	allowed map[string]struct{}
 }
 
-var _ port.KnowledgeBindingResolver = workstreamKnowledgeBindingResolver{}
-var _ port.KnowledgeRetrievalBindingResolver = workstreamKnowledgeBindingResolver{}
+var (
+	_ port.KnowledgeBindingResolver          = workstreamKnowledgeBindingResolver{}
+	_ port.KnowledgeRetrievalBindingResolver = workstreamKnowledgeBindingResolver{}
+)
 
-func (r workstreamKnowledgeBindingResolver) ResolveKnowledgeBinding(ctx context.Context, team, actor string, conversationKey domain.ConversationKey, text string) (domain.KnowledgeWriteBinding, error) {
+func (r workstreamKnowledgeBindingResolver) ResolveKnowledgeBinding(
+	ctx context.Context,
+	team, actor string,
+	conversationKey domain.ConversationKey,
+	text string,
+) (domain.KnowledgeWriteBinding, error) {
 	binding := domain.KnowledgeWriteBinding{Team: team, Actor: actor, Conversation: conversationKey}
 	if command, matched, err := knowledgeusecase.ParseHumanCommand(text); matched && err == nil && domain.KnowledgeScopeKind(command.ScopeKind) == domain.KnowledgeScopeProject {
 		if _, ok := r.allowed[command.ScopeID]; ok {
@@ -79,7 +86,12 @@ func (r workstreamKnowledgeBindingResolver) ResolveKnowledgeBinding(ctx context.
 // conversation binding plus a nil snapshot and grants no project or
 // workstream scope. The snapshot, when valid, is derived from that same
 // read so a concurrent mutation can never mix binding and snapshot.
-func (r workstreamKnowledgeBindingResolver) ResolveRetrievalBinding(ctx context.Context, team, actor string, conversation domain.ConversationKey, exchangeTS string) (port.KnowledgeRetrievalBinding, error) {
+func (r workstreamKnowledgeBindingResolver) ResolveRetrievalBinding(
+	ctx context.Context,
+	team, actor string,
+	conversation domain.ConversationKey,
+	exchangeTS string,
+) (port.KnowledgeRetrievalBinding, error) {
 	binding := domain.KnowledgeWriteBinding{Team: team, Actor: actor, Conversation: conversation}
 	if r.store == nil {
 		return port.KnowledgeRetrievalBinding{Binding: binding, ExchangeTS: exchangeTS}, nil
@@ -92,7 +104,8 @@ func (r workstreamKnowledgeBindingResolver) ResolveRetrievalBinding(ctx context.
 		return port.KnowledgeRetrievalBinding{}, fmt.Errorf("resolve active workstream for retrieval binding: %w", err)
 	}
 	if err := workstream.ValidateBinding(actor, conversation, workstream.Project); err != nil {
-		return port.KnowledgeRetrievalBinding{Binding: binding, ExchangeTS: exchangeTS}, nil //nolint:nilerr // invalid binding degrades to the unscoped default, consistent with the other early returns above
+		//nolint:nilerr // Invalid bindings degrade to the unscoped default, consistent with the other early returns above.
+		return port.KnowledgeRetrievalBinding{Binding: binding, ExchangeTS: exchangeTS}, nil
 	}
 	if workstream.Status != domain.WorkstreamActive {
 		return port.KnowledgeRetrievalBinding{Binding: binding, ExchangeTS: exchangeTS}, nil

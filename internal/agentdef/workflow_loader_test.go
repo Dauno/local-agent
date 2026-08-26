@@ -119,7 +119,13 @@ func TestLoadWorkflowRejectsUnsafeOrAmbiguousDocuments(t *testing.T) {
 			name: "exit loop arguments",
 			root: "agent_class: LoopAgent\nname: Root\ndescription: test\nmax_iterations: 1\nsub_agents:\n  - config_path: child.yaml\n",
 			set: func(t *testing.T, stateDir string) string {
-				writeWorkflowFile(t, stateDir, "case", "child.yaml", "agent_class: LlmAgent\nname: Child\nmodel: deepseek/test\ninstruction: test\ntools:\n  - name: exit_loop\n    args:\n      ignored: true\n")
+				writeWorkflowFile(
+					t,
+					stateDir,
+					"case",
+					"child.yaml",
+					"agent_class: LlmAgent\nname: Child\nmodel: deepseek/test\ninstruction: test\ntools:\n  - name: exit_loop\n    args:\n      ignored: true\n",
+				)
 				return ""
 			},
 			want: "arguments are not supported",
@@ -295,11 +301,13 @@ func cliWorkflowDefinitions() *agentdef.Definitions {
 		Name: "codex", Type: agentdef.ProviderTypeAgentCLI, Executable: "codex",
 		Version:    &agentdef.CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "0.0.0"},
 		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"exec", "-"}},
-		Stream: &agentdef.CLIStream{Format: "ndjson",
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
 			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"},
 			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
 			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "item"}, TypeField: "item.type", DiscardTypes: []string{}},
-			TerminalTypes: []string{"result"}},
+			TerminalTypes: []string{"result"},
+		},
 		Profiles: map[string]agentdef.Profile{"build": {Model: "gpt-5.6-luna", Approval: agentdef.ApprovalAuto}},
 	}
 	return defs

@@ -187,7 +187,11 @@ func externalAgentFailureClass(err error) string {
 // final post-transformation text, its exact UTF-8 byte count and lowercase
 // hex SHA-256 digest are set; Delivery* fields, artifact refs and policy
 // fields stay empty for the synchronous path.
-func (d *externalAgentJobDispatcher) normalizeForegroundResult(ctx context.Context, job domain.ExternalAgentJob, result domain.ExternalAgentInvocationResult) (domain.ExternalAgentInvocationResult, error) {
+func (d *externalAgentJobDispatcher) normalizeForegroundResult(
+	ctx context.Context,
+	job domain.ExternalAgentJob,
+	result domain.ExternalAgentInvocationResult,
+) (domain.ExternalAgentInvocationResult, error) {
 	text, size, digest, err := d.normalizeResultText(result.Text, d.policy.MaxInlineResultBytes)
 	if err != nil {
 		return domain.ExternalAgentInvocationResult{}, err
@@ -282,7 +286,10 @@ func (d *externalAgentJobDispatcher) materialize(ctx context.Context, job domain
 		}
 		content, err = d.artifacts.Get(ctx, job.ID, result.ArtifactRef, result.ResultSHA256, d.policy.MaxResultArtifactBytes)
 		if err != nil {
-			return domain.ExternalAgentInvocationResult{}, &domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultArtifactInvalid, Err: errors.New("verified external-agent result artifact is unavailable")}
+			return domain.ExternalAgentInvocationResult{}, &domain.ExternalAgentError{
+				Code: domain.ExternalAgentErrorResultArtifactInvalid,
+				Err:  errors.New("verified external-agent result artifact is unavailable"),
+			}
 		}
 	} else {
 		content = []byte(result.Text)
@@ -405,7 +412,12 @@ func (d *externalAgentJobDispatcher) hasSessionRecovery() bool {
 	return false
 }
 
-func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *runtimeInfrastructure, supplied ...externalAgentSchedules) (*externalagent.Service, *externalagent.NotificationWorker, error) {
+func newExternalAgentJobService(
+	cfg config.Config,
+	models runtimeModels,
+	infra *runtimeInfrastructure,
+	supplied ...externalAgentSchedules,
+) (*externalagent.Service, *externalagent.NotificationWorker, error) {
 	children := externalAgentChildren(models.preparedAgentTools)
 	if len(children) == 0 {
 		return nil, nil, nil
@@ -452,13 +464,15 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	if models.rootDef != nil {
 		global = models.rootDef.EffectiveDelegatedGlobalInstruction()
 	}
-	dispatcher := &externalAgentJobDispatcher{children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
+	dispatcher := &externalAgentJobDispatcher{
+		children: children, global: global, store: store, sanitize: models.redactor.String, results: nativeResults,
 		artifacts: models.artifactStore, policy: policy, partLabels: cfg.Slack.PartLabels,
 		reconciliationTimeout: time.Duration(cfg.ExternalAgent.ReconciliationTimeoutSeconds) * time.Second,
 		progressStore:         store, processRegistry: infra.processRegistry,
 		progressWarnAfter: time.Duration(cfg.ExternalAgent.ProgressWarningSeconds) * time.Second,
 		logger:            models.logger, metrics: models.metrics,
-		progressGauge: externalagent.NewActiveProgressGauge(models.metrics)}
+		progressGauge: externalagent.NewActiveProgressGauge(models.metrics),
+	}
 	runtime := jobRuntimeForDispatcher(dispatcher)
 	service, err := externalagent.New(externalagent.Config{
 		DefaultTimeout:         time.Duration(cfg.ExternalAgent.DefaultJobTimeoutSeconds) * time.Second,
@@ -484,7 +498,18 @@ func newExternalAgentJobService(cfg config.Config, models runtimeModels, infra *
 	}
 	uploader := slackadapter.NewGeneratedFileUploader(infra.api, infra.slackTimeout)
 	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(infra.publisher, infra.history, uploader, models.artifactStore, store, infra.api, cfg.Slack.PartLabels)
-	notificationWorker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute}, externalagent.NotificationDependencies{Store: store, Publisher: notificationPublisher, HostCompleter: service, Logger: models.logger, Metrics: models.metrics, Scheduler: schedules.notifications, ActivationWake: schedules.activations.Wake})
+	notificationWorker, err := externalagent.NewNotificationWorker(
+		externalagent.NotificationConfig{PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute},
+		externalagent.NotificationDependencies{
+			Store:          store,
+			Publisher:      notificationPublisher,
+			HostCompleter:  service,
+			Logger:         models.logger,
+			Metrics:        models.metrics,
+			Scheduler:      schedules.notifications,
+			ActivationWake: schedules.activations.Wake,
+		},
+	)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -504,7 +529,13 @@ func jobRuntimeForDispatcher(dispatcher *externalAgentJobDispatcher) port.Extern
 // the identical production construction instead of reproducing it, and so
 // a regression that swaps in the wrong scheduler here is caught by that
 // test rather than only by composeRuntime itself.
-func newExternalAgentActivationWorker(store port.ExternalAgentJobActivationStore, handler port.ExternalAgentJobCompletionHandler, logger port.Logger, metrics port.MetricRecorder, schedules externalAgentSchedules) (*externalagent.ActivationWorker, error) {
+func newExternalAgentActivationWorker(
+	store port.ExternalAgentJobActivationStore,
+	handler port.ExternalAgentJobCompletionHandler,
+	logger port.Logger,
+	metrics port.MetricRecorder,
+	schedules externalAgentSchedules,
+) (*externalagent.ActivationWorker, error) {
 	return externalagent.NewActivationWorker(externalagent.ActivationConfig{
 		PollInterval: time.Second, LeaseTTL: 30 * time.Second, StuckThreshold: 5 * time.Minute,
 	}, externalagent.ActivationDependencies{

@@ -248,8 +248,10 @@ func BenchmarkSessionLatestEventOrdinal(b *testing.B) {
 // cap from the worker prompt. This grid holds candidates <= 300, enough to
 // show the shape without an hours-long run.
 
-var retentionBenchEvents = []int{100, 1_000, 10_000}
-var retentionBenchCandidates = []int{10, 100, 300}
+var (
+	retentionBenchEvents     = []int{100, 1_000, 10_000}
+	retentionBenchCandidates = []int{10, 100, 300}
+)
 
 // retentionBenchRef derives a valid 64-character lowercase hex ref from a
 // label, so seeding code can build distinct, deterministic, schema-valid

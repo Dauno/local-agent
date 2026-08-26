@@ -24,8 +24,10 @@ func TestStatusProjectionMergesLiveProgress(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 1, ProgressWarningTimeout: 10 * time.Second},
-		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, ProgressStore: jobStore, ProcessRegistry: &projectionRegistry{alive: new(true)}})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 1, ProgressWarningTimeout: 10 * time.Second},
+		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, ProgressStore: jobStore, ProcessRegistry: &projectionRegistry{alive: new(true)}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

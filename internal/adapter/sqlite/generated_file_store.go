@@ -46,7 +46,14 @@ func (s *GeneratedFileOperationStore) CreateGeneratedFileOperation(ctx context.C
 }
 
 func (s *GeneratedFileOperationStore) UpdateGeneratedFileOperation(ctx context.Context, operationID string, status domain.GeneratedFileOperationStatus, slackFileID string) error {
-	result, err := s.db.ExecContext(ctx, `UPDATE generated_file_operations SET status = ?, slack_file_id = ?, updated_at = ? WHERE id = ?`, string(status), slackFileID, time.Now().UTC().UnixNano(), operationID)
+	result, err := s.db.ExecContext(
+		ctx,
+		`UPDATE generated_file_operations SET status = ?, slack_file_id = ?, updated_at = ? WHERE id = ?`,
+		string(status),
+		slackFileID,
+		time.Now().UTC().UnixNano(),
+		operationID,
+	)
 	if err != nil {
 		return fmt.Errorf("update generated file operation: %w", err)
 	}

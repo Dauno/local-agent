@@ -295,7 +295,17 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 			// confirmation gate and the job record, so it is rebuilt per call.
 			// A foreground leaf reuses the startup-validated wrapper.
 			if child.executionMode == agentdef.ExecutionModeDurableJob {
-				durable, err := newAgentCLIDurableTool(child.definition, child.cliResolved, child.projectRoots, child.externalAgentTimeout, child.registryRevision, f.jobStarter, f.completionBindings, actor, key)
+				durable, err := newAgentCLIDurableTool(
+					child.definition,
+					child.cliResolved,
+					child.projectRoots,
+					child.externalAgentTimeout,
+					child.registryRevision,
+					f.jobStarter,
+					f.completionBindings,
+					actor,
+					key,
+				)
 				if err != nil {
 					return nil, fmt.Errorf("build durable agent CLI tool %q: %w", child.definition.Name, err)
 				}
@@ -345,7 +355,13 @@ func (f *compositeAgentToolFactory) ToolsForActivation(actor string, key domain.
 	return factory.ToolsForActivation(actor, key, activation)
 }
 
-func externalAgentDelegationConfirmation(ctx context.Context, completionBindings port.ExternalAgentJobCompletionBindingResolver, actor string, key domain.ConversationKey, args externalAgentArgs) (string, map[string]any) {
+func externalAgentDelegationConfirmation(
+	ctx context.Context,
+	completionBindings port.ExternalAgentJobCompletionBindingResolver,
+	actor string,
+	key domain.ConversationKey,
+	args externalAgentArgs,
+) (string, map[string]any) {
 	task := boundedConfirmationText(args.Task, maxConfirmationTaskRunes)
 	payload := map[string]any{
 		"project": args.Project,
@@ -493,7 +509,14 @@ func newAgentToolAgentWithContext(definition agentdef.AgentDef, globalInstructio
 	return newAgentToolAgentFull(definition, globalInstruction, childModel, tools, contextConfig, nil)
 }
 
-func newAgentToolAgentFull(definition agentdef.AgentDef, globalInstruction string, childModel model.LLM, tools []tool.Tool, contextConfig *agentToolContextConfig, inputSchema *genai.Schema) (agent.Agent, error) {
+func newAgentToolAgentFull(
+	definition agentdef.AgentDef,
+	globalInstruction string,
+	childModel model.LLM,
+	tools []tool.Tool,
+	contextConfig *agentToolContextConfig,
+	inputSchema *genai.Schema,
+) (agent.Agent, error) {
 	instruction := definition.Instruction
 	includeContents := llmagent.IncludeContentsDefault
 	if definition.IncludeContents == "none" {

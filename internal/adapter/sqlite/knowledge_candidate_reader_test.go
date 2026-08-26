@@ -66,7 +66,22 @@ func TestKnowledgeCandidateReaderExactCrossScopesReturnZero(t *testing.T) {
 	// other identities must be indistinguishable from missing.
 	seedRetrievalClaim(t, store, "kclaim_user_other", "user secret", "is", "string", "user-value", "", "user", "slack:T00000001:user:U99999999", "asserted", nowUnix, 0, 1)
 	seedRetrievalClaim(t, store, "kclaim_project_other", "project secret", "is", "string", "project-value", "", "project", "other-project", "asserted", nowUnix, 0, 1)
-	seedRetrievalClaim(t, store, "kclaim_conversation_other", "conversation secret", "is", "string", "conversation-value", "", "conversation", "slack:T00000001:dm:C99999999", "asserted", nowUnix, 0, 1)
+	seedRetrievalClaim(
+		t,
+		store,
+		"kclaim_conversation_other",
+		"conversation secret",
+		"is",
+		"string",
+		"conversation-value",
+		"",
+		"conversation",
+		"slack:T00000001:dm:C99999999",
+		"asserted",
+		nowUnix,
+		0,
+		1,
+	)
 	seedRetrievalClaim(t, store, "kclaim_workstream_other", "workstream secret", "is", "string", "workstream-value", "", "workstream", "ws-other", "asserted", nowUnix, 0, 1)
 	seedRetrievalClaim(t, store, "kclaim_team_other", "team secret", "is", "string", "team-value", "", "team", "T00000002", "asserted", nowUnix, 0, 1)
 

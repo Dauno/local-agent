@@ -379,15 +379,19 @@ type compilerMetricCapture struct {
 func (m *compilerMetricCapture) AddCounter(name string, delta int64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: labels})
 }
+
 func (m *compilerMetricCapture) SetGauge(name string, value int64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: labels})
 }
+
 func (m *compilerMetricCapture) Observe(name string, value float64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: labels})
 }
+
 func (m *compilerMetricCapture) Snapshot() []port.MetricSample {
 	return append([]port.MetricSample(nil), m.samples...)
 }
+
 func (m *compilerMetricCapture) find(name string) (port.MetricSample, bool) {
 	for _, sample := range m.samples {
 		if sample.Name == name {
@@ -607,9 +611,11 @@ func TestCompilerAccountsForFixedProviderInput(t *testing.T) {
 	}
 	const fixed = 100
 	compiler := New(newFakeResultStore(), serializedByteCounter{})
-	_, err = compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents,
+	_, err = compiler.Compile(context.Background(), domain.CompileRequest{
+		Contents:           contents,
 		ModelBudget:        domain.RequestBudget{HardTokens: len(serialized) + fixed - 1, TargetTokens: len(serialized) + fixed - 1},
-		FixedRequestTokens: fixed})
+		FixedRequestTokens: fixed,
+	})
 	if !errors.Is(err, domain.ErrIrreducibleContext) {
 		t.Fatalf("Compile() error = %v, want fixed input to cross hard limit", err)
 	}
@@ -639,7 +645,14 @@ func TestCompilerRecountsContinuityAndExcerptsThenFailsClosed(t *testing.T) {
 		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file", Args: map[string]any{}}}}},
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": readableText(500)}}}}},
 	}
-	base := domain.CompileRequest{Contents: contents, ExistingSummary: "summary", ModelBudget: domain.RequestBudget{HardTokens: 10_000, TargetTokens: 10_000}, Continuity: domain.ContinuityCapsule{Objective: &domain.ContinuityItem{ID: "objective", Kind: domain.ContinuityKindObjective, Text: "keep context bounded", Status: domain.ContinuityStatusCurrent}}}
+	base := domain.CompileRequest{
+		Contents:        contents,
+		ExistingSummary: "summary",
+		ModelBudget:     domain.RequestBudget{HardTokens: 10_000, TargetTokens: 10_000},
+		Continuity: domain.ContinuityCapsule{
+			Objective: &domain.ContinuityItem{ID: "objective", Kind: domain.ContinuityKindObjective, Text: "keep context bounded", Status: domain.ContinuityStatusCurrent},
+		},
+	}
 
 	for _, tc := range []struct {
 		name    string
@@ -947,8 +960,10 @@ func TestCompilerRemovesBulkArraysAndEscapesSpoofedMarker(t *testing.T) {
 			"values": values, "status": "ok", "_local_agent_context_projection": "spoofed",
 		}}}}},
 	}
-	result, err := newCompiler().Compile(context.Background(), domain.CompileRequest{Contents: contents,
-		ModelBudget: domain.RequestBudget{HardTokens: 2000, TargetTokens: 1500}, Actor: "U1", ConversationKey: "conversation"})
+	result, err := newCompiler().Compile(context.Background(), domain.CompileRequest{
+		Contents:    contents,
+		ModelBudget: domain.RequestBudget{HardTokens: 2000, TargetTokens: 1500}, Actor: "U1", ConversationKey: "conversation",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1175,7 +1190,12 @@ func TestCompilerDoesNotExternalizeResultChunks(t *testing.T) {
 		Contents: []domain.Content{
 			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "inspect result"}}},
 			{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "v2-chunk", Name: "workstream_read_result_chunk"}}}},
-			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "v2-chunk", Name: "workstream_read_result_chunk", Response: map[string]any{"content": strings.Repeat("x", 6_000)}}}}},
+			{
+				Role: domain.ContentRoleUser,
+				Parts: []domain.ContentPart{
+					{FunctionResponse: &domain.FunctionResponse{ID: "v2-chunk", Name: "workstream_read_result_chunk", Response: map[string]any{"content": strings.Repeat("x", 6_000)}}},
+				},
+			},
 		},
 		ModelBudget: domain.RequestBudget{HardTokens: 1_000, TargetTokens: 1_000}, Actor: "U1", ConversationKey: "no-recursive-projection",
 	})
@@ -1195,7 +1215,10 @@ func TestCompilerV2BoundaryDoesNotWriteAnyProjection(t *testing.T) {
 		Contents: []domain.Content{
 			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "run tool"}}},
 			{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "tool-large", Name: "arbitrary_tool"}}}},
-			{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "tool-large", Name: "arbitrary_tool", Response: map[string]any{"content": strings.Repeat("x", 6_000)}}}}},
+			{
+				Role:  domain.ContentRoleUser,
+				Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "tool-large", Name: "arbitrary_tool", Response: map[string]any{"content": strings.Repeat("x", 6_000)}}}},
+			},
 		},
 		ModelBudget: domain.RequestBudget{HardTokens: 1_000, TargetTokens: 1_000}, Actor: "U1", ConversationKey: "v2-no-writes",
 	})

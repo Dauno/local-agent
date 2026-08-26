@@ -57,7 +57,9 @@ formatters:
   enable:
     - gci
     - gofmt
+    - gofumpt
     - goimports
+    - golines
   settings:
     gci:
       sections:
@@ -65,9 +67,15 @@ formatters:
         - default
         - localmodule
       custom-order: true
+    gofumpt:
+      module-path: github.com/Dauno/slack-local-agent
     goimports:
       local-prefixes:
         - github.com/Dauno/slack-local-agent
+    golines:
+      max-len: 200
+      reformat-tags: false
+      chain-split-dots: false
   exclusions:
     paths:
       - '^vendor/'

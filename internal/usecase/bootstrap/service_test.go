@@ -305,7 +305,8 @@ slack:
 	if loaded.Slack.AppName != identity.SlackAppName || loaded.Slack.BotDisplayName != identity.SlackBotDisplayName {
 		t.Fatalf("identity not applied: %#v", loaded.Slack)
 	}
-	if strings.Join(loaded.Slack.AllowedUserIDs, ",") != "U12345678" || strings.Join(loaded.Slack.AllowedTeamIDs, ",") != "T12345678" || strings.Join(loaded.Slack.AllowedChannelIDs, ",") != "C12345678" {
+	if strings.Join(loaded.Slack.AllowedUserIDs, ",") != "U12345678" || strings.Join(loaded.Slack.AllowedTeamIDs, ",") != "T12345678" ||
+		strings.Join(loaded.Slack.AllowedChannelIDs, ",") != "C12345678" {
 		t.Fatalf("access control not applied: %#v", loaded.Slack)
 	}
 	if !loaded.Slack.Context.Enabled {

@@ -788,7 +788,17 @@ func parseElement(data []byte, templateName, fieldPath string) (*templateElement
 	if err := validateLiteralString(raw.Type, templateName, fieldPath+".type"); err != nil {
 		return nil, err
 	}
-	element := &templateElement{Type: raw.Type, ActionID: raw.ActionID, Value: raw.Value, URL: raw.URL, Style: raw.Style, Multiline: raw.Multiline, MinLength: raw.MinLength, MaxLength: raw.MaxLength, FocusOnLoad: raw.FocusOnLoad}
+	element := &templateElement{
+		Type:        raw.Type,
+		ActionID:    raw.ActionID,
+		Value:       raw.Value,
+		URL:         raw.URL,
+		Style:       raw.Style,
+		Multiline:   raw.Multiline,
+		MinLength:   raw.MinLength,
+		MaxLength:   raw.MaxLength,
+		FocusOnLoad: raw.FocusOnLoad,
+	}
 	if raw.ActionID != "" {
 		if err := validateLiteralID(raw.ActionID, fieldPath+".action_id"); err != nil {
 			return nil, err
@@ -1306,7 +1316,14 @@ func validateBlocks(doc templateDocument, blocks []templateBlock, modal bool) er
 				return fmt.Errorf("%s.elements exceeds %d items", fieldPath, maxRendererActionElements)
 			}
 			for elementIndex, element := range block.Elements {
-				if err := validateElement(doc, element, modal, map[string]bool{"button": true, "static_select": true}, &actionIDs, fmt.Sprintf("%s.elements[%d]", fieldPath, elementIndex)); err != nil {
+				if err := validateElement(
+					doc,
+					element,
+					modal,
+					map[string]bool{"button": true, "static_select": true},
+					&actionIDs,
+					fmt.Sprintf("%s.elements[%d]", fieldPath, elementIndex),
+				); err != nil {
 					return err
 				}
 			}
@@ -1627,7 +1644,11 @@ func parseTemplateString(value string) (templateToken, bool, error) {
 		}
 	}
 	lower := strings.ToLower(value)
-	if strings.Contains(value, "{{") || strings.Contains(value, "}}") || strings.Contains(value, "${") || strings.Contains(value, "<%") || strings.Contains(lower, "javascript:") || strings.Contains(lower, "<script") || strings.Contains(lower, "function(") || strings.Contains(lower, "eval(") || strings.Contains(value, "=>") {
+	if strings.Contains(value, "{{") || strings.Contains(value, "}}") || strings.Contains(value, "${") || strings.Contains(value, "<%") || strings.Contains(lower, "javascript:") ||
+		strings.Contains(lower, "<script") ||
+		strings.Contains(lower, "function(") ||
+		strings.Contains(lower, "eval(") ||
+		strings.Contains(value, "=>") {
 		return templateToken{}, false, errors.New("partial placeholders, expressions, and scripts are not supported")
 	}
 	return templateToken{}, false, nil

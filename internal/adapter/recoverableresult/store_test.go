@@ -78,12 +78,15 @@ func (m *resultMetricCapture) add(sample port.MetricSample) {
 	}
 	m.samples[sample.Name] = append(m.samples[sample.Name], sample)
 }
+
 func (m *resultMetricCapture) AddCounter(name string, delta int64, labels port.MetricLabels) {
 	m.add(port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: labels})
 }
+
 func (m *resultMetricCapture) SetGauge(name string, value int64, labels port.MetricLabels) {
 	m.add(port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: labels})
 }
+
 func (m *resultMetricCapture) Observe(name string, value float64, labels port.MetricLabels) {
 	m.add(port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: labels})
 }
@@ -460,7 +463,7 @@ func TestSHA256Integrity(t *testing.T) {
 	_ = origData
 
 	// Corrupt the first byte
-	if err := os.WriteFile(filePath, []byte("X"+content[1:]), 0600); err != nil {
+	if err := os.WriteFile(filePath, []byte("X"+content[1:]), 0o600); err != nil {
 		t.Fatal(err)
 	}
 

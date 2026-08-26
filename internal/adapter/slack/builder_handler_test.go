@@ -148,7 +148,8 @@ func TestBuilderInstallRejectsMismatchedDraftIdentityAndState(t *testing.T) {
 	baseCallback := slackapi.InteractionCallback{
 		Team: slackapi.Team{ID: "T12345678"}, User: slackapi.User{ID: "U12345678"},
 
-		Container: slackapi.Container{ChannelID: "C12345678", ThreadTs: "1700000000.000001"}}
+		Container: slackapi.Container{ChannelID: "C12345678", ThreadTs: "1700000000.000001"},
+	}
 
 	tests := []struct {
 		name   string

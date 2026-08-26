@@ -191,7 +191,15 @@ func TestKnowledgeProjectionFailPersistsBoundedCode(t *testing.T) {
 	if status != string(domain.KnowledgeProjectionFailed) || lastError != port.KnowledgeProjectionExhaustedCode {
 		t.Fatalf("failed row = %q %q", status, lastError)
 	}
-	if err := store.FailProjectionBatch(ctx, []int{item.ID}, item.LeaseUntil, "a code that is far too long for the bounded terminal failure column and would leak detail"); !errors.Is(err, port.ErrKnowledgeValidation) {
+	if err := store.FailProjectionBatch(
+		ctx,
+		[]int{item.ID},
+		item.LeaseUntil,
+		"a code that is far too long for the bounded terminal failure column and would leak detail",
+	); !errors.Is(
+		err,
+		port.ErrKnowledgeValidation,
+	) {
 		t.Fatalf("oversized code error = %v, want ErrKnowledgeValidation", err)
 	}
 }

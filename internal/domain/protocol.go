@@ -344,7 +344,12 @@ func scanContentProtocol(contents []Content, options ProtocolValidationOptions) 
 					}
 					wrapper := ledger.calls[call.confirmationWrapperID]
 					if wrapper == nil || wrapper.responseCount != 1 {
-						return ledger, protocolValidationError(ProtocolRuleConfirmationLifecycle, contentIndex, partIndex, fmt.Sprintf("function response %q precedes confirmation decision", response.ID))
+						return ledger, protocolValidationError(
+							ProtocolRuleConfirmationLifecycle,
+							contentIndex,
+							partIndex,
+							fmt.Sprintf("function response %q precedes confirmation decision", response.ID),
+						)
 					}
 				}
 				if call.responseCount == 0 && isConfirmationPlaceholder(response) {

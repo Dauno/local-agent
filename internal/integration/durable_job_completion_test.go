@@ -254,7 +254,10 @@ func TestDetachedJobNotificationRetriesHTTPFailureAndReclaimsExpiredPublishing(t
 		t.Fatal(err)
 	}
 	notificationPublisher := slackadapter.NewDurableJobNotificationPublisher(publisher, history, slackadapter.NewGeneratedFileUploader(client, time.Second), artifacts, jobs, client, false)
-	worker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute, RetryBase: time.Hour, RetryMax: time.Hour}, externalagent.NotificationDependencies{Store: jobs, Publisher: notificationPublisher, HostCompleter: service})
+	worker, err := externalagent.NewNotificationWorker(
+		externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute, RetryBase: time.Hour, RetryMax: time.Hour},
+		externalagent.NotificationDependencies{Store: jobs, Publisher: notificationPublisher, HostCompleter: service},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -268,7 +271,14 @@ func TestDetachedJobNotificationRetriesHTTPFailureAndReclaimsExpiredPublishing(t
 	if inspection.Deliveries[0].PublishState != domain.NotificationPending || inspection.Deliveries[0].Attempts != 1 || inspection.Deliveries[0].LastErrorCode != "notification_publish_ambiguous" {
 		t.Fatalf("retry state = %#v", inspection.Deliveries[0])
 	}
-	if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications SET publish_state = ?, lease_expiry = ?, next_attempt_at = ? WHERE job_id = ?`, domain.NotificationPublishing, time.Now().UTC().Add(-time.Minute).UnixNano(), time.Now().UTC().UnixNano(), job.ID); err != nil {
+	if _, err := store.DB().ExecContext(
+		t.Context(),
+		`UPDATE external_agent_job_notifications SET publish_state = ?, lease_expiry = ?, next_attempt_at = ? WHERE job_id = ?`,
+		domain.NotificationPublishing,
+		time.Now().UTC().Add(-time.Minute).UnixNano(),
+		time.Now().UTC().UnixNano(),
+		job.ID,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := worker.ProcessOne(t.Context()); err != nil {
@@ -278,7 +288,8 @@ func TestDetachedJobNotificationRetriesHTTPFailureAndReclaimsExpiredPublishing(t
 	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
 		t.Fatalf("recovered inspection = %#v, err=%v", inspection, err)
 	}
-	if inspection.Deliveries[0].PublishState != domain.NotificationPublished || inspection.Deliveries[0].Attempts != 2 || inspection.Deliveries[0].RecoveredSlackTS == "" || inspection.Deliveries[0].LastErrorCode != "" {
+	if inspection.Deliveries[0].PublishState != domain.NotificationPublished || inspection.Deliveries[0].Attempts != 2 || inspection.Deliveries[0].RecoveredSlackTS == "" ||
+		inspection.Deliveries[0].LastErrorCode != "" {
 		t.Fatalf("recovered state = %#v", inspection.Deliveries[0])
 	}
 	mu.Lock()
@@ -345,7 +356,9 @@ func TestDetachedJobNotificationPublishesMultipartMarkdownFromOutbox(t *testing.
 	}
 	history := slackadapter.NewHistoryReader(client, "B12345678", time.Second, integrationLogger{}, false)
 	worker, err := externalagent.NewNotificationWorker(externalagent.NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Minute}, externalagent.NotificationDependencies{
-		Store: jobs, Publisher: slackadapter.NewDurableJobNotificationPublisher(publisher, history, slackadapter.NewGeneratedFileUploader(client, time.Second), artifacts, jobs, client, false), HostCompleter: service,
+		Store:         jobs,
+		Publisher:     slackadapter.NewDurableJobNotificationPublisher(publisher, history, slackadapter.NewGeneratedFileUploader(client, time.Second), artifacts, jobs, client, false),
+		HostCompleter: service,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -561,7 +574,8 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 		t.Fatalf("final inspection = %#v, err=%v", inspection, err)
 	}
 	finalDelivery := inspection.Deliveries[0]
-	if finalDelivery.PublishState != domain.NotificationPublished || finalDelivery.UploadState != domain.JobResultUploadCompleted || !finalDelivery.SlackFileIDPresent || finalDelivery.RecoveredSlackTS != statusTS {
+	if finalDelivery.PublishState != domain.NotificationPublished || finalDelivery.UploadState != domain.JobResultUploadCompleted || !finalDelivery.SlackFileIDPresent ||
+		finalDelivery.RecoveredSlackTS != statusTS {
 		t.Fatalf("final file delivery = %#v", finalDelivery)
 	}
 	mu.Lock()
@@ -579,11 +593,33 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 
 func integrationDetachedJob(id string, now time.Time) domain.ExternalAgentJob {
 	return domain.ExternalAgentJob{
-		ID: id, Mode: domain.JobDetached, Provider: "opencode", Profile: "build", PrimaryProject: "workspace",
-		RegistryRevision: "r1", Task: "integration task", Actor: "U12345678", TeamID: "T12345678",
-		ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued,
-		TimeoutAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
-		RequestSHA256: domain.ExternalAgentJobRequestDigest(domain.ExternalAgentJobRequest{Provider: "opencode", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "r1", Task: "integration task", Mode: domain.JobDetached, Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678"}),
+		ID:               id,
+		Mode:             domain.JobDetached,
+		Provider:         "opencode",
+		Profile:          "build",
+		PrimaryProject:   "workspace",
+		RegistryRevision: "r1",
+		Task:             "integration task",
+		Actor:            "U12345678",
+		TeamID:           "T12345678",
+		ConversationKey:  "slack:T12345678:dm:D12345678",
+		Status:           domain.JobQueued,
+		TimeoutAt:        now.Add(time.Hour),
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		RequestSHA256: domain.ExternalAgentJobRequestDigest(
+			domain.ExternalAgentJobRequest{
+				Provider:         "opencode",
+				Profile:          "build",
+				PrimaryProject:   "workspace",
+				RegistryRevision: "r1",
+				Task:             "integration task",
+				Mode:             domain.JobDetached,
+				Actor:            "U12345678",
+				TeamID:           "T12345678",
+				ConversationKey:  "slack:T12345678:dm:D12345678",
+			},
+		),
 	}
 }
 

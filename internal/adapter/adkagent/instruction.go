@@ -27,7 +27,10 @@ var (
 // BaseInstruction returns the complete MVP behavioral instruction required by
 // the PRD for the configured persona.
 func BaseInstruction(agentName string) string {
-	return fmt.Sprintf("You are %s, a Slack conversational assistant. Answer concisely by default. You currently have no access to shell commands, local files, repositories, secrets, external tools, or autonomous background tasks. "+ImmutablePolicy(), agentName)
+	return fmt.Sprintf(
+		"You are %s, a Slack conversational assistant. Answer concisely by default. You currently have no access to shell commands, local files, repositories, secrets, external tools, or autonomous background tasks. "+ImmutablePolicy(),
+		agentName,
+	)
 }
 
 // ImmutablePolicy returns the complete policy used by the runtime

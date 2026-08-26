@@ -484,9 +484,11 @@ func (s *snapshotStore) Put(_ context.Context, req port.PutResultRequest) (domai
 	s.put = req
 	return domain.RecoverableResult{Ref: "snapshot-ref"}, nil
 }
+
 func (*snapshotStore) ReadChunk(context.Context, domain.ResultChunkRequest) (domain.ResultChunk, error) {
 	return domain.ResultChunk{}, nil
 }
+
 func (*snapshotStore) Stat(context.Context, port.StatResultRequest) (domain.RecoverableResult, error) {
 	return domain.RecoverableResult{}, nil
 }

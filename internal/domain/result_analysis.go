@@ -548,9 +548,16 @@ func (m AnalysisSegmentManifest) Coverage() AnalysisCoverage {
 // sites.
 func (c AnalysisCoverage) StatusText() string {
 	if c.Complete {
-		return fmt.Sprintf("Source coverage: %d verified bytes, complete. This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved.", c.CoveredBytes)
+		return fmt.Sprintf(
+			"Source coverage: %d verified bytes, complete. This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved.",
+			c.CoveredBytes,
+		)
 	}
-	return fmt.Sprintf("Source coverage: %d verified bytes, incomplete (%d gap range(s) remain). This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved.", c.CoveredBytes, len(c.Gaps))
+	return fmt.Sprintf(
+		"Source coverage: %d verified bytes, incomplete (%d gap range(s) remain). This reports which byte ranges were read and digest-verified, not that the content was reviewed, understood, or approved.",
+		c.CoveredBytes,
+		len(c.Gaps),
+	)
 }
 
 // AnalysisStatement is one bounded typed statement: a finding, a

@@ -48,7 +48,15 @@ type AnalysisStore interface {
 	// limits.Digest(), so a resumed or restarted analysis can always
 	// reconstruct the exact bounds it ran under, independent of whatever
 	// the live configuration has since become.
-	Create(ctx context.Context, identity domain.AnalysisIdentity, limits domain.AnalysisLimits, objectiveText string, scope domain.ResultScope, workstreamID string, now time.Time) (AnalysisRecord, error)
+	Create(
+		ctx context.Context,
+		identity domain.AnalysisIdentity,
+		limits domain.AnalysisLimits,
+		objectiveText string,
+		scope domain.ResultScope,
+		workstreamID string,
+		now time.Time,
+	) (AnalysisRecord, error)
 	// Get reads one analysis record. It returns an error wrapping
 	// domain.ErrAnalysisUnavailable when the row does not exist or does not
 	// match scope.

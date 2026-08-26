@@ -38,7 +38,8 @@ func (s *WorkstreamStore) Create(ctx context.Context, workstream domain.Workstre
 	if workstream.Status != domain.WorkstreamProposed || workstream.Revision != 0 {
 		return fmt.Errorf("%w: new workstreams must be proposed at revision zero", port.ErrWorkstreamValidation)
 	}
-	if source == domain.WorkstreamSourceWorker || (source != domain.WorkstreamSourceHuman && source != domain.WorkstreamSourceRoot && source != domain.WorkstreamSourceSystem) || strings.TrimSpace(sourceID) == "" {
+	if source == domain.WorkstreamSourceWorker || (source != domain.WorkstreamSourceHuman && source != domain.WorkstreamSourceRoot && source != domain.WorkstreamSourceSystem) ||
+		strings.TrimSpace(sourceID) == "" {
 		return fmt.Errorf("%w: creation provenance is invalid", port.ErrWorkstreamValidation)
 	}
 	if err := workstream.ValidateWithLimits(storageWorkstreamLimits()); err != nil {
@@ -82,17 +83,36 @@ func (s *WorkstreamStore) Create(ctx context.Context, workstream domain.Workstre
 	err = tx.QueryRowContext(ctx, `SELECT owner_actor, conversation_key, project, status, revision, objective
 		FROM workstreams WHERE workstream_id = ?`, workstream.ID).Scan(&existingOwner, &existingConversation, &existingProject, &existingStatus, &existingRevision, &existingObjective)
 	if err == nil {
-		if existingOwner == workstream.OwnerActor && existingConversation == string(workstream.ConversationKey) && existingProject == workstream.Project && existingStatus == string(workstream.Status) && existingRevision == workstream.Revision && existingObjective == workstream.Objective {
+		if existingOwner == workstream.OwnerActor && existingConversation == string(workstream.ConversationKey) && existingProject == workstream.Project &&
+			existingStatus == string(workstream.Status) &&
+			existingRevision == workstream.Revision &&
+			existingObjective == workstream.Objective {
 			return nil
 		}
-		return fmt.Errorf("%w: workstream ID %q is already bound to different state (owner=%q conversation=%q project=%q status=%q revision=%d objective=%q)", port.ErrWorkstreamValidation, workstream.ID, existingOwner, existingConversation, existingProject, existingStatus, existingRevision, existingObjective)
+		return fmt.Errorf(
+			"%w: workstream ID %q is already bound to different state (owner=%q conversation=%q project=%q status=%q revision=%d objective=%q)",
+			port.ErrWorkstreamValidation,
+			workstream.ID,
+			existingOwner,
+			existingConversation,
+			existingProject,
+			existingStatus,
+			existingRevision,
+			existingObjective,
+		)
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("%w: inspect workstream identity: %v", port.ErrWorkstreamUnavailable, err)
 	}
 
 	var existingID string
-	err = tx.QueryRowContext(ctx, `SELECT workstream_id FROM workstreams WHERE conversation_key = ? AND status IN ('proposed', 'active', 'paused', 'blocked') LIMIT 1`, string(workstream.ConversationKey)).Scan(&existingID)
+	err = tx.QueryRowContext(
+		ctx,
+		`SELECT workstream_id FROM workstreams WHERE conversation_key = ? AND status IN ('proposed', 'active', 'paused', 'blocked') LIMIT 1`,
+		string(workstream.ConversationKey),
+	).Scan(
+		&existingID,
+	)
 	if err == nil {
 		return fmt.Errorf("%w: conversation is already bound to %q", port.ErrWorkstreamConversationConflict, existingID)
 	}
@@ -182,7 +202,13 @@ func (s *WorkstreamStore) Apply(ctx context.Context, transition domain.Workstrea
 	return s.apply(ctx, transition, limits, now, nil)
 }
 
-func (s *WorkstreamStore) apply(ctx context.Context, transition domain.WorkstreamTransition, limits domain.WorkstreamLimits, now time.Time, after func(context.Context, *sql.Tx, domain.WorkstreamTransitionRecord, domain.Workstream) error) (domain.WorkstreamTransitionRecord, error) {
+func (s *WorkstreamStore) apply(
+	ctx context.Context,
+	transition domain.WorkstreamTransition,
+	limits domain.WorkstreamLimits,
+	now time.Time,
+	after func(context.Context, *sql.Tx, domain.WorkstreamTransitionRecord, domain.Workstream) error,
+) (domain.WorkstreamTransitionRecord, error) {
 	if s == nil || s.db == nil {
 		return domain.WorkstreamTransitionRecord{}, fmt.Errorf("%w: workstream store is not configured", port.ErrWorkstreamUnavailable)
 	}
@@ -371,7 +397,20 @@ func (s *WorkstreamStore) Transitions(ctx context.Context, workstreamID string) 
 	for rows.Next() {
 		var record domain.WorkstreamTransitionRecord
 		var committedAt int64
-		if err := rows.Scan(&record.WorkstreamID, &record.FromRevision, &record.ToRevision, &record.Source, &record.SourceID, &record.Actor, &record.Action, &record.PayloadDigest, &record.PayloadJSON, &record.StateDigest, &record.StateJSON, &committedAt); err != nil {
+		if err := rows.Scan(
+			&record.WorkstreamID,
+			&record.FromRevision,
+			&record.ToRevision,
+			&record.Source,
+			&record.SourceID,
+			&record.Actor,
+			&record.Action,
+			&record.PayloadDigest,
+			&record.PayloadJSON,
+			&record.StateDigest,
+			&record.StateJSON,
+			&committedAt,
+		); err != nil {
 			return nil, fmt.Errorf("%w: scan workstream journal: %v", port.ErrWorkstreamUnavailable, err)
 		}
 		record.CommittedAt = time.Unix(0, committedAt).UTC()
@@ -617,14 +656,32 @@ func loadWorkstream(ctx context.Context, queryer workstreamQueryer, where string
 
 func insertWorkstreamChildren(ctx context.Context, exec interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, workstream domain.Workstream) error {
+}, workstream domain.Workstream,
+) error {
 	for _, constraint := range workstream.Constraints {
-		if _, err := exec.ExecContext(ctx, `INSERT INTO workstream_constraints (workstream_id, constraint_id, text, source_id) VALUES (?, ?, ?, ?)`, workstream.ID, constraint.ID, constraint.Text, constraint.SourceID); err != nil {
+		if _, err := exec.ExecContext(
+			ctx,
+			`INSERT INTO workstream_constraints (workstream_id, constraint_id, text, source_id) VALUES (?, ?, ?, ?)`,
+			workstream.ID,
+			constraint.ID,
+			constraint.Text,
+			constraint.SourceID,
+		); err != nil {
 			return fmt.Errorf("%w: insert workstream constraint: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	}
 	for _, decision := range workstream.Decisions {
-		if _, err := exec.ExecContext(ctx, `INSERT INTO workstream_decisions (workstream_id, decision_id, status, proposal, source, rationale, effective_revision) VALUES (?, ?, ?, ?, ?, ?, ?)`, workstream.ID, decision.ID, string(decision.Status), decision.Proposal, decision.Source, decision.Rationale, decision.EffectiveRevision); err != nil {
+		if _, err := exec.ExecContext(
+			ctx,
+			`INSERT INTO workstream_decisions (workstream_id, decision_id, status, proposal, source, rationale, effective_revision) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			workstream.ID,
+			decision.ID,
+			string(decision.Status),
+			decision.Proposal,
+			decision.Source,
+			decision.Rationale,
+			decision.EffectiveRevision,
+		); err != nil {
 			return fmt.Errorf("%w: insert workstream decision: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	}
@@ -658,12 +715,29 @@ func insertWorkstreamChildren(ctx context.Context, exec interface {
 		if status == "" {
 			status = domain.QuestionOpen
 		}
-		if _, err := exec.ExecContext(ctx, `INSERT INTO workstream_questions (workstream_id, question_id, text, status, resolution, source_id) VALUES (?, ?, ?, ?, ?, ?)`, workstream.ID, question.ID, question.Text, string(status), question.Resolution, question.SourceID); err != nil {
+		if _, err := exec.ExecContext(
+			ctx,
+			`INSERT INTO workstream_questions (workstream_id, question_id, text, status, resolution, source_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			workstream.ID,
+			question.ID,
+			question.Text,
+			string(status),
+			question.Resolution,
+			question.SourceID,
+		); err != nil {
 			return fmt.Errorf("%w: insert workstream question: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	}
 	for _, result := range workstream.ResultLinks {
-		if _, err := exec.ExecContext(ctx, `INSERT INTO workstream_result_links (workstream_id, result_link_id, task_id, result_identity, description) VALUES (?, ?, ?, ?, ?)`, workstream.ID, result.ID, result.TaskID, result.ResultIdentity, result.Description); err != nil {
+		if _, err := exec.ExecContext(
+			ctx,
+			`INSERT INTO workstream_result_links (workstream_id, result_link_id, task_id, result_identity, description) VALUES (?, ?, ?, ?, ?)`,
+			workstream.ID,
+			result.ID,
+			result.TaskID,
+			result.ResultIdentity,
+			result.Description,
+		); err != nil {
 			return fmt.Errorf("%w: insert workstream result link: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	}
@@ -731,7 +805,14 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		}
 		return insertTask(task)
 	case domain.WorkstreamActionRecordConstraint:
-		if _, err := tx.ExecContext(ctx, `INSERT INTO workstream_constraints (workstream_id, constraint_id, text, source_id) VALUES (?, ?, ?, ?)`, next.ID, transition.Constraint.ID, transition.Constraint.Text, transition.Constraint.SourceID); err != nil {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO workstream_constraints (workstream_id, constraint_id, text, source_id) VALUES (?, ?, ?, ?)`,
+			next.ID,
+			transition.Constraint.ID,
+			transition.Constraint.Text,
+			transition.Constraint.SourceID,
+		); err != nil {
 			return fmt.Errorf("%w: insert workstream constraint delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	case domain.WorkstreamActionProposeDecision:
@@ -739,7 +820,17 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		if !ok {
 			return fmt.Errorf("%w: decision delta is missing", port.ErrWorkstreamValidation)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO workstream_decisions (workstream_id, decision_id, status, proposal, source, rationale, effective_revision) VALUES (?, ?, ?, ?, ?, ?, ?)`, next.ID, decision.ID, string(decision.Status), decision.Proposal, decision.Source, decision.Rationale, decision.EffectiveRevision); err != nil {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO workstream_decisions (workstream_id, decision_id, status, proposal, source, rationale, effective_revision) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			next.ID,
+			decision.ID,
+			string(decision.Status),
+			decision.Proposal,
+			decision.Source,
+			decision.Rationale,
+			decision.EffectiveRevision,
+		); err != nil {
 			return fmt.Errorf("%w: insert workstream decision delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	case domain.WorkstreamActionRequestHumanDecision:
@@ -747,7 +838,16 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		if !ok {
 			return fmt.Errorf("%w: question delta is missing", port.ErrWorkstreamValidation)
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO workstream_questions (workstream_id, question_id, text, status, resolution, source_id) VALUES (?, ?, ?, ?, ?, ?)`, next.ID, question.ID, question.Text, string(question.Status), question.Resolution, question.SourceID); err != nil {
+		if _, err := tx.ExecContext(
+			ctx,
+			`INSERT INTO workstream_questions (workstream_id, question_id, text, status, resolution, source_id) VALUES (?, ?, ?, ?, ?, ?)`,
+			next.ID,
+			question.ID,
+			question.Text,
+			string(question.Status),
+			question.Resolution,
+			question.SourceID,
+		); err != nil {
 			return fmt.Errorf("%w: insert workstream question delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	case domain.WorkstreamActionApproveDecision, domain.WorkstreamActionRejectDecision:
@@ -755,11 +855,25 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		if transition.Action == domain.WorkstreamActionRejectDecision {
 			status = domain.DecisionRejected
 		}
-		if _, err := tx.ExecContext(ctx, `UPDATE workstream_decisions SET status = ?, effective_revision = ? WHERE workstream_id = ? AND decision_id = ?`, string(status), next.Revision, next.ID, transition.DecisionID); err != nil {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE workstream_decisions SET status = ?, effective_revision = ? WHERE workstream_id = ? AND decision_id = ?`,
+			string(status),
+			next.Revision,
+			next.ID,
+			transition.DecisionID,
+		); err != nil {
 			return fmt.Errorf("%w: update workstream decision delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	case domain.WorkstreamActionResolveQuestion:
-		if _, err := tx.ExecContext(ctx, `UPDATE workstream_questions SET status = ?, resolution = ? WHERE workstream_id = ? AND question_id = ?`, string(domain.QuestionResolved), transition.QuestionResolution, next.ID, transition.QuestionID); err != nil {
+		if _, err := tx.ExecContext(
+			ctx,
+			`UPDATE workstream_questions SET status = ?, resolution = ? WHERE workstream_id = ? AND question_id = ?`,
+			string(domain.QuestionResolved),
+			transition.QuestionResolution,
+			next.ID,
+			transition.QuestionID,
+		); err != nil {
 			return fmt.Errorf("%w: update workstream question delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	case domain.WorkstreamActionRejectTask:
@@ -771,7 +885,18 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		if confirmationStatus == "" {
 			confirmationStatus = domain.TaskConfirmationNotRequired
 		}
-		updated, err := tx.ExecContext(ctx, `UPDATE workstream_tasks SET status = ?, result_identity = ?, confirmation_identity = ?, confirmation_status = ?, execution_identity = ?, integrated = ? WHERE workstream_id = ? AND task_id = ?`, string(task.Status), task.ResultIdentity, task.ConfirmationIdentity, string(confirmationStatus), task.ExecutionIdentity, boolInt(task.Integrated), next.ID, task.ID)
+		updated, err := tx.ExecContext(
+			ctx,
+			`UPDATE workstream_tasks SET status = ?, result_identity = ?, confirmation_identity = ?, confirmation_status = ?, execution_identity = ?, integrated = ? WHERE workstream_id = ? AND task_id = ?`,
+			string(task.Status),
+			task.ResultIdentity,
+			task.ConfirmationIdentity,
+			string(confirmationStatus),
+			task.ExecutionIdentity,
+			boolInt(task.Integrated),
+			next.ID,
+			task.ID,
+		)
 		if err != nil {
 			return fmt.Errorf("%w: update workstream task delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
@@ -787,7 +912,16 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		if confirmationStatus == "" {
 			confirmationStatus = domain.TaskConfirmationNotRequired
 		}
-		updated, err := tx.ExecContext(ctx, `UPDATE workstream_tasks SET status = ?, execution_identity = ?, confirmation_status = ?, integrated = ? WHERE workstream_id = ? AND task_id = ?`, string(task.Status), task.ExecutionIdentity, string(confirmationStatus), boolInt(task.Integrated), next.ID, task.ID)
+		updated, err := tx.ExecContext(
+			ctx,
+			`UPDATE workstream_tasks SET status = ?, execution_identity = ?, confirmation_status = ?, integrated = ? WHERE workstream_id = ? AND task_id = ?`,
+			string(task.Status),
+			task.ExecutionIdentity,
+			string(confirmationStatus),
+			boolInt(task.Integrated),
+			next.ID,
+			task.ID,
+		)
 		if err != nil {
 			return fmt.Errorf("%w: update workstream task start delta: %v", port.ErrWorkstreamUnavailable, err)
 		}

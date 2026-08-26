@@ -15,8 +15,10 @@ import (
 
 var _ port.ExternalAgentJobCompletionHandler = (*Service)(nil)
 
-var errAssistantExchangeUnavailable = errors.New("assistant exchange writer is unavailable")
-var errActivationStoreUnavailable = errors.New("external-agent activation store is unavailable")
+var (
+	errAssistantExchangeUnavailable = errors.New("assistant exchange writer is unavailable")
+	errActivationStoreUnavailable   = errors.New("external-agent activation store is unavailable")
+)
 
 func activationStateConflict(err error) error {
 	return port.NewActivationProcessError("activation_state_conflict", true, err)
@@ -81,7 +83,11 @@ func (s *Service) PublishActivationFallback(ctx context.Context, supplied domain
 	if s.exchange == nil {
 		return port.NewActivationProcessError("activation_exchange_unavailable", true, errAssistantExchangeUnavailable)
 	}
-	fallback := fmt.Sprintf("OpenCode job `%s` finished, but the integrated root response is unavailable (error code `%s`). The job result remains available through normal job status and result reads.", current.JobID, current.LastErrorCode)
+	fallback := fmt.Sprintf(
+		"OpenCode job `%s` finished, but the integrated root response is unavailable (error code `%s`). The job result remains available through normal job status and result reads.",
+		current.JobID,
+		current.LastErrorCode,
+	)
 	message := domain.Message{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant, Content: fallback, CreatedAt: s.clock.Now().UTC()}
 	intent, err := fallbackStore.PrepareActivationFallbackExchange(ctx, current, metadata, message, s.cfg.RetainMessages, s.clock.Now().UTC())
 	if err != nil {
@@ -311,7 +317,8 @@ func (s *Service) activationFrame(ctx context.Context, activation domain.Externa
 	if err != nil {
 		return domain.ActivationFrame{}, err
 	}
-	if result.JobID != activation.JobID || result.StatusRevision != activation.StatusRevision || result.ContentBytes <= 0 || result.ContentBytes != int64(len([]byte(result.Text))) || result.ContentSHA256 == "" {
+	if result.JobID != activation.JobID || result.StatusRevision != activation.StatusRevision || result.ContentBytes <= 0 || result.ContentBytes != int64(len([]byte(result.Text))) ||
+		result.ContentSHA256 == "" {
 		return domain.ActivationFrame{}, errors.New("activation result identity does not match terminal snapshot")
 	}
 	if activation.ContentBytes != result.ContentBytes {
@@ -371,7 +378,12 @@ func (s *Service) directInlineAdmitted(bytes int64) bool {
 		bytes <= s.cfg.MaxDirectInlineBytes && bytes <= domain.HardMaxDirectInlineResultBytes
 }
 
-func (s *Service) prepareActivationResponse(ctx context.Context, activation *domain.ExternalAgentJobActivation, metadata domain.ConversationMetadata, message domain.Message) (port.PreparedAssistantExchange, error) {
+func (s *Service) prepareActivationResponse(
+	ctx context.Context,
+	activation *domain.ExternalAgentJobActivation,
+	metadata domain.ConversationMetadata,
+	message domain.Message,
+) (port.PreparedAssistantExchange, error) {
 	if atomicStore, ok := s.activationStore.(port.ExternalAgentJobActivationExchangeStore); ok {
 		return atomicStore.PrepareActivationResponseWithExchange(ctx, activation, metadata, message, s.cfg.RetainMessages, s.clock.Now().UTC())
 	}

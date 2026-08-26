@@ -500,9 +500,11 @@ func (c *Client) relativeLocation(project, uri string) (string, error) {
 }
 
 func toCodeLocation(source sourceSnapshot, path string, value lspRange) domain.CodeLocation {
-	return domain.CodeLocation{Project: source.project, Path: path, StartByte: byteOffsetUTF16(source.content, value.Start.Line, value.Start.Character),
+	return domain.CodeLocation{
+		Project: source.project, Path: path, StartByte: byteOffsetUTF16(source.content, value.Start.Line, value.Start.Character),
 		EndByte: byteOffsetUTF16(source.content, value.End.Line, value.End.Character), StartLine: value.Start.Line + 1,
-		EndLine: value.End.Line + 1, Language: languageForPath(path), FileSHA256: source.digest}
+		EndLine: value.End.Line + 1, Language: languageForPath(path), FileSHA256: source.digest,
+	}
 }
 
 func byteOffsetUTF16(content string, line, character int) int64 {

@@ -39,9 +39,13 @@ func (testCodeReader) ReadRange(_ context.Context, req domain.SourceRangeRequest
 		return domain.SourceRange{}, err
 	}
 	digest := fmt.Sprintf("%x", sha256.Sum256(data))
-	return domain.SourceRange{Location: domain.CodeLocation{Project: req.Project, Path: req.Path, StartLine: 1,
-		EndLine: strings.Count(string(data), "\n") + 1, EndByte: int64(len(data)), FileSHA256: digest},
-		Content: string(data), EOF: true, ResultRef: "test-result"}, nil
+	return domain.SourceRange{
+		Location: domain.CodeLocation{
+			Project: req.Project, Path: req.Path, StartLine: 1,
+			EndLine: strings.Count(string(data), "\n") + 1, EndByte: int64(len(data)), FileSHA256: digest,
+		},
+		Content: string(data), EOF: true, ResultRef: "test-result",
+	}, nil
 }
 
 func newTestEngine() *Engine {
@@ -52,7 +56,7 @@ func newTestEngine() *Engine {
 func writeGoFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -62,7 +66,7 @@ func writeGoFile(t *testing.T, dir, name, content string) string {
 func writeFile(t *testing.T, dir, name, content string) string {
 	t.Helper()
 	path := filepath.Join(dir, name)
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	return path

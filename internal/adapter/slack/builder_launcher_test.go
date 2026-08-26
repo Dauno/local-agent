@@ -65,7 +65,8 @@ func TestBuilderLauncherUsesOnboardingTemplateAndPreservesContract(t *testing.T)
 		t.Fatalf("launcher actions = %#v", client.blocks[1])
 	}
 	button, ok := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
-	if !ok || button.ActionID != "local_agent.builder.open" || button.Value != metadata || button.Text == nil || button.Text.Text != "Abrir formulario" || button.Style != slackapi.StylePrimary || button.URL != "" {
+	if !ok || button.ActionID != "local_agent.builder.open" || button.Value != metadata || button.Text == nil || button.Text.Text != "Abrir formulario" || button.Style != slackapi.StylePrimary ||
+		button.URL != "" {
 		t.Fatalf("launcher button = %#v", actions.Elements.ElementSet[0])
 	}
 	describe, ok := actions.Elements.ElementSet[1].(*slackapi.ButtonBlockElement)

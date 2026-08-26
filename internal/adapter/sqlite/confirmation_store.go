@@ -28,7 +28,8 @@ func NewConfirmationStore(store *Store) *ConfirmationStore {
 }
 
 func (s *ConfirmationStore) CreateDelivery(ctx context.Context, delivery port.ConfirmationDelivery) error {
-	if delivery.WrapperCallID == "" || delivery.OriginalCallID == "" || delivery.SessionID == "" || delivery.Actor == "" || delivery.TeamID == "" || delivery.ChannelID == "" || delivery.Expiry.IsZero() {
+	if delivery.WrapperCallID == "" || delivery.OriginalCallID == "" || delivery.SessionID == "" || delivery.Actor == "" || delivery.TeamID == "" || delivery.ChannelID == "" ||
+		delivery.Expiry.IsZero() {
 		return errors.New("confirmation delivery has required fields missing")
 	}
 	if delivery.Status == "" {

@@ -71,7 +71,11 @@ func (s *fakeActivationWorkstreamService) CreateHuman(context.Context, port.Work
 	return domain.WorkstreamSnapshot{}, nil
 }
 
-func (s *fakeActivationWorkstreamService) ApplyHuman(_ context.Context, _ port.WorkstreamBinding, transition domain.WorkstreamTransition) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+func (s *fakeActivationWorkstreamService) ApplyHuman(
+	_ context.Context,
+	_ port.WorkstreamBinding,
+	transition domain.WorkstreamTransition,
+) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
 	s.applyHumanCalls = append(s.applyHumanCalls, transition)
 	return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, nil
 }
@@ -325,8 +329,14 @@ func TestActivationFrameSelectsNativeHandleAfterInlineBound(t *testing.T) {
 	activation.ResultSHA256 = resultSHA
 	reader := &fakeActivationResultReader{
 		result: domain.ExternalAgentJobResult{JobID: activation.JobID, StatusRevision: activation.StatusRevision, Text: resultText, ContentSHA256: resultSHA, ContentBytes: resultBytes},
-		handle: domain.ResultHandle{ResultID: strings.Repeat("b", 64), SHA256: resultSHA, Bytes: resultBytes, MediaType: "text/markdown", Availability: []domain.ResultAvailability{domain.ResultAvailabilityPrivateArtifact}},
-		found:  true,
+		handle: domain.ResultHandle{
+			ResultID:     strings.Repeat("b", 64),
+			SHA256:       resultSHA,
+			Bytes:        resultBytes,
+			MediaType:    "text/markdown",
+			Availability: []domain.ResultAvailability{domain.ResultAvailabilityPrivateArtifact},
+		},
+		found: true,
 	}
 	service := completionService(t, &fakeActivationStore{activation: activation}, &fakeRuntime{}, &fakePublisher{})
 	service.completionReader = reader
@@ -354,7 +364,13 @@ func TestActivationFrameAppliesDirectInlineAdmission(t *testing.T) {
 	resultSHA := sha256Hex(resultText)
 	activation.ContentBytes = resultBytes
 	activation.ResultSHA256 = resultSHA
-	handle := domain.ResultHandle{ResultID: strings.Repeat("d", 64), SHA256: resultSHA, Bytes: resultBytes, MediaType: "text/markdown", Availability: []domain.ResultAvailability{domain.ResultAvailabilityPrivateArtifact}}
+	handle := domain.ResultHandle{
+		ResultID:     strings.Repeat("d", 64),
+		SHA256:       resultSHA,
+		Bytes:        resultBytes,
+		MediaType:    "text/markdown",
+		Availability: []domain.ResultAvailability{domain.ResultAvailabilityPrivateArtifact},
+	}
 
 	build := func(t *testing.T, resultHandlesEnabled bool, maxDirectInlineBytes int64) *Service {
 		t.Helper()
@@ -459,8 +475,14 @@ func TestHandleJobCompletionRunsNativeHandleFrameWithoutResultText(t *testing.T)
 			JobID: activation.JobID, StatusRevision: activation.StatusRevision, Text: resultText,
 			ContentSHA256: resultSHA, ContentBytes: resultBytes,
 		},
-		handle: domain.ResultHandle{ResultID: strings.Repeat("c", 64), SHA256: resultSHA, Bytes: resultBytes, MediaType: "text/markdown", Availability: []domain.ResultAvailability{domain.ResultAvailabilityPrivateArtifact}},
-		found:  true,
+		handle: domain.ResultHandle{
+			ResultID:     strings.Repeat("c", 64),
+			SHA256:       resultSHA,
+			Bytes:        resultBytes,
+			MediaType:    "text/markdown",
+			Availability: []domain.ResultAvailability{domain.ResultAvailabilityPrivateArtifact},
+		},
+		found: true,
 	}
 	service.exchange = &fakeExchangeWriter{}
 
@@ -695,7 +717,11 @@ func (*blockingSnapshotWorkstreamService) CreateHuman(context.Context, port.Work
 	return domain.WorkstreamSnapshot{}, nil
 }
 
-func (s *blockingSnapshotWorkstreamService) ApplyHuman(_ context.Context, _ port.WorkstreamBinding, transition domain.WorkstreamTransition) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+func (s *blockingSnapshotWorkstreamService) ApplyHuman(
+	_ context.Context,
+	_ port.WorkstreamBinding,
+	transition domain.WorkstreamTransition,
+) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
 	s.applied = append(s.applied, transition)
 	return domain.WorkstreamTransitionRecord{WorkstreamID: transition.WorkstreamID, Action: transition.Action, ToRevision: 1}, domain.WorkstreamSnapshot{}, nil
 }
@@ -778,7 +804,14 @@ func (*fakeActivationFallbackStore) ClaimNextActivationFallback(context.Context,
 	return nil, nil
 }
 
-func (s *fakeActivationFallbackStore) PrepareActivationFallbackExchange(_ context.Context, _ *domain.ExternalAgentJobActivation, _ domain.ConversationMetadata, _ domain.Message, _ int, _ time.Time) (port.PreparedAssistantExchange, error) {
+func (s *fakeActivationFallbackStore) PrepareActivationFallbackExchange(
+	_ context.Context,
+	_ *domain.ExternalAgentJobActivation,
+	_ domain.ConversationMetadata,
+	_ domain.Message,
+	_ int,
+	_ time.Time,
+) (port.PreparedAssistantExchange, error) {
 	s.prepareCalls++
 	if s.prepareErr != nil {
 		return port.PreparedAssistantExchange{}, s.prepareErr
@@ -1035,7 +1068,8 @@ func TestRetryMovesExistingCompletionEnvelopeAfterInterleavedHumanTurn(t *testin
 	if err := service.HandleJobCompletion(t.Context(), activation); err != nil {
 		t.Fatal(err)
 	}
-	if runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1].Source != domain.MessageSourceJobCompletion || runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1].ExternalTS != activation.ActivationID {
+	if runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1].Source != domain.MessageSourceJobCompletion ||
+		runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1].ExternalTS != activation.ActivationID {
 		t.Fatalf("retry current input = %#v", runtime.runRequest.Messages[len(runtime.runRequest.Messages)-1])
 	}
 	if countJobCompletionMessages(runtime.runRequest.Messages) != 1 || countJobCompletionMessages(store.appended) != 0 {

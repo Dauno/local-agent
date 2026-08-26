@@ -25,12 +25,14 @@ type fakeAnalysisSourceStore struct {
 func (f *fakeAnalysisSourceStore) Materialize(context.Context, port.ResultMaterialization) (domain.ResultHandle, error) {
 	return domain.ResultHandle{}, errors.New("not implemented")
 }
+
 func (f *fakeAnalysisSourceStore) Resolve(_ context.Context, resultID string, scope domain.ResultScope) (domain.ResultIdentity, domain.ResultHandle, error) {
 	if resultID != f.identity.ResultID || scope != f.scope {
 		return domain.ResultIdentity{}, domain.ResultHandle{}, domain.ErrResultUnavailable
 	}
 	return f.identity, domain.ResultHandle{}, nil
 }
+
 func (f *fakeAnalysisSourceStore) ReadRange(context.Context, string, domain.ResultScope, int64, int64) (domain.ResultChunk, error) {
 	return domain.ResultChunk{}, errors.New("not implemented")
 }
@@ -46,7 +48,15 @@ func newFakeAnalysisStore() *fakeAnalysisStore {
 	return &fakeAnalysisStore{byID: map[string]port.AnalysisRecord{}}
 }
 
-func (f *fakeAnalysisStore) Create(_ context.Context, identity domain.AnalysisIdentity, _ domain.AnalysisLimits, objectiveText string, scope domain.ResultScope, workstreamID string, now time.Time) (port.AnalysisRecord, error) {
+func (f *fakeAnalysisStore) Create(
+	_ context.Context,
+	identity domain.AnalysisIdentity,
+	_ domain.AnalysisLimits,
+	objectiveText string,
+	scope domain.ResultScope,
+	workstreamID string,
+	now time.Time,
+) (port.AnalysisRecord, error) {
 	digest := identity.SemanticDigest()
 	for _, record := range f.byID {
 		if record.Identity.SemanticDigest() == digest {
@@ -102,18 +112,23 @@ type fakeAnalysisStepStore struct {
 func (f *fakeAnalysisStepStore) Prepare(context.Context, port.AnalysisStep) (port.AnalysisStep, error) {
 	return port.AnalysisStep{}, errors.New("not implemented")
 }
+
 func (f *fakeAnalysisStepStore) ClaimNext(context.Context, string, time.Time, time.Duration) (port.AnalysisStep, bool, error) {
 	return port.AnalysisStep{}, false, errors.New("not implemented")
 }
+
 func (f *fakeAnalysisStepStore) Complete(context.Context, domain.AnalysisStepClaim, string, time.Time) (port.AnalysisStep, error) {
 	return port.AnalysisStep{}, errors.New("not implemented")
 }
+
 func (f *fakeAnalysisStepStore) Retry(context.Context, domain.AnalysisStepClaim, time.Time, bool) error {
 	return errors.New("not implemented")
 }
+
 func (f *fakeAnalysisStepStore) Fail(context.Context, domain.AnalysisStepClaim, domain.AnalysisFailureCode, time.Time) error {
 	return errors.New("not implemented")
 }
+
 func (f *fakeAnalysisStepStore) List(_ context.Context, analysisID string, _ string, _ int) ([]port.AnalysisStep, error) {
 	var out []port.AnalysisStep
 	for _, step := range f.steps {
@@ -132,10 +147,12 @@ type fakeAnalysisEvidenceStore struct {
 func newFakeAnalysisEvidenceStore() *fakeAnalysisEvidenceStore {
 	return &fakeAnalysisEvidenceStore{byLeafStep: map[string][]port.AnalysisEvidenceExcerpt{}}
 }
+
 func (f *fakeAnalysisEvidenceStore) Write(_ context.Context, _ string, leafStepID string, excerpt port.AnalysisEvidenceExcerpt, _ time.Time) error {
 	f.byLeafStep[leafStepID] = append(f.byLeafStep[leafStepID], excerpt)
 	return nil
 }
+
 func (f *fakeAnalysisEvidenceStore) ListByLeafStep(_ context.Context, _ string, leafStepID string) ([]port.AnalysisEvidenceExcerpt, error) {
 	return f.byLeafStep[leafStepID], nil
 }
@@ -148,10 +165,12 @@ type fakeAnalysisStepPayloadStore struct {
 func newFakeAnalysisStepPayloadStore() *fakeAnalysisStepPayloadStore {
 	return &fakeAnalysisStepPayloadStore{byStep: map[string][]byte{}}
 }
+
 func (f *fakeAnalysisStepPayloadStore) WritePayload(_ context.Context, claim domain.AnalysisStepClaim, payload []byte, _ time.Time) error {
 	f.byStep[claim.StepID] = payload
 	return nil
 }
+
 func (f *fakeAnalysisStepPayloadStore) ReadPayload(_ context.Context, _ string, stepID string) ([]byte, error) {
 	payload, ok := f.byStep[stepID]
 	if !ok {
@@ -171,6 +190,7 @@ func (s *spyAnalyzer) AnalyzeLeaf(context.Context, port.AnalysisLeafInput) (doma
 	s.called = true
 	return domain.AnalysisLeaf{}, errors.New("spy analyzer must never be called by a tool")
 }
+
 func (s *spyAnalyzer) Reduce(context.Context, port.AnalysisReductionInput) (domain.AnalysisPacket, error) {
 	s.called = true
 	return domain.AnalysisPacket{}, errors.New("spy analyzer must never be called by a tool")

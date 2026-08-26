@@ -12,8 +12,10 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var _ port.KnowledgeIndexSource = (*KnowledgeIndexSourceStore)(nil)
-var _ port.KnowledgeIdentityLister = (*KnowledgeIndexSourceStore)(nil)
+var (
+	_ port.KnowledgeIndexSource    = (*KnowledgeIndexSourceStore)(nil)
+	_ port.KnowledgeIdentityLister = (*KnowledgeIndexSourceStore)(nil)
+)
 
 // KnowledgeIndexSourceStore re-reads one complete authoritative item by
 // stable identity for index construction. It applies no scope, status, or

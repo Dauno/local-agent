@@ -248,7 +248,14 @@ func TestJobStatusUsesStrictResultAvailability(t *testing.T) {
 	}{
 		{
 			name: "completed inline with complete identity",
-			job:  domain.ExternalAgentJob{ID: "job_inline", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary)))},
+			job: domain.ExternalAgentJob{
+				ID:             "job_inline",
+				Status:         domain.JobCompleted,
+				StatusRevision: 4,
+				ResultSummary:  summary,
+				ResultSHA256:   summaryDigest,
+				ResultBytes:    int64(len([]byte(summary))),
+			},
 			want: true,
 		},
 		{
@@ -283,7 +290,14 @@ func TestJobStatusUsesStrictResultAvailability(t *testing.T) {
 		},
 		{
 			name: "completed with mismatched byte count",
-			job:  domain.ExternalAgentJob{ID: "job_mismatch", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary))) + 1},
+			job: domain.ExternalAgentJob{
+				ID:             "job_mismatch",
+				Status:         domain.JobCompleted,
+				StatusRevision: 4,
+				ResultSummary:  summary,
+				ResultSHA256:   summaryDigest,
+				ResultBytes:    int64(len([]byte(summary))) + 1,
+			},
 			want: false,
 		},
 		{
@@ -293,12 +307,27 @@ func TestJobStatusUsesStrictResultAvailability(t *testing.T) {
 		},
 		{
 			name: "completed artifact with zero bytes",
-			job:  domain.ExternalAgentJob{ID: "job_artifactzero", Status: domain.JobCompleted, StatusRevision: 4, ResultArtifact: "job_artifactzero-delivery.result", ResultSHA256: artifactDigest, ResultBytes: 0},
+			job: domain.ExternalAgentJob{
+				ID:             "job_artifactzero",
+				Status:         domain.JobCompleted,
+				StatusRevision: 4,
+				ResultArtifact: "job_artifactzero-delivery.result",
+				ResultSHA256:   artifactDigest,
+				ResultBytes:    0,
+			},
 			want: false,
 		},
 		{
 			name: "incoherent artifact does not fall back to inline",
-			job:  domain.ExternalAgentJob{ID: "job_dual", Status: domain.JobCompleted, StatusRevision: 4, ResultSummary: summary, ResultSHA256: summaryDigest, ResultBytes: int64(len([]byte(summary))), ResultArtifact: "bad/ref.result"},
+			job: domain.ExternalAgentJob{
+				ID:             "job_dual",
+				Status:         domain.JobCompleted,
+				StatusRevision: 4,
+				ResultSummary:  summary,
+				ResultSHA256:   summaryDigest,
+				ResultBytes:    int64(len([]byte(summary))),
+				ResultArtifact: "bad/ref.result",
+			},
 			want: false,
 		},
 		{

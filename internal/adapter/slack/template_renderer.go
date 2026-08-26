@@ -1,9 +1,10 @@
 package slack
 
 import (
+	"cmp"
 	"errors"
 	"fmt"
-	"sort"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode/utf8"
@@ -584,7 +585,7 @@ func builderProfilesForKind(kind domain.AgentKind, profiles []BuilderProviderPro
 			filtered = append(filtered, profile)
 		}
 	}
-	sort.Slice(filtered, func(i, j int) bool { return filtered[i].Reference < filtered[j].Reference })
+	slices.SortFunc(filtered, func(a, b BuilderProviderProfile) int { return cmp.Compare(a.Reference, b.Reference) })
 	return filtered
 }
 

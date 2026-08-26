@@ -26,7 +26,13 @@ func newBuilderLauncherPublisher(client blockPostClient, publisher port.Response
 	return newBuilderLauncherPublisherWithDependencies(client, nil, nil, "", publisher, logger)
 }
 
-func NewBuilderLauncherPublisherWithStore(client *slackapi.Client, publisher port.ResponsePublisher, logger port.Logger, store port.BuilderLauncherDeliveryStore, botUserID string) port.BuilderLauncherPublisher {
+func NewBuilderLauncherPublisherWithStore(
+	client *slackapi.Client,
+	publisher port.ResponsePublisher,
+	logger port.Logger,
+	store port.BuilderLauncherDeliveryStore,
+	botUserID string,
+) port.BuilderLauncherPublisher {
 	var poster blockPostClient
 	var recovery standardMessageClient
 	if client != nil {
@@ -36,7 +42,14 @@ func NewBuilderLauncherPublisherWithStore(client *slackapi.Client, publisher por
 	return newBuilderLauncherPublisherWithDependencies(poster, recovery, store, botUserID, publisher, logger)
 }
 
-func newBuilderLauncherPublisherWithDependencies(client blockPostClient, recovery standardMessageClient, store port.BuilderLauncherDeliveryStore, botUserID string, publisher port.ResponsePublisher, logger port.Logger) *builderLauncherPublisher {
+func newBuilderLauncherPublisherWithDependencies(
+	client blockPostClient,
+	recovery standardMessageClient,
+	store port.BuilderLauncherDeliveryStore,
+	botUserID string,
+	publisher port.ResponsePublisher,
+	logger port.Logger,
+) *builderLauncherPublisher {
 	renderer, renderErr := NewEmbeddedTemplateRenderer()
 	return &builderLauncherPublisher{
 		client: client, recoveryClient: recovery, store: store, botUserID: botUserID,

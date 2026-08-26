@@ -123,8 +123,12 @@ func TestKnowledgeCommandReplayIsIdempotentAcrossRestart(t *testing.T) {
 	if claimIDFromMessage(t, replayed) != claimID {
 		t.Fatalf("replay created a second claim: %q vs %q", replayed, created)
 	}
-	if _, _, err := service.Execute(ctx, binding, "evt-1",
-		knowledge.HumanCommandPrefix+`{"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"pg-02","scope_kind":"project","scope_id":"workspace"}`); !errors.Is(err, port.ErrKnowledgeCASConflict) {
+	if _, _, err := service.Execute(
+		ctx,
+		binding,
+		"evt-1",
+		knowledge.HumanCommandPrefix+`{"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"pg-02","scope_kind":"project","scope_id":"workspace"}`,
+	); !errors.Is(err, port.ErrKnowledgeCASConflict) {
 		t.Fatalf("same event with different content error = %v", err)
 	}
 
@@ -317,8 +321,12 @@ func TestKnowledgeForgetBlocksRewriteAndSurvivesRestart(t *testing.T) {
 	if !strings.Contains(replayed, "already recorded") {
 		t.Fatalf("forget replay message = %q", replayed)
 	}
-	if _, _, err := service.Execute(ctx, binding, "evt-3",
-		knowledge.HumanCommandPrefix+`{"action":"remember","subject":"secret-plan","predicate":"is","value_kind":"string","value_text":"sensitive"}`); !errors.Is(err, domain.ErrKnowledgeTombstoneBlocked) {
+	if _, _, err := service.Execute(
+		ctx,
+		binding,
+		"evt-3",
+		knowledge.HumanCommandPrefix+`{"action":"remember","subject":"secret-plan","predicate":"is","value_kind":"string","value_text":"sensitive"}`,
+	); !errors.Is(err, domain.ErrKnowledgeTombstoneBlocked) {
 		t.Fatalf("rewrite of forgotten subject error = %v", err)
 	}
 	if _, _, err := service.Execute(ctx, binding, "evt-4",
@@ -406,7 +414,10 @@ func TestKnowledgeCommandIdentityIsGlobalAcrossTargets(t *testing.T) {
 	binding := knowledgeTestBinding("U12345678", "workspace")
 
 	remember := func(subject string) string {
-		return knowledge.HumanCommandPrefix + fmt.Sprintf(`{"action":"remember","subject":"%s","predicate":"runs_on","value_kind":"string","value_text":"pg-01","scope_kind":"project","scope_id":"workspace"}`, subject)
+		return knowledge.HumanCommandPrefix + fmt.Sprintf(
+			`{"action":"remember","subject":"%s","predicate":"runs_on","value_kind":"string","value_text":"pg-01","scope_kind":"project","scope_id":"workspace"}`,
+			subject,
+		)
 	}
 	if _, _, err := service.Execute(ctx, binding, "evt-1", remember("database")); err != nil {
 		t.Fatal(err)
@@ -629,8 +640,15 @@ func TestKnowledgeForgetAndInspectHonorConfiguredLimits(t *testing.T) {
 	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_tombstones`).Scan(&tombstoneCount); err != nil || tombstoneCount != 1 {
 		t.Fatalf("tombstones = %d, %v", tombstoneCount, err)
 	}
-	if _, _, err := service.Execute(ctx, binding, "evt-3",
-		knowledge.HumanCommandPrefix+fmt.Sprintf(`{"action":"remember","subject":"%s","predicate":"is","value_kind":"string","value_text":"y"}`, subject)); !errors.Is(err, domain.ErrKnowledgeTombstoneBlocked) {
+	if _, _, err := service.Execute(
+		ctx,
+		binding,
+		"evt-3",
+		knowledge.HumanCommandPrefix+fmt.Sprintf(
+			`{"action":"remember","subject":"%s","predicate":"is","value_kind":"string","value_text":"y"}`,
+			subject,
+		),
+	); !errors.Is(err, domain.ErrKnowledgeTombstoneBlocked) {
 		t.Fatalf("rewrite after amplified forget error = %v", err)
 	}
 }
@@ -700,8 +718,15 @@ func TestKnowledgeForgetSurvivesRestartWithDefaultLimits(t *testing.T) {
 	if err := reopened.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_tombstones`).Scan(&tombstoneCount); err != nil || tombstoneCount != 1 {
 		t.Fatalf("tombstones = %d, %v", tombstoneCount, err)
 	}
-	if _, _, err := restarted.Execute(ctx, binding, "evt-3",
-		knowledge.HumanCommandPrefix+fmt.Sprintf(`{"action":"remember","subject":"%s","predicate":"is","value_kind":"string","value_text":"y"}`, subject)); !errors.Is(err, port.ErrKnowledgeValidation) {
+	if _, _, err := restarted.Execute(
+		ctx,
+		binding,
+		"evt-3",
+		knowledge.HumanCommandPrefix+fmt.Sprintf(
+			`{"action":"remember","subject":"%s","predicate":"is","value_kind":"string","value_text":"y"}`,
+			subject,
+		),
+	); !errors.Is(err, port.ErrKnowledgeValidation) {
 		t.Fatalf("rewrite of forgotten amplified subject error = %v, want rejection under default limits", err)
 	}
 }
@@ -721,8 +746,15 @@ func TestKnowledgeForgetHardScopeValidationAcrossRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := knowledgeTestBinding("U12345678", longScope)
-	if _, _, err := amplified.Execute(ctx, binding, "evt-1",
-		knowledge.HumanCommandPrefix+fmt.Sprintf(`{"action":"remember","subject":"api","predicate":"is","value_kind":"string","value_text":"x","scope_kind":"project","scope_id":"%s"}`, longScope)); err != nil {
+	if _, _, err := amplified.Execute(
+		ctx,
+		binding,
+		"evt-1",
+		knowledge.HumanCommandPrefix+fmt.Sprintf(
+			`{"action":"remember","subject":"api","predicate":"is","value_kind":"string","value_text":"x","scope_kind":"project","scope_id":"%s"}`,
+			longScope,
+		),
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
@@ -774,7 +806,13 @@ func TestKnowledgeRejectedScopeForgetDoesNotConsumeIdentity(t *testing.T) {
 		t.Fatalf("valid forget reusing the event identity rejected: %v", err)
 	}
 	var committedReceipts int
-	if err := store.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM knowledge_command_receipts WHERE source_ref = 'slack-human:evt-reuse'`).Scan(&committedReceipts); err != nil || committedReceipts != 1 {
+	if err := store.DB().QueryRowContext(
+		ctx,
+		`SELECT COUNT(*) FROM knowledge_command_receipts WHERE source_ref = 'slack-human:evt-reuse'`,
+	).Scan(
+		&committedReceipts,
+	); err != nil ||
+		committedReceipts != 1 {
 		t.Fatalf("command receipts for the reused event = %d, %v; want exactly 1", committedReceipts, err)
 	}
 }

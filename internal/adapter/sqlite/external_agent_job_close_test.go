@@ -48,7 +48,17 @@ func TestAbandonCompletionUnknownRefusesStaleAndUnauthorizedClosure(t *testing.T
 	if err != nil || awaiting == nil {
 		t.Fatalf("job = %#v, err = %v", awaiting, err)
 	}
-	if _, err := jobStore.AbandonCompletionUnknown(t.Context(), job.ID, awaiting.Actor, awaiting.ConversationKey, awaiting.StatusRevision+1, now); !errors.Is(err, port.ErrExternalAgentJobRevisionConflict) {
+	if _, err := jobStore.AbandonCompletionUnknown(
+		t.Context(),
+		job.ID,
+		awaiting.Actor,
+		awaiting.ConversationKey,
+		awaiting.StatusRevision+1,
+		now,
+	); !errors.Is(
+		err,
+		port.ErrExternalAgentJobRevisionConflict,
+	) {
 		t.Fatalf("stale revision err = %v, want a revision conflict", err)
 	}
 	if _, err := jobStore.AbandonCompletionUnknown(t.Context(), job.ID, "U-someone-else", awaiting.ConversationKey, awaiting.StatusRevision, now); err == nil {

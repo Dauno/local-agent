@@ -16,30 +16,34 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var _ port.ExternalAgentJobStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExpiredExternalAgentJobRecovery = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobNotificationStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobNotificationRetryStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobNotificationHealthStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationHealthStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobAdminStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobDeliveryStore = (*ExternalAgentJobStore)(nil)
-var _ port.ArtifactReferenceChecker = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobReconciler = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobExpectedReconciler = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobShutdownStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationExchangeStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationClaimStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationRetryStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationCompletionStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationLeaseStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobActivationReconciler = (*ExternalAgentJobStore)(nil)
+var (
+	_ port.ExternalAgentJobStore                     = (*ExternalAgentJobStore)(nil)
+	_ port.ExpiredExternalAgentJobRecovery           = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobNotificationStore         = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobNotificationRetryStore    = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobNotificationHealthStore   = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationHealthStore     = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobAdminStore                = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobDeliveryStore             = (*ExternalAgentJobStore)(nil)
+	_ port.ArtifactReferenceChecker                  = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobReconciler                = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobExpectedReconciler        = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobShutdownStore             = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationStore           = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationExchangeStore   = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationClaimStore      = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationRetryStore      = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationCompletionStore = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationLeaseStore      = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobActivationReconciler      = (*ExternalAgentJobStore)(nil)
+)
 
-var ErrNotificationStateConflict = port.ErrNotificationStateConflict
-var ErrNotificationClaimConflict = port.ErrNotificationClaimConflict
-var ErrActivationStateConflict = port.ErrActivationStateConflict
-var ErrActivationClaimConflict = port.ErrActivationClaimConflict
+var (
+	ErrNotificationStateConflict = port.ErrNotificationStateConflict
+	ErrNotificationClaimConflict = port.ErrNotificationClaimConflict
+	ErrActivationStateConflict   = port.ErrActivationStateConflict
+	ErrActivationClaimConflict   = port.ErrActivationClaimConflict
+)
 
 const (
 	notificationRetryBaseDelay = time.Second
@@ -228,7 +232,20 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 		var leaseOwner string
 		var leaseExpiry, nextAttemptAt int64
 		var filePresent int
-		if err := rows.Scan(&delivery.StatusRevision, &kind, &publishState, &delivery.Attempts, &leaseOwner, &leaseExpiry, &errorCode, &nextAttemptAt, &recoveredTS, &deliveryMode, &uploadState, &filePresent); err != nil {
+		if err := rows.Scan(
+			&delivery.StatusRevision,
+			&kind,
+			&publishState,
+			&delivery.Attempts,
+			&leaseOwner,
+			&leaseExpiry,
+			&errorCode,
+			&nextAttemptAt,
+			&recoveredTS,
+			&deliveryMode,
+			&uploadState,
+			&filePresent,
+		); err != nil {
 			return nil, fmt.Errorf("scan external-agent job delivery inspection: %w", err)
 		}
 		delivery.NotificationKind = safeAdminNotificationKind(kind)
@@ -294,7 +311,18 @@ func (s *ExternalAgentJobStore) NotificationHealth(ctx context.Context, now time
 	if err := rows.Close(); err != nil {
 		return health, fmt.Errorf("close external-agent notification state counts: %w", err)
 	}
-	permanentCodes := []string{"result_identity_invalid", "result_artifact_missing", "result_artifact_owner_ref_mismatch", "result_artifact_bytes_mismatch", "result_artifact_digest_mismatch", "result_artifact_invalid", "result_delivery_failed", "result_destination_mismatch", "notification_delivery_invalid", "result_file_upload_unknown"}
+	permanentCodes := []string{
+		"result_identity_invalid",
+		"result_artifact_missing",
+		"result_artifact_owner_ref_mismatch",
+		"result_artifact_bytes_mismatch",
+		"result_artifact_digest_mismatch",
+		"result_artifact_invalid",
+		"result_delivery_failed",
+		"result_destination_mismatch",
+		"notification_delivery_invalid",
+		"result_file_upload_unknown",
+	}
 	args := make([]any, 0, len(permanentCodes)+1)
 	args = append(args, domain.NotificationPublished)
 	for _, code := range permanentCodes {
@@ -476,7 +504,17 @@ func (s *ExternalAgentJobStore) RequestCancellation(ctx context.Context, jobID, 
 	if job.Status == domain.JobCancelled {
 		job.FinishedAt = job.UpdatedAt
 	}
-	changed, err := tx.ExecContext(ctx, `UPDATE external_agent_jobs SET status = ?, status_revision = ?, finished_at = ?, updated_at = ? WHERE job_id = ? AND status = ? AND status_revision = ?`, job.Status, job.StatusRevision, unix(job.FinishedAt), unix(job.UpdatedAt), job.ID, previous, expectedRevision)
+	changed, err := tx.ExecContext(
+		ctx,
+		`UPDATE external_agent_jobs SET status = ?, status_revision = ?, finished_at = ?, updated_at = ? WHERE job_id = ? AND status = ? AND status_revision = ?`,
+		job.Status,
+		job.StatusRevision,
+		unix(job.FinishedAt),
+		unix(job.UpdatedAt),
+		job.ID,
+		previous,
+		expectedRevision,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -497,15 +535,38 @@ func (s *ExternalAgentJobStore) RequestCancellation(ctx context.Context, jobID, 
 	return &job, nil
 }
 
-func (s *ExternalAgentJobStore) BeginReconciliation(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error) {
+func (s *ExternalAgentJobStore) BeginReconciliation(
+	ctx context.Context,
+	jobID, actor string,
+	conversationKey domain.ConversationKey,
+	now time.Time,
+	owner string,
+	leaseTTL time.Duration,
+) (*domain.ExternalAgentJob, error) {
 	return s.beginReconciliation(ctx, jobID, actor, conversationKey, -1, now, owner, leaseTTL)
 }
 
-func (s *ExternalAgentJobStore) BeginReconciliationExpected(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error) {
+func (s *ExternalAgentJobStore) BeginReconciliationExpected(
+	ctx context.Context,
+	jobID, actor string,
+	conversationKey domain.ConversationKey,
+	expectedRevision int,
+	now time.Time,
+	owner string,
+	leaseTTL time.Duration,
+) (*domain.ExternalAgentJob, error) {
 	return s.beginReconciliation(ctx, jobID, actor, conversationKey, expectedRevision, now, owner, leaseTTL)
 }
 
-func (s *ExternalAgentJobStore) beginReconciliation(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJob, error) {
+func (s *ExternalAgentJobStore) beginReconciliation(
+	ctx context.Context,
+	jobID, actor string,
+	conversationKey domain.ConversationKey,
+	expectedRevision int,
+	now time.Time,
+	owner string,
+	leaseTTL time.Duration,
+) (*domain.ExternalAgentJob, error) {
 	if strings.TrimSpace(owner) == "" || leaseTTL <= 0 {
 		return nil, errors.New("reconciliation lease owner and positive TTL are required")
 	}
@@ -532,7 +593,18 @@ func (s *ExternalAgentJobStore) beginReconciliation(ctx context.Context, jobID, 
 	if expectedRevision >= 0 {
 		compareRevision = expectedRevision
 	}
-	result, err := tx.ExecContext(ctx, `UPDATE external_agent_jobs SET status = ?, attempt = attempt + 1, lease_owner = ?, lease_expiry = ?, heartbeat_at = ?, status_revision = status_revision + 1, updated_at = ? WHERE job_id = ? AND status = ? AND status_revision = ?`, domain.JobReconciling, owner, leaseExpiry.UnixNano(), now.UnixNano(), now.UnixNano(), jobID, domain.JobCompletionUnknown, compareRevision)
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE external_agent_jobs SET status = ?, attempt = attempt + 1, lease_owner = ?, lease_expiry = ?, heartbeat_at = ?, status_revision = status_revision + 1, updated_at = ? WHERE job_id = ? AND status = ? AND status_revision = ?`,
+		domain.JobReconciling,
+		owner,
+		leaseExpiry.UnixNano(),
+		now.UnixNano(),
+		now.UnixNano(),
+		jobID,
+		domain.JobCompletionUnknown,
+		compareRevision,
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -558,7 +630,13 @@ func (s *ExternalAgentJobStore) beginReconciliation(ctx context.Context, jobID, 
 //
 // It never touches a lease. A completion-unknown job holds none, which is why
 // Transition cannot close one.
-func (s *ExternalAgentJobStore) AbandonCompletionUnknown(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, now time.Time) (*domain.ExternalAgentJob, error) {
+func (s *ExternalAgentJobStore) AbandonCompletionUnknown(
+	ctx context.Context,
+	jobID, actor string,
+	conversationKey domain.ConversationKey,
+	expectedRevision int,
+	now time.Time,
+) (*domain.ExternalAgentJob, error) {
 	if expectedRevision < 0 {
 		return nil, errors.New("expected status revision is required")
 	}
@@ -613,7 +691,15 @@ func (s *ExternalAgentJobStore) AbandonCompletionUnknown(ctx context.Context, jo
 // closed. It never carries operator text.
 const abandonedByOperatorCode = "abandoned_by_operator"
 
-func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error {
+func (s *ExternalAgentJobStore) Transition(
+	ctx context.Context,
+	jobID, owner string,
+	attempt int,
+	next domain.ExternalAgentJobStatus,
+	result *domain.ExternalAgentInvocationResult,
+	errorCode string,
+	now time.Time,
+) error {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
@@ -677,7 +763,26 @@ func (s *ExternalAgentJobStore) Transition(ctx context.Context, jobID, owner str
 	}
 	query := `UPDATE external_agent_jobs SET status = ?, result_summary = ?, result_artifact = ?, result_sha256 = ?, result_bytes = ?, error_code = ?, status_revision = ?, finished_at = ?, lease_owner = ?, lease_expiry = ?, heartbeat_at = ?, updated_at = ?
 		WHERE job_id = ? AND status = ? AND lease_owner = ? AND attempt = ? AND status_revision = ? AND lease_expiry > ?`
-	args := []any{job.Status, job.ResultSummary, job.ResultArtifact, job.ResultSHA256, job.ResultBytes, job.ErrorCode, job.StatusRevision, unix(job.FinishedAt), leaseOwner, leaseExpiry, heartbeat, unix(job.UpdatedAt), job.ID, previous, owner, attempt, expectedRevision, now.UnixNano()}
+	args := []any{
+		job.Status,
+		job.ResultSummary,
+		job.ResultArtifact,
+		job.ResultSHA256,
+		job.ResultBytes,
+		job.ErrorCode,
+		job.StatusRevision,
+		unix(job.FinishedAt),
+		leaseOwner,
+		leaseExpiry,
+		heartbeat,
+		unix(job.UpdatedAt),
+		job.ID,
+		previous,
+		owner,
+		attempt,
+		expectedRevision,
+		now.UnixNano(),
+	}
 	if next == domain.JobQueued {
 		query += ` AND timeout_at > ?`
 		args = append(args, now.UnixNano())
@@ -720,8 +825,10 @@ func (s *ExternalAgentJobStore) NativeResultIDForJob(ctx context.Context, jobID 
 	return resultID, nil
 }
 
-var _ port.ExternalAgentJobNativeResultStore = (*ExternalAgentJobStore)(nil)
-var _ port.ExternalAgentJobAbandoner = (*ExternalAgentJobStore)(nil)
+var (
+	_ port.ExternalAgentJobNativeResultStore = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobAbandoner         = (*ExternalAgentJobStore)(nil)
+)
 
 func bindNativeExternalAgentResult(ctx context.Context, tx *sql.Tx, job domain.ExternalAgentJob, result domain.ExternalAgentInvocationResult) error {
 	if !validResultOpaqueID(result.NativeResultID) || job.Status != domain.JobCompleted {
@@ -806,7 +913,14 @@ func quarantineUnboundNativeExternalAgentResults(ctx context.Context, tx *sql.Tx
 }
 
 func (s *ExternalAgentJobStore) ListExpiredRunning(ctx context.Context, now time.Time) ([]domain.ExternalAgentJob, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM external_agent_jobs WHERE status IN (?, ?, ?) AND lease_expiry > 0 AND lease_expiry <= ? ORDER BY updated_at ASC`, domain.JobRunning, domain.JobCancelRequested, domain.JobReconciling, now.UnixNano())
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT `+jobColumns+` FROM external_agent_jobs WHERE status IN (?, ?, ?) AND lease_expiry > 0 AND lease_expiry <= ? ORDER BY updated_at ASC`,
+		domain.JobRunning,
+		domain.JobCancelRequested,
+		domain.JobReconciling,
+		now.UnixNano(),
+	)
 	if err != nil {
 		return nil, err
 	}
@@ -823,7 +937,14 @@ func (s *ExternalAgentJobStore) ListExpiredRunning(ctx context.Context, now time
 }
 
 func (s *ExternalAgentJobStore) ShutdownStats(ctx context.Context) (domain.ExternalAgentJobShutdownStats, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT status, COUNT(*) FROM external_agent_jobs WHERE status IN (?, ?, ?, ?) GROUP BY status`, domain.JobQueued, domain.JobRunning, domain.JobReconciling, domain.JobCompletionUnknown)
+	rows, err := s.db.QueryContext(
+		ctx,
+		`SELECT status, COUNT(*) FROM external_agent_jobs WHERE status IN (?, ?, ?, ?) GROUP BY status`,
+		domain.JobQueued,
+		domain.JobRunning,
+		domain.JobReconciling,
+		domain.JobCompletionUnknown,
+	)
 	if err != nil {
 		return domain.ExternalAgentJobShutdownStats{}, err
 	}
@@ -905,7 +1026,8 @@ func isNotificationTerminal(status domain.ExternalAgentJobStatus) bool {
 
 func insertJobNotification(ctx context.Context, exec interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, job domain.ExternalAgentJob, result *domain.ExternalAgentInvocationResult) error {
+}, job domain.ExternalAgentJob, result *domain.ExternalAgentInvocationResult,
+) error {
 	var notification domain.ExternalAgentJobNotification
 	var err error
 	if result != nil && job.Status == domain.JobCompleted && job.Mode == domain.JobDetached {
@@ -968,7 +1090,15 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 	if err != nil {
 		return nil, fmt.Errorf("select notification claimable: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT publish_state FROM external_agent_job_notifications WHERE job_id = ? AND status_revision = ? AND kind = ?`, jobID, revision, kind).Scan(&previousState); err != nil {
+	if err := tx.QueryRowContext(
+		ctx,
+		`SELECT publish_state FROM external_agent_job_notifications WHERE job_id = ? AND status_revision = ? AND kind = ?`,
+		jobID,
+		revision,
+		kind,
+	).Scan(
+		&previousState,
+	); err != nil {
 		return nil, fmt.Errorf("read notification state before claim: %w", err)
 	}
 	leaseExpiry := now.Add(leaseTTL)
@@ -991,7 +1121,9 @@ func (s *ExternalAgentJobStore) ClaimNextNotification(ctx context.Context, now t
 	if err != nil {
 		return nil, err
 	}
-	notification.NeedsReconciliation = previousState == string(domain.NotificationUnknown) || previousState == string(domain.NotificationPublishing) || notification.LastErrorCode == "notification_publish_ambiguous" || notification.LastErrorCode == "result_file_upload_unknown"
+	notification.NeedsReconciliation = previousState == string(domain.NotificationUnknown) || previousState == string(domain.NotificationPublishing) ||
+		notification.LastErrorCode == "notification_publish_ambiguous" ||
+		notification.LastErrorCode == "result_file_upload_unknown"
 	if err := tx.Commit(); err != nil {
 		return nil, fmt.Errorf("commit notification claim: %w", err)
 	}
@@ -1010,13 +1142,26 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 		return fmt.Errorf("begin notification publication: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	result, err := tx.ExecContext(ctx, `UPDATE external_agent_job_notifications SET
+	result, err := tx.ExecContext(
+		ctx,
+		`UPDATE external_agent_job_notifications SET
 		publish_state = ?, recovered_slack_ts = ?, lease_owner = '', lease_expiry = 0,
 		last_error_code = '', published_at = ?, updated_at = ?, upload_state = CASE WHEN delivery_mode = 'file' THEN ? ELSE upload_state END
 		WHERE job_id = ? AND status_revision = ? AND kind = ? AND publish_state = ?
 		AND lease_owner = ? AND attempts = ? AND (policy_version = 'legacy_v1' OR
-			(delivery_mode = 'markdown' OR (delivery_mode = 'file' AND upload_state = 'completed' AND length(slack_file_id) > 0)))`, domain.NotificationPublished, slackTS,
-		now.UnixNano(), now.UnixNano(), domain.JobResultUploadCompleted, notification.JobID, notification.StatusRevision, notification.Kind, domain.NotificationPublishing, notification.LeaseOwner, notification.Attempts)
+			(delivery_mode = 'markdown' OR (delivery_mode = 'file' AND upload_state = 'completed' AND length(slack_file_id) > 0)))`,
+		domain.NotificationPublished,
+		slackTS,
+		now.UnixNano(),
+		now.UnixNano(),
+		domain.JobResultUploadCompleted,
+		notification.JobID,
+		notification.StatusRevision,
+		notification.Kind,
+		domain.NotificationPublishing,
+		notification.LeaseOwner,
+		notification.Attempts,
+	)
 	if err != nil {
 		return fmt.Errorf("mark notification published: %w", err)
 	}
@@ -1386,7 +1531,44 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 	var terminalStatus string
 	var publishedAt int64
 	var legacyContentSHA string
-	err := row.Scan(&n.JobID, &n.StatusRevision, &n.Kind, &terminalStatus, &publishedAt, &n.CanonicalMarkdown, &legacyContentSHA, &n.RendererVersion, &n.Target.ChannelID, &n.Target.ThreadTS, &state, &n.LeaseOwner, &leaseExpiry, &n.Attempts, &nextAttempt, &n.RecoveredSlackTS, &n.LastErrorCode, &created, &updated, &deliveryMode, &policyVersion, &n.ArtifactRef, &n.ResultBytes, &n.MaxMarkdownParts, &uploadState, &n.SlackFileID, &rootActivationRequired, &n.NotificationSHA256, &n.NotificationBytes, &n.ResultSHA256, &n.WorkstreamID, &n.TaskID, &n.ExecutionIdentity, &n.AdmissionRevision, &n.Actor, &n.ConversationKey)
+	err := row.Scan(
+		&n.JobID,
+		&n.StatusRevision,
+		&n.Kind,
+		&terminalStatus,
+		&publishedAt,
+		&n.CanonicalMarkdown,
+		&legacyContentSHA,
+		&n.RendererVersion,
+		&n.Target.ChannelID,
+		&n.Target.ThreadTS,
+		&state,
+		&n.LeaseOwner,
+		&leaseExpiry,
+		&n.Attempts,
+		&nextAttempt,
+		&n.RecoveredSlackTS,
+		&n.LastErrorCode,
+		&created,
+		&updated,
+		&deliveryMode,
+		&policyVersion,
+		&n.ArtifactRef,
+		&n.ResultBytes,
+		&n.MaxMarkdownParts,
+		&uploadState,
+		&n.SlackFileID,
+		&rootActivationRequired,
+		&n.NotificationSHA256,
+		&n.NotificationBytes,
+		&n.ResultSHA256,
+		&n.WorkstreamID,
+		&n.TaskID,
+		&n.ExecutionIdentity,
+		&n.AdmissionRevision,
+		&n.Actor,
+		&n.ConversationKey,
+	)
 	if err != nil {
 		return domain.ExternalAgentJobNotification{}, fmt.Errorf("load notification: %w", err)
 	}
@@ -1423,7 +1605,45 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 		leaseExpiry, heartbeat, timeout, created, started, finished, updated int64
 		sideEffects                                                          int
 	)
-	err := row.Scan(&job.ID, &mode, &job.Provider, &job.Profile, &job.PrimaryProject, &projects, &job.RegistryRevision, &job.Task, &job.RequestSHA256, &job.WrapperCallID, &job.OriginalCallID, &job.Actor, &job.TeamID, &conversation, &job.WorkstreamID, &job.TaskID, &job.ExecutionIdentity, &job.AdmissionRevision, &status, &job.Attempt, &job.ExternalAgentSessionID, &job.TranscriptPath, &sideEffects, &job.LeaseOwner, &leaseExpiry, &heartbeat, &timeout, &job.ResultSummary, &job.ResultArtifact, &job.ResultSHA256, &job.ResultBytes, &job.ErrorCode, &job.StatusRevision, &created, &started, &finished, &updated)
+	err := row.Scan(
+		&job.ID,
+		&mode,
+		&job.Provider,
+		&job.Profile,
+		&job.PrimaryProject,
+		&projects,
+		&job.RegistryRevision,
+		&job.Task,
+		&job.RequestSHA256,
+		&job.WrapperCallID,
+		&job.OriginalCallID,
+		&job.Actor,
+		&job.TeamID,
+		&conversation,
+		&job.WorkstreamID,
+		&job.TaskID,
+		&job.ExecutionIdentity,
+		&job.AdmissionRevision,
+		&status,
+		&job.Attempt,
+		&job.ExternalAgentSessionID,
+		&job.TranscriptPath,
+		&sideEffects,
+		&job.LeaseOwner,
+		&leaseExpiry,
+		&heartbeat,
+		&timeout,
+		&job.ResultSummary,
+		&job.ResultArtifact,
+		&job.ResultSHA256,
+		&job.ResultBytes,
+		&job.ErrorCode,
+		&job.StatusRevision,
+		&created,
+		&started,
+		&finished,
+		&updated,
+	)
 	if err != nil {
 		return domain.ExternalAgentJob{}, err
 	}
@@ -1444,8 +1664,16 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 
 func insertJobEvent(ctx context.Context, exec interface {
 	ExecContext(context.Context, string, ...any) (sql.Result, error)
-}, job domain.ExternalAgentJob, kind string) error {
-	_, err := exec.ExecContext(ctx, `INSERT INTO external_agent_job_events (job_id, status_revision, event_kind, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`, job.ID, job.StatusRevision, kind, job.UpdatedAt.UnixNano())
+}, job domain.ExternalAgentJob, kind string,
+) error {
+	_, err := exec.ExecContext(
+		ctx,
+		`INSERT INTO external_agent_job_events (job_id, status_revision, event_kind, created_at) VALUES (?, ?, ?, ?) ON CONFLICT DO NOTHING`,
+		job.ID,
+		job.StatusRevision,
+		kind,
+		job.UpdatedAt.UnixNano(),
+	)
 	return err
 }
 

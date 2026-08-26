@@ -13,7 +13,12 @@ import (
 
 var _ port.BuilderLauncherDeliveryStore = (*Store)(nil)
 
-func (s *Store) ClaimBuilderLauncher(ctx context.Context, deliveryID string, key domain.ConversationKey, createdAt time.Time) (port.BuilderLauncherDeliveryClaim, port.BuilderLauncherDeliveryState, error) {
+func (s *Store) ClaimBuilderLauncher(
+	ctx context.Context,
+	deliveryID string,
+	key domain.ConversationKey,
+	createdAt time.Time,
+) (port.BuilderLauncherDeliveryClaim, port.BuilderLauncherDeliveryState, error) {
 	if strings.TrimSpace(deliveryID) == "" || strings.TrimSpace(string(key)) == "" {
 		return port.BuilderLauncherDeliveryClaim{}, "", errors.New("builder launcher claim identity is required")
 	}

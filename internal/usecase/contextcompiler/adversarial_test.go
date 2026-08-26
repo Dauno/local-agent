@@ -69,7 +69,10 @@ func TestAdversarial_ManySmallToolResponsesExceedBudget(t *testing.T) {
 
 	responses := make([]domain.Content, 50)
 	for i := range 50 {
-		responses[i] = domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: fmt.Sprintf("call-%d", i), Name: "read_file", Response: map[string]any{"text": fmt.Sprintf("content %d", i)}}}}}
+		responses[i] = domain.Content{
+			Role:  domain.ContentRoleUser,
+			Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: fmt.Sprintf("call-%d", i), Name: "read_file", Response: map[string]any{"text": fmt.Sprintf("content %d", i)}}}},
+		}
 	}
 
 	contents := make([]domain.Content, 0, 52)
@@ -150,7 +153,10 @@ func TestAdversarial_CrossActorResultReferenceRejected(t *testing.T) {
 	contents := []domain.Content{
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read file"}}},
 		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file", Args: map[string]any{"path": "large.go"}}}}},
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": strings.Repeat("large ", 20000)}}}}},
+		{
+			Role:  domain.ContentRoleUser,
+			Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": strings.Repeat("large ", 20000)}}}},
+		},
 	}
 
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{
@@ -241,7 +247,10 @@ func TestAdversarial_ConfirmationSurroundedByOversizedToolData(t *testing.T) {
 	contents := []domain.Content{
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read files and then approve deployment"}}},
 		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file", Args: map[string]any{"path": "main.go"}}}}},
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": strings.Repeat("large file content ", 10000)}}}}},
+		{
+			Role:  domain.ContentRoleUser,
+			Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": strings.Repeat("large file content ", 10000)}}}},
+		},
 	}
 
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget, Actor: "U-Alice", ConversationKey: "slack:T:dm:A"})
@@ -291,7 +300,12 @@ func TestAdversarial_ToolPayloadSpoofingProjectionMarker(t *testing.T) {
 	contents := []domain.Content{
 		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "read file"}}},
 		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "read_file", Args: map[string]any{"path": "large.go"}}}}},
-		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": largeText, "_local_agent_context_projection": spoofedMarker}}}}},
+		{
+			Role: domain.ContentRoleUser,
+			Parts: []domain.ContentPart{
+				{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "read_file", Response: map[string]any{"text": largeText, "_local_agent_context_projection": spoofedMarker}}},
+			},
+		},
 	}
 
 	result, err := compiler.Compile(context.Background(), domain.CompileRequest{Contents: contents, ModelBudget: budget, Actor: "U-Alice", ConversationKey: "slack:T:dm:A"})
@@ -406,7 +420,12 @@ func TestAdversarial_ParallelLargeResponsesDeterministic(t *testing.T) {
 
 		responses := make([]domain.Content, 5)
 		for j := range 5 {
-			responses[j] = domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: fmt.Sprintf("call-%d", j), Name: "read_file", Response: map[string]any{"text": strings.Repeat(fmt.Sprintf("r%d ", j), 5000)}}}}}
+			responses[j] = domain.Content{
+				Role: domain.ContentRoleUser,
+				Parts: []domain.ContentPart{
+					{FunctionResponse: &domain.FunctionResponse{ID: fmt.Sprintf("call-%d", j), Name: "read_file", Response: map[string]any{"text": strings.Repeat(fmt.Sprintf("r%d ", j), 5000)}}},
+				},
+			}
 		}
 
 		contents := make([]domain.Content, 0, 52)
@@ -445,7 +464,17 @@ func (f *fakeResultStore) Put(ctx context.Context, req port.PutResultRequest) (d
 	if f.corrupSHA256 != "" {
 		sha256Hex = f.corrupSHA256
 	}
-	return domain.RecoverableResult{Ref: ref, Kind: req.Kind, Actor: req.Actor, ConversationKey: req.ConversationKey, SizeBytes: int64(len(req.Content)), CodePoints: utf8.RuneCountInString(req.Content), SHA256: sha256Hex, CreatedAt: time.Now(), ExpiresAt: time.Now().Add(time.Hour)}, nil
+	return domain.RecoverableResult{
+		Ref:             ref,
+		Kind:            req.Kind,
+		Actor:           req.Actor,
+		ConversationKey: req.ConversationKey,
+		SizeBytes:       int64(len(req.Content)),
+		CodePoints:      utf8.RuneCountInString(req.Content),
+		SHA256:          sha256Hex,
+		CreatedAt:       time.Now(),
+		ExpiresAt:       time.Now().Add(time.Hour),
+	}, nil
 }
 
 func (f *fakeResultStore) ReadChunk(ctx context.Context, req domain.ResultChunkRequest) (domain.ResultChunk, error) {

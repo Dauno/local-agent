@@ -43,17 +43,20 @@ func (s *fakeStore) ClaimDedupe(context.Context, []string, time.Time, time.Time)
 	s.claimed = true
 	return true, nil
 }
+
 func (s *fakeStore) HasAssistantMessage(context.Context, domain.ConversationKey) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.hasCalls++
 	return s.hasAssistant, nil
 }
+
 func (s *fakeStore) RecentMessages(_ context.Context, key domain.ConversationKey, _ int) ([]domain.Message, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return append([]domain.Message(nil), s.recent[key]...), nil
 }
+
 func (s *fakeStore) AppendMessage(_ context.Context, metadata domain.ConversationMetadata, message domain.Message, _ int) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -138,6 +141,7 @@ type fakeConfirmationStore struct {
 func (*fakeConfirmationStore) CreateDelivery(context.Context, port.ConfirmationDelivery) error {
 	return nil
 }
+
 func (s *fakeConfirmationStore) MarkPublished(_ context.Context, wrapperCallID, correlationID, slackMessageTS, rendererMode string) error {
 	if s.delivery != nil && s.delivery.WrapperCallID == wrapperCallID {
 		s.delivery.Status = port.ConfirmationPublished
@@ -155,17 +159,21 @@ func (s *fakeConfirmationStore) MarkPublished(_ context.Context, wrapperCallID, 
 	}
 	return nil
 }
+
 func (s *fakeConfirmationStore) MarkConsumed(_ context.Context, _ string) error {
 	s.delivery.Status = port.ConfirmationConsumed
 	return nil
 }
+
 func (s *fakeConfirmationStore) RejectDelivery(_ context.Context, _ string) error {
 	s.delivery.Status = port.ConfirmationRejected
 	return nil
 }
+
 func (s *fakeConfirmationStore) GetByWrapperCallID(context.Context, string) (*port.ConfirmationDelivery, error) {
 	return s.delivery, nil
 }
+
 func (s *fakeConfirmationStore) ListPending(context.Context) ([]port.ConfirmationDelivery, error) {
 	return append([]port.ConfirmationDelivery(nil), s.pending...), nil
 }
@@ -232,7 +240,13 @@ func (w *fakeExchangeWriter) PrepareAssistantExchange(_ context.Context, metadat
 	return w.prepared, nil
 }
 
-func (w *fakeExchangeWriter) PrepareStructuredAssistantExchange(ctx context.Context, metadata domain.ConversationMetadata, message domain.Message, presentationJSON string, retain int) (port.PreparedAssistantExchange, error) {
+func (w *fakeExchangeWriter) PrepareStructuredAssistantExchange(
+	ctx context.Context,
+	metadata domain.ConversationMetadata,
+	message domain.Message,
+	presentationJSON string,
+	retain int,
+) (port.PreparedAssistantExchange, error) {
 	w.structured++
 	w.presentationJSON = presentationJSON
 	return w.PrepareAssistantExchange(ctx, metadata, message, retain)
@@ -256,6 +270,7 @@ func (w *fakeExchangeWriter) DiscardAssistantExchange(context.Context, string) e
 	w.discards++
 	return nil
 }
+
 func (*fakeExchangeWriter) ReconcileAssistantExchanges(context.Context, port.AssistantExchangeFinder) error {
 	return nil
 }
@@ -317,10 +332,12 @@ func (f *fakeStandardExperience) CreateProgress(_ context.Context, operation dom
 	f.operation = &operation
 	return nil
 }
+
 func (f *fakeStandardExperience) MarkProgressPublished(_ context.Context, _ string, messageTS string) error {
 	f.operation.MessageTS = messageTS
 	return nil
 }
+
 func (f *fakeStandardExperience) SetProgressState(_ context.Context, _ string, state domain.ProgressState, _ time.Time) error {
 	f.states = append(f.states, state)
 	if f.operation != nil {
@@ -328,15 +345,18 @@ func (f *fakeStandardExperience) SetProgressState(_ context.Context, _ string, s
 	}
 	return nil
 }
+
 func (f *fakeStandardExperience) ListRecoverableProgress(context.Context) ([]domain.ProgressOperation, error) {
 	if f.operation == nil {
 		return nil, nil
 	}
 	return []domain.ProgressOperation{*f.operation}, nil
 }
+
 func (f *fakeStandardExperience) FindWaitingProgress(context.Context, domain.ConversationKey) (*domain.ProgressOperation, error) {
 	return f.operation, nil
 }
+
 func (f *fakeStandardExperience) ClaimSuggestedPrompts(context.Context, string, string, domain.ConversationKey, time.Time) (string, bool, error) {
 	if f.promptClaim {
 		return "prompts-1", false, nil
@@ -344,17 +364,21 @@ func (f *fakeStandardExperience) ClaimSuggestedPrompts(context.Context, string, 
 	f.promptClaim = true
 	return "prompts-1", true, nil
 }
+
 func (*fakeStandardExperience) MarkSuggestedPromptsPublished(context.Context, string, string, time.Time) error {
 	return nil
 }
+
 func (f *fakeStandardExperience) PrepareIncremental(_ context.Context, operation domain.IncrementalOperation) error {
 	f.incremental = &operation
 	return nil
 }
+
 func (f *fakeStandardExperience) MarkIncrementalCreated(_ context.Context, _, messageTS string, _ time.Time) error {
 	f.incremental.MessageTS = messageTS
 	return nil
 }
+
 func (f *fakeStandardExperience) AdvanceIncremental(_ context.Context, _ string, status domain.IncrementalStatus, sequence int, digest string, _ time.Time) error {
 	f.incrementalStates = append(f.incrementalStates, status)
 	if f.incremental != nil {
@@ -362,30 +386,37 @@ func (f *fakeStandardExperience) AdvanceIncremental(_ context.Context, _ string,
 	}
 	return nil
 }
+
 func (*fakeStandardExperience) ListUnfinishedIncremental(context.Context) ([]domain.IncrementalOperation, error) {
 	return nil, nil
 }
+
 func (f *fakeStandardExperience) PublishProgress(_ context.Context, _ domain.ReplyTarget, operation domain.ProgressOperation) (port.PublishedResponse, error) {
 	f.progressOut = append(f.progressOut, operation.State)
 	return port.PublishedResponse{LastMessageTS: "1700000001.000001"}, nil
 }
+
 func (f *fakeStandardExperience) UpdateProgress(_ context.Context, operation domain.ProgressOperation) error {
 	f.progressOut = append(f.progressOut, operation.State)
 	return nil
 }
+
 func (*fakeStandardExperience) RecoverProgress(context.Context, domain.ProgressOperation) (port.PublishedResponse, bool, error) {
 	return port.PublishedResponse{}, false, nil
 }
+
 func (f *fakeStandardExperience) PublishSuggestedPrompts(context.Context, domain.ReplyTarget, string, []string) (port.PublishedResponse, error) {
 	f.promptCalls++
 	return port.PublishedResponse{LastMessageTS: "1700000001.000002"}, nil
 }
+
 func (f *fakeStandardExperience) ValidateIncrementalText(text string) error {
 	if f.incrementalLimit > 0 && len([]rune(text)) > f.incrementalLimit {
 		return port.ErrIncrementalTextTooLong
 	}
 	return nil
 }
+
 func (f *fakeStandardExperience) CreateIncremental(_ context.Context, _ domain.ReplyTarget, operation domain.IncrementalOperation, text string) (port.PublishedResponse, error) {
 	f.createdText = text
 	f.incremental = &operation
@@ -394,18 +425,22 @@ func (f *fakeStandardExperience) CreateIncremental(_ context.Context, _ domain.R
 	}
 	return port.PublishedResponse{LastMessageTS: "1700000001.000003"}, nil
 }
+
 func (f *fakeStandardExperience) UpdateIncremental(_ context.Context, operation domain.IncrementalOperation, text string) error {
 	f.incremental, f.updatedText = &operation, text
 	return nil
 }
+
 func (f *fakeStandardExperience) FinalizeIncremental(_ context.Context, operation domain.IncrementalOperation, text, _ string) error {
 	f.incremental, f.finalText = &operation, text
 	return nil
 }
+
 func (f *fakeStandardExperience) InterruptIncremental(_ context.Context, operation domain.IncrementalOperation, text string) error {
 	f.incremental, f.interrupted = &operation, text
 	return nil
 }
+
 func (*fakeStandardExperience) RecoverIncremental(context.Context, domain.IncrementalOperation) (port.PublishedResponse, bool, error) {
 	return port.PublishedResponse{}, false, nil
 }
@@ -488,7 +523,15 @@ func newTestService(t *testing.T, store *fakeStore, runtime *fakeRuntime, histor
 	return newTestServiceWithConfirmations(t, store, runtime, history, publisher, nil, mutate)
 }
 
-func newTestServiceWithConfirmations(t *testing.T, store *fakeStore, runtime *fakeRuntime, history *fakeHistory, publisher *fakePublisher, confirmations port.ConfirmationDeliveryStore, mutate func(*Config)) *Service {
+func newTestServiceWithConfirmations(
+	t *testing.T,
+	store *fakeStore,
+	runtime *fakeRuntime,
+	history *fakeHistory,
+	publisher *fakePublisher,
+	confirmations port.ConfirmationDeliveryStore,
+	mutate func(*Config),
+) *Service {
 	t.Helper()
 	cfg := Config{
 		AccessPolicy:   domain.AccessPolicy{AllowedUserIDs: []string{"U12345678"}},

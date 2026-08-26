@@ -93,8 +93,12 @@ func TestKnowledgeProjectionRememberRendersClaimFromAuthority(t *testing.T) {
 	startKnowledgeProjectionWorker(t, service, store, memoryDir)
 	binding := knowledgeTestBinding("U12345678", "workspace")
 
-	_, _, err := service.Execute(ctx, binding, "evt-1",
-		knowledgeusecase.HumanCommandPrefix+`{"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"PostgreSQL 17","scope_kind":"project","scope_id":"workspace"}`)
+	_, _, err := service.Execute(
+		ctx,
+		binding,
+		"evt-1",
+		knowledgeusecase.HumanCommandPrefix+`{"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"PostgreSQL 17","scope_kind":"project","scope_id":"workspace"}`,
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -221,8 +225,12 @@ func TestKnowledgeProjectionManualEditIsReplacedFromAuthority(t *testing.T) {
 
 	// The next committed mutation forces a projection that replaces the
 	// manual edit from the durable authority.
-	if _, _, err := service.Execute(ctx, binding, "evt-2",
-		knowledgeusecase.HumanCommandPrefix+`{"action":"remember","subject":"cache","predicate":"runs_on","value_kind":"string","value_text":"redis","scope_kind":"project","scope_id":"workspace"}`); err != nil {
+	if _, _, err := service.Execute(
+		ctx,
+		binding,
+		"evt-2",
+		knowledgeusecase.HumanCommandPrefix+`{"action":"remember","subject":"cache","predicate":"runs_on","value_kind":"string","value_text":"redis","scope_kind":"project","scope_id":"workspace"}`,
+	); err != nil {
 		t.Fatal(err)
 	}
 	claims := waitForKnowledgeText(t, memoryDir, "knowledge/claims.md", "redis")
@@ -243,8 +251,12 @@ func TestKnowledgeProjectionDisabledGateWritesNothingAndReEnableDrains(t *testin
 
 	// Commit a mutation while knowledge is enabled so a durable trigger
 	// exists, then run the worker behind a disabled gate.
-	if _, _, err := enabledService.Execute(ctx, binding, "evt-1",
-		knowledgeusecase.HumanCommandPrefix+`{"action":"remember","subject":"deferred","predicate":"uses","value_kind":"string","value_text":"x","scope_kind":"project","scope_id":"workspace"}`); err != nil {
+	if _, _, err := enabledService.Execute(
+		ctx,
+		binding,
+		"evt-1",
+		knowledgeusecase.HumanCommandPrefix+`{"action":"remember","subject":"deferred","predicate":"uses","value_kind":"string","value_text":"x","scope_kind":"project","scope_id":"workspace"}`,
+	); err != nil {
 		t.Fatal(err)
 	}
 	var gate atomic.Bool

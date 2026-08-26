@@ -46,7 +46,10 @@ func TestWorkstreamSurvivesRestartWithBindingAndCAS(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer func() { _ = reopened.Close() }()
-	restarted, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: adaptersqlite.NewWorkstreamStore(reopened)})
+	restarted, err := workstream.New(
+		workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}},
+		workstream.Dependencies{Store: adaptersqlite.NewWorkstreamStore(reopened)},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}

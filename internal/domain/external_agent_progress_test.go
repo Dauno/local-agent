@@ -114,7 +114,10 @@ func TestProgressToolAccountingOverflow(t *testing.T) {
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
 	for index := range maxTrackedActiveTools + 5 {
 		callID := "tool-" + strconv.Itoa(index)
-		progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: &ExternalAgentToolProgress{CallID: callID, Kind: ExternalAgentToolKindExecute, Status: ExternalAgentToolStatusPending}}, base)
+		progress.Apply(
+			ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: &ExternalAgentToolProgress{CallID: callID, Kind: ExternalAgentToolKindExecute, Status: ExternalAgentToolStatusPending}},
+			base,
+		)
 	}
 	if progress.ActiveToolCount != maxTrackedActiveTools {
 		t.Fatalf("active tool count = %d, want bounded %d", progress.ActiveToolCount, maxTrackedActiveTools)
@@ -126,13 +129,22 @@ func TestProgressToolAccountingOverflow(t *testing.T) {
 		t.Fatalf("tracked tool states = %d, want bounded %d", len(progress.toolStates), maxTrackedActiveTools)
 	}
 	// An untracked overflow terminal cannot decrement the tracked count.
-	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-20", Status: ExternalAgentToolStatusTerminal}}, base.Add(time.Second))
+	progress.Apply(
+		ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-20", Status: ExternalAgentToolStatusTerminal}},
+		base.Add(time.Second),
+	)
 	if progress.ActiveToolCount != maxTrackedActiveTools {
 		t.Fatalf("overflow terminal decremented tracked count to %d", progress.ActiveToolCount)
 	}
 	// Terminal tracked calls release their map entry for future tools.
-	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-0", Status: ExternalAgentToolStatusTerminal}}, base.Add(2*time.Second))
-	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: &ExternalAgentToolProgress{CallID: "tool-new", Kind: ExternalAgentToolKindRead, Status: ExternalAgentToolStatusPending}}, base.Add(3*time.Second))
+	progress.Apply(
+		ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCallUpdate, Tool: &ExternalAgentToolProgress{CallID: "tool-0", Status: ExternalAgentToolStatusTerminal}},
+		base.Add(2*time.Second),
+	)
+	progress.Apply(
+		ExternalAgentProgressEvent{Kind: ExternalAgentEventToolCall, Tool: &ExternalAgentToolProgress{CallID: "tool-new", Kind: ExternalAgentToolKindRead, Status: ExternalAgentToolStatusPending}},
+		base.Add(3*time.Second),
+	)
 	if progress.ActiveToolCount != maxTrackedActiveTools || len(progress.toolStates) != maxTrackedActiveTools {
 		t.Fatalf("replacement tool count/states = %d/%d", progress.ActiveToolCount, len(progress.toolStates))
 	}
@@ -275,9 +287,11 @@ func TestProgressStopReasonPhases(t *testing.T) {
 }
 
 func TestProgressValidateAllowlists(t *testing.T) {
-	valid := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1, Phase: ExternalAgentPhaseToolRunning,
+	valid := ExternalAgentJobProgress{
+		JobID: "job_1", Attempt: 1, Phase: ExternalAgentPhaseToolRunning,
 		LastEventKind: ExternalAgentEventToolCallUpdate, LastToolKind: ExternalAgentToolKindExecute,
-		LastToolStatus: ExternalAgentToolStatusRunning, StopReason: ExternalAgentStopReasonEndTurn}
+		LastToolStatus: ExternalAgentToolStatusRunning, StopReason: ExternalAgentStopReasonEndTurn,
+	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid projection rejected: %v", err)
 	}

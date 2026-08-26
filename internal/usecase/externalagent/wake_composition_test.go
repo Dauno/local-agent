@@ -331,8 +331,10 @@ func TestExternalAgentThreeSchedulerGroupWakesEachOwnConsumerOnly(t *testing.T) 
 	}
 
 	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Minute, PollInterval: time.Hour, Concurrency: 1, MaxAttempts: 1},
-		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4}},
-			Scheduler: jobsScheduler, NotificationWake: notificationsScheduler.Wake})
+		Dependencies{
+			Store: jobStore, Runtime: &fakeJobRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4}},
+			Scheduler: jobsScheduler, NotificationWake: notificationsScheduler.Wake,
+		})
 	if err != nil {
 		t.Fatal(err)
 	}

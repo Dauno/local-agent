@@ -1,9 +1,10 @@
 package port
 
 import (
+	"cmp"
 	"context"
 	"errors"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -31,7 +32,12 @@ type fakeKnowledgeRetrievalBindingResolver struct {
 	binding KnowledgeRetrievalBinding
 }
 
-func (f fakeKnowledgeRetrievalBindingResolver) ResolveRetrievalBinding(_ context.Context, team, actor string, conversation domain.ConversationKey, exchangeTS string) (KnowledgeRetrievalBinding, error) {
+func (f fakeKnowledgeRetrievalBindingResolver) ResolveRetrievalBinding(
+	_ context.Context,
+	team, actor string,
+	conversation domain.ConversationKey,
+	exchangeTS string,
+) (KnowledgeRetrievalBinding, error) {
 	if team == "" || actor == "" || conversation == "" || exchangeTS == "" {
 		return KnowledgeRetrievalBinding{}, ErrKnowledgeValidation
 	}
@@ -53,7 +59,14 @@ type fakeKnowledgeCandidateReader struct {
 	items      map[string]KnowledgeAuthoritativeItem
 }
 
-func (f fakeKnowledgeCandidateReader) ReadExact(_ context.Context, _ domain.KnowledgeWriteBinding, _ time.Time, limits domain.KnowledgeRetrievalLimits, query string, tokens []string) ([]KnowledgeEligibleCandidate, error) {
+func (f fakeKnowledgeCandidateReader) ReadExact(
+	_ context.Context,
+	_ domain.KnowledgeWriteBinding,
+	_ time.Time,
+	limits domain.KnowledgeRetrievalLimits,
+	query string,
+	tokens []string,
+) ([]KnowledgeEligibleCandidate, error) {
 	var matched []KnowledgeEligibleCandidate
 	for _, candidate := range f.candidates {
 		hit := candidate.Subject == query
@@ -72,7 +85,13 @@ func (f fakeKnowledgeCandidateReader) ReadExact(_ context.Context, _ domain.Know
 	return matched, nil
 }
 
-func (f fakeKnowledgeCandidateReader) ReadRelated(_ context.Context, _ domain.KnowledgeWriteBinding, _ time.Time, _ domain.KnowledgeRetrievalLimits, seeds []KnowledgeEligibleCandidate) ([]KnowledgeEligibleCandidate, error) {
+func (f fakeKnowledgeCandidateReader) ReadRelated(
+	_ context.Context,
+	_ domain.KnowledgeWriteBinding,
+	_ time.Time,
+	_ domain.KnowledgeRetrievalLimits,
+	seeds []KnowledgeEligibleCandidate,
+) ([]KnowledgeEligibleCandidate, error) {
 	var related []KnowledgeEligibleCandidate
 	for _, seed := range seeds {
 		for _, candidate := range f.candidates {
@@ -84,7 +103,14 @@ func (f fakeKnowledgeCandidateReader) ReadRelated(_ context.Context, _ domain.Kn
 	return related, nil
 }
 
-func (f fakeKnowledgeCandidateReader) ReadItem(_ context.Context, _ domain.KnowledgeWriteBinding, _ time.Time, _ domain.KnowledgeRetrievalLimits, kind domain.KnowledgeRetrievalItemKind, id string) (KnowledgeAuthoritativeItem, error) {
+func (f fakeKnowledgeCandidateReader) ReadItem(
+	_ context.Context,
+	_ domain.KnowledgeWriteBinding,
+	_ time.Time,
+	_ domain.KnowledgeRetrievalLimits,
+	kind domain.KnowledgeRetrievalItemKind,
+	id string,
+) (KnowledgeAuthoritativeItem, error) {
 	item, ok := f.items[string(kind)+":"+id]
 	if !ok {
 		return KnowledgeAuthoritativeItem{}, ErrKnowledgeNotFound
@@ -225,7 +251,7 @@ func (f *fakeKnowledgeQueueStore) List(_ context.Context, kind domain.KnowledgeR
 			items = append(items, item)
 		}
 	}
-	sort.Slice(items, func(i, j int) bool { return items[i].ID < items[j].ID })
+	slices.SortFunc(items, func(a, b domain.KnowledgeQueueItem) int { return cmp.Compare(a.ID, b.ID) })
 	if len(items) > limit {
 		items = items[:limit]
 	}
@@ -287,7 +313,17 @@ func TestKnowledgeCandidateReaderFakesBoundExactAndRelationReads(t *testing.T) {
 	if err != nil || item.Claim == nil || item.Claim.ID != "c1" {
 		t.Fatalf("authoritative read = %+v, %v", item, err)
 	}
-	if _, err := reader.ReadItem(context.Background(), domain.KnowledgeWriteBinding{}, time.Time{}, domain.DefaultKnowledgeRetrievalLimits(), domain.KnowledgeRetrievalClaim, "missing"); !errors.Is(err, ErrKnowledgeNotFound) {
+	if _, err := reader.ReadItem(
+		context.Background(),
+		domain.KnowledgeWriteBinding{},
+		time.Time{},
+		domain.DefaultKnowledgeRetrievalLimits(),
+		domain.KnowledgeRetrievalClaim,
+		"missing",
+	); !errors.Is(
+		err,
+		ErrKnowledgeNotFound,
+	) {
 		t.Fatalf("missing item error = %v", err)
 	}
 }
@@ -358,7 +394,15 @@ func TestKnowledgeQueueStoreBoundsLeaseAndPagination(t *testing.T) {
 	if _, _, err := store.ClaimNext(context.Background(), domain.KnowledgeRetrievalClaim, now, -time.Minute); !errors.Is(err, ErrKnowledgeValidation) {
 		t.Fatalf("negative lease error = %v, want ErrKnowledgeValidation", err)
 	}
-	if _, _, err := store.ClaimNext(context.Background(), domain.KnowledgeRetrievalClaim, now, time.Duration(domain.HardMaxKnowledgeQueueLeaseSeconds+1)*time.Second); !errors.Is(err, ErrKnowledgeValidation) {
+	if _, _, err := store.ClaimNext(
+		context.Background(),
+		domain.KnowledgeRetrievalClaim,
+		now,
+		time.Duration(domain.HardMaxKnowledgeQueueLeaseSeconds+1)*time.Second,
+	); !errors.Is(
+		err,
+		ErrKnowledgeValidation,
+	) {
 		t.Fatalf("over-long lease error = %v, want ErrKnowledgeValidation", err)
 	}
 	if _, err := store.List(context.Background(), domain.KnowledgeRetrievalClaim, "", 0); !errors.Is(err, ErrKnowledgeValidation) {

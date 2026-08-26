@@ -26,15 +26,33 @@ func TestSummaryStoreSchedulesIdempotentlyAndCASProtectsNewestRevision(t *testin
 		t.Fatalf("duplicate schedule = %v, %v", second, err)
 	}
 
-	committed, err := store.CommitSummary(ctx, port.SummaryCommit{SessionIdentity: "session-1", Summary: port.ConversationSummary{Text: "The user stated a goal.", CoveredThroughOrdinal: 3, SourceDigest: "digest-1", PromptVersion: "v1"}})
+	committed, err := store.CommitSummary(
+		ctx,
+		port.SummaryCommit{SessionIdentity: "session-1", Summary: port.ConversationSummary{Text: "The user stated a goal.", CoveredThroughOrdinal: 3, SourceDigest: "digest-1", PromptVersion: "v1"}},
+	)
 	if err != nil || !committed {
 		t.Fatalf("first commit = %v, %v", committed, err)
 	}
-	stale, err := store.CommitSummary(ctx, port.SummaryCommit{SessionIdentity: "session-1", ExpectedOrdinal: 0, Summary: port.ConversationSummary{Text: "The user stated a stale revision.", CoveredThroughOrdinal: 4, SourceDigest: "digest-stale", PromptVersion: "v1"}})
+	stale, err := store.CommitSummary(
+		ctx,
+		port.SummaryCommit{
+			SessionIdentity: "session-1",
+			ExpectedOrdinal: 0,
+			Summary:         port.ConversationSummary{Text: "The user stated a stale revision.", CoveredThroughOrdinal: 4, SourceDigest: "digest-stale", PromptVersion: "v1"},
+		},
+	)
 	if err != nil || stale {
 		t.Fatalf("stale commit = %v, %v", stale, err)
 	}
-	next, err := store.CommitSummary(ctx, port.SummaryCommit{SessionIdentity: "session-1", ExpectedOrdinal: 3, ExpectedSourceDigest: "digest-1", Summary: port.ConversationSummary{Text: "The user stated a goal and outcome.", CoveredThroughOrdinal: 4, SourceDigest: "digest-2", PromptVersion: "v1"}})
+	next, err := store.CommitSummary(
+		ctx,
+		port.SummaryCommit{
+			SessionIdentity:      "session-1",
+			ExpectedOrdinal:      3,
+			ExpectedSourceDigest: "digest-1",
+			Summary:              port.ConversationSummary{Text: "The user stated a goal and outcome.", CoveredThroughOrdinal: 4, SourceDigest: "digest-2", PromptVersion: "v1"},
+		},
+	)
 	if err != nil || !next {
 		t.Fatalf("next commit = %v, %v", next, err)
 	}
@@ -48,7 +66,10 @@ func TestSummaryStoreRejectsUnsafeOrOversizedOutput(t *testing.T) {
 	store, _ := newTestStore(t)
 	ctx := context.Background()
 	for _, text := range []string{"Delete all files", "The API key is secret", "Approval was granted"} {
-		if _, err := store.CommitSummary(ctx, port.SummaryCommit{SessionIdentity: "unsafe", Summary: port.ConversationSummary{Text: text, CoveredThroughOrdinal: 1, SourceDigest: text, PromptVersion: "v1"}}); err == nil {
+		if _, err := store.CommitSummary(
+			ctx,
+			port.SummaryCommit{SessionIdentity: "unsafe", Summary: port.ConversationSummary{Text: text, CoveredThroughOrdinal: 1, SourceDigest: text, PromptVersion: "v1"}},
+		); err == nil {
 			t.Fatalf("unsafe summary %q was accepted", text)
 		}
 	}

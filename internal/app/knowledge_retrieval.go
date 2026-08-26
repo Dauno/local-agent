@@ -151,7 +151,13 @@ func (q wakingKnowledgeQueue) Enqueue(ctx context.Context, kind domain.Knowledge
 // SearchSemantic fail-closed, and the retriever's Provider stays nil. The
 // embedding API key was resolved inside prepareRuntimeModels and must be
 // present when embeddings are enabled.
-func composeLexicalRetrieval(cfg config.Config, models runtimeModels, modelCalls port.ModelCallLimiter, store *sqlite.Store, supplied ...knowledgeRetrievalSchedules) (*knowledgeRetrievalComposition, error) {
+func composeLexicalRetrieval(
+	cfg config.Config,
+	models runtimeModels,
+	modelCalls port.ModelCallLimiter,
+	store *sqlite.Store,
+	supplied ...knowledgeRetrievalSchedules,
+) (*knowledgeRetrievalComposition, error) {
 	retrieval := cfg.Orchestration.Knowledge.Retrieval
 	if !cfg.Orchestration.Knowledge.Enabled || !retrieval.Enabled {
 		return nil, nil

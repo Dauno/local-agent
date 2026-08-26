@@ -17,8 +17,10 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var ErrDisabled = errors.New("workstream orchestration is disabled")
-var ErrResultHandlesDisabled = errors.New("native result handles are disabled")
+var (
+	ErrDisabled              = errors.New("workstream orchestration is disabled")
+	ErrResultHandlesDisabled = errors.New("native result handles are disabled")
+)
 
 type Config struct {
 	Enabled              bool
@@ -53,9 +55,11 @@ type Service struct {
 	analysisGate  port.AnalysesByWorkstream
 }
 
-var _ port.WorkstreamMutator = (*Service)(nil)
-var _ port.WorkstreamSnapshotReader = (*Service)(nil)
-var _ port.WorkstreamService = (*Service)(nil)
+var (
+	_ port.WorkstreamMutator        = (*Service)(nil)
+	_ port.WorkstreamSnapshotReader = (*Service)(nil)
+	_ port.WorkstreamService        = (*Service)(nil)
+)
 
 func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.Store == nil {
@@ -79,7 +83,15 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		allowedProjects[project] = struct{}{}
 	}
 	cfg.AllowedProjects = allowedProjects
-	return &Service{cfg: cfg, store: deps.Store, clock: deps.Clock, verifier: deps.ResultVerifier, linkCommitter: deps.LinkCommitter, resultReader: deps.ResultReader, analysisGate: deps.AnalysisGate}, nil
+	return &Service{
+		cfg:           cfg,
+		store:         deps.Store,
+		clock:         deps.Clock,
+		verifier:      deps.ResultVerifier,
+		linkCommitter: deps.LinkCommitter,
+		resultReader:  deps.ResultReader,
+		analysisGate:  deps.AnalysisGate,
+	}, nil
 }
 
 func (s *Service) Create(ctx context.Context, binding Binding, id, objective string) (domain.WorkstreamSnapshot, error) {
@@ -253,7 +265,12 @@ func (s *Service) Active(ctx context.Context, binding Binding) (domain.Workstrea
 // Apply binds all authority fields to the trusted invocation. Callers provide
 // only the action payload, expected revision, and provenance identity; model
 // selectors cannot replace actor, conversation, project, or source kind.
-func (s *Service) Apply(ctx context.Context, binding Binding, source domain.WorkstreamTransitionSource, transition domain.WorkstreamTransition) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+func (s *Service) Apply(
+	ctx context.Context,
+	binding Binding,
+	source domain.WorkstreamTransitionSource,
+	transition domain.WorkstreamTransition,
+) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
 	// Confirmation proofs are accepted only through ApplyConfirmed, after a
 	// host-owned confirmation store has consumed the matching decision.
 	transition.Confirmation = nil
@@ -263,7 +280,13 @@ func (s *Service) Apply(ctx context.Context, binding Binding, source domain.Work
 // ApplyConfirmed applies a root transition after the host has verified and
 // consumed a bound confirmation. The proof is still rebound to the trusted
 // invocation before the domain policy checks it.
-func (s *Service) ApplyConfirmed(ctx context.Context, binding Binding, source domain.WorkstreamTransitionSource, transition domain.WorkstreamTransition, confirmation domain.WorkstreamConfirmation) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+func (s *Service) ApplyConfirmed(
+	ctx context.Context,
+	binding Binding,
+	source domain.WorkstreamTransitionSource,
+	transition domain.WorkstreamTransition,
+	confirmation domain.WorkstreamConfirmation,
+) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
 	if confirmation.Action == "" {
 		confirmation.Action = transition.Action
 	}
@@ -276,11 +299,23 @@ func (s *Service) ApplyConfirmed(ctx context.Context, binding Binding, source do
 
 // ApplyHostConfirmed adapts an already-consumed host confirmation (such as the
 // ADK confirmation resumed by the bot use case) to the domain proof contract.
-func (s *Service) ApplyHostConfirmed(ctx context.Context, binding Binding, source domain.WorkstreamTransitionSource, transition domain.WorkstreamTransition, confirmationID string) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+func (s *Service) ApplyHostConfirmed(
+	ctx context.Context,
+	binding Binding,
+	source domain.WorkstreamTransitionSource,
+	transition domain.WorkstreamTransition,
+	confirmationID string,
+) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
 	if strings.TrimSpace(confirmationID) == "" {
 		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, domain.ErrWorkstreamConfirmationRequired
 	}
-	confirmation := domain.WorkstreamConfirmation{ID: confirmationID, Action: transition.Action, PayloadDigest: transition.PayloadDigestValue(), Approved: true, ExpiresAt: s.clock.Now().UTC().Add(time.Minute)}
+	confirmation := domain.WorkstreamConfirmation{
+		ID:            confirmationID,
+		Action:        transition.Action,
+		PayloadDigest: transition.PayloadDigestValue(),
+		Approved:      true,
+		ExpiresAt:     s.clock.Now().UTC().Add(time.Minute),
+	}
 	return s.ApplyConfirmed(ctx, binding, source, transition, confirmation)
 }
 
@@ -294,7 +329,13 @@ func (s *Service) ApplyHuman(ctx context.Context, binding Binding, transition do
 // LinkCompletedResult admits only a fully verified result into the durable
 // workstream journal. Result scope is rebuilt from the trusted invocation; the
 // model-provided link can never select its own identity or scope.
-func (s *Service) LinkCompletedResult(ctx context.Context, binding Binding, teamID, resultID string, transition domain.WorkstreamTransition, confirmationID string) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+func (s *Service) LinkCompletedResult(
+	ctx context.Context,
+	binding Binding,
+	teamID, resultID string,
+	transition domain.WorkstreamTransition,
+	confirmationID string,
+) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
 	if err := s.requireEnabled(); err != nil {
 		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
 	}
@@ -379,8 +420,10 @@ func (s *Service) verifyResultForWorkstream(ctx context.Context, binding Binding
 	if s.verifier == nil || strings.TrimSpace(teamID) == "" || strings.TrimSpace(resultID) == "" || strings.TrimSpace(workstreamID) == "" {
 		return port.WorkstreamResultVerification{}, domain.ResultIdentity{}, domain.ErrResultUnavailable
 	}
-	verification := port.WorkstreamResultVerification{ResultID: resultID, WorkstreamID: workstreamID, Actor: binding.Actor,
-		TeamID: teamID, Conversation: string(binding.ConversationKey), Project: binding.Project}
+	verification := port.WorkstreamResultVerification{
+		ResultID: resultID, WorkstreamID: workstreamID, Actor: binding.Actor,
+		TeamID: teamID, Conversation: string(binding.ConversationKey), Project: binding.Project,
+	}
 	identity, err := s.verifier.VerifyForWorkstream(ctx, verification)
 	return verification, identity, err
 }
@@ -425,7 +468,12 @@ func (s *Service) ValidateProposal(ctx context.Context, binding Binding, source 
 	return err
 }
 
-func (s *Service) apply(ctx context.Context, binding Binding, source domain.WorkstreamTransitionSource, transition domain.WorkstreamTransition) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
+func (s *Service) apply(
+	ctx context.Context,
+	binding Binding,
+	source domain.WorkstreamTransitionSource,
+	transition domain.WorkstreamTransition,
+) (domain.WorkstreamTransitionRecord, domain.WorkstreamSnapshot, error) {
 	if err := s.requireEnabled(); err != nil {
 		return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
 	}

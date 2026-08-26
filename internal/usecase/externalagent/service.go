@@ -78,10 +78,12 @@ type Service struct {
 	stopped             chan struct{}
 }
 
-var _ port.ExternalAgentJobReader = (*Service)(nil)
-var _ port.ExternalAgentJobNativeResultReader = (*Service)(nil)
-var _ port.ExternalAgentJobActivationReader = (*Service)(nil)
-var _ port.ExternalAgentJobHostCompleter = (*Service)(nil)
+var (
+	_ port.ExternalAgentJobReader             = (*Service)(nil)
+	_ port.ExternalAgentJobNativeResultReader = (*Service)(nil)
+	_ port.ExternalAgentJobActivationReader   = (*Service)(nil)
+	_ port.ExternalAgentJobHostCompleter      = (*Service)(nil)
+)
 
 const (
 	defaultResultChunkBytes       int64 = 16 * 1024
@@ -121,11 +123,13 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if deps.JobWake == nil {
 		deps.JobWake = deps.Scheduler.Wake
 	}
-	return &Service{cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
+	return &Service{
+		cfg: cfg, store: deps.Store, runtime: deps.Runtime, publisher: deps.Publisher,
 		artifacts: deps.Artifacts, nativeResults: deps.NativeResults, progressStore: deps.ProgressStore, processRegistry: deps.ProcessRegistry,
 		maxResultBytes: deps.MaxResultBytes, maxResultChunkBytes: deps.MaxResultChunkBytes,
 		clock: deps.Clock, logger: logger, metrics: metrics, scheduler: deps.Scheduler, jobWake: deps.JobWake, notificationWake: deps.NotificationWake,
-		stopClaims: make(chan struct{}), stopped: make(chan struct{})}, nil
+		stopClaims: make(chan struct{}), stopped: make(chan struct{}),
+	}, nil
 }
 
 func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error) {
@@ -325,7 +329,13 @@ func (s *Service) Status(ctx context.Context, jobID, actor string, conversationK
 
 // StatusAtRevision returns the authorized job only when it still represents
 // the terminal snapshot captured by an activation.
-func (s *Service) StatusAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus) (*domain.ExternalAgentJob, error) {
+func (s *Service) StatusAtRevision(
+	ctx context.Context,
+	jobID, actor string,
+	conversationKey domain.ConversationKey,
+	expectedRevision int,
+	expectedStatus domain.ExternalAgentJobStatus,
+) (*domain.ExternalAgentJob, error) {
 	job, err := s.Status(ctx, jobID, actor, conversationKey)
 	if err != nil {
 		return nil, err
@@ -523,7 +533,14 @@ func (s *Service) ReadResultChunk(ctx context.Context, jobID, actor string, conv
 // ReadResultChunkAtRevision refuses to read a later reconciliation revision
 // through an older activation. The check and the read use the same job
 // snapshot, so callers cannot mix revision N identity with revision N+2 data.
-func (s *Service) ReadResultChunkAtRevision(ctx context.Context, jobID, actor string, conversationKey domain.ConversationKey, expectedRevision int, expectedStatus domain.ExternalAgentJobStatus, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
+func (s *Service) ReadResultChunkAtRevision(
+	ctx context.Context,
+	jobID, actor string,
+	conversationKey domain.ConversationKey,
+	expectedRevision int,
+	expectedStatus domain.ExternalAgentJobStatus,
+	offsetBytes, maxBytes int64,
+) (domain.ResultChunk, error) {
 	job, err := s.StatusAtRevision(ctx, jobID, actor, conversationKey, expectedRevision, expectedStatus)
 	if err != nil {
 		return domain.ResultChunk{}, err
@@ -925,7 +942,15 @@ func (s *Service) resumableAfterExpiry(job domain.ExternalAgentJob, next domain.
 	return next == domain.JobCompletionUnknown && job.Status == domain.JobRunning && job.ExternalAgentSessionID != ""
 }
 
-func (s *Service) transition(ctx context.Context, jobID, owner string, attempt int, next domain.ExternalAgentJobStatus, result *domain.ExternalAgentInvocationResult, errorCode string, now time.Time) error {
+func (s *Service) transition(
+	ctx context.Context,
+	jobID, owner string,
+	attempt int,
+	next domain.ExternalAgentJobStatus,
+	result *domain.ExternalAgentInvocationResult,
+	errorCode string,
+	now time.Time,
+) error {
 	if err := s.store.Transition(ctx, jobID, owner, attempt, next, result, errorCode, now); err != nil {
 		return err
 	}
@@ -963,7 +988,10 @@ func terminalOutcome(job *domain.ExternalAgentJob, runErr, contextErr error, max
 	if runErr == nil {
 		return domain.JobCompleted, ""
 	}
-	if code := externalAgentFailureCode(runErr); code == string(domain.ExternalAgentErrorResultTooLarge) || code == string(domain.ExternalAgentErrorResultArtifactInvalid) || code == string(domain.ExternalAgentErrorResultDeliveryFailed) || strings.HasPrefix(code, "result_") {
+	if code := externalAgentFailureCode(
+		runErr,
+	); code == string(domain.ExternalAgentErrorResultTooLarge) || code == string(domain.ExternalAgentErrorResultArtifactInvalid) || code == string(domain.ExternalAgentErrorResultDeliveryFailed) ||
+		strings.HasPrefix(code, "result_") {
 		return domain.JobFailed, code
 	}
 	if job.Status == domain.JobCancelRequested {

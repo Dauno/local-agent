@@ -35,7 +35,7 @@ type HumanCommand struct {
 	ScopeID          string                 `json:"scope_id,omitempty"`
 	ValidFrom        string                 `json:"valid_from,omitempty"`
 	ValidUntil       string                 `json:"valid_until,omitempty"`
-	ExpectedRevision int                    `json:"expected_revision,omitempty"`
+	ExpectedRevision int                    `json:"expected_revision,omitzero"`
 }
 
 // ParseHumanCommand decodes one strict-JSON memory-human command. It reports
@@ -112,7 +112,20 @@ func (c HumanCommand) validateForAction(present map[string]bool) error {
 			}
 			return nil
 		}
-		if err := c.allowOnly(present, "subject", "predicate", "value_kind", "value_text", "value_number", "value_boolean", "value_reference", "scope_kind", "scope_id", "valid_from", "valid_until"); err != nil {
+		if err := c.allowOnly(
+			present,
+			"subject",
+			"predicate",
+			"value_kind",
+			"value_text",
+			"value_number",
+			"value_boolean",
+			"value_reference",
+			"scope_kind",
+			"scope_id",
+			"valid_from",
+			"valid_until",
+		); err != nil {
 			return fmt.Errorf("claim remember: %w", err)
 		}
 		if strings.TrimSpace(c.Subject) == "" || strings.TrimSpace(c.Predicate) == "" {

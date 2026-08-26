@@ -184,7 +184,14 @@ func appendStrings(target *[]any, values []string) {
 // document subject inside SQL with bound parameters, bounded by
 // max_candidates_per_channel after authorization and stable kind-then-
 // identity ordering.
-func (r *KnowledgeCandidateReader) ReadExact(ctx context.Context, binding domain.KnowledgeWriteBinding, now time.Time, limits domain.KnowledgeRetrievalLimits, query string, tokens []string) ([]port.KnowledgeEligibleCandidate, error) {
+func (r *KnowledgeCandidateReader) ReadExact(
+	ctx context.Context,
+	binding domain.KnowledgeWriteBinding,
+	now time.Time,
+	limits domain.KnowledgeRetrievalLimits,
+	query string,
+	tokens []string,
+) ([]port.KnowledgeEligibleCandidate, error) {
 	if err := r.validateRead(binding, now, limits); err != nil {
 		return nil, err
 	}
@@ -253,7 +260,13 @@ func (r *KnowledgeCandidateReader) ReadExact(ctx context.Context, binding domain
 // value_reference) pairs, and result claims pass scope, status, and
 // validity predicates again in SQL. There is no recursion, alias inference,
 // cross-scope expansion, or graph table.
-func (r *KnowledgeCandidateReader) ReadRelated(ctx context.Context, binding domain.KnowledgeWriteBinding, now time.Time, limits domain.KnowledgeRetrievalLimits, seeds []port.KnowledgeEligibleCandidate) ([]port.KnowledgeEligibleCandidate, error) {
+func (r *KnowledgeCandidateReader) ReadRelated(
+	ctx context.Context,
+	binding domain.KnowledgeWriteBinding,
+	now time.Time,
+	limits domain.KnowledgeRetrievalLimits,
+	seeds []port.KnowledgeEligibleCandidate,
+) ([]port.KnowledgeEligibleCandidate, error) {
 	if err := r.validateRead(binding, now, limits); err != nil {
 		return nil, err
 	}
@@ -356,7 +369,14 @@ func (r *KnowledgeCandidateReader) ReadRelated(ctx context.Context, binding doma
 // a channel or index hit. Scope-or-owner, status, and validity predicates
 // apply again in SQL; an unreadable row is indistinguishable from a missing
 // one.
-func (r *KnowledgeCandidateReader) ReadItem(ctx context.Context, binding domain.KnowledgeWriteBinding, now time.Time, limits domain.KnowledgeRetrievalLimits, kind domain.KnowledgeRetrievalItemKind, id string) (port.KnowledgeAuthoritativeItem, error) {
+func (r *KnowledgeCandidateReader) ReadItem(
+	ctx context.Context,
+	binding domain.KnowledgeWriteBinding,
+	now time.Time,
+	limits domain.KnowledgeRetrievalLimits,
+	kind domain.KnowledgeRetrievalItemKind,
+	id string,
+) (port.KnowledgeAuthoritativeItem, error) {
 	if err := r.validateRead(binding, now, limits); err != nil {
 		return port.KnowledgeAuthoritativeItem{}, err
 	}

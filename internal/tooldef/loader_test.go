@@ -125,7 +125,11 @@ func TestLoadRejectsInvalidTools(t *testing.T) {
 	}{
 		{name: "unknown field", content: "name: ripgrep\nunknown: true\n", want: "field unknown not found"},
 		{name: "bad name", content: strings.Replace(validTool, "name: ripgrep", "name: Grep", 1), want: "name must match"},
-		{name: "missing description", content: strings.Replace(validTool, "description: Search text or regular expressions in files inside a registered project.", "description: \"\"", 1), want: "description must not be empty"},
+		{
+			name:    "missing description",
+			content: strings.Replace(validTool, "description: Search text or regular expressions in files inside a registered project.", "description: \"\"", 1),
+			want:    "description must not be empty",
+		},
 		{name: "executable with path", content: strings.Replace(validTool, "executable: rg", "executable: /usr/bin/rg", 1), want: "bare command name"},
 		{name: "bad scope", content: strings.Replace(validTool, "scope: sandbox_read_only", "scope: shell", 1), want: "policy.scope"},
 		{name: "bad timeout", content: strings.Replace(validTool, "timeout_seconds: 5", "timeout_seconds: 0", 1), want: "timeout_seconds"},

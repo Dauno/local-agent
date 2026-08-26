@@ -14,7 +14,18 @@ func TestGeneratedFileOperationStorePersistsMetadataWithoutContent(t *testing.T)
 	store, _ := newTestStore(t)
 	operations := NewGeneratedFileOperationStore(store)
 	createdAt := time.Date(2026, 7, 21, 12, 0, 0, 123, time.UTC)
-	op := domain.GeneratedFileOperation{ID: "file:call-1", ConversationKey: "slack:T:dm:D", Actor: "U1", Filename: "report.csv", MediaType: "text/csv", ContentSHA256: "abc", SizeBytes: 12, Status: domain.GeneratedFileOpPendingConfirmation, CreatedAt: createdAt, UpdatedAt: createdAt}
+	op := domain.GeneratedFileOperation{
+		ID:              "file:call-1",
+		ConversationKey: "slack:T:dm:D",
+		Actor:           "U1",
+		Filename:        "report.csv",
+		MediaType:       "text/csv",
+		ContentSHA256:   "abc",
+		SizeBytes:       12,
+		Status:          domain.GeneratedFileOpPendingConfirmation,
+		CreatedAt:       createdAt,
+		UpdatedAt:       createdAt,
+	}
 	if err := operations.CreateGeneratedFileOperation(context.Background(), op); err != nil {
 		t.Fatal(err)
 	}

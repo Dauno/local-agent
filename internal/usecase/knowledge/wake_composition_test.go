@@ -117,7 +117,11 @@ func TestProjectionSchedulerConsumesWithoutRecoveryTimer(t *testing.T) {
 // knowledge lexical queue class.
 func TestLexicalSchedulerConsumesWithoutRecoveryTimer(t *testing.T) {
 	newDeps := func() (*workerFakeSource, *workerFakeIndex, *workerFakeLister, *workerFakeResolver) {
-		return newWorkerFakeSource(), newWorkerFakeIndex(nil), &workerFakeLister{identities: map[domain.KnowledgeRetrievalItemKind][]port.KnowledgeTruthIdentity{}}, &workerFakeResolver{content: map[string]string{}, err: map[string]error{}}
+		source := newWorkerFakeSource()
+		index := newWorkerFakeIndex(nil)
+		lister := &workerFakeLister{identities: map[domain.KnowledgeRetrievalItemKind][]port.KnowledgeTruthIdentity{}}
+		resolver := &workerFakeResolver{content: map[string]string{}, err: map[string]error{}}
+		return source, index, lister, resolver
 	}
 
 	t.Run("restart empty then produced", func(t *testing.T) {
@@ -178,7 +182,11 @@ func TestLexicalSchedulerConsumesWithoutRecoveryTimer(t *testing.T) {
 // knowledge embedding queue class.
 func TestEmbeddingSchedulerConsumesWithoutRecoveryTimer(t *testing.T) {
 	newDeps := func() (*workerFakeSource, *workerFakeVectorIndex, *workerFakeLister, *workerFakeResolver) {
-		return newWorkerFakeSource(), newWorkerFakeVectorIndex(nil), &workerFakeLister{identities: map[domain.KnowledgeRetrievalItemKind][]port.KnowledgeTruthIdentity{}}, &workerFakeResolver{content: map[string]string{}, err: map[string]error{}}
+		source := newWorkerFakeSource()
+		index := newWorkerFakeVectorIndex(nil)
+		lister := &workerFakeLister{identities: map[domain.KnowledgeRetrievalItemKind][]port.KnowledgeTruthIdentity{}}
+		resolver := &workerFakeResolver{content: map[string]string{}, err: map[string]error{}}
+		return source, index, lister, resolver
 	}
 
 	t.Run("restart empty then produced", func(t *testing.T) {

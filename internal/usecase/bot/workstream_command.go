@@ -120,7 +120,14 @@ func parseHumanWorkstreamCommand(text string) (humanWorkstreamCommand, bool, err
 				requiredInputs = append(requiredInputs, command.SourceResultIdentity)
 			}
 		}
-		transition.Task = &domain.WorkstreamTask{ID: command.TaskID, Project: command.Project, Description: command.TaskDescription, Status: domain.TaskProposed, Dependencies: command.Dependencies, RequiredInputs: requiredInputs}
+		transition.Task = &domain.WorkstreamTask{
+			ID:             command.TaskID,
+			Project:        command.Project,
+			Description:    command.TaskDescription,
+			Status:         domain.TaskProposed,
+			Dependencies:   command.Dependencies,
+			RequiredInputs: requiredInputs,
+		}
 	case domain.WorkstreamActionStartTask:
 		if strings.TrimSpace(command.TaskID) == "" {
 			return humanWorkstreamCommand{}, true, errors.New("task_id is required to start a task")
@@ -142,5 +149,12 @@ func parseHumanWorkstreamCommand(text string) (humanWorkstreamCommand, bool, err
 			return humanWorkstreamCommand{}, true, errors.New("objective is required to create a workstream")
 		}
 	}
-	return humanWorkstreamCommand{Project: command.Project, WorkstreamID: command.WorkstreamID, ExpectedRevision: command.ExpectedRevision, Action: command.Action, Objective: command.Objective, Transition: transition}, true, nil
+	return humanWorkstreamCommand{
+		Project:          command.Project,
+		WorkstreamID:     command.WorkstreamID,
+		ExpectedRevision: command.ExpectedRevision,
+		Action:           command.Action,
+		Objective:        command.Objective,
+		Transition:       transition,
+	}, true, nil
 }

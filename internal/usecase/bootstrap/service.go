@@ -210,7 +210,11 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("marshal attachment analyzer template: %w", err)
 	}
-	attachmentAnalyzerData = append([]byte("# Rename this file to attachment_analyzer.yaml after replacing provider/profile.\n# The referenced provider profile must configure token_counter.strategy: estimator\n# with id: visual-tile-conservative-v1 so image requests can be valued; doctor\n# and startup fail closed otherwise.\n"), attachmentAnalyzerData...)
+	attachmentAnalyzerData = append(
+		[]byte(
+			"# Rename this file to attachment_analyzer.yaml after replacing provider/profile.\n# The referenced provider profile must configure token_counter.strategy: estimator\n# with id: visual-tile-conservative-v1 so image requests can be valued; doctor\n# and startup fail closed otherwise.\n",
+		),
+		attachmentAnalyzerData...)
 	if err := s.writeSeedFile(ctx, "attachment analyzer template", filepath.Join(agentsDir, "attachment_analyzer.yaml.example"), attachmentAnalyzerData); err != nil {
 		return Snapshot{}, err
 	}

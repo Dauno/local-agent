@@ -65,8 +65,10 @@ func (e *Engine) Query(ctx context.Context, req domain.SyntaxQueryRequest) (resu
 	if req.Query != "outline" && req.Query != "symbol" {
 		return domain.SyntaxQueryResult{}, port.ErrSyntaxUnsupportedQuery
 	}
-	rangeResult, err := reader.ReadRange(ctx, domain.SourceRangeRequest{Project: req.Project, Path: req.Path,
-		StartLine: 1, MaxLines: 10_000, Actor: req.Actor, ConversationKey: req.ConversationKey})
+	rangeResult, err := reader.ReadRange(ctx, domain.SourceRangeRequest{
+		Project: req.Project, Path: req.Path,
+		StartLine: 1, MaxLines: 10_000, Actor: req.Actor, ConversationKey: req.ConversationKey,
+	})
 	if err != nil {
 		return domain.SyntaxQueryResult{}, fmt.Errorf("read source: %w", err)
 	}

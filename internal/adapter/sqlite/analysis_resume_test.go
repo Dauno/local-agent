@@ -52,7 +52,18 @@ func (f *fixedAnalyzer) Reduce(_ context.Context, input port.AnalysisReductionIn
 // durable stores a restarted worker would use. It stops when ClaimNext
 // finds nothing left. It returns the root reduction step id (the last
 // completed reduction step) and its output digest.
-func runAnalysisToCompletion(t *testing.T, ctx context.Context, steps *AnalysisStepStore, evidence *AnalysisEvidenceStore, source *fakeTrustedResultSourceStore, analyzer *fixedAnalyzer, analysisID string, segments map[string]domain.AnalysisSegment, limits domain.AnalysisLimits, scope domain.ResultScope) (rootStepID string, rootDigest string) {
+func runAnalysisToCompletion(
+	t *testing.T,
+	ctx context.Context,
+	steps *AnalysisStepStore,
+	evidence *AnalysisEvidenceStore,
+	source *fakeTrustedResultSourceStore,
+	analyzer *fixedAnalyzer,
+	analysisID string,
+	segments map[string]domain.AnalysisSegment,
+	limits domain.AnalysisLimits,
+	scope domain.ResultScope,
+) (rootStepID string, rootDigest string) {
 	t.Helper()
 	leafRunner := &resultanalysis.LeafRunner{Steps: steps, Source: source, Analyzer: analyzer, Evidence: evidence, Payloads: steps}
 	reductionRunner := &resultanalysis.ReductionRunner{Steps: steps, Payloads: steps, Evidence: evidence, Analyzer: analyzer}
@@ -127,12 +138,14 @@ type fakeTrustedResultSourceStore struct {
 func (f *fakeTrustedResultSourceStore) Materialize(context.Context, port.ResultMaterialization) (domain.ResultHandle, error) {
 	return domain.ResultHandle{}, errors.New("not implemented")
 }
+
 func (f *fakeTrustedResultSourceStore) Resolve(_ context.Context, resultID string, _ domain.ResultScope) (domain.ResultIdentity, domain.ResultHandle, error) {
 	if resultID != f.identity.ResultID {
 		return domain.ResultIdentity{}, domain.ResultHandle{}, domain.ErrResultUnavailable
 	}
 	return f.identity, domain.ResultHandle{}, nil
 }
+
 func (f *fakeTrustedResultSourceStore) ReadRange(_ context.Context, resultID string, _ domain.ResultScope, offsetBytes, maxBytes int64) (domain.ResultChunk, error) {
 	if resultID != f.identity.ResultID {
 		return domain.ResultChunk{}, domain.ErrResultUnavailable
@@ -163,7 +176,9 @@ func readStepOutputDigest(t *testing.T, ctx context.Context, steps *AnalysisStep
 	return ""
 }
 
-func setupResumeFixture(t *testing.T) (*AnalysisStepStore, *AnalysisEvidenceStore, *fakeTrustedResultSourceStore, string, map[string]domain.AnalysisSegment, domain.AnalysisLimits, domain.ResultScope) {
+func setupResumeFixture(
+	t *testing.T,
+) (*AnalysisStepStore, *AnalysisEvidenceStore, *fakeTrustedResultSourceStore, string, map[string]domain.AnalysisSegment, domain.AnalysisLimits, domain.ResultScope) {
 	t.Helper()
 	dbStore, err := Initialize(t.Context(), t.TempDir()+"/analysis-resume.db")
 	if err != nil {

@@ -32,8 +32,13 @@ import (
 func TestResultAnalysisPromptVersionTracksLeafAndReductionConstants(t *testing.T) {
 	const goldenSuiteTag = "analysis-ab039b147a8ccc70"
 	if resultAnalysisPromptVersion != goldenSuiteTag {
-		t.Fatalf("resultAnalysisPromptVersion = %q, want the golden tag %q derived from openaillm.LeafPromptVersion=%q and openaillm.ReductionPromptVersion=%q; if this drifted on purpose, update goldenSuiteTag",
-			resultAnalysisPromptVersion, goldenSuiteTag, openaillm.LeafPromptVersion, openaillm.ReductionPromptVersion)
+		t.Fatalf(
+			"resultAnalysisPromptVersion = %q, want the golden tag %q derived from openaillm.LeafPromptVersion=%q and openaillm.ReductionPromptVersion=%q; if this drifted on purpose, update goldenSuiteTag",
+			resultAnalysisPromptVersion,
+			goldenSuiteTag,
+			openaillm.LeafPromptVersion,
+			openaillm.ReductionPromptVersion,
+		)
 	}
 	if deriveResultAnalysisPromptVersion("leaf-a", "reduction-a") == deriveResultAnalysisPromptVersion("leaf-b", "reduction-a") {
 		t.Fatal("changing the leaf prompt version did not change the derived suite tag")

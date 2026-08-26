@@ -330,12 +330,10 @@ func (w *Worker) drainAnalysis(ctx context.Context, record port.AnalysisRecord, 
 			break
 		}
 		sem <- struct{}{}
-		wg.Add(1)
-		go func(step port.AnalysisStep) {
-			defer wg.Done()
+		wg.Go(func() {
 			defer func() { <-sem }()
-			w.processStep(ctx, record, limits, segmentByOrdinal, stepByID, rootManifest, rootStepID, step)
-		}(claimed)
+			w.processStep(ctx, record, limits, segmentByOrdinal, stepByID, rootManifest, rootStepID, claimed)
+		})
 	}
 	wg.Wait()
 }
@@ -347,7 +345,8 @@ func (w *Worker) drainAnalysis(ctx context.Context, record port.AnalysisRecord, 
 // RunReduction's own outcome contracts.
 func (w *Worker) processStep(ctx context.Context, record port.AnalysisRecord, limits domain.AnalysisLimits,
 	segmentByOrdinal map[int]domain.AnalysisSegment, stepByID map[string]port.AnalysisStep,
-	rootManifest domain.AnalysisSegmentManifest, rootStepID string, step port.AnalysisStep) {
+	rootManifest domain.AnalysisSegmentManifest, rootStepID string, step port.AnalysisStep,
+) {
 	now := w.deps.Clock.Now().UTC()
 	claim := domain.AnalysisStepClaim{AnalysisID: record.AnalysisID, StepID: step.StepID, Generation: step.Generation, LeaseUntil: step.LeaseUntil}
 
@@ -368,7 +367,8 @@ func (w *Worker) processStep(ctx context.Context, record port.AnalysisRecord, li
 }
 
 func (w *Worker) runLeafStep(ctx context.Context, record port.AnalysisRecord, limits domain.AnalysisLimits,
-	segmentByOrdinal map[int]domain.AnalysisSegment, claim domain.AnalysisStepClaim, step port.AnalysisStep, now time.Time) {
+	segmentByOrdinal map[int]domain.AnalysisSegment, claim domain.AnalysisStepClaim, step port.AnalysisStep, now time.Time,
+) {
 	segment, ok := segmentByOrdinal[step.SegmentOrdinal]
 	if !ok {
 		if err := w.deps.Steps.Fail(ctx, claim, domain.AnalysisFailureSegmentInvalid, now); err != nil && ctx.Err() == nil {
@@ -400,7 +400,8 @@ func (w *Worker) runLeafStep(ctx context.Context, record port.AnalysisRecord, li
 
 func (w *Worker) runReductionStep(ctx context.Context, record port.AnalysisRecord, segmentByOrdinal map[int]domain.AnalysisSegment,
 	stepByID map[string]port.AnalysisStep, rootManifest domain.AnalysisSegmentManifest, rootStepID string,
-	claim domain.AnalysisStepClaim, step port.AnalysisStep, now time.Time) {
+	claim domain.AnalysisStepClaim, step port.AnalysisStep, now time.Time,
+) {
 	children := make([]port.AnalysisStep, 0, len(step.ChildStepIDs))
 	for _, childID := range step.ChildStepIDs {
 		child, ok := stepByID[childID]

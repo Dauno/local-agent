@@ -400,7 +400,12 @@ func domainContentsFromGenAI(t *testing.T, contents []*genai.Content) []domain.C
 					ID: part.FunctionResponse.ID, Name: part.FunctionResponse.Name, Response: part.FunctionResponse.Response, WillContinue: part.FunctionResponse.WillContinue,
 				}
 			}
-			if part.InlineData != nil || part.FileData != nil || part.ToolCall != nil || part.ToolResponse != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil || part.VideoMetadata != nil || part.MediaResolution != nil || part.Thought || len(part.ThoughtSignature) > 0 || len(part.PartMetadata) > 0 {
+			if part.InlineData != nil || part.FileData != nil || part.ToolCall != nil || part.ToolResponse != nil || part.CodeExecutionResult != nil || part.ExecutableCode != nil ||
+				part.VideoMetadata != nil ||
+				part.MediaResolution != nil ||
+				part.Thought ||
+				len(part.ThoughtSignature) > 0 ||
+				len(part.PartMetadata) > 0 {
 				encoded, err := json.Marshal(part)
 				if err != nil {
 					t.Fatalf("encode content part %d.%d: %v", contentIndex, partIndex, err)

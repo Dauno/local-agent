@@ -58,7 +58,10 @@ func TestProjectorExactlyAtBudgetAndUnicodeUseCodePoints(t *testing.T) {
 
 func TestProjectorCountsStructuredPartsAndRetainsRecentTurnsInOrder(t *testing.T) {
 	call := domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "lookup", Args: map[string]any{"query": "one"}}}}}
-	response := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "lookup", Response: map[string]any{"result": "one"}}}}}
+	response := domain.Content{
+		Role:  domain.ContentRoleUser,
+		Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "lookup", Response: map[string]any{"result": "one"}}}},
+	}
 	contents := []domain.Content{userText("first"), modelText("answer-1"), userText("second"), call, response, modelText("answer-2"), userText("current")}
 	structuredCost, err := domain.ContentCost([]domain.Content{call, response})
 	if err != nil || structuredCost == 0 {
@@ -68,19 +71,32 @@ func TestProjectorCountsStructuredPartsAndRetainsRecentTurnsInOrder(t *testing.T
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(result.Contents) != 5 || result.Contents[0].Parts[0].Text != "second" || result.Contents[1].Parts[0].FunctionCall == nil || result.Contents[2].Parts[0].FunctionResponse == nil || result.Contents[4].Parts[0].Text != "current" {
+	if len(result.Contents) != 5 || result.Contents[0].Parts[0].Text != "second" || result.Contents[1].Parts[0].FunctionCall == nil || result.Contents[2].Parts[0].FunctionResponse == nil ||
+		result.Contents[4].Parts[0].Text != "current" {
 		t.Fatalf("recent projection = %#v", result.Contents)
 	}
 }
 
 func TestProjectorNeverSeparatesProtocolPairs(t *testing.T) {
 	originalCall := domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "call-1", Name: "write"}}}}
-	placeholderResponse := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"error": "requires confirmation"}}}}}
-	confirmationCall := domain.Content{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "wrapper-1", Name: domain.ConfirmationFunctionName, Args: map[string]any{
-		"originalFunctionCall": map[string]any{"id": "call-1", "name": "write"},
-	}}}}}
-	confirmationResponse := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "wrapper-1", Name: domain.ConfirmationFunctionName, Response: map[string]any{"confirmed": true}}}}}
-	terminalResponse := domain.Content{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"result": "done"}}}}}
+	placeholderResponse := domain.Content{
+		Role:  domain.ContentRoleUser,
+		Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"error": "requires confirmation"}}}},
+	}
+	confirmationCall := domain.Content{
+		Role: domain.ContentRoleModel,
+		Parts: []domain.ContentPart{{FunctionCall: &domain.FunctionCall{ID: "wrapper-1", Name: domain.ConfirmationFunctionName, Args: map[string]any{
+			"originalFunctionCall": map[string]any{"id": "call-1", "name": "write"},
+		}}}},
+	}
+	confirmationResponse := domain.Content{
+		Role:  domain.ContentRoleUser,
+		Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "wrapper-1", Name: domain.ConfirmationFunctionName, Response: map[string]any{"confirmed": true}}}},
+	}
+	terminalResponse := domain.Content{
+		Role:  domain.ContentRoleUser,
+		Parts: []domain.ContentPart{{FunctionResponse: &domain.FunctionResponse{ID: "call-1", Name: "write", Response: map[string]any{"result": "done"}}}},
+	}
 	contents := []domain.Content{userText("request"), originalCall, placeholderResponse, confirmationCall, confirmationResponse, terminalResponse, modelText("completed"), userText("next")}
 	result, err := testProjector(t, 1000, 8).Project(context.Background(), domain.CompactionRequest{Contents: contents})
 	if err != nil || len(result.Contents) != len(contents) {
@@ -128,7 +144,9 @@ func TestProjectorSummaryNeverEvictsRecentRawTurn(t *testing.T) {
 }
 
 func TestADKFunctionPartsKeepNumericTypesAcrossNonActiveProjection(t *testing.T) {
-	original := []*genai.Content{{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call", Name: "tool", Args: map[string]any{"integer": int64(7), "fraction": float32(1.5)}}}}}}
+	original := []*genai.Content{
+		{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{ID: "call", Name: "tool", Args: map[string]any{"integer": int64(7), "fraction": float32(1.5)}}}}},
+	}
 	domainContents, err := toDomainContents(original)
 	if err != nil {
 		t.Fatal(err)

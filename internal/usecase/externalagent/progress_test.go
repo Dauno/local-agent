@@ -130,7 +130,12 @@ func TestRecorderPhaseBoundariesFlushImmediately(t *testing.T) {
 	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventSessionNew})
 	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventPromptSent})
 	clock.advance(time.Minute)
-	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventToolCall, Tool: &domain.ExternalAgentToolProgress{CallID: "t1", Kind: domain.ExternalAgentToolKindExecute, Status: domain.ExternalAgentToolStatusPending}})
+	recorder.Record(
+		domain.ExternalAgentProgressEvent{
+			Kind: domain.ExternalAgentEventToolCall,
+			Tool: &domain.ExternalAgentToolProgress{CallID: "t1", Kind: domain.ExternalAgentToolKindExecute, Status: domain.ExternalAgentToolStatusPending},
+		},
+	)
 	// Phase boundaries persist without any 30-second interval elapsing.
 	waitFor(t, func() bool { return store.latest().Phase == domain.ExternalAgentPhaseToolPending })
 	if store.count() > 6 {
@@ -160,7 +165,12 @@ func TestRecorderCoalescesRepeatedChunks(t *testing.T) {
 	// coalesced into a bounded number of durable writes. The first chunk also
 	// flushes (phase change to responding), so wait for the tool projection.
 	clock.advance(31 * time.Second)
-	recorder.Record(domain.ExternalAgentProgressEvent{Kind: domain.ExternalAgentEventToolCall, Tool: &domain.ExternalAgentToolProgress{CallID: "t1", Kind: domain.ExternalAgentToolKindExecute, Status: domain.ExternalAgentToolStatusPending}})
+	recorder.Record(
+		domain.ExternalAgentProgressEvent{
+			Kind: domain.ExternalAgentEventToolCall,
+			Tool: &domain.ExternalAgentToolProgress{CallID: "t1", Kind: domain.ExternalAgentToolKindExecute, Status: domain.ExternalAgentToolStatusPending},
+		},
+	)
 	waitFor(t, func() bool { return store.latest().ActiveToolCount == 1 })
 	if store.count() > 5 {
 		t.Fatalf("repeated chunks caused %d durable writes, want bounded coalescing", store.count())
@@ -349,8 +359,12 @@ func TestDeriveProgressHealthTable(t *testing.T) {
 			want:  domain.ExternalAgentHealthPossiblyStalled,
 		},
 		{
-			name:  "transport recent but progress stale is quiet",
-			proj:  domain.ExternalAgentJobProgress{Phase: domain.ExternalAgentPhaseAgentProcessing, LastTransportActivityAt: now.Add(-2 * time.Second), LastMeaningfulProgressAt: now.Add(-time.Minute)},
+			name: "transport recent but progress stale is quiet",
+			proj: domain.ExternalAgentJobProgress{
+				Phase:                    domain.ExternalAgentPhaseAgentProcessing,
+				LastTransportActivityAt:  now.Add(-2 * time.Second),
+				LastMeaningfulProgressAt: now.Add(-time.Minute),
+			},
 			alive: new(true),
 			want:  domain.ExternalAgentHealthQuiet,
 		},

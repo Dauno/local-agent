@@ -39,7 +39,7 @@ func newFutureSchemaError(found int) *versionRangeError {
 }
 
 func newTerminalSchemaError(sentinel error, found int) *versionRangeError {
-	var typed = fmt.Errorf("%w: found v%d", sentinel, found)
+	typed := fmt.Errorf("%w: found v%d", sentinel, found)
 	if errors.Is(sentinel, rollout.ErrUnsupportedSourceSchema) {
 		typed = rollout.UnsupportedSourceSchemaError{Found: found, MinSupported: rollout.MinSourceVersion, MaxSupported: rollout.MaxSourceVersion}
 	}

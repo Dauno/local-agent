@@ -486,7 +486,7 @@ func (h *knowledgeEvalHarness) runCase(t *testing.T, testCase evalCase) (identit
 // runCaseOn executes one dataset case through the given retriever.
 func (h *knowledgeEvalHarness) runCaseOn(t *testing.T, testCase evalCase, retriever port.KnowledgeRetriever) (identities []string, reasons []string, cards []domain.KnowledgeFrameCard) {
 	t.Helper()
-	var workstream = &domain.WorkstreamSnapshot{
+	workstream := &domain.WorkstreamSnapshot{
 		ID:              knowledgeEvalWorkstream,
 		Project:         knowledgeEvalProject,
 		OwnerActor:      knowledgeEvalActor,

@@ -10,8 +10,10 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/rollout"
 )
 
-const writerSHA1 = "1111111111111111111111111111111111111111111111111111111111111111"
-const writerSHA2 = "2222222222222222222222222222222222222222222222222222222222222222"
+const (
+	writerSHA1 = "1111111111111111111111111111111111111111111111111111111111111111"
+	writerSHA2 = "2222222222222222222222222222222222222222222222222222222222222222"
+)
 
 func backupIdentityFor(path, sha string) rollout.BackupIdentity {
 	return rollout.BackupIdentity{
@@ -93,7 +95,8 @@ func TestFileSchemaWriterMigrateRunsChainToCurrent(t *testing.T) {
 
 func installPostflightFaultTrigger(t *testing.T, db interface {
 	ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
-}) func() {
+},
+) func() {
 	t.Helper()
 	trigger := `CREATE TRIGGER injected_postflight_fault BEFORE INSERT ON runtime_state
 		WHEN NEW.state_key = '` + rollout.KeyPostflightDetail + `'

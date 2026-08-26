@@ -115,7 +115,14 @@ func (s *ExternalAgentJobStore) ClaimNextActivation(ctx context.Context, now tim
 	return s.claimActivation(ctx, now, owner, leaseTTL, "", nil)
 }
 
-func (s *ExternalAgentJobStore) ReconcileActivation(ctx context.Context, activationID, actor, teamID string, conversationKey domain.ConversationKey, now time.Time, owner string, leaseTTL time.Duration) (*domain.ExternalAgentJobActivation, error) {
+func (s *ExternalAgentJobStore) ReconcileActivation(
+	ctx context.Context,
+	activationID, actor, teamID string,
+	conversationKey domain.ConversationKey,
+	now time.Time,
+	owner string,
+	leaseTTL time.Duration,
+) (*domain.ExternalAgentJobActivation, error) {
 	if strings.TrimSpace(actor) == "" || strings.TrimSpace(teamID) == "" || conversationKey == "" {
 		return nil, errors.New("external-agent activation binding is required")
 	}
@@ -129,7 +136,14 @@ func (s *ExternalAgentJobStore) ReconcileActivation(ctx context.Context, activat
 	return s.claimActivation(ctx, now, owner, leaseTTL, activationID, activation)
 }
 
-func (s *ExternalAgentJobStore) claimActivation(ctx context.Context, now time.Time, owner string, leaseTTL time.Duration, activationID string, expected *domain.ExternalAgentJobActivation) (*domain.ExternalAgentJobActivation, error) {
+func (s *ExternalAgentJobStore) claimActivation(
+	ctx context.Context,
+	now time.Time,
+	owner string,
+	leaseTTL time.Duration,
+	activationID string,
+	expected *domain.ExternalAgentJobActivation,
+) (*domain.ExternalAgentJobActivation, error) {
 	if s == nil || s.db == nil {
 		return nil, errors.New("external-agent activation store is not configured")
 	}
@@ -297,7 +311,8 @@ func (s *ExternalAgentJobStore) PrepareActivationResponseWithExchange(
 		}
 		return port.PreparedAssistantExchange{ID: current.ExchangeIntentID, CorrelationID: current.CorrelationID}, nil
 	}
-	if current.State != domain.ActivationModelStarted || current.LeaseOwner != activation.LeaseOwner || current.Attempt != activation.Attempt || current.LeaseExpiry.IsZero() || !current.LeaseExpiry.After(now.UTC()) {
+	if current.State != domain.ActivationModelStarted || current.LeaseOwner != activation.LeaseOwner || current.Attempt != activation.Attempt || current.LeaseExpiry.IsZero() ||
+		!current.LeaseExpiry.After(now.UTC()) {
 		return port.PreparedAssistantExchange{}, port.ErrActivationStateConflict
 	}
 	if current.ConversationKey != metadata.Key || current.TeamID != metadata.TeamID || current.ConversationKey == "" {
@@ -374,7 +389,12 @@ func sameActivationIdentity(left, right *domain.ExternalAgentJobActivation) bool
 		left.PublishedAt.Equal(right.PublishedAt)
 }
 
-func (s *ExternalAgentJobStore) PrepareActivationResponse(ctx context.Context, activation *domain.ExternalAgentJobActivation, responseBody, responseSHA256, exchangeIntentID, correlationID string, now time.Time) error {
+func (s *ExternalAgentJobStore) PrepareActivationResponse(
+	ctx context.Context,
+	activation *domain.ExternalAgentJobActivation,
+	responseBody, responseSHA256, exchangeIntentID, correlationID string,
+	now time.Time,
+) error {
 	if err := validateActivationMutation(activation, now, time.Time{}); err != nil {
 		return err
 	}

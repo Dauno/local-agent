@@ -393,7 +393,7 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter, expectedSess
 		// An ignored type carries nothing this adapter reads. It is skipped
 		// before every other rule, so a trailing bookkeeping event cannot be
 		// mistaken for an event after the terminal one.
-		if eventType, found := stringAt(event, "type"); found && contains(stream.IgnoreTypes, eventType) {
+		if eventType, found := stringAt(event, "type"); found && slices.Contains(stream.IgnoreTypes, eventType) {
 			continue
 		}
 		if terminal {
@@ -413,9 +413,9 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter, expectedSess
 					l.logger.Debug("agent CLI activity type field did not resolve",
 						"type_field", stream.Activity.TypeField)
 				}
-			case contains(stream.Activity.DiscardTypes, kind):
+			case slices.Contains(stream.Activity.DiscardTypes, kind):
 				continue
-			case contains(stream.Activity.ReportTypes, kind):
+			case slices.Contains(stream.Activity.ReportTypes, kind):
 				if l.logger != nil {
 					l.logger.Debug("agent CLI native activity", "kind", kind, "status", "completed")
 				}
@@ -434,7 +434,7 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter, expectedSess
 			}
 		}
 		typeName, _ := stringAt(event, "type")
-		if contains(stream.TerminalTypes, typeName) {
+		if slices.Contains(stream.TerminalTypes, typeName) {
 			terminal = true
 		}
 	}
@@ -579,6 +579,7 @@ func matches(event any, conditions []map[string]string) bool {
 	}
 	return false
 }
+
 func matchesOne(event any, condition map[string]string) bool {
 	for path, want := range condition {
 		got, ok := valueAt(event, path)
@@ -588,6 +589,7 @@ func matchesOne(event any, condition map[string]string) bool {
 	}
 	return true
 }
+
 func conditionMatches(condition, values map[string]string) bool {
 	for key, want := range condition {
 		if values[key] != want {
@@ -596,6 +598,7 @@ func conditionMatches(condition, values map[string]string) bool {
 	}
 	return true
 }
+
 func stringAt(event any, path string) (string, bool) {
 	value, ok := valueAt(event, path)
 	if !ok {
@@ -604,6 +607,7 @@ func stringAt(event any, path string) (string, bool) {
 	text, ok := value.(string)
 	return text, ok
 }
+
 func valueAt(value any, path string) (any, bool) {
 	for _, part := range strings.Split(path, ".") {
 		switch current := value.(type) {
@@ -625,14 +629,7 @@ func valueAt(value any, path string) (any, bool) {
 	}
 	return value, true
 }
-func contains(values []string, want string) bool {
-	for _, value := range values {
-		if value == want {
-			return true
-		}
-	}
-	return false
-}
+
 func substituteArgs(args []string, values map[string]string) []string {
 	result := make([]string, len(args))
 	for i, arg := range args {
@@ -720,23 +717,28 @@ func (c *limitedCapture) Write(data []byte) (int, error) {
 	c.truncated = c.total > int64(c.limit)
 	return len(data), nil
 }
+
 func (c *limitedCapture) summary() diagnosticSummary {
 	return diagnosticSummary{bytes: c.total, limit: int64(c.limit), truncated: c.truncated}
 }
+
 func readDiagnostic(reader io.Reader, limit int) diagnosticSummary {
 	capture := &limitedCapture{limit: limit}
 	_, _ = io.Copy(capture, reader)
 	return capture.summary()
 }
+
 func classifyStartError(command string, err error) error {
 	if errors.Is(err, exec.ErrNotFound) || errors.Is(err, os.ErrNotExist) {
 		return &CLIError{Code: CodeExecutableMissing, Message: fmt.Sprintf("agent CLI executable %q not found or not runnable", command)}
 	}
 	return &CLIError{Code: CodeProcessFailed, Message: fmt.Sprintf("start agent CLI %q failed", command), Cause: err}
 }
+
 func classifyProcessError(command string, err error, diagnostic diagnosticSummary) error {
 	return &CLIError{Code: CodeProcessFailed, Message: fmt.Sprintf("agent CLI %q failed%s", command, diagnosticSuffix("stderr", diagnostic)), Cause: err}
 }
+
 func (l *LLM) annotateProtocol(err error, diagnostic diagnosticSummary) error {
 	var violation *ProtocolViolation
 	if errors.As(err, &violation) {
@@ -744,6 +746,7 @@ func (l *LLM) annotateProtocol(err error, diagnostic diagnosticSummary) error {
 	}
 	return err
 }
+
 func (l *LLM) sanitizeText(text string) string {
 	text = strings.Map(func(value rune) rune {
 		if value < 0x20 && value != '\t' {
@@ -756,6 +759,7 @@ func (l *LLM) sanitizeText(text string) string {
 	}
 	return strings.TrimSpace(text)
 }
+
 func diagnosticSuffix(label string, diagnostic diagnosticSummary) string {
 	if diagnostic.bytes == 0 {
 		return ""

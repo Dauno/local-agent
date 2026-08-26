@@ -14,8 +14,10 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-var _ port.StandardExperienceStore = (*Store)(nil)
-var _ port.OnboardingDeliveryStore = (*Store)(nil)
+var (
+	_ port.StandardExperienceStore = (*Store)(nil)
+	_ port.OnboardingDeliveryStore = (*Store)(nil)
+)
 
 const onboardingClaimLease = 2 * time.Minute
 
@@ -134,7 +136,13 @@ func (s *Store) ClaimSuggestedPrompts(ctx context.Context, teamID, userID string
 }
 
 func (s *Store) MarkSuggestedPromptsPublished(ctx context.Context, deliveryID, messageTS string, updatedAt time.Time) error {
-	if _, err := s.db.ExecContext(ctx, `UPDATE standard_prompt_deliveries SET status = 'published', message_ts = ?, updated_at = ? WHERE id = ? AND status = 'prepared'`, messageTS, updatedAt.UnixNano(), deliveryID); err != nil {
+	if _, err := s.db.ExecContext(
+		ctx,
+		`UPDATE standard_prompt_deliveries SET status = 'published', message_ts = ?, updated_at = ? WHERE id = ? AND status = 'prepared'`,
+		messageTS,
+		updatedAt.UnixNano(),
+		deliveryID,
+	); err != nil {
 		return fmt.Errorf("mark standard suggested prompts published: %w", err)
 	}
 	return nil

@@ -128,12 +128,25 @@ type KnowledgeCandidateReader interface {
 	// ReadRelated expands one hop from the authorized exact claim seeds:
 	// claims whose subject or reference matches either (subject,
 	// value_reference) endpoint of the seeds' owns/relates_to edges.
-	ReadRelated(ctx context.Context, binding domain.KnowledgeWriteBinding, now time.Time, limits domain.KnowledgeRetrievalLimits, seeds []KnowledgeEligibleCandidate) ([]KnowledgeEligibleCandidate, error)
+	ReadRelated(
+		ctx context.Context,
+		binding domain.KnowledgeWriteBinding,
+		now time.Time,
+		limits domain.KnowledgeRetrievalLimits,
+		seeds []KnowledgeEligibleCandidate,
+	) ([]KnowledgeEligibleCandidate, error)
 	// ReadItem re-reads the complete authorized row for card construction
 	// after a channel or index hit. Documents are returned with their
 	// original handle; content resolution happens separately through
 	// KnowledgeDocumentResolver.
-	ReadItem(ctx context.Context, binding domain.KnowledgeWriteBinding, now time.Time, limits domain.KnowledgeRetrievalLimits, kind domain.KnowledgeRetrievalItemKind, id string) (KnowledgeAuthoritativeItem, error)
+	ReadItem(
+		ctx context.Context,
+		binding domain.KnowledgeWriteBinding,
+		now time.Time,
+		limits domain.KnowledgeRetrievalLimits,
+		kind domain.KnowledgeRetrievalItemKind,
+		id string,
+	) (KnowledgeAuthoritativeItem, error)
 }
 
 // KnowledgeDocumentResolver resolves complete verified document content.

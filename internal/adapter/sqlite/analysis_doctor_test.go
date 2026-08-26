@@ -81,7 +81,10 @@ func doctorCompleteRootReduction(t *testing.T, steps *AnalysisStepStore, analysi
 		t.Fatalf("complete leaf step: %v", err)
 	}
 
-	if _, err := steps.Prepare(t.Context(), port.AnalysisStep{AnalysisID: analysisID, StepID: "reduce-0", Kind: domain.AnalysisStepReduction, ChildStepIDs: []string{"leaf-0"}, CreatedAt: now}); err != nil {
+	if _, err := steps.Prepare(
+		t.Context(),
+		port.AnalysisStep{AnalysisID: analysisID, StepID: "reduce-0", Kind: domain.AnalysisStepReduction, ChildStepIDs: []string{"leaf-0"}, CreatedAt: now},
+	); err != nil {
 		t.Fatalf("prepare reduction step: %v", err)
 	}
 	claimedReduction, ok, err := steps.ClaimNext(t.Context(), analysisID, now, time.Hour)
@@ -122,7 +125,10 @@ func TestCheckResultAnalysisStateReportsExactCounts(t *testing.T) {
 	// is prepared at the same past instant so created_at never lands after
 	// the claim's updated_at.
 	staleClaimNow := now.Add(-2 * time.Hour)
-	if _, err := steps.Prepare(t.Context(), port.AnalysisStep{AnalysisID: analysisA, StepID: "leaf-claimed-expired", Kind: domain.AnalysisStepLeaf, SegmentOrdinal: 2, CreatedAt: staleClaimNow}); err != nil {
+	if _, err := steps.Prepare(
+		t.Context(),
+		port.AnalysisStep{AnalysisID: analysisA, StepID: "leaf-claimed-expired", Kind: domain.AnalysisStepLeaf, SegmentOrdinal: 2, CreatedAt: staleClaimNow},
+	); err != nil {
 		t.Fatalf("prepare leaf-claimed-expired: %v", err)
 	}
 	if _, ok, err := steps.ClaimNext(t.Context(), analysisA, staleClaimNow, time.Second); err != nil || !ok {

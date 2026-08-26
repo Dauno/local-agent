@@ -38,12 +38,15 @@ type fakeSummaryStore struct{ record port.SummaryRecord }
 func (s fakeSummaryStore) LatestSummary(context.Context, string) (port.SummaryRecord, error) {
 	return s.record, nil
 }
+
 func (fakeSummaryStore) CommitSummary(context.Context, port.SummaryCommit) (bool, error) {
 	return false, nil
 }
+
 func (fakeSummaryStore) ScheduleSummaryJob(context.Context, string, int64, time.Time) (bool, error) {
 	return false, nil
 }
+
 func (fakeSummaryStore) ClaimSummaryJob(context.Context, time.Time) (port.SummaryJob, error) {
 	return port.SummaryJob{}, nil
 }

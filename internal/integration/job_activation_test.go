@@ -236,15 +236,26 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if completed.State != domain.ActivationCompleted {
 		t.Fatalf("activation state = %q, want completed", completed.State)
 	}
-	if len(responsePublisher.calls) != 1 || responsePublisher.calls[0].target.ChannelID != "D12345678" || responsePublisher.calls[0].target.ThreadTS != "1710000000.000001" || responsePublisher.calls[0].text != "root synthesis" {
+	if len(responsePublisher.calls) != 1 || responsePublisher.calls[0].target.ChannelID != "D12345678" || responsePublisher.calls[0].target.ThreadTS != "1710000000.000001" ||
+		responsePublisher.calls[0].text != "root synthesis" {
 		t.Fatalf("root delivery = %#v", responsePublisher.calls)
 	}
 
 	var foregroundActivations, detachedActivations int
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM external_agent_job_activations a JOIN external_agent_jobs j ON j.job_id = a.job_id WHERE j.mode = 'foreground'`).Scan(&foregroundActivations); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM external_agent_job_activations a JOIN external_agent_jobs j ON j.job_id = a.job_id WHERE j.mode = 'foreground'`,
+	).Scan(
+		&foregroundActivations,
+	); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM external_agent_job_activations a JOIN external_agent_jobs j ON j.job_id = a.job_id WHERE j.mode = 'detached'`).Scan(&detachedActivations); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM external_agent_job_activations a JOIN external_agent_jobs j ON j.job_id = a.job_id WHERE j.mode = 'detached'`,
+	).Scan(
+		&detachedActivations,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if foregroundActivations != 0 || detachedActivations != 1 {
@@ -530,7 +541,15 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 		t.Fatalf("human command did not commit through the trusted path: revision=%d tasks=%d", revision, taskCount)
 	}
 	var sourceInputs int
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_task_inputs WHERE workstream_id = ? AND task_id = ? AND input_identity = ?`, job.WorkstreamID, "task-proposal-e2e-2", sourceResultID).Scan(&sourceInputs); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM workstream_task_inputs WHERE workstream_id = ? AND task_id = ? AND input_identity = ?`,
+		job.WorkstreamID,
+		"task-proposal-e2e-2",
+		sourceResultID,
+	).Scan(
+		&sourceInputs,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if sourceInputs != 1 {
@@ -900,7 +919,15 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 	// The persisted row carries the post-transform identity.
 	var jobID, summary, persistedSHA string
 	var persistedBytes int64
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT job_id, result_summary, result_sha256, result_bytes FROM external_agent_jobs WHERE mode = 'foreground'`).Scan(&jobID, &summary, &persistedSHA, &persistedBytes); err != nil {
+	if err := store.DB().QueryRowContext(
+		t.Context(),
+		`SELECT job_id, result_summary, result_sha256, result_bytes FROM external_agent_jobs WHERE mode = 'foreground'`,
+	).Scan(
+		&jobID,
+		&summary,
+		&persistedSHA,
+		&persistedBytes,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if summary != sanitizedText || persistedSHA != digest || persistedBytes != int64(len(sanitizedText)) {
@@ -935,7 +962,13 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 	if len([]byte(reconstructed)) != int(persistedBytes) {
 		t.Fatalf("chunk byte count = %d, want %d", len([]byte(reconstructed)), persistedBytes)
 	}
-	if result, err := service.ReadResult(t.Context(), jobID, actor, key); err != nil || result.Text != sanitizedText || result.ContentSHA256 != digest || result.ContentBytes != int64(len(sanitizedText)) {
+	if result, err := service.ReadResult(
+		t.Context(),
+		jobID,
+		actor,
+		key,
+	); err != nil || result.Text != sanitizedText || result.ContentSHA256 != digest ||
+		result.ContentBytes != int64(len(sanitizedText)) {
 		t.Fatalf("verified full read = %#v err=%v", result, err)
 	}
 
@@ -1165,7 +1198,10 @@ func (m *activationRootModel) GenerateContent(ctx context.Context, request *mode
 			yield(&model.LLMResponse{Content: genai.NewContentFromText(m.response, genai.RoleModel), TurnComplete: true}, nil)
 			return
 		}
-		yield(functionCallResponse(fmt.Sprintf("call_chunk_%03d", chunkNumber+1), "read_job_result_chunk", map[string]any{"job_id": m.jobID, "offset_bytes": nextOffset, "max_bytes": m.chunkMaxBytes}), nil)
+		yield(
+			functionCallResponse(fmt.Sprintf("call_chunk_%03d", chunkNumber+1), "read_job_result_chunk", map[string]any{"job_id": m.jobID, "offset_bytes": nextOffset, "max_bytes": m.chunkMaxBytes}),
+			nil,
+		)
 	}
 }
 
@@ -1771,10 +1807,12 @@ func (*drainActivationHandler) ReconcileJobCompletion(context.Context, domain.Ex
 	return nil
 }
 
-var _ model.LLM = (*activationRootModel)(nil)
-var _ port.ExternalAgentJobRuntime = (*detachedDispatcherRuntime)(nil)
-var _ externalAgentInvoker = (*detachedFakeExternalAgent)(nil)
-var _ port.JobNotificationPublisher = (*jobActivationNotificationPublisher)(nil)
-var _ port.ResponsePublisher = (*jobActivationResponsePublisher)(nil)
-var _ port.ExternalAgentJobActivationStore = (*drainActivationStore)(nil)
-var _ port.ExternalAgentJobCompletionHandler = (*drainActivationHandler)(nil)
+var (
+	_ model.LLM                              = (*activationRootModel)(nil)
+	_ port.ExternalAgentJobRuntime           = (*detachedDispatcherRuntime)(nil)
+	_ externalAgentInvoker                   = (*detachedFakeExternalAgent)(nil)
+	_ port.JobNotificationPublisher          = (*jobActivationNotificationPublisher)(nil)
+	_ port.ResponsePublisher                 = (*jobActivationResponsePublisher)(nil)
+	_ port.ExternalAgentJobActivationStore   = (*drainActivationStore)(nil)
+	_ port.ExternalAgentJobCompletionHandler = (*drainActivationHandler)(nil)
+)

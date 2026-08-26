@@ -14,7 +14,10 @@ import (
 
 func TestServiceBindsTrustedInvocationAndPreservesJournalRecord(t *testing.T) {
 	store := &fakeStore{workstream: testWorkstream()}
-	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store, Clock: fixedClock{at: time.Unix(10, 0).UTC()}})
+	service, err := workstream.New(
+		workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}},
+		workstream.Dependencies{Store: store, Clock: fixedClock{at: time.Unix(10, 0).UTC()}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -289,8 +292,10 @@ func TestServiceLinksOnlyVerifierIdentityAndTrustedScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
-	transition := domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
-		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: "model-forged-id"}}
+	transition := domain.WorkstreamTransition{
+		WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
+		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: "model-forged-id"},
+	}
 	record, snapshot, err := service.LinkCompletedResult(ctx(), binding, "T12345678", identity.ResultID, transition, "confirmation-1")
 	if err != nil {
 		t.Fatal(err)
@@ -298,7 +303,8 @@ func TestServiceLinksOnlyVerifierIdentityAndTrustedScope(t *testing.T) {
 	if record.ToRevision != 1 || snapshot.Revision != 1 || len(snapshot.ResultLinks) != 1 {
 		t.Fatalf("link result = %+v / %+v", record, snapshot)
 	}
-	if verifier.request.Actor != binding.Actor || verifier.request.TeamID != "T12345678" || verifier.request.Conversation != string(binding.ConversationKey) || verifier.request.Project != binding.Project {
+	if verifier.request.Actor != binding.Actor || verifier.request.TeamID != "T12345678" || verifier.request.Conversation != string(binding.ConversationKey) ||
+		verifier.request.Project != binding.Project {
 		t.Fatalf("untrusted verifier scope = %+v", verifier.request)
 	}
 	if committer.request.Transition.ResultLink.ResultIdentity != identity.ResultID || committer.request.VerifiedIdentity != identity {
@@ -310,14 +316,19 @@ func TestServiceResultHandleGateBlocksNewLinksButPreservesReads(t *testing.T) {
 	identity := testVerifiedResultIdentity()
 	store := &fakeStore{workstream: testWorkstream()}
 	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{
-		Store: store, ResultVerifier: &fakeResultVerifier{identity: identity}, LinkCommitter: &fakeResultLinkCommitter{workstream: testWorkstream()}, ResultReader: &fakeResultReader{identity: identity},
+		Store:          store,
+		ResultVerifier: &fakeResultVerifier{identity: identity},
+		LinkCommitter:  &fakeResultLinkCommitter{workstream: testWorkstream()},
+		ResultReader:   &fakeResultReader{identity: identity},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
-	transition := domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
-		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: identity.ResultID}}
+	transition := domain.WorkstreamTransition{
+		WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
+		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: identity.ResultID},
+	}
 	if _, _, err := service.LinkCompletedResult(ctx(), binding, "T12345678", identity.ResultID, transition, "confirmation-1"); !errors.Is(err, workstream.ErrResultHandlesDisabled) {
 		t.Fatalf("disabled result link error = %v", err)
 	}

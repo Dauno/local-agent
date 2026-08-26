@@ -1,9 +1,10 @@
 package externalagent
 
 import (
+	"cmp"
 	"context"
 	"errors"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -329,15 +330,14 @@ func (s *activationWorkerStore) ClaimNextActivation(_ context.Context, now time.
 		}
 		candidates = append(candidates, activation)
 	}
-	sort.Slice(candidates, func(i, j int) bool {
-		left, right := candidates[i], candidates[j]
+	slices.SortFunc(candidates, func(left, right *domain.ExternalAgentJobActivation) int {
 		if !left.PublishedAt.Equal(right.PublishedAt) {
-			return left.PublishedAt.Before(right.PublishedAt)
+			return left.PublishedAt.Compare(right.PublishedAt)
 		}
 		if left.StatusRevision != right.StatusRevision {
-			return left.StatusRevision < right.StatusRevision
+			return cmp.Compare(left.StatusRevision, right.StatusRevision)
 		}
-		return left.JobID < right.JobID
+		return cmp.Compare(left.JobID, right.JobID)
 	})
 	if len(candidates) == 0 {
 		return nil, nil

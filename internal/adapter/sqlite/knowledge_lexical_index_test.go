@@ -83,7 +83,15 @@ func TestKnowledgeLexicalIndexSearchQuotesTermsAsData(t *testing.T) {
 		{domain.KnowledgeRetrievalClaim, "kclaim_meta_3", "star subject", "asterisk*star"},
 	}
 	for _, subject := range subjects {
-		if err := index.ReplaceLexical(t.Context(), subject.kind, subject.id, 1, knowledgeIndexTestDigest(subject.kind, subject.id, 1, subject.subject_, subject.body), subject.subject_, subject.body); err != nil {
+		if err := index.ReplaceLexical(
+			t.Context(),
+			subject.kind,
+			subject.id,
+			1,
+			knowledgeIndexTestDigest(subject.kind, subject.id, 1, subject.subject_, subject.body),
+			subject.subject_,
+			subject.body,
+		); err != nil {
 			t.Fatalf("ReplaceLexical() error = %v", err)
 		}
 	}
@@ -163,7 +171,15 @@ func TestKnowledgeLexicalIndexWorkerSurface(t *testing.T) {
 	store, _ := newTestStore(t)
 	index := NewKnowledgeLexicalIndexStore(store, "")
 
-	if err := index.ReplaceLexical(t.Context(), domain.KnowledgeRetrievalClaim, "kclaim_row", 2, knowledgeIndexTestDigest(domain.KnowledgeRetrievalClaim, "kclaim_row", 2, "s", "b"), "s", "b"); err != nil {
+	if err := index.ReplaceLexical(
+		t.Context(),
+		domain.KnowledgeRetrievalClaim,
+		"kclaim_row",
+		2,
+		knowledgeIndexTestDigest(domain.KnowledgeRetrievalClaim, "kclaim_row", 2, "s", "b"),
+		"s",
+		"b",
+	); err != nil {
 		t.Fatalf("ReplaceLexical() error = %v", err)
 	}
 	rows, err := index.ListLexical(t.Context(), domain.KnowledgeRetrievalClaim, "", 16)
@@ -171,7 +187,15 @@ func TestKnowledgeLexicalIndexWorkerSurface(t *testing.T) {
 		t.Fatalf("ListLexical() = %+v, %v", rows, err)
 	}
 	// Replacement is atomic: old rows are gone.
-	if err := index.ReplaceLexical(t.Context(), domain.KnowledgeRetrievalClaim, "kclaim_row", 3, knowledgeIndexTestDigest(domain.KnowledgeRetrievalClaim, "kclaim_row", 3, "s2", "b2"), "s2", "b2"); err != nil {
+	if err := index.ReplaceLexical(
+		t.Context(),
+		domain.KnowledgeRetrievalClaim,
+		"kclaim_row",
+		3,
+		knowledgeIndexTestDigest(domain.KnowledgeRetrievalClaim, "kclaim_row", 3, "s2", "b2"),
+		"s2",
+		"b2",
+	); err != nil {
 		t.Fatalf("ReplaceLexical(second) error = %v", err)
 	}
 	rows, err = index.ListLexical(t.Context(), domain.KnowledgeRetrievalClaim, "", 16)
@@ -186,7 +210,15 @@ func TestKnowledgeLexicalIndexWorkerSurface(t *testing.T) {
 		t.Fatalf("ListLexical(after delete) = %+v, %v", rows, err)
 	}
 	// Clear removes everything for rebuild.
-	if err := index.ReplaceLexical(t.Context(), domain.KnowledgeRetrievalDocument, "kdoc_x", 1, knowledgeIndexTestDigest(domain.KnowledgeRetrievalDocument, "kdoc_x", 1, "s", "b"), "s", "b"); err != nil {
+	if err := index.ReplaceLexical(
+		t.Context(),
+		domain.KnowledgeRetrievalDocument,
+		"kdoc_x",
+		1,
+		knowledgeIndexTestDigest(domain.KnowledgeRetrievalDocument, "kdoc_x", 1, "s", "b"),
+		"s",
+		"b",
+	); err != nil {
 		t.Fatalf("ReplaceLexical(doc) error = %v", err)
 	}
 	if err := index.ClearLexical(t.Context()); err != nil {

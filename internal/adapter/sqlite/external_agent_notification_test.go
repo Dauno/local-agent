@@ -28,7 +28,16 @@ func TestTerminalTransitionEnqueuesOneDurableNotification(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "safe summary"}, "", now.Add(time.Second)); err != nil {
+	if err := jobs.Transition(
+		t.Context(),
+		job.ID,
+		claimed.LeaseOwner,
+		claimed.Attempt,
+		domain.JobCompleted,
+		&domain.ExternalAgentInvocationResult{Text: "safe summary"},
+		"",
+		now.Add(time.Second),
+	); err != nil {
 		t.Fatal(err)
 	}
 	claimedNotification, err := jobs.ClaimNextNotification(t.Context(), now.Add(2*time.Second), "publisher-1", time.Minute)
@@ -288,7 +297,16 @@ func TestTerminalTransitionRollsBackWhenNotificationCannotBeBuilt(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "done"}, "", now.Add(time.Second)); err == nil {
+	if err := jobs.Transition(
+		t.Context(),
+		job.ID,
+		claimed.LeaseOwner,
+		claimed.Attempt,
+		domain.JobCompleted,
+		&domain.ExternalAgentInvocationResult{Text: "done"},
+		"",
+		now.Add(time.Second),
+	); err == nil {
 		t.Fatal("terminal transition succeeded without a valid notification target")
 	}
 	current, err := jobs.GetJob(t.Context(), job.ID)
@@ -313,7 +331,16 @@ func TestLegacyNotificationCannotBeConvertedIntoNewDelivery(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "done"}, "", now.Add(time.Second)); err != nil {
+	if err := jobs.Transition(
+		t.Context(),
+		job.ID,
+		claimed.LeaseOwner,
+		claimed.Attempt,
+		domain.JobCompleted,
+		&domain.ExternalAgentInvocationResult{Text: "done"},
+		"",
+		now.Add(time.Second),
+	); err != nil {
 		t.Fatal(err)
 	}
 	_, err = store.db.ExecContext(t.Context(), `UPDATE external_agent_job_notifications SET
@@ -449,7 +476,16 @@ func TestNotificationHealthAndAdminInspectionAreContentFree(t *testing.T) {
 		if claimErr != nil {
 			t.Fatal(claimErr)
 		}
-		if transitionErr := jobs.Transition(t.Context(), id, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "secret result text"}, "", base.Add(time.Second)); transitionErr != nil {
+		if transitionErr := jobs.Transition(
+			t.Context(),
+			id,
+			claimed.LeaseOwner,
+			claimed.Attempt,
+			domain.JobCompleted,
+			&domain.ExternalAgentInvocationResult{Text: "secret result text"},
+			"",
+			base.Add(time.Second),
+		); transitionErr != nil {
 			t.Fatal(transitionErr)
 		}
 		return job
@@ -504,7 +540,11 @@ func TestNotificationHealthAndAdminInspectionAreContentFree(t *testing.T) {
 	if err != nil || inspection == nil || len(inspection.Deliveries) != 1 {
 		t.Fatalf("inspection = %#v, err=%v", inspection, err)
 	}
-	if inspection.Deliveries[0].DeliveryMode != domain.JobResultDeliveryFile || !inspection.Deliveries[0].SlackFileIDPresent || inspection.Deliveries[0].UploadState != domain.JobResultUploadCompleted || inspection.Deliveries[0].LeaseOwner != "worker-secret" || !inspection.Deliveries[0].LeaseOwnerPresent || !inspection.Deliveries[0].LeaseExpiry.Equal(healthNow.Add(time.Minute)) {
+	if inspection.Deliveries[0].DeliveryMode != domain.JobResultDeliveryFile || !inspection.Deliveries[0].SlackFileIDPresent ||
+		inspection.Deliveries[0].UploadState != domain.JobResultUploadCompleted ||
+		inspection.Deliveries[0].LeaseOwner != "worker-secret" ||
+		!inspection.Deliveries[0].LeaseOwnerPresent ||
+		!inspection.Deliveries[0].LeaseExpiry.Equal(healthNow.Add(time.Minute)) {
 		t.Fatalf("file inspection = %#v", inspection.Deliveries[0])
 	}
 	if inspection.Deliveries[0].LastErrorCode != "notification_publish_ambiguous" {
@@ -550,7 +590,16 @@ func TestInspectJobPreservesBoundedResultErrorCodes(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		if err := jobs.Transition(t.Context(), jobID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "safe summary"}, "", base.Add(time.Second)); err != nil {
+		if err := jobs.Transition(
+			t.Context(),
+			jobID,
+			claimed.LeaseOwner,
+			claimed.Attempt,
+			domain.JobCompleted,
+			&domain.ExternalAgentInvocationResult{Text: "safe summary"},
+			"",
+			base.Add(time.Second),
+		); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := store.DB().ExecContext(t.Context(), `UPDATE external_agent_job_notifications

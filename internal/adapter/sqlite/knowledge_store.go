@@ -311,7 +311,15 @@ func (s *KnowledgeStore) CreateClaim(ctx context.Context, claim domain.Knowledge
 	return claim, nil
 }
 
-func insertKnowledgeClaimRevision(ctx context.Context, tx *sql.Tx, claim domain.KnowledgeClaim, status domain.KnowledgeClaimStatus, sourceClass domain.KnowledgeSourceClass, operation, sourceRef, reason string, now time.Time) error {
+func insertKnowledgeClaimRevision(
+	ctx context.Context,
+	tx *sql.Tx,
+	claim domain.KnowledgeClaim,
+	status domain.KnowledgeClaimStatus,
+	sourceClass domain.KnowledgeSourceClass,
+	operation, sourceRef, reason string,
+	now time.Time,
+) error {
 	kind, text, reference, number, boolean := encodeKnowledgeValue(claim.Value)
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO knowledge_claim_revisions
@@ -327,7 +335,15 @@ func insertKnowledgeClaimRevision(ctx context.Context, tx *sql.Tx, claim domain.
 	return nil
 }
 
-func insertKnowledgePreferenceRevision(ctx context.Context, tx *sql.Tx, preferenceID, revisionNumber int, value domain.KnowledgeValue, status domain.KnowledgePreferenceStatus, sourceRef string, now time.Time) error {
+func insertKnowledgePreferenceRevision(
+	ctx context.Context,
+	tx *sql.Tx,
+	preferenceID, revisionNumber int,
+	value domain.KnowledgeValue,
+	status domain.KnowledgePreferenceStatus,
+	sourceRef string,
+	now time.Time,
+) error {
 	kind, text, _, number, boolean := encodeKnowledgeValue(value)
 	if _, err := tx.ExecContext(ctx, `
 		INSERT INTO knowledge_preference_revisions
@@ -517,7 +533,17 @@ func (s *KnowledgeStore) CorrectClaim(ctx context.Context, replacement domain.Kn
 	superseded := prior
 	superseded.Status = domain.KnowledgeClaimSuperseded
 	superseded.Revision = prior.Revision + 1
-	if err := insertKnowledgeClaimRevision(ctx, tx, superseded, domain.KnowledgeClaimSuperseded, replacement.SourceClass, "supersede", replacement.SourceRef, "superseded by correction", now); err != nil {
+	if err := insertKnowledgeClaimRevision(
+		ctx,
+		tx,
+		superseded,
+		domain.KnowledgeClaimSuperseded,
+		replacement.SourceClass,
+		"supersede",
+		replacement.SourceRef,
+		"superseded by correction",
+		now,
+	); err != nil {
 		return domain.KnowledgeClaim{}, err
 	}
 
@@ -533,7 +559,17 @@ func (s *KnowledgeStore) CorrectClaim(ctx context.Context, replacement domain.Kn
 		string(replacement.SupersedesID), replacement.Revision, now.UnixNano(), now.UnixNano()); err != nil {
 		return domain.KnowledgeClaim{}, fmt.Errorf("%w: insert replacement claim: %v", port.ErrKnowledgeUnavailable, err)
 	}
-	if err := insertKnowledgeClaimRevision(ctx, tx, replacement, replacement.Status, replacement.SourceClass, "create", replacement.SourceRef, "correction supersedes "+string(prior.ID), now); err != nil {
+	if err := insertKnowledgeClaimRevision(
+		ctx,
+		tx,
+		replacement,
+		replacement.Status,
+		replacement.SourceClass,
+		"create",
+		replacement.SourceRef,
+		"correction supersedes "+string(prior.ID),
+		now,
+	); err != nil {
 		return domain.KnowledgeClaim{}, err
 	}
 	if err := insertKnowledgeProjection(ctx, tx, now); err != nil {
@@ -557,7 +593,14 @@ func (s *KnowledgeStore) CorrectClaim(ctx context.Context, replacement domain.Kn
 // supersession, a different transition, or a different authority class) is
 // rejected. Supersession is rejected here; it requires a validated
 // replacement.
-func (s *KnowledgeStore) TransitionClaimStatus(ctx context.Context, id domain.KnowledgeClaimID, expectedRev int, next domain.KnowledgeClaimStatus, source domain.KnowledgeSourceClass, sourceRef string) (domain.KnowledgeClaim, error) {
+func (s *KnowledgeStore) TransitionClaimStatus(
+	ctx context.Context,
+	id domain.KnowledgeClaimID,
+	expectedRev int,
+	next domain.KnowledgeClaimStatus,
+	source domain.KnowledgeSourceClass,
+	sourceRef string,
+) (domain.KnowledgeClaim, error) {
 	if err := s.available(); err != nil {
 		return domain.KnowledgeClaim{}, err
 	}

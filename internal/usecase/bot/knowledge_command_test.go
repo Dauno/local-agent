@@ -57,7 +57,12 @@ func (f *fakeKnowledgeBindingResolver) ResolveKnowledgeBinding(_ context.Context
 	return f.binding, nil
 }
 
-func newKnowledgeBotService(t *testing.T, knowledge port.KnowledgeCommands, bindings port.KnowledgeBindingResolver, coordinator port.ConversationCoordinator) (*Service, *fakeStore, *fakeRuntime, *fakePublisher) {
+func newKnowledgeBotService(
+	t *testing.T,
+	knowledge port.KnowledgeCommands,
+	bindings port.KnowledgeBindingResolver,
+	coordinator port.ConversationCoordinator,
+) (*Service, *fakeStore, *fakeRuntime, *fakePublisher) {
 	t.Helper()
 	store := &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)}
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "answer"}}

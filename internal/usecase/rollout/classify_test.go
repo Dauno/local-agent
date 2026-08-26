@@ -251,27 +251,34 @@ func TestClassifyRolloutBindsRowTwoToLiveSchema(t *testing.T) {
 func TestClassifyRolloutFailsClosedOnPartialStates(t *testing.T) {
 	baselineOnly := RolloutState{
 		BaselinePresent: true,
-		BaselineValid:   true}
+		BaselineValid:   true,
+	}
 	cutoffOnly := RolloutState{
 		CutoffPresent: true,
-		CutoffValid:   true}
+		CutoffValid:   true,
+	}
 	malformedBaseline := RolloutState{
 		BaselinePresent: true,
-		BaselineValid:   false}
+		BaselineValid:   false,
+	}
 	malformedCutoff := RolloutState{
 		CutoffPresent: true,
-		CutoffValid:   false}
+		CutoffValid:   false,
+	}
 
 	statusWithoutDetail := RolloutState{
 		PostflightPresent: true,
 		PostflightValid:   true,
-		PostflightStatus:  PostflightPassed}
+		PostflightStatus:  PostflightPassed,
+	}
 	detailWithoutStatus := RolloutState{
 		PostflightDetailPresent: true,
-		PostflightDetail:        "orphan"}
+		PostflightDetail:        "orphan",
+	}
 	unknownStatus := RolloutState{
 		PostflightPresent: true,
-		PostflightValid:   false}
+		PostflightValid:   false,
+	}
 
 	cases := []struct {
 		name     string
@@ -330,7 +337,8 @@ func TestIsRolloutCompletePropagatesErrorsUnchanged(t *testing.T) {
 	}
 	corruptState := RolloutState{
 		BaselinePresent: true,
-		BaselineValid:   true}
+		BaselineValid:   true,
+	}
 	if _, err := IsRolloutComplete(41, corruptState); !errors.Is(err, ErrRolloutStateCorrupt) {
 		t.Fatalf("err = %v, want Corrupt propagated", err)
 	}

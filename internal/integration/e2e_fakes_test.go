@@ -228,14 +228,14 @@ func newE2ESandbox(t *testing.T) (dir string, projects map[string]string) {
 	mustWrite(t, filepath.Join(dir, "main.go"), "package main\n\nfunc main() {}\n")
 	mustWrite(t, filepath.Join(dir, "README.md"), "# Test\n")
 	mustWrite(t, filepath.Join(dir, ".env"), "SECRET=value\n")
-	must(os.MkdirAll(filepath.Join(dir, "subdir"), 0755))
+	must(os.MkdirAll(filepath.Join(dir, "subdir"), 0o755))
 	mustWrite(t, filepath.Join(dir, "subdir", "note.txt"), "hello\n")
 	return dir, map[string]string{"workspace": dir}
 }
 
 func mustWrite(t *testing.T, path, content string) {
 	t.Helper()
-	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+	if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 		t.Fatal(err)
 	}
 }

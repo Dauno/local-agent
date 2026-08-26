@@ -385,10 +385,18 @@ func validateKnowledgeRetrieval(problems *[]FieldError, cfg Config) {
 			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.api_key_env", "must be a bounded valid environment variable name when embedding is enabled")
 		}
 		if embedding.Dimensions < 1 {
-			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.dimensions", fmt.Sprintf("must be between 1 and %d when embedding is enabled", domain.HardMaxKnowledgeEmbeddingDimensions))
+			addConfigProblem(
+				problems,
+				"orchestration.knowledge.retrieval.embedding.dimensions",
+				fmt.Sprintf("must be between 1 and %d when embedding is enabled", domain.HardMaxKnowledgeEmbeddingDimensions),
+			)
 		}
 		if embedding.MinSimilarityBasisPoints < 1 {
-			addConfigProblem(problems, "orchestration.knowledge.retrieval.embedding.min_similarity_basis_points", fmt.Sprintf("must be between 1 and %d when embedding is enabled", domain.HardMaxKnowledgeMinSimilarityBasisPoints))
+			addConfigProblem(
+				problems,
+				"orchestration.knowledge.retrieval.embedding.min_similarity_basis_points",
+				fmt.Sprintf("must be between 1 and %d when embedding is enabled", domain.HardMaxKnowledgeMinSimilarityBasisPoints),
+			)
 		}
 		validateEmbeddingBaseURL(problems, "orchestration.knowledge.retrieval.embedding.base_url", embedding.BaseURL)
 	} else if strings.TrimSpace(embedding.BaseURL) != "" {

@@ -83,7 +83,14 @@ func TestAnalysisCompletionStoreCommitsAllThreeWrites(t *testing.T) {
 	if reprCount != 1 {
 		t.Fatalf("host_reduction representation count = %d, want 1", reprCount)
 	}
-	if err := dbStore.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM result_references WHERE result_id = ? AND owner_kind = 'result_analysis' AND owner_id = ? AND state = 'live'`, sourceID, analysisID).Scan(&refCount); err != nil {
+	if err := dbStore.DB().QueryRowContext(
+		t.Context(),
+		`SELECT COUNT(*) FROM result_references WHERE result_id = ? AND owner_kind = 'result_analysis' AND owner_id = ? AND state = 'live'`,
+		sourceID,
+		analysisID,
+	).Scan(
+		&refCount,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if refCount != 1 {
@@ -95,7 +102,13 @@ func TestAnalysisCompletionStoreCommitsAllThreeWrites(t *testing.T) {
 	// this test never read the column back, so a store that persisted a
 	// clock-dependent or otherwise wrong digest still passed.
 	var persistedPacketSHA256 string
-	if err := dbStore.DB().QueryRowContext(t.Context(), `SELECT payload_sha256 FROM result_representations WHERE result_id = ? AND kind = 'host_reduction'`, sourceID).Scan(&persistedPacketSHA256); err != nil {
+	if err := dbStore.DB().QueryRowContext(
+		t.Context(),
+		`SELECT payload_sha256 FROM result_representations WHERE result_id = ? AND kind = 'host_reduction'`,
+		sourceID,
+	).Scan(
+		&persistedPacketSHA256,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if persistedPacketSHA256 != strings.Repeat("f", 64) {

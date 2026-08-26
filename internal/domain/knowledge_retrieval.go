@@ -1,9 +1,9 @@
 package domain
 
 import (
+	"cmp"
 	"fmt"
 	"slices"
-	"sort"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -362,17 +362,17 @@ func RankKnowledgeCandidates(candidates []KnowledgeRankCandidate) ([]KnowledgeRa
 		slices.Sort(candidate.Reasons)
 		ranked = append(ranked, candidate)
 	}
-	sort.Slice(ranked, func(i, j int) bool {
-		if ranked[i].Tier != ranked[j].Tier {
-			return ranked[i].Tier < ranked[j].Tier
+	slices.SortFunc(ranked, func(a, b KnowledgeRankedCandidate) int {
+		if a.Tier != b.Tier {
+			return cmp.Compare(a.Tier, b.Tier)
 		}
-		if ranked[i].FusedScore != ranked[j].FusedScore {
-			return ranked[i].FusedScore > ranked[j].FusedScore
+		if a.FusedScore != b.FusedScore {
+			return cmp.Compare(b.FusedScore, a.FusedScore)
 		}
-		if ranked[i].Kind != ranked[j].Kind {
-			return KnowledgeRetrievalItemKindOrder(ranked[i].Kind) < KnowledgeRetrievalItemKindOrder(ranked[j].Kind)
+		if a.Kind != b.Kind {
+			return cmp.Compare(KnowledgeRetrievalItemKindOrder(a.Kind), KnowledgeRetrievalItemKindOrder(b.Kind))
 		}
-		return ranked[i].ID < ranked[j].ID
+		return cmp.Compare(a.ID, b.ID)
 	})
 	return ranked, nil
 }

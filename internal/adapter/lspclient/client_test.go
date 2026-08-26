@@ -26,12 +26,15 @@ func (m *lspMetricCapture) record(name string) {
 	}
 	m.counts[name]++
 }
+
 func (m *lspMetricCapture) AddCounter(name string, _ int64, _ port.MetricLabels) {
 	m.record(name)
 }
+
 func (m *lspMetricCapture) SetGauge(name string, _ int64, _ port.MetricLabels) {
 	m.record(name)
 }
+
 func (m *lspMetricCapture) Observe(name string, _ float64, _ port.MetricLabels) {
 	m.record(name)
 }
@@ -112,10 +115,16 @@ func TestClientExternalizesTruncatedSymbolResults(t *testing.T) {
 	}
 	resultStore := &recordingResultStore{}
 	client, err := New(Config{
-		Servers: []Server{{ID: "fake", Path: os.Args[0], SHA256: fmt.Sprintf("%x", sha256.Sum256(binary)), Args: []string{"-test.run=TestLSPHelperProcess", "--", "lsp-helper"}, Languages: []string{"go"}}},
-		Routes:  map[string][]string{"go": {"fake"}}, ProjectRoots: map[string]string{"workspace": root},
-		Readers: map[string]port.CodeReader{"workspace": sourceReader{digest: "digest"}}, ResultStore: resultStore, MaxProcesses: 1,
-		InitTimeout: time.Second, RequestTimeout: time.Second,
+		Servers: []Server{
+			{ID: "fake", Path: os.Args[0], SHA256: fmt.Sprintf("%x", sha256.Sum256(binary)), Args: []string{"-test.run=TestLSPHelperProcess", "--", "lsp-helper"}, Languages: []string{"go"}},
+		},
+		Routes:         map[string][]string{"go": {"fake"}},
+		ProjectRoots:   map[string]string{"workspace": root},
+		Readers:        map[string]port.CodeReader{"workspace": sourceReader{digest: "digest"}},
+		ResultStore:    resultStore,
+		MaxProcesses:   1,
+		InitTimeout:    time.Second,
+		RequestTimeout: time.Second,
 	})
 	if err != nil {
 		t.Fatal(err)

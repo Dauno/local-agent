@@ -241,9 +241,18 @@ func TestGenerateContentStreamsTrueTextDeltasAndAuthoritativeFinal(t *testing.T)
 		}
 		requestBody <- body
 		writer.Header().Set("Content-Type", "text/event-stream")
-		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":\"\"}]}\n\n")
-		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"\"}]}\n\n")
-		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(
+			writer,
+			"data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hel\"},\"finish_reason\":\"\"}]}\n\n",
+		)
+		_, _ = fmt.Fprint(
+			writer,
+			"data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\"lo\"},\"finish_reason\":\"\"}]}\n\n",
+		)
+		_, _ = fmt.Fprint(
+			writer,
+			"data: {\"id\":\"completion-1\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"provider-model\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+		)
 		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(server.Close)
@@ -281,11 +290,20 @@ func TestGenerateContentIgnoresSSEKeepAliveAndRetryBlocks(t *testing.T) {
 		}
 		_, _ = fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
 		flusher.Flush()
-		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"\"}]}\n\n")
+		_, _ = fmt.Fprint(
+			writer,
+			"data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"role\":\"assistant\",\"content\":\"Hello\"},\"finish_reason\":\"\"}]}\n\n",
+		)
 		_, _ = fmt.Fprint(writer, ": one\n\n: two\n\nretry: 3000\n\n")
 		flusher.Flush()
-		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" after keep-alive\"},\"finish_reason\":\"\"}]}\n\n")
-		_, _ = fmt.Fprint(writer, "data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n")
+		_, _ = fmt.Fprint(
+			writer,
+			"data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{\"content\":\" after keep-alive\"},\"finish_reason\":\"\"}]}\n\n",
+		)
+		_, _ = fmt.Fprint(
+			writer,
+			"data: {\"id\":\"completion-keepalive\",\"object\":\"chat.completion.chunk\",\"created\":1,\"model\":\"test\",\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+		)
 		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(server.Close)
@@ -298,7 +316,8 @@ func TestGenerateContentIgnoresSSEKeepAliveAndRetryBlocks(t *testing.T) {
 		}
 		responses = append(responses, response)
 	}
-	if len(responses) != 3 || responses[0].Content.Parts[0].Text != "Hello" || responses[1].Content.Parts[0].Text != " after keep-alive" || responses[2].Content.Parts[0].Text != "Hello after keep-alive" {
+	if len(responses) != 3 || responses[0].Content.Parts[0].Text != "Hello" || responses[1].Content.Parts[0].Text != " after keep-alive" ||
+		responses[2].Content.Parts[0].Text != "Hello after keep-alive" {
 		t.Fatalf("keep-alive responses = %#v", responses)
 	}
 }
@@ -307,10 +326,48 @@ func TestGenerateContentAccumulatesToolCallChunksAfterEmptySSEBlocks(t *testing.
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
 		writer.Header().Set("Content-Type", "text/event-stream")
 		_, _ = fmt.Fprint(writer, ": PROCESSING\n\nretry: 3000\n\n")
-		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"role": "assistant", "tool_calls": []any{map[string]any{"index": 0, "id": "call-1", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{"query":"sta`}}}}, "finish_reason": ""}}})
+		writeSSEChunk(
+			writer,
+			map[string]any{
+				"id":      "completion-tool",
+				"object":  "chat.completion.chunk",
+				"created": 1,
+				"model":   "test",
+				"choices": []any{
+					map[string]any{
+						"index": 0,
+						"delta": map[string]any{
+							"role":       "assistant",
+							"tool_calls": []any{map[string]any{"index": 0, "id": "call-1", "type": "function", "function": map[string]any{"name": "lookup", "arguments": `{"query":"sta`}}},
+						},
+						"finish_reason": "",
+					},
+				},
+			},
+		)
 		_, _ = fmt.Fprint(writer, ": gap\n\n: gap2\n\n")
-		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"index": 0, "function": map[string]any{"arguments": `tus"}`}}}}, "finish_reason": ""}}})
-		writeSSEChunk(writer, map[string]any{"id": "completion-tool", "object": "chat.completion.chunk", "created": 1, "model": "test", "choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}}})
+		writeSSEChunk(
+			writer,
+			map[string]any{
+				"id":      "completion-tool",
+				"object":  "chat.completion.chunk",
+				"created": 1,
+				"model":   "test",
+				"choices": []any{
+					map[string]any{"index": 0, "delta": map[string]any{"tool_calls": []any{map[string]any{"index": 0, "function": map[string]any{"arguments": `tus"}`}}}}, "finish_reason": ""},
+				},
+			},
+		)
+		writeSSEChunk(
+			writer,
+			map[string]any{
+				"id":      "completion-tool",
+				"object":  "chat.completion.chunk",
+				"created": 1,
+				"model":   "test",
+				"choices": []any{map[string]any{"index": 0, "delta": map[string]any{}, "finish_reason": "tool_calls"}},
+			},
+		)
 		_, _ = fmt.Fprint(writer, "data: [DONE]\n\n")
 	}))
 	t.Cleanup(server.Close)
@@ -846,7 +903,10 @@ func TestGenerateContentRejectsInvalidFunctionProtocolBeforeHTTP(t *testing.T) {
 	}{
 		{
 			name: "duplicate declaration",
-			req:  &model.LLMRequest{Contents: textRequest().Contents, Config: &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "same"}, {Name: "same"}}}}}},
+			req: &model.LLMRequest{
+				Contents: textRequest().Contents,
+				Config:   &genai.GenerateContentConfig{Tools: []*genai.Tool{{FunctionDeclarations: []*genai.FunctionDeclaration{{Name: "same"}, {Name: "same"}}}}},
+			},
 		},
 		{
 			name: "missing call ID",
@@ -854,7 +914,9 @@ func TestGenerateContentRejectsInvalidFunctionProtocolBeforeHTTP(t *testing.T) {
 		},
 		{
 			name: "function response with text",
-			req:  &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "unexpected"}, {FunctionResponse: &genai.FunctionResponse{ID: "call", Name: "lookup"}}}}}},
+			req: &model.LLMRequest{
+				Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "unexpected"}, {FunctionResponse: &genai.FunctionResponse{ID: "call", Name: "lookup"}}}}},
+			},
 		},
 	}
 	for _, tt := range tests {
@@ -884,10 +946,22 @@ func TestGenerateContentRejectsUnsupportedRequestsBeforeHTTP(t *testing.T) {
 		stream bool
 		want   error
 	}{
-		{name: "non text part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("binary"), "application/pdf")}}}}, want: ErrUnsupportedPart},
+		{
+			name: "non text part",
+			req:  &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{genai.NewPartFromBytes([]byte("binary"), "application/pdf")}}}},
+			want: ErrUnsupportedPart,
+		},
 		{name: "thought part", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "reasoning", Thought: true}}}}}, want: ErrUnsupportedPart},
-		{name: "thought signature", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", ThoughtSignature: []byte("signature")}}}}}, want: ErrUnsupportedPart},
-		{name: "part metadata", req: &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", PartMetadata: map[string]any{"source": "test"}}}}}}, want: ErrUnsupportedPart},
+		{
+			name: "thought signature",
+			req:  &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", ThoughtSignature: []byte("signature")}}}}},
+			want: ErrUnsupportedPart,
+		},
+		{
+			name: "part metadata",
+			req:  &model.LLMRequest{Contents: []*genai.Content{{Role: genai.RoleUser, Parts: []*genai.Part{{Text: "text", PartMetadata: map[string]any{"source": "test"}}}}}},
+			want: ErrUnsupportedPart,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1116,12 +1190,15 @@ func (m *guardMetricCapture) add(sample port.MetricSample) {
 	}
 	m.samples[sample.Name] = append(m.samples[sample.Name], sample)
 }
+
 func (m *guardMetricCapture) AddCounter(name string, delta int64, labels port.MetricLabels) {
 	m.add(port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: labels})
 }
+
 func (m *guardMetricCapture) SetGauge(name string, value int64, labels port.MetricLabels) {
 	m.add(port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: labels})
 }
+
 func (m *guardMetricCapture) Observe(name string, value float64, labels port.MetricLabels) {
 	m.add(port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: labels})
 }

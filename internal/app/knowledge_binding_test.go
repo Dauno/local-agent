@@ -21,15 +21,19 @@ type knowledgeBindingTestStore struct {
 func (s *knowledgeBindingTestStore) Create(context.Context, domain.Workstream, domain.WorkstreamTransitionSource, string) error {
 	return errors.New("unexpected create")
 }
+
 func (s *knowledgeBindingTestStore) Get(context.Context, string) (domain.Workstream, error) {
 	return domain.Workstream{}, port.ErrWorkstreamNotFound
 }
+
 func (s *knowledgeBindingTestStore) ActiveForConversation(context.Context, domain.ConversationKey) (domain.Workstream, error) {
 	return s.active, s.err
 }
+
 func (s *knowledgeBindingTestStore) Apply(context.Context, domain.WorkstreamTransition, domain.WorkstreamLimits, time.Time) (domain.WorkstreamTransitionRecord, error) {
 	return domain.WorkstreamTransitionRecord{}, errors.New("unexpected apply")
 }
+
 func (s *knowledgeBindingTestStore) Transitions(context.Context, string) ([]domain.WorkstreamTransitionRecord, error) {
 	return nil, errors.New("unexpected transitions")
 }

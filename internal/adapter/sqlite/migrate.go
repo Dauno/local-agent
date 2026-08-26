@@ -90,7 +90,26 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// adds an optional transcript path to external-agent jobs. Existing rows
 	// stay empty and are never replayed or inferred.
 	// Older schemas retain the existing explicit-reset requirement.
-	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 && current != 24 && current != 25 && current != 26 && current != 27 && current != 28 && current != 29 && current != 30 && current != 31 && current != 32 && current != 33 && current != 34 && current != 35 && current != 36 && current != 37 && current != 38 && current != 39 && current != 40 && current != 41 && current != 42 {
+	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 &&
+		current != 24 &&
+		current != 25 &&
+		current != 26 &&
+		current != 27 &&
+		current != 28 &&
+		current != 29 &&
+		current != 30 &&
+		current != 31 &&
+		current != 32 &&
+		current != 33 &&
+		current != 34 &&
+		current != 35 &&
+		current != 36 &&
+		current != 37 &&
+		current != 38 &&
+		current != 39 &&
+		current != 40 &&
+		current != 41 &&
+		current != 42 {
 		return &StateResetNeededError{Found: current, Supported: SchemaVersion}
 	}
 

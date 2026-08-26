@@ -116,7 +116,13 @@ func (r knowledgeBotBindingResolver) ResolveKnowledgeBinding(ctx context.Context
 	return binding, nil
 }
 
-func newKnowledgeBotService(t *testing.T, store *adaptersqlite.Store, enabled bool, bindings port.KnowledgeBindingResolver, runtime *knowledgeBotRuntime) (*botusecase.Service, *knowledgeBotPublisher, *botusecase.Limiter) {
+func newKnowledgeBotService(
+	t *testing.T,
+	store *adaptersqlite.Store,
+	enabled bool,
+	bindings port.KnowledgeBindingResolver,
+	runtime *knowledgeBotRuntime,
+) (*botusecase.Service, *knowledgeBotPublisher, *botusecase.Limiter) {
 	t.Helper()
 	coordinator := botusecase.NewLimiter(2)
 	knowledgeService, err := knowledge.New(knowledge.Config{Enabled: enabled}, knowledge.Dependencies{
@@ -203,7 +209,11 @@ func TestKnowledgeBotRememberAndForgetViaSlackCommand(t *testing.T) {
 	defer func() { _ = store.Close() }()
 	service, publisher, _ := newKnowledgeBotService(t, store, true, nil, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 
-	if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"secret-plan","predicate":"is","value_kind":"string","value_text":"classified"}`)); err != nil || outcome != botusecase.OutcomeResponded {
+	if outcome, err := service.Handle(
+		ctx,
+		knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"secret-plan","predicate":"is","value_kind":"string","value_text":"classified"}`),
+	); err != nil ||
+		outcome != botusecase.OutcomeResponded {
 		t.Fatalf("remember outcome = %q, err = %v", outcome, err)
 	}
 	if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK2", `memory-human {"action":"forget","subject":"secret-plan"}`)); err != nil || outcome != botusecase.OutcomeResponded {
@@ -274,7 +284,11 @@ func TestKnowledgeBotProjectBindingAndUnregisteredSelectorRejection(t *testing.T
 	resolver := knowledgeBotBindingResolver{store: workstreamStore, allowed: map[string]struct{}{"workspace": {}}}
 	service, publisher, _ := newKnowledgeBotService(t, store, true, resolver, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 
-	if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"pg-01"}`)); err != nil || outcome != botusecase.OutcomeResponded {
+	if outcome, err := service.Handle(
+		ctx,
+		knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"database","predicate":"runs_on","value_kind":"string","value_text":"pg-01"}`),
+	); err != nil ||
+		outcome != botusecase.OutcomeResponded {
 		t.Fatalf("default-project remember outcome = %q, err = %v", outcome, err)
 	}
 	kind, id := knowledgeClaimScopeRow(t, store, "database")
@@ -283,7 +297,14 @@ func TestKnowledgeBotProjectBindingAndUnregisteredSelectorRejection(t *testing.T
 	}
 
 	before := knowledgeClaimCount(t, store)
-	if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK2", `memory-human {"action":"remember","subject":"cache","predicate":"is","value_kind":"string","value_text":"redis","scope_kind":"project","scope_id":"unregistered"}`)); err != nil || outcome != botusecase.OutcomeResponded {
+	if outcome, err := service.Handle(
+		ctx,
+		knowledgeBotDMInvocation(
+			"EvK2",
+			`memory-human {"action":"remember","subject":"cache","predicate":"is","value_kind":"string","value_text":"redis","scope_kind":"project","scope_id":"unregistered"}`,
+		),
+	); err != nil ||
+		outcome != botusecase.OutcomeResponded {
 		t.Fatalf("unregistered selector outcome = %q, err = %v", outcome, err)
 	}
 	calls := publisher.snapshot()
@@ -294,7 +315,14 @@ func TestKnowledgeBotProjectBindingAndUnregisteredSelectorRejection(t *testing.T
 		t.Fatal("unregistered project selector mutated knowledge state")
 	}
 
-	if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK3", `memory-human {"action":"remember","subject":"cache","predicate":"is","value_kind":"string","value_text":"redis","scope_kind":"project","scope_id":"workspace"}`)); err != nil || outcome != botusecase.OutcomeResponded {
+	if outcome, err := service.Handle(
+		ctx,
+		knowledgeBotDMInvocation(
+			"EvK3",
+			`memory-human {"action":"remember","subject":"cache","predicate":"is","value_kind":"string","value_text":"redis","scope_kind":"project","scope_id":"workspace"}`,
+		),
+	); err != nil ||
+		outcome != botusecase.OutcomeResponded {
 		t.Fatalf("registered selector outcome = %q, err = %v", outcome, err)
 	}
 	kind, id = knowledgeClaimScopeRow(t, store, "cache")
@@ -409,7 +437,11 @@ func TestKnowledgeBotPersistedActiveWorkstreamBindsWithoutWorkstreamCommands(t *
 	resolver := knowledgeBotBindingResolver{store: workstreamStore, allowed: map[string]struct{}{"workspace": {}}}
 	service, _, _ := newKnowledgeBotService(t, store, true, resolver, &knowledgeBotRuntime{turn: port.AgentTurn{Text: "unused"}})
 
-	if outcome, err := service.Handle(ctx, knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"database","predicate":"is","value_kind":"string","value_text":"pg-01"}`)); err != nil || outcome != botusecase.OutcomeResponded {
+	if outcome, err := service.Handle(
+		ctx,
+		knowledgeBotDMInvocation("EvK1", `memory-human {"action":"remember","subject":"database","predicate":"is","value_kind":"string","value_text":"pg-01"}`),
+	); err != nil ||
+		outcome != botusecase.OutcomeResponded {
 		t.Fatalf("remember outcome = %q, err = %v", outcome, err)
 	}
 	kind, id := knowledgeClaimScopeRow(t, store, "database")

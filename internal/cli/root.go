@@ -300,7 +300,12 @@ func newJobsCommand(backend Backend, streams Streams) *cobra.Command {
 			return command.Help()
 		},
 	}
-	command.AddCommand(newJobsInspectCommand(backend, streams), newJobsReconcileCommand(backend, streams), newJobsCloseCommand(backend, streams), newJobsQuarantineLegacyIdentityCommand(backend, streams))
+	command.AddCommand(
+		newJobsInspectCommand(backend, streams),
+		newJobsReconcileCommand(backend, streams),
+		newJobsCloseCommand(backend, streams),
+		newJobsQuarantineLegacyIdentityCommand(backend, streams),
+	)
 	return command
 }
 

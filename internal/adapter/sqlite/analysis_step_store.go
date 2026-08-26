@@ -32,8 +32,10 @@ func NewAnalysisStepStore(store *Store) *AnalysisStepStore {
 	return &AnalysisStepStore{db: store.db}
 }
 
-var _ port.AnalysisStepStore = (*AnalysisStepStore)(nil)
-var _ port.AnalysisStepPayloadStore = (*AnalysisStepStore)(nil)
+var (
+	_ port.AnalysisStepStore        = (*AnalysisStepStore)(nil)
+	_ port.AnalysisStepPayloadStore = (*AnalysisStepStore)(nil)
+)
 
 const hardMaxAnalysisStepIDRunes = 128
 

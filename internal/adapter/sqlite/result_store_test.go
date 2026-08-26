@@ -184,7 +184,14 @@ func TestResultStoreQuarantineRequiresDurableStateChange(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := results.quarantineReservation(t.Context(), resultReservation{resultID: handle.ResultID, state: "payload_published", storage: storage}, storage); !errors.Is(err, domain.ErrResultUnavailable) {
+	if err := results.quarantineReservation(
+		t.Context(),
+		resultReservation{resultID: handle.ResultID, state: "payload_published", storage: storage},
+		storage,
+	); !errors.Is(
+		err,
+		domain.ErrResultUnavailable,
+	) {
 		t.Fatalf("committed reservation quarantine error = %v", err)
 	}
 	if err := results.quarantineResult(t.Context(), strings.Repeat("d", 64)); !errors.Is(err, domain.ErrResultUnavailable) {

@@ -88,7 +88,16 @@ func New(config Config, deps Dependencies) (*Service, error) {
 	if deps.ScheduleWake == nil {
 		deps.ScheduleWake = deps.Scheduler.Wake
 	}
-	return &Service{config: config, store: deps.Store, summarizer: deps.Summarizer, turnSource: deps.TurnSource, logger: deps.Logger, metrics: &SummaryWorkerMetrics{}, scheduler: deps.Scheduler, scheduleWake: deps.ScheduleWake}, nil
+	return &Service{
+		config:       config,
+		store:        deps.Store,
+		summarizer:   deps.Summarizer,
+		turnSource:   deps.TurnSource,
+		logger:       deps.Logger,
+		metrics:      &SummaryWorkerMetrics{},
+		scheduler:    deps.Scheduler,
+		scheduleWake: deps.ScheduleWake,
+	}, nil
 }
 
 // ScheduleConversation schedules a discovery job and relies on the store's

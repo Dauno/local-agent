@@ -114,7 +114,19 @@ func TestDurableExternalAgentDispatcherMaterializesSanitizedCompleteResult(t *te
 	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, sanitize: func(value string) string { return value }, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
 	}}
-	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_1", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	result, err := dispatcher.Run(
+		context.Background(),
+		domain.ExternalAgentJob{
+			ID:               "job_1",
+			Mode:             domain.JobDetached,
+			Provider:         "codex",
+			Profile:          "codex/build",
+			PrimaryProject:   "workspace",
+			RegistryRevision: "rev-1",
+			Task:             "task",
+			TimeoutAt:        time.Now().Add(time.Minute),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -125,7 +137,19 @@ func TestDurableExternalAgentDispatcherMaterializesSanitizedCompleteResult(t *te
 	dispatcher.artifacts = largeArtifacts
 	child.model = &captureModel{text: strings.Repeat("x", domain.SlackMarkdownChunkRunes*6+1)}
 	dispatcher.children = []preparedAgentTool{child}
-	large, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_2", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	large, err := dispatcher.Run(
+		context.Background(),
+		domain.ExternalAgentJob{
+			ID:               "job_2",
+			Mode:             domain.JobDetached,
+			Provider:         "codex",
+			Profile:          "codex/build",
+			PrimaryProject:   "workspace",
+			RegistryRevision: "rev-1",
+			Task:             "task",
+			TimeoutAt:        time.Now().Add(time.Minute),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -189,7 +213,15 @@ func TestDurableExternalAgentDispatcherNativeResultMatchesInlineAndFileDelivery(
 				t.Fatal(err)
 			}
 			var resultID string
-			if err := catalog.DB().QueryRowContext(t.Context(), `SELECT result_id FROM result_records WHERE producer_kind = ? AND producer_id = ? AND producer_revision = ?`, domain.ResultProducerExternalAgentJob, job.ID, job.StatusRevision+1).Scan(&resultID); err != nil {
+			if err := catalog.DB().QueryRowContext(
+				t.Context(),
+				`SELECT result_id FROM result_records WHERE producer_kind = ? AND producer_id = ? AND producer_revision = ?`,
+				domain.ResultProducerExternalAgentJob,
+				job.ID,
+				job.StatusRevision+1,
+			).Scan(
+				&resultID,
+			); err != nil {
 				t.Fatalf("read native external-agent result: %v", err)
 			}
 			_, handle, err := results.Resolve(t.Context(), resultID, domain.ResultScope{
@@ -306,11 +338,24 @@ func TestDurableExternalAgentDispatcherFallsBackForUnicodeTwentyThousandCharacte
 	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{child}, artifacts: artifacts, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 1, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: domain.SlackMarkdownChunkRunes, MaxResultArtifactBytes: 1024 * 1024,
 	}}
-	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_unicode", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", TimeoutAt: time.Now().Add(time.Minute)})
+	result, err := dispatcher.Run(
+		context.Background(),
+		domain.ExternalAgentJob{
+			ID:               "job_unicode",
+			Mode:             domain.JobDetached,
+			Provider:         "codex",
+			Profile:          "codex/build",
+			PrimaryProject:   "workspace",
+			RegistryRevision: "rev-1",
+			Task:             "task",
+			TimeoutAt:        time.Now().Add(time.Minute),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.NativeResultID != "" || result.DeliveryMode != domain.JobResultDeliveryFile || result.Text != "" || len(artifacts.contents) != 1 || len([]rune(artifacts.contents["job_unicode-delivery"])) != 20000 {
+	if result.NativeResultID != "" || result.DeliveryMode != domain.JobResultDeliveryFile || result.Text != "" || len(artifacts.contents) != 1 ||
+		len([]rune(artifacts.contents["job_unicode-delivery"])) != 20000 {
 		t.Fatalf("Unicode fallback result=%+v artifacts=%#v", result, artifacts.contents)
 	}
 }
@@ -327,7 +372,21 @@ func TestDurableExternalAgentMaterializationRedactsBeforeSQLiteDelivery(t *testi
 	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{child}, sanitize: secure.NewRedactor(secret).String, policy: domain.ResultDeliveryPolicy{
 		MaxMarkdownParts: 6, MaxFileBytes: 1024 * 1024, MaxInlineResultBytes: 64 * 1024, MaxResultArtifactBytes: 1024 * 1024,
 	}}
-	result, err := dispatcher.Run(context.Background(), domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "codex", Profile: "codex/build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", ConversationKey: "slack:T12345678:dm:D12345678", Actor: "U12345678", TimeoutAt: time.Now().Add(time.Minute)})
+	result, err := dispatcher.Run(
+		context.Background(),
+		domain.ExternalAgentJob{
+			ID:               "job_secret",
+			Mode:             domain.JobDetached,
+			Provider:         "codex",
+			Profile:          "codex/build",
+			PrimaryProject:   "workspace",
+			RegistryRevision: "rev-1",
+			Task:             "task",
+			ConversationKey:  "slack:T12345678:dm:D12345678",
+			Actor:            "U12345678",
+			TimeoutAt:        time.Now().Add(time.Minute),
+		},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -340,7 +399,24 @@ func TestDurableExternalAgentMaterializationRedactsBeforeSQLiteDelivery(t *testi
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
-	job := domain.ExternalAgentJob{ID: "job_secret", Mode: domain.JobDetached, Provider: "codex", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued, TimeoutAt: time.Now().Add(time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now(), OriginalCallID: "secret-call", RequestSHA256: "request"}
+	job := domain.ExternalAgentJob{
+		ID:               "job_secret",
+		Mode:             domain.JobDetached,
+		Provider:         "codex",
+		Profile:          "build",
+		PrimaryProject:   "workspace",
+		RegistryRevision: "rev-1",
+		Task:             "task",
+		Actor:            "U12345678",
+		TeamID:           "T12345678",
+		ConversationKey:  "slack:T12345678:dm:D12345678",
+		Status:           domain.JobQueued,
+		TimeoutAt:        time.Now().Add(time.Minute),
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+		OriginalCallID:   "secret-call",
+		RequestSHA256:    "request",
+	}
 	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 		t.Fatalf("create job = %v, err = %v", created, err)
 	}
@@ -429,7 +505,8 @@ func TestDurableExternalAgentDispatcherNormalizesForegroundResultIdentity(t *tes
 			if result.Text != tc.final || result.ResultBytes != wantBytes || result.ResultSHA256 != wantSHA {
 				t.Fatalf("foreground identity = %+v, want text %q bytes %d sha %s", result, tc.final, wantBytes, wantSHA)
 			}
-			if result.DeliveryMode != "" || result.DeliveryCanonicalMarkdown != "" || result.DeliveryPolicyVersion != "" || result.DeliveryArtifactRef != "" || result.Inline || result.ArtifactRef != "" {
+			if result.DeliveryMode != "" || result.DeliveryCanonicalMarkdown != "" || result.DeliveryPolicyVersion != "" || result.DeliveryArtifactRef != "" || result.Inline ||
+				result.ArtifactRef != "" {
 				t.Fatalf("foreground result carried detached delivery metadata: %+v", result)
 			}
 			if wantBytes != int64(len([]rune(tc.final))) && result.ResultBytes == int64(len([]rune(tc.final))) {
@@ -475,7 +552,24 @@ func TestDurableExternalAgentDispatcherForegroundResultPersistsCompleteIdentity(
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
-	job := domain.ExternalAgentJob{ID: "job_fg", Mode: domain.JobForeground, Provider: "codex", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "rev-1", Task: "task", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Status: domain.JobQueued, TimeoutAt: time.Now().Add(time.Minute), CreatedAt: time.Now(), UpdatedAt: time.Now(), OriginalCallID: "fg-call", RequestSHA256: "request"}
+	job := domain.ExternalAgentJob{
+		ID:               "job_fg",
+		Mode:             domain.JobForeground,
+		Provider:         "codex",
+		Profile:          "build",
+		PrimaryProject:   "workspace",
+		RegistryRevision: "rev-1",
+		Task:             "task",
+		Actor:            "U12345678",
+		TeamID:           "T12345678",
+		ConversationKey:  "slack:T12345678:dm:D12345678",
+		Status:           domain.JobQueued,
+		TimeoutAt:        time.Now().Add(time.Minute),
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+		OriginalCallID:   "fg-call",
+		RequestSHA256:    "request",
+	}
 	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 		t.Fatalf("create job = %v, err = %v", created, err)
 	}
@@ -605,5 +699,7 @@ func (failingDeliveryArtifacts) Get(context.Context, string, string, string, int
 	return nil, errors.New("injected delivery artifact unavailable")
 }
 
-var _ port.TrustedResultStore = cancelingTrustedResultStore{}
-var _ port.ResultArtifactStore = failingDeliveryArtifacts{}
+var (
+	_ port.TrustedResultStore  = cancelingTrustedResultStore{}
+	_ port.ResultArtifactStore = failingDeliveryArtifacts{}
+)

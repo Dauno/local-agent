@@ -39,7 +39,10 @@ func TestNotificationWorkerBacksOffAmbiguousReconciliation(t *testing.T) {
 		PublishState: domain.NotificationPublishing,
 	}}
 	publisher := &fakeNotificationPublisher{reconcileErr: port.NewNotificationPublishError("notification_publish_ambiguous", true, true, errors.New("transient history failure"))}
-	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second, RetryBase: time.Second, RetryMax: time.Minute}, NotificationDependencies{Store: store, Publisher: publisher})
+	worker, err := NewNotificationWorker(
+		NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second, RetryBase: time.Second, RetryMax: time.Minute},
+		NotificationDependencies{Store: store, Publisher: publisher},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -72,9 +75,11 @@ func (s *fakeNotificationStore) ClaimNextNotification(context.Context, time.Time
 		return nil, nil
 	}
 	s.claimed = true
-	s.notification.NeedsReconciliation = s.notification.NeedsReconciliation || s.notification.PublishState == domain.NotificationPublishing || (s.notification.PublishState == domain.NotificationUnknown && s.notification.DeliveryMode == domain.JobResultDeliveryFile)
+	s.notification.NeedsReconciliation = s.notification.NeedsReconciliation || s.notification.PublishState == domain.NotificationPublishing ||
+		(s.notification.PublishState == domain.NotificationUnknown && s.notification.DeliveryMode == domain.JobResultDeliveryFile)
 	return &s.notification, nil
 }
+
 func (s *fakeNotificationStore) MarkNotificationPublished(_ context.Context, n *domain.ExternalAgentJobNotification, ts string, _ time.Time) error {
 	if s.markPublishedErr != nil {
 		return s.markPublishedErr
@@ -86,6 +91,7 @@ func (s *fakeNotificationStore) MarkNotificationPublished(_ context.Context, n *
 	s.notification.PublishState = domain.NotificationPublished
 	return nil
 }
+
 func (s *fakeNotificationStore) MarkNotificationUnknown(_ context.Context, _ *domain.ExternalAgentJobNotification, code string) error {
 	if s.markUnknownErr != nil {
 		return s.markUnknownErr
@@ -95,6 +101,7 @@ func (s *fakeNotificationStore) MarkNotificationUnknown(_ context.Context, _ *do
 	s.notification.LastErrorCode = code
 	return nil
 }
+
 func (s *fakeNotificationStore) MarkNotificationRetry(_ context.Context, _ *domain.ExternalAgentJobNotification, code string, next, _ time.Time) error {
 	if s.markRetryErr != nil {
 		return s.markRetryErr
@@ -120,6 +127,7 @@ func (p *fakeNotificationPublisher) Publish(context.Context, domain.ExternalAgen
 	}
 	return p.publishResponse, nil
 }
+
 func (p *fakeNotificationPublisher) Reconcile(context.Context, domain.ExternalAgentJobNotification) (string, bool, error) {
 	p.reconcileCalled = true
 	if p.reconcileErr != nil {
@@ -186,7 +194,10 @@ func TestNotificationWorkerRetriesDefinitiveFailureWithPersistedBackoff(t *testi
 		PublishState: domain.NotificationPending,
 	}}
 	publisher := &fakeNotificationPublisher{publishErr: &port.NotificationPublishError{Code: "result_file_upload_failed", Retryable: true, Err: errors.New("definitive")}}
-	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second, RetryBase: time.Second, RetryMax: time.Minute}, NotificationDependencies{Store: store, Publisher: publisher})
+	worker, err := NewNotificationWorker(
+		NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second, RetryBase: time.Second, RetryMax: time.Minute},
+		NotificationDependencies{Store: store, Publisher: publisher},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -232,7 +243,10 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 	}}
 	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
 	completer := &fakeHostCompleter{turn: port.AgentTurn{Text: content}}
-	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, HostCompleter: completer})
+	worker, err := NewNotificationWorker(
+		NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second},
+		NotificationDependencies{Store: store, Publisher: publisher, HostCompleter: completer},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -267,7 +281,10 @@ func TestNotificationWorkerPreservesBoundedResultErrorCodes(t *testing.T) {
 				MaxMarkdownParts: 1,
 			}
 			completer := &fakeHostCompleter{err: &domain.ResultError{Code: domain.ResultErrorCode(code), Err: errors.New("synthetic detail that must never surface")}}
-			worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: &fakeNotificationStore{}, Publisher: &fakeNotificationPublisher{}, HostCompleter: completer})
+			worker, err := NewNotificationWorker(
+				NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second},
+				NotificationDependencies{Store: &fakeNotificationStore{}, Publisher: &fakeNotificationPublisher{}, HostCompleter: completer},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -300,7 +317,10 @@ func TestNotificationWorkerRejectsHostCompletionResultIdentityMismatch(t *testin
 	store := &fakeNotificationStore{notification: notification}
 	publisher := &fakeNotificationPublisher{publishResponse: port.PublishedResponse{LastMessageTS: "1710000000.000001"}}
 	completer := &fakeHostCompleter{turn: port.AgentTurn{Text: content}}
-	worker, err := NewNotificationWorker(NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second}, NotificationDependencies{Store: store, Publisher: publisher, HostCompleter: completer})
+	worker, err := NewNotificationWorker(
+		NotificationConfig{PollInterval: time.Millisecond, LeaseTTL: time.Second},
+		NotificationDependencies{Store: store, Publisher: publisher, HostCompleter: completer},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -358,6 +378,7 @@ func (l *recordingNotificationLogger) Info(string, ...any)  {}
 func (l *recordingNotificationLogger) Warn(message string, args ...any) {
 	l.warnings = append(l.warnings, fmt.Sprint(append([]any{message}, args...)...))
 }
+
 func (l *recordingNotificationLogger) Error(message string, args ...any) {
 	l.errors = append(l.errors, fmt.Sprint(append([]any{message}, args...)...))
 	if l.onError != nil {
@@ -372,12 +393,15 @@ type recordingNotificationMetrics struct {
 func (m *recordingNotificationMetrics) AddCounter(name string, delta int64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindCounter, Value: float64(delta), Labels: port.CloneMetricLabels(labels)})
 }
+
 func (m *recordingNotificationMetrics) SetGauge(name string, value int64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindGauge, Value: float64(value), Labels: port.CloneMetricLabels(labels)})
 }
+
 func (m *recordingNotificationMetrics) Observe(name string, value float64, labels port.MetricLabels) {
 	m.samples = append(m.samples, port.MetricSample{Name: name, Kind: port.MetricKindObservation, Value: value, Labels: port.CloneMetricLabels(labels)})
 }
+
 func (m *recordingNotificationMetrics) Snapshot() []port.MetricSample {
 	return append([]port.MetricSample(nil), m.samples...)
 }

@@ -222,7 +222,11 @@ func TestDurableDispatcherPersistsSessionAndTranscriptFromRealCLIStream(t *testi
 		t.Fatal(err)
 	}
 	script := filepath.Join(t.TempDir(), "agent.sh")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"session-compose\"}' '{\"type\":\"result\",\"result\":\"done\"}'\n"), 0o700); err != nil {
+	if err := os.WriteFile(
+		script,
+		[]byte("#!/bin/sh\nprintf '%s\\n' '{\"type\":\"thread.started\",\"thread_id\":\"session-compose\"}' '{\"type\":\"result\",\"result\":\"done\"}'\n"),
+		0o700,
+	); err != nil {
 		t.Fatal(err)
 	}
 	session := &agentdef.CLISession{
@@ -231,11 +235,19 @@ func TestDurableDispatcherPersistsSessionAndTranscriptFromRealCLIStream(t *testi
 		Resume:     agentdef.CLISessionResume{ResumeFlag: []string{"--resume", "{{session_id}}"}},
 	}
 	provider := agentdef.Provider{
-		Name: "codex", Type: agentdef.ProviderTypeAgentCLI,
+		Name:       "codex",
+		Type:       agentdef.ProviderTypeAgentCLI,
 		Version:    &agentdef.CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},
 		Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{script}},
-		Stream:     &agentdef.CLIStream{Format: "ndjson", IgnoreTypes: []string{"thread.started"}, FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"}, Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}}, Activity: &agentdef.CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "kind", DiscardTypes: []string{}}, TerminalTypes: []string{"result"}},
-		Session:    session,
+		Stream: &agentdef.CLIStream{
+			Format:        "ndjson",
+			IgnoreTypes:   []string{"thread.started"},
+			FinalText:     agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "result"},
+			Failure:       agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
+			Activity:      &agentdef.CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "kind", DiscardTypes: []string{}},
+			TerminalTypes: []string{"result"},
+		},
+		Session: session,
 	}
 	cliModel, err := agentcli.New(agentcli.Config{
 		Command: "/bin/sh", Provider: provider, Profile: agentdef.Profile{Model: "fake"},
@@ -268,7 +280,11 @@ func TestDurableDispatcherPersistsSessionAndTranscriptFromRealCLIStream(t *testi
 		definition: agentdef.AgentDef{Name: "worker", Model: "codex/fake"}, model: cliModel,
 		cliResolved: &agentdef.ResolvedModel{Provider: provider, Session: session}, registryRevision: "sha256:compose",
 	}
-	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{child}, store: store, policy: domain.ResultDeliveryPolicy{MaxInlineResultBytes: 4096, MaxResultArtifactBytes: 4096, MaxMarkdownParts: 1, MaxFileBytes: 4096}}
+	dispatcher := &externalAgentJobDispatcher{
+		children: []preparedAgentTool{child},
+		store:    store,
+		policy:   domain.ResultDeliveryPolicy{MaxInlineResultBytes: 4096, MaxResultArtifactBytes: 4096, MaxMarkdownParts: 1, MaxFileBytes: 4096},
+	}
 	if _, err := dispatcher.Run(t.Context(), *claimed); err != nil {
 		t.Fatal(err)
 	}

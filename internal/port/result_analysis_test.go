@@ -30,7 +30,15 @@ func newFakeAnalysisStore() *fakeAnalysisStore {
 	return &fakeAnalysisStore{byDigest: map[string]string{}, rows: map[string]AnalysisRecord{}}
 }
 
-func (f *fakeAnalysisStore) Create(_ context.Context, identity domain.AnalysisIdentity, _ domain.AnalysisLimits, objectiveText string, scope domain.ResultScope, workstreamID string, now time.Time) (AnalysisRecord, error) {
+func (f *fakeAnalysisStore) Create(
+	_ context.Context,
+	identity domain.AnalysisIdentity,
+	_ domain.AnalysisLimits,
+	objectiveText string,
+	scope domain.ResultScope,
+	workstreamID string,
+	now time.Time,
+) (AnalysisRecord, error) {
 	if err := identity.Validate(); err != nil {
 		return AnalysisRecord{}, err
 	}

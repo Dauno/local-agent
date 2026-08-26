@@ -25,7 +25,10 @@ func TestDetachedJobIsPersistedBeforeWorkerCompletesIt(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	runtime := &fakeJobRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4}}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: 2 * time.Second, PollInterval: 10 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: 2 * time.Second, PollInterval: 10 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +73,16 @@ func TestJobAndNotificationWakesFollowDurableCommits(t *testing.T) {
 	if err != nil || claimed == nil {
 		t.Fatalf("ClaimNext() = %#v, %v", claimed, err)
 	}
-	if err := service.transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4}, "", time.Now().UTC()); err != nil {
+	if err := service.transition(
+		t.Context(),
+		job.ID,
+		claimed.LeaseOwner,
+		claimed.Attempt,
+		domain.JobCompleted,
+		&domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4},
+		"",
+		time.Now().UTC(),
+	); err != nil {
 		t.Fatal(err)
 	}
 	if notificationWakes != 1 {
@@ -96,7 +108,10 @@ func TestStopAdmissionDrainsRunningJobWithoutClaimingQueuedWork(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
 	runtime := &fakeJobRuntime{result: domain.ExternalAgentInvocationResult{Text: "drained", ResultBytes: 7}, block: make(chan struct{})}
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{Store: jobStore, Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1},
+		Dependencies{Store: jobStore, Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,7 +155,10 @@ func TestReconciliationRenewsLeaseUntilCompletion(t *testing.T) {
 	jobStore := &recordingJobStore{ExternalAgentJobStore: sqlite.NewExternalAgentJobStore(store), renewed: renewed}
 	runtime := &fakeRecoveryRuntime{wait: renewed, result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}
 	clock := fixedClock{now: time.Now().UTC()}
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 30 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime, Clock: clock})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 30 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime, Clock: clock},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -164,7 +182,10 @@ func TestExpiredReconciliationReturnsToCompletionUnknown(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeRecoveryRuntime{}})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: &fakeRecoveryRuntime{}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -194,7 +215,10 @@ func TestExpiredRunningJobAutomaticallyReconcilesPersistedSession(t *testing.T) 
 	runtime := &fakeRecoveryRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}
 	// The recovery lease must outlive one heartbeat under test load. Expiry of
 	// the dead worker's lease is driven by its own claim TTL below, not by this.
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 2 * time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 2 * time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -239,7 +263,10 @@ func TestCancelledJobIsNotAutomaticallyResumed(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
 	runtime := &fakeRecoveryRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -290,7 +317,10 @@ func TestExpiredReconciliationIsNotAutomaticallyRetried(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
-	service, err := New(Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeRecoveryRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}})
+	service, err := New(
+		Config{DefaultTimeout: time.Minute, MaxTimeout: time.Hour, LeaseTTL: 20 * time.Millisecond, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: &fakeRecoveryRuntime{result: domain.ExternalAgentInvocationResult{Text: "done", ResultBytes: 4}}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -321,7 +351,10 @@ func TestRunningJobCancellationIsIdempotentBeforeSideEffects(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	runtime := &fakeJobRuntime{block: make(chan struct{})}
 	jobStore := sqlite.NewExternalAgentJobStore(store)
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 10 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 10 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -357,7 +390,10 @@ func TestJobTotalTimeoutIsTerminalAndNeverRequeued(t *testing.T) {
 	jobStore := sqlite.NewExternalAgentJobStore(store)
 	runtime := &fakeJobRuntime{block: make(chan struct{})}
 	clock := &fakeClock{now: time.Now().UTC()}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: 10 * time.Second, PollInterval: time.Hour, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime, Clock: clock})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: 10 * time.Second, PollInterval: time.Hour, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime, Clock: clock},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,7 +427,10 @@ func TestForegroundWaitReturnsWhenQueuedJobTotalTimeoutExpires(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: &fakeJobRuntime{}})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: &fakeJobRuntime{}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -417,7 +456,10 @@ func TestForegroundWaitDoesNotBlockOnExpiredJobCancellation(t *testing.T) {
 	}
 	clock := &fakeClock{now: time.Now().UTC()}
 	timeout := time.Hour
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: 24 * time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, Clock: clock})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: 24 * time.Hour, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, Clock: clock},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -466,7 +508,10 @@ func TestStartRejectsUnboundConversation(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = store.Close() })
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: &fakeJobRuntime{}})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: &fakeJobRuntime{}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -486,7 +531,10 @@ func TestSafeRetryDoesNotPublishQueuedAsTerminal(t *testing.T) {
 	jobStore := sqlite.NewExternalAgentJobStore(store)
 	runtime := &fakeJobRuntime{block: make(chan struct{})}
 	publisher := &fakeJobPublisher{}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime, Publisher: publisher})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime, Publisher: publisher},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -524,7 +572,10 @@ func TestTransientExternalAgentProcessExitRetriesBeforeSession(t *testing.T) {
 		result: domain.ExternalAgentInvocationResult{Text: "done", Inline: true, ResultBytes: 4},
 		errs:   []error{&domain.ExternalAgentError{Code: domain.ExternalAgentErrorProcessExit, Err: context.Canceled}},
 	}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -549,7 +600,10 @@ func TestNonRetryableExternalAgentErrorPreservesCode(t *testing.T) {
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
 	runtime := &fakeJobRuntime{errs: []error{&domain.ExternalAgentError{Code: domain.ExternalAgentErrorConfigDrift, Err: context.Canceled}}}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -581,7 +635,10 @@ func TestHostCompletionReadsOnlyAuthorizedCompleteResult(t *testing.T) {
 	content := "complete sanitized result"
 	digest := sha256.Sum256([]byte(content))
 	job := testRequest(domain.JobDetached)
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1},
+		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -703,8 +760,17 @@ func TestIdentityFailureCounterCoversFullChunkAndAdapterReads(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return domain.ExternalAgentInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "foreign-delivery.result", ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes,
-					DeliveryArtifactRef: "foreign-delivery.result", DeliveryContentSHA256: artifact.SHA256, DeliveryContentBytes: artifact.Bytes, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6}
+				return domain.ExternalAgentInvocationResult{
+					DeliveryMode:             domain.JobResultDeliveryFile,
+					ArtifactRef:              "foreign-delivery.result",
+					ResultSHA256:             artifact.SHA256,
+					ResultBytes:              artifact.Bytes,
+					DeliveryArtifactRef:      "foreign-delivery.result",
+					DeliveryContentSHA256:    artifact.SHA256,
+					DeliveryContentBytes:     artifact.Bytes,
+					DeliveryPolicyVersion:    domain.JobDeliveryPolicyV1,
+					DeliveryMaxMarkdownParts: 6,
+				}
 			},
 			read: func(service *Service, job *domain.ExternalAgentJob) error {
 				_, err := service.ReadResult(t.Context(), job.ID, "U12345678", "slack:T12345678:dm:D12345678")
@@ -737,8 +803,17 @@ func TestIdentityFailureCounterCoversFullChunkAndAdapterReads(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return domain.ExternalAgentInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes,
-					DeliveryArtifactRef: artifact.Reference, DeliveryContentSHA256: artifact.SHA256, DeliveryContentBytes: artifact.Bytes, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6}
+				return domain.ExternalAgentInvocationResult{
+					DeliveryMode:             domain.JobResultDeliveryFile,
+					ArtifactRef:              artifact.Reference,
+					ResultSHA256:             artifact.SHA256,
+					ResultBytes:              artifact.Bytes,
+					DeliveryArtifactRef:      artifact.Reference,
+					DeliveryContentSHA256:    artifact.SHA256,
+					DeliveryContentBytes:     artifact.Bytes,
+					DeliveryPolicyVersion:    domain.JobDeliveryPolicyV1,
+					DeliveryMaxMarkdownParts: 6,
+				}
 			},
 			tamper: func(t *testing.T, job *domain.ExternalAgentJob, db *sqlite.Store, stateDir string) {
 				ref := domain.CanonicalArtifactReference(job.ID)
@@ -803,7 +878,9 @@ func TestIdentityFailureCounterCoversFullChunkAndAdapterReads(t *testing.T) {
 				if testCase.wantCount == 0 {
 					t.Fatalf("healthy read failed: %v", readErr)
 				}
-				if !strings.Contains(readErr.Error(), string(domain.ResultErrorIdentityInvalid)) && !strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactOwnerRefMismatch)) && !strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactBytesMismatch)) && !strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactDigestMismatch)) {
+				if !strings.Contains(readErr.Error(), string(domain.ResultErrorIdentityInvalid)) && !strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactOwnerRefMismatch)) &&
+					!strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactBytesMismatch)) &&
+					!strings.Contains(readErr.Error(), string(domain.ResultErrorArtifactDigestMismatch)) {
 					t.Fatalf("read error = %q, want an identity-class code", readErr.Error())
 				}
 			}
@@ -946,11 +1023,24 @@ func TestReadResultChunkRangeErrorsAreRequestErrorsNotIdentityFailures(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	completeJobWithResult(t, jobStore, created, domain.ExternalAgentInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes})
+	completeJobWithResult(
+		t,
+		jobStore,
+		created,
+		domain.ExternalAgentInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes},
+	)
 	if err := os.WriteFile(filepath.Join(stateDir, "artifacts", artifact.Reference), []byte("tampered!"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ReadResultChunk(t.Context(), created.ID, request.Actor, request.ConversationKey, 0, 4); err == nil || !strings.Contains(err.Error(), string(domain.ResultErrorArtifactBytesMismatch)) {
+	if _, err := service.ReadResultChunk(
+		t.Context(),
+		created.ID,
+		request.Actor,
+		request.ConversationKey,
+		0,
+		4,
+	); err == nil ||
+		!strings.Contains(err.Error(), string(domain.ResultErrorArtifactBytesMismatch)) {
 		t.Fatalf("tampered artifact error = %v", err)
 	}
 	if got := identityCount(corruptionMetrics); got != 1 {
@@ -1023,7 +1113,10 @@ func TestHostCompletionVerifiesPrivateArtifactDigest(t *testing.T) {
 	content := "file result"
 	digest := sha256.Sum256([]byte(content))
 	request := testRequest(domain.JobDetached)
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: fakeResultArtifacts{data: []byte(content)}, MaxResultBytes: 1024})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Millisecond, Concurrency: 1, MaxAttempts: 1},
+		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}, Artifacts: fakeResultArtifacts{data: []byte(content)}, MaxResultBytes: 1024},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1036,8 +1129,15 @@ func TestHostCompletionVerifiesPrivateArtifactDigest(t *testing.T) {
 		t.Fatal(err)
 	}
 	if err := jobStore.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{
-		DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: "job_" + job.ID[4:] + "-delivery.result", ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)),
-		DeliveryArtifactRef: "job_" + job.ID[4:] + "-delivery.result", DeliveryContentSHA256: fmt.Sprintf("%x", digest), DeliveryContentBytes: int64(len(content)), DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6,
+		DeliveryMode:             domain.JobResultDeliveryFile,
+		ArtifactRef:              "job_" + job.ID[4:] + "-delivery.result",
+		ResultSHA256:             fmt.Sprintf("%x", digest),
+		ResultBytes:              int64(len(content)),
+		DeliveryArtifactRef:      "job_" + job.ID[4:] + "-delivery.result",
+		DeliveryContentSHA256:    fmt.Sprintf("%x", digest),
+		DeliveryContentBytes:     int64(len(content)),
+		DeliveryPolicyVersion:    domain.JobDeliveryPolicyV1,
+		DeliveryMaxMarkdownParts: 6,
 	}, "", time.Now().UTC()); err != nil {
 		t.Fatal(err)
 	}
@@ -1143,7 +1243,15 @@ func TestReadResultChunkStreamsAndReverifiesFileModeArtifact(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(stateDir, "artifacts", artifact.Reference), []byte("file🔥tamper"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := service.ReadResultChunk(t.Context(), job.ID, request.Actor, request.ConversationKey, 0, 5); err == nil || !strings.Contains(err.Error(), string(domain.ResultErrorArtifactDigestMismatch)) {
+	if _, err := service.ReadResultChunk(
+		t.Context(),
+		job.ID,
+		request.Actor,
+		request.ConversationKey,
+		0,
+		5,
+	); err == nil ||
+		!strings.Contains(err.Error(), string(domain.ResultErrorArtifactDigestMismatch)) {
 		t.Fatalf("tampered file-mode artifact error = %v", err)
 	}
 }
@@ -1160,7 +1268,10 @@ func TestStartAndWaitReturnsVerifiedForegroundResult(t *testing.T) {
 	runtime := &fakeJobRuntime{result: domain.ExternalAgentInvocationResult{
 		Text: content, Inline: true, ResultSHA256: fmt.Sprintf("%x", digest), ResultBytes: int64(len(content)),
 	}}
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: runtime})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: runtime},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1298,7 +1409,10 @@ func TestStartAndWaitRejectsTamperedForegroundBinding(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = store.Close() })
 	jobStore := sqlite.NewExternalAgentJobStore(store)
-	service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+		Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1365,7 +1479,10 @@ func TestReadResultRejectsIncompleteIdentity(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			jobStore := sqlite.NewExternalAgentJobStore(store)
-			service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+			service, err := New(
+				Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+				Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1447,7 +1564,12 @@ func TestVerifiedResultFailuresAreBoundedAndRedacted(t *testing.T) {
 				return store
 			},
 			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.ExternalAgentInvocationResult, func(t *testing.T)) {
-				return domain.ExternalAgentInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: jobID + "-delivery.result", ResultSHA256: redactedDigest, ResultBytes: int64(len(redactedContent))}, nil
+				return domain.ExternalAgentInvocationResult{
+					DeliveryMode: domain.JobResultDeliveryFile,
+					ArtifactRef:  jobID + "-delivery.result",
+					ResultSHA256: redactedDigest,
+					ResultBytes:  int64(len(redactedContent)),
+				}, nil
 			},
 			read:     readResult,
 			wantCode: string(domain.ResultErrorArtifactMissing),
@@ -1485,7 +1607,12 @@ func TestVerifiedResultFailuresAreBoundedAndRedacted(t *testing.T) {
 				if err != nil {
 					t.Fatal(err)
 				}
-				return domain.ExternalAgentInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: artifact.Reference, ResultSHA256: artifact.SHA256, ResultBytes: artifact.Bytes + 1}, nil
+				return domain.ExternalAgentInvocationResult{
+					DeliveryMode: domain.JobResultDeliveryFile,
+					ArtifactRef:  artifact.Reference,
+					ResultSHA256: artifact.SHA256,
+					ResultBytes:  artifact.Bytes + 1,
+				}, nil
 			},
 			read:     readResult,
 			wantCode: string(domain.ResultErrorArtifactBytesMismatch),
@@ -1534,7 +1661,12 @@ func TestVerifiedResultFailuresAreBoundedAndRedacted(t *testing.T) {
 				return leakyResultArtifacts{content: redactedContent}
 			},
 			complete: func(t *testing.T, jobID string, store port.ResultArtifactStore) (domain.ExternalAgentInvocationResult, func(t *testing.T)) {
-				return domain.ExternalAgentInvocationResult{DeliveryMode: domain.JobResultDeliveryFile, ArtifactRef: jobID + "-delivery.result", ResultSHA256: redactedDigest, ResultBytes: int64(len(redactedContent))}, nil
+				return domain.ExternalAgentInvocationResult{
+					DeliveryMode: domain.JobResultDeliveryFile,
+					ArtifactRef:  jobID + "-delivery.result",
+					ResultSHA256: redactedDigest,
+					ResultBytes:  int64(len(redactedContent)),
+				}, nil
 			},
 			read:     readResult,
 			wantCode: string(domain.ResultErrorArtifactInvalid),
@@ -1594,7 +1726,12 @@ func (f leakyResultArtifacts) Put(context.Context, string, string) (domain.Resul
 }
 
 func (f leakyResultArtifacts) Get(context.Context, string, string, string, int64) ([]byte, error) {
-	return nil, errors.New("artifact read exploded: digest " + fmt.Sprintf("%x", sha256.Sum256([]byte(f.content))) + " ref job_redacted7f3c-delivery.result path /var/run/local-agent-redacted-7f3c/artifacts owner U-redacted-actor-7f3c conversation slack:T-redacted-team-7f3c:dm:D-redacted-channel-7f3c content " + f.content)
+	return nil, errors.New(
+		"artifact read exploded: digest " + fmt.Sprintf(
+			"%x",
+			sha256.Sum256([]byte(f.content)),
+		) + " ref job_redacted7f3c-delivery.result path /var/run/local-agent-redacted-7f3c/artifacts owner U-redacted-actor-7f3c conversation slack:T-redacted-team-7f3c:dm:D-redacted-channel-7f3c content " + f.content,
+	)
 }
 
 func TestStartAndWaitKeepsTerminalStatusErrors(t *testing.T) {
@@ -1630,7 +1767,10 @@ func TestStartAndWaitKeepsTerminalStatusErrors(t *testing.T) {
 			}
 			t.Cleanup(func() { _ = store.Close() })
 			jobStore := sqlite.NewExternalAgentJobStore(store)
-			service, err := New(Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2}, Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}})
+			service, err := New(
+				Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: 5 * time.Millisecond, Concurrency: 1, MaxAttempts: 2},
+				Dependencies{Store: jobStore, Runtime: &fakeJobRuntime{}},
+			)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1831,7 +1971,20 @@ func createCompletionUnknownJob(t *testing.T, service *Service, store port.Exter
 }
 
 func testRequestWithTimeout(mode domain.ExternalAgentJobMode, timeout time.Duration) domain.ExternalAgentJobRequest {
-	return domain.ExternalAgentJobRequest{Provider: "opencode", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "r1", Task: "task", Mode: mode, WrapperCallID: "wrapper-1", OriginalCallID: "original-1", Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678", Timeout: timeout}
+	return domain.ExternalAgentJobRequest{
+		Provider:         "opencode",
+		Profile:          "build",
+		PrimaryProject:   "workspace",
+		RegistryRevision: "r1",
+		Task:             "task",
+		Mode:             mode,
+		WrapperCallID:    "wrapper-1",
+		OriginalCallID:   "original-1",
+		Actor:            "U12345678",
+		TeamID:           "T12345678",
+		ConversationKey:  "slack:T12345678:dm:D12345678",
+		Timeout:          timeout,
+	}
 }
 
 func waitForJob(t *testing.T, store port.ExternalAgentJobStore, id string, status domain.ExternalAgentJobStatus) *domain.ExternalAgentJob {

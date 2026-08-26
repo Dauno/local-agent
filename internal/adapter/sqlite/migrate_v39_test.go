@@ -136,10 +136,18 @@ func TestMigrationV39UpgradePreservesStateAndSeedsQueues(t *testing.T) {
 		VALUES ('mem_legacy1', 'legacy', 'Legacy', '', 'active', '[]', 'topics', '', 'legacy content', 1, 1, 1)`)
 	insert(`INSERT INTO memory_topic_revisions (topic_id, revision_number, content, change_reason, created_at)
 		VALUES ('mem_legacy1', 1, 'legacy content', 'init', 1)`)
-	insert(`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, valid_from, valid_until, current_rev, created_at, updated_at)
-		VALUES ('claim-a', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', 0, 0, 1, ?, ?)`, now, now)
-	insert(`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, valid_from, valid_until, current_rev, created_at, updated_at)
-		VALUES ('claim-b', 'db', 'uses', 'string', 'y', 'project', 'p', 'human', 'r2', 'archived', 0, 0, 3, ?, ?)`, now, now)
+	insert(
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, valid_from, valid_until, current_rev, created_at, updated_at)
+		VALUES ('claim-a', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', 0, 0, 1, ?, ?)`,
+		now,
+		now,
+	)
+	insert(
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, valid_from, valid_until, current_rev, created_at, updated_at)
+		VALUES ('claim-b', 'db', 'uses', 'string', 'y', 'project', 'p', 'human', 'r2', 'archived', 0, 0, 3, ?, ?)`,
+		now,
+		now,
+	)
 	insert(`INSERT INTO knowledge_preferences (owner_key, key, value_kind, value_text, status, source_ref, current_rev, created_at, updated_at)
 		VALUES ('slack:T1:user:U1', 'theme', 'string', 'dark', 'active', 'r3', 1, ?, ?)`, now, now)
 	insert(`INSERT INTO knowledge_preferences (owner_key, key, value_kind, value_number, status, source_ref, current_rev, created_at, updated_at)
@@ -255,15 +263,23 @@ func TestKnowledgeRetrievalQueueEnqueueOnMutations(t *testing.T) {
 	}
 
 	// Insert enqueues both identities with generation 1 pending.
-	if _, err := db.ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now); err != nil {
+	if _, err := db.ExecContext(
+		t.Context(),
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`,
+		now,
+		now,
+	); err != nil {
 		t.Fatal(err)
 	}
 	assertBothQueues("claim", "c1", 1)
 
 	// A mutation on a settled queue row increments generation and resets
 	// attempts/lease/error state.
-	if _, err := db.ExecContext(t.Context(), `UPDATE knowledge_lexical_queue SET status = 'done', attempts = 5, next_attempt = 99, lease_until = 88, last_error = 'attempts_exhausted' WHERE item_kind = 'claim' AND item_id = 'c1'`); err != nil {
+	if _, err := db.ExecContext(
+		t.Context(),
+		`UPDATE knowledge_lexical_queue SET status = 'done', attempts = 5, next_attempt = 99, lease_until = 88, last_error = 'attempts_exhausted' WHERE item_kind = 'claim' AND item_id = 'c1'`,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := db.ExecContext(t.Context(), `UPDATE knowledge_claims SET status = 'verified', current_rev = current_rev + 1, updated_at = ? WHERE id = 'c1'`, now); err != nil {
@@ -337,8 +353,13 @@ func TestKnowledgeRetrievalQueueEnqueueRollsBackWithTruth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := tx.ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now); err != nil {
+	if _, err := tx.ExecContext(
+		t.Context(),
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`,
+		now,
+		now,
+	); err != nil {
 		t.Fatal(err)
 	}
 	var queueRows int
@@ -352,7 +373,12 @@ func TestKnowledgeRetrievalQueueEnqueueRollsBackWithTruth(t *testing.T) {
 	if err := db.QueryRowContext(t.Context(), `SELECT COUNT(*) FROM knowledge_claims WHERE id = 'c1'`).Scan(&claims); err != nil {
 		t.Fatal(err)
 	}
-	if err := db.QueryRowContext(t.Context(), `SELECT (SELECT COUNT(*) FROM knowledge_lexical_queue WHERE item_kind = 'claim' AND item_id = 'c1') + (SELECT COUNT(*) FROM knowledge_embedding_queue WHERE item_kind = 'claim' AND item_id = 'c1')`).Scan(&rows); err != nil {
+	if err := db.QueryRowContext(
+		t.Context(),
+		`SELECT (SELECT COUNT(*) FROM knowledge_lexical_queue WHERE item_kind = 'claim' AND item_id = 'c1') + (SELECT COUNT(*) FROM knowledge_embedding_queue WHERE item_kind = 'claim' AND item_id = 'c1')`,
+	).Scan(
+		&rows,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if claims != 0 || rows != 0 {
@@ -363,8 +389,13 @@ func TestKnowledgeRetrievalQueueEnqueueRollsBackWithTruth(t *testing.T) {
 func TestMigrationV39CrashRollsBackAndReopens(t *testing.T) {
 	path, raw := createSchemaAtVersion(t, 38)
 	now := time.Now().UTC().UnixNano()
-	if _, err := raw.ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now); err != nil {
+	if _, err := raw.ExecContext(
+		t.Context(),
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`,
+		now,
+		now,
+	); err != nil {
 		_ = raw.Close()
 		t.Fatal(err)
 	}
@@ -426,8 +457,13 @@ func TestMigrationV39ReopenPreservesRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().UnixNano()
-	if _, err := store.DB().ExecContext(t.Context(), `INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
-		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`, now, now); err != nil {
+	if _, err := store.DB().ExecContext(
+		t.Context(),
+		`INSERT INTO knowledge_claims (id, subject, predicate, value_kind, value_text, scope_kind, scope_id, source_class, source_ref, status, created_at, updated_at)
+		VALUES ('c1', 'api', 'is', 'string', 'x', 'project', 'p', 'human', 'r1', 'asserted', ?, ?)`,
+		now,
+		now,
+	); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {

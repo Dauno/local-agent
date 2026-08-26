@@ -33,9 +33,12 @@ const (
 	upgradeCancelled        = "Actualizacion cancelada."
 	resumeNeededSummary     = "database is at v43 with an incomplete rollout (postflight not yet passed); will re-run postflight"
 )
-const promptMigrate = "Aplicar la migracion de schema v33 a v43 sobre "
-const promptV33Stopped = "El proceso v33 desplegado no participa en el protocolo de bloqueo de este comando. Confirme que ese proceso esta detenido antes de continuar."
-const terminalRangeText = "is outside the range local-agent db upgrade accepts ([33, 43]); this file cannot be upgraded or opened by this binary"
+
+const (
+	promptMigrate     = "Aplicar la migracion de schema v33 a v43 sobre "
+	promptV33Stopped  = "El proceso v33 desplegado no participa en el protocolo de bloqueo de este comando. Confirme que ese proceso esta detenido antes de continuar."
+	terminalRangeText = "is outside the range local-agent db upgrade accepts ([33, 43]); this file cannot be upgraded or opened by this binary"
+)
 
 func TestDBUpgradeFreshRunPromptsTwiceThenCompletes(t *testing.T) {
 	h := newUpgradeHarness(t)

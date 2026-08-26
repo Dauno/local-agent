@@ -454,7 +454,8 @@ func (w Workstream) ValidateWithLimits(limits WorkstreamLimits) error {
 	if err := limits.Validate(); err != nil {
 		return err
 	}
-	if strings.TrimSpace(w.ID) == "" || strings.TrimSpace(string(w.ConversationKey)) == "" || strings.TrimSpace(w.OwnerActor) == "" || strings.TrimSpace(w.Project) == "" || strings.TrimSpace(w.Objective) == "" {
+	if strings.TrimSpace(w.ID) == "" || strings.TrimSpace(string(w.ConversationKey)) == "" || strings.TrimSpace(w.OwnerActor) == "" || strings.TrimSpace(w.Project) == "" ||
+		strings.TrimSpace(w.Objective) == "" {
 		return errors.New("workstream required fields are missing")
 	}
 	for name, value := range map[string]string{
@@ -475,7 +476,8 @@ func (w Workstream) ValidateWithLimits(limits WorkstreamLimits) error {
 		return errors.New("workstream revision must not be negative")
 	}
 
-	if len(w.Tasks) > limits.MaxTasks || len(w.Constraints) > limits.MaxConstraints || len(w.Decisions) > limits.MaxDecisions || len(w.OpenQuestions) > limits.MaxQuestions || len(w.ResultLinks) > limits.MaxResultLinks {
+	if len(w.Tasks) > limits.MaxTasks || len(w.Constraints) > limits.MaxConstraints || len(w.Decisions) > limits.MaxDecisions || len(w.OpenQuestions) > limits.MaxQuestions ||
+		len(w.ResultLinks) > limits.MaxResultLinks {
 		return fmt.Errorf("%w: workstream collection limit exceeded", ErrWorkstreamLimitExceeded)
 	}
 	if err := validateWorkstreamCollections(w, limits); err != nil {
@@ -517,7 +519,9 @@ func validateWorkstreamCollections(w Workstream, limits WorkstreamLimits) error 
 		if strings.TrimSpace(decision.ID) == "" || strings.TrimSpace(decision.Proposal) == "" {
 			return errors.New("workstream decision required fields are missing")
 		}
-		if utf8.RuneCountInString(decision.ID) > limits.MaxIDRunes || utf8.RuneCountInString(decision.Proposal) > limits.MaxTextRunes || utf8.RuneCountInString(decision.Source) > limits.MaxTextRunes || utf8.RuneCountInString(decision.Rationale) > limits.MaxTextRunes {
+		if utf8.RuneCountInString(decision.ID) > limits.MaxIDRunes || utf8.RuneCountInString(decision.Proposal) > limits.MaxTextRunes ||
+			utf8.RuneCountInString(decision.Source) > limits.MaxTextRunes ||
+			utf8.RuneCountInString(decision.Rationale) > limits.MaxTextRunes {
 			return fmt.Errorf("%w: workstream decision exceeds configured bounds", ErrWorkstreamLimitExceeded)
 		}
 		switch decision.Status {
@@ -559,7 +563,8 @@ func validateWorkstreamCollections(w Workstream, limits WorkstreamLimits) error 
 		if strings.TrimSpace(result.ID) == "" || strings.TrimSpace(result.ResultIdentity) == "" {
 			return errors.New("workstream result link required fields are missing")
 		}
-		if utf8.RuneCountInString(result.ID) > limits.MaxIDRunes || utf8.RuneCountInString(result.TaskID) > limits.MaxIDRunes || utf8.RuneCountInString(result.ResultIdentity) > limits.MaxIDRunes || utf8.RuneCountInString(result.Description) > limits.MaxTextRunes {
+		if utf8.RuneCountInString(result.ID) > limits.MaxIDRunes || utf8.RuneCountInString(result.TaskID) > limits.MaxIDRunes || utf8.RuneCountInString(result.ResultIdentity) > limits.MaxIDRunes ||
+			utf8.RuneCountInString(result.Description) > limits.MaxTextRunes {
 			return fmt.Errorf("%w: workstream result link exceeds configured bounds", ErrWorkstreamLimitExceeded)
 		}
 		if _, exists := resultIDs[result.ID]; exists {
@@ -580,7 +585,10 @@ func validateWorkstreamTasks(w Workstream, limits WorkstreamLimits) (map[string]
 		if task.Project != w.Project {
 			return nil, 0, fmt.Errorf("%w: task %q belongs to project %q, workstream belongs to %q", ErrWorkstreamProjectMismatch, task.ID, task.Project, w.Project)
 		}
-		if utf8.RuneCountInString(task.ID) > limits.MaxIDRunes || utf8.RuneCountInString(task.Project) > limits.MaxTextRunes || utf8.RuneCountInString(task.Description) > limits.MaxTextRunes || utf8.RuneCountInString(task.ResultIdentity) > limits.MaxIDRunes || utf8.RuneCountInString(task.ExecutionIdentity) > limits.MaxIDRunes || utf8.RuneCountInString(task.ConfirmationIdentity) > limits.MaxIDRunes {
+		if utf8.RuneCountInString(task.ID) > limits.MaxIDRunes || utf8.RuneCountInString(task.Project) > limits.MaxTextRunes || utf8.RuneCountInString(task.Description) > limits.MaxTextRunes ||
+			utf8.RuneCountInString(task.ResultIdentity) > limits.MaxIDRunes ||
+			utf8.RuneCountInString(task.ExecutionIdentity) > limits.MaxIDRunes ||
+			utf8.RuneCountInString(task.ConfirmationIdentity) > limits.MaxIDRunes {
 			return nil, 0, fmt.Errorf("%w: workstream task exceeds configured bounds", ErrWorkstreamLimitExceeded)
 		}
 		if len(task.RequiredInputs) > limits.MaxDependenciesPerTask || len(task.Dependencies) > limits.MaxDependenciesPerTask {

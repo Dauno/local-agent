@@ -101,7 +101,10 @@ func TestHandleIsolatedGreetingPublishesOnboardingWithoutModelCall(t *testing.T)
 
 func TestHandleRepeatedGreetingDoesNotPublishOrCallModel(t *testing.T) {
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "model response"}}
-	store := &onboardingStoreFake{state: port.OnboardingAlreadyPublished, claim: port.OnboardingDeliveryClaim{DeliveryID: "standard_onboarding:T12345678:U12345678", ConversationKey: "slack:T12345678:dm:D12345678:thread:1700000000.000001"}}
+	store := &onboardingStoreFake{
+		state: port.OnboardingAlreadyPublished,
+		claim: port.OnboardingDeliveryClaim{DeliveryID: "standard_onboarding:T12345678:U12345678", ConversationKey: "slack:T12345678:dm:D12345678:thread:1700000000.000001"},
+	}
 	publisher := &onboardingPublisherFake{}
 	service := newOnboardingService(t, store, publisher, runtime)
 

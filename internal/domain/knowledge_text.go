@@ -10,11 +10,13 @@ import (
 
 var (
 	credentialValuePattern      = regexp.MustCompile(`(?i)\b(?:sk|xoxb|xapp|ghp|gho|glpat)[-_][a-z0-9_=-]{4,}\b`)
-	credentialAssignmentPattern = regexp.MustCompile(`(?i)\b(?:api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|client[_ -]?secret|secret|password|bearer|private[_ -]?key)\b\s*(?:=|:)\s*\S+`)
-	bearerCredentialPattern     = regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}\b`)
-	personalEmailPattern        = regexp.MustCompile(`(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b`)
-	personalPhonePattern        = regexp.MustCompile(`(?i)\b(?:phone|telephone|teléfono|telefono|móvil|movil|cell)\b[^\n]{0,20}\+?\d(?:[ -]?\d){7,}`)
-	paymentCardPattern          = regexp.MustCompile(`\b(?:\d[ -]?){13,19}\b`)
+	credentialAssignmentPattern = regexp.MustCompile(
+		`(?i)\b(?:api[_ -]?key|access[_ -]?token|auth(?:entication|orization)?[_ -]?token|client[_ -]?secret|secret|password|bearer|private[_ -]?key)\b\s*(?:=|:)\s*\S+`,
+	)
+	bearerCredentialPattern = regexp.MustCompile(`(?i)\bbearer\s+[a-z0-9._~+/=-]{8,}\b`)
+	personalEmailPattern    = regexp.MustCompile(`(?i)\b[a-z0-9._%+-]+@[a-z0-9.-]+\.[a-z]{2,}\b`)
+	personalPhonePattern    = regexp.MustCompile(`(?i)\b(?:phone|telephone|teléfono|telefono|móvil|movil|cell)\b[^\n]{0,20}\+?\d(?:[ -]?\d){7,}`)
+	paymentCardPattern      = regexp.MustCompile(`\b(?:\d[ -]?){13,19}\b`)
 )
 
 func SlackOwnerKey(key ConversationKey, userID string) string {
@@ -48,8 +50,26 @@ func ValidateKnowledgeText(value string) error {
 
 var (
 	sensitiveTerms = []string{
-		"social security number", "ssn", "national id", "government id", "passport number", "date of birth", "medical diagnosis", "medical record", "bank account",
-		"número de seguridad social", "numero de seguridad social", "dni", "número de pasaporte", "numero de pasaporte", "fecha de nacimiento", "diagnóstico médico", "diagnostico medico", "historial médico", "historial medico", "cuenta bancaria",
+		"social security number",
+		"ssn",
+		"national id",
+		"government id",
+		"passport number",
+		"date of birth",
+		"medical diagnosis",
+		"medical record",
+		"bank account",
+		"número de seguridad social",
+		"numero de seguridad social",
+		"dni",
+		"número de pasaporte",
+		"numero de pasaporte",
+		"fecha de nacimiento",
+		"diagnóstico médico",
+		"diagnostico medico",
+		"historial médico",
+		"historial medico",
+		"cuenta bancaria",
 	}
 	spanishDirectiveActions = []string{
 		"responder", "contestar", "usar", "incluir", "mencionar", "revelar", "divulgar", "ejecutar", "ignorar", "omitir", "cambiar", "modificar", "eliminar", "borrar",
@@ -58,15 +78,78 @@ var (
 		"instrucción", "instrucciones", "prompt", "política", "politica", "herramienta", "herramientas", "autorización", "autorizacion", "permiso", "permisos",
 	}
 	spanishImperativeMemoryVerbs = []string{
-		"ignora", "omite", "anula", "elude", "ejecuta", "corre", "usa", "llama", "revela", "divulga", "extrae", "concede", "permite", "deniega", "habilita", "deshabilita", "cambia", "modifica", "elimina", "borra", "escribe", "lee", "responde", "contesta",
+		"ignora",
+		"omite",
+		"anula",
+		"elude",
+		"ejecuta",
+		"corre",
+		"usa",
+		"llama",
+		"revela",
+		"divulga",
+		"extrae",
+		"concede",
+		"permite",
+		"deniega",
+		"habilita",
+		"deshabilita",
+		"cambia",
+		"modifica",
+		"elimina",
+		"borra",
+		"escribe",
+		"lee",
+		"responde",
+		"contesta",
 	}
 	spanishDirectiveModals = []string{
 		"debe", "debes", "deben", "deberá", "debera", "deberán", "deberan", "deberías", "deberias", "tiene", "tienes", "tienen", "puede", "puedes", "pueden",
 	}
 	formatOrOutputFactVerbs = []string{"is", "was", "were", "changed", "changes", "change", "has", "had"}
-	imperativeMemoryVerbs   = []string{"ignore", "disregard", "override", "bypass", "follow", "obey", "execute", "run", "call", "invoke", "use", "send", "reveal", "disclose", "exfiltrate", "grant", "allow", "deny", "enable", "disable", "change", "modify", "delete", "remove", "write", "read", "return", "respond", "act", "fetch", "open", "click", "curl", "wget", "bash", "sh", "python", "powershell", "rm"}
-	modalMemoryVerbs        = []string{"must", "should", "shall", "need", "required", "require", "cannot", "can"}
-	directiveWords          = []string{"answer", "include", "mention", "state", "provide", "begin", "end", "be"}
+	imperativeMemoryVerbs   = []string{
+		"ignore",
+		"disregard",
+		"override",
+		"bypass",
+		"follow",
+		"obey",
+		"execute",
+		"run",
+		"call",
+		"invoke",
+		"use",
+		"send",
+		"reveal",
+		"disclose",
+		"exfiltrate",
+		"grant",
+		"allow",
+		"deny",
+		"enable",
+		"disable",
+		"change",
+		"modify",
+		"delete",
+		"remove",
+		"write",
+		"read",
+		"return",
+		"respond",
+		"act",
+		"fetch",
+		"open",
+		"click",
+		"curl",
+		"wget",
+		"bash",
+		"sh",
+		"python",
+		"powershell",
+		"rm",
+	}
+	modalMemoryVerbs = []string{"must", "should", "shall", "need", "required", "require", "cannot", "can"}
+	directiveWords   = []string{"answer", "include", "mention", "state", "provide", "begin", "end", "be"}
 )
 
 func memoryReferenceWords(value string) []string {
@@ -236,7 +319,8 @@ func isPersistentAssistantInstruction(words []string) bool {
 	if len(words) >= 2 && words[0] == "assistant" && modalMemoryVerb(words[1]) {
 		return true
 	}
-	if len(words) >= 4 && words[0] == "in" && (words[1] == "every" || words[1] == "each" || words[1] == "all") && (words[2] == "response" || words[2] == "responses" || words[2] == "reply" || words[2] == "replies") {
+	if len(words) >= 4 && words[0] == "in" && (words[1] == "every" || words[1] == "each" || words[1] == "all") &&
+		(words[2] == "response" || words[2] == "responses" || words[2] == "reply" || words[2] == "replies") {
 		return isDirectiveWords(words[3:])
 	}
 	return false
@@ -259,7 +343,8 @@ func isMemoryCategoryDirective(words []string) bool {
 	case "instruction", "instructions", "prompt", "policy", "tool", "tools", "function", "command", "authorization", "permission", "privilege":
 		consumed = 1
 	case "system", "developer", "model":
-		if start+1 < len(words) && (words[start+1] == "prompt" || words[start+1] == "instruction" || words[start+1] == "instructions" || words[start+1] == "message" || words[start+1] == "policy" || words[start+1] == "tool" || words[start+1] == "tools") {
+		if start+1 < len(words) &&
+			(words[start+1] == "prompt" || words[start+1] == "instruction" || words[start+1] == "instructions" || words[start+1] == "message" || words[start+1] == "policy" || words[start+1] == "tool" || words[start+1] == "tools") {
 			consumed = 2
 		}
 	}

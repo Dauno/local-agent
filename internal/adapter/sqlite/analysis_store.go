@@ -31,8 +31,10 @@ func NewAnalysisStore(store *Store) *AnalysisStore {
 	return &AnalysisStore{db: store.db}
 }
 
-var _ port.AnalysisStore = (*AnalysisStore)(nil)
-var _ port.AnalysesByWorkstream = (*AnalysisStore)(nil)
+var (
+	_ port.AnalysisStore        = (*AnalysisStore)(nil)
+	_ port.AnalysesByWorkstream = (*AnalysisStore)(nil)
+)
 
 const analysisRecordColumns = `analysis_id, source_result_id, source_sha256, objective_class, objective_digest,
 	objective_text, segmentation_version, prompt_version, model_fingerprint, limits_digest, limits_json,
@@ -57,7 +59,15 @@ const analysisRecordColumns = `analysis_id, source_result_id, source_sha256, obj
 // MarshalJSON, so it always serializes its fields in declaration order.
 // identity.LimitsDigest must equal limits.Digest(); Create rejects a
 // mismatched pair rather than trusting the digest string blindly.
-func (s *AnalysisStore) Create(ctx context.Context, identity domain.AnalysisIdentity, limits domain.AnalysisLimits, objectiveText string, scope domain.ResultScope, workstreamID string, now time.Time) (port.AnalysisRecord, error) {
+func (s *AnalysisStore) Create(
+	ctx context.Context,
+	identity domain.AnalysisIdentity,
+	limits domain.AnalysisLimits,
+	objectiveText string,
+	scope domain.ResultScope,
+	workstreamID string,
+	now time.Time,
+) (port.AnalysisRecord, error) {
 	if s == nil || s.db == nil {
 		return port.AnalysisRecord{}, domain.ErrAnalysisUnavailable
 	}

@@ -2,6 +2,7 @@ package resultanalysis
 
 import (
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/domain"
@@ -60,7 +61,7 @@ func PrepareSteps(analysisID string, manifest domain.AnalysisSegmentManifest, li
 		var next []string
 		for i := 0; i < len(current); i += fanIn {
 			end := min(i+fanIn, len(current))
-			children := append([]string{}, current[i:end]...)
+			children := slices.Clone(current[i:end])
 			id := fmt.Sprintf("reduce-%d-%d", level, len(next))
 			steps = append(steps, port.AnalysisStep{
 				AnalysisID: analysisID, StepID: id, Kind: domain.AnalysisStepReduction,

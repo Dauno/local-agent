@@ -1,11 +1,13 @@
 package app
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -148,7 +150,7 @@ func buildWorkspaceRegistry(cfg config.Config, paths config.Paths) (domain.Works
 		}
 		projects = append(projects, domain.Project{Name: name, Path: canonical})
 	}
-	sort.Slice(projects, func(i, j int) bool { return projects[i].Name < projects[j].Name })
+	slices.SortFunc(projects, func(a, b domain.Project) int { return cmp.Compare(a.Name, b.Name) })
 
 	// The application root is no longer required to be a registered project.
 	// It used to be, because every CLI ran there. A caller now names the

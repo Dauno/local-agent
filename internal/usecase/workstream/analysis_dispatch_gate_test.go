@@ -94,7 +94,10 @@ func TestServiceBlocksConfirmationWhenCompletedAnalysisSourceIsStale(t *testing.
 	staleIdentity := domain.AnalysisIdentity{SourceResultID: freshIdentity.ResultID, SourceSHA256: "stale-digest-does-not-match-current-source"}
 	gate := &fakeAnalysisGate{records: []port.AnalysisRecord{{AnalysisID: "an-1", State: domain.AnalysisCompleted, Identity: staleIdentity, Scope: scope}}}
 	reader := &fakeResultReader{identity: freshIdentity}
-	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store, AnalysisGate: gate, ResultReader: reader})
+	service, err := workstream.New(
+		workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}},
+		workstream.Dependencies{Store: store, AnalysisGate: gate, ResultReader: reader},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +119,10 @@ func TestServiceAllowsConfirmationWhenAnalysisCompletedAndFresh(t *testing.T) {
 	matchingIdentity := domain.AnalysisIdentity{SourceResultID: sourceIdentity.ResultID, SourceSHA256: sourceIdentity.SHA256}
 	gate := &fakeAnalysisGate{records: []port.AnalysisRecord{{AnalysisID: "an-1", State: domain.AnalysisCompleted, Identity: matchingIdentity, Scope: scope}}}
 	reader := &fakeResultReader{identity: sourceIdentity}
-	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store, AnalysisGate: gate, ResultReader: reader})
+	service, err := workstream.New(
+		workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}},
+		workstream.Dependencies{Store: store, AnalysisGate: gate, ResultReader: reader},
+	)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,8 +159,10 @@ func TestServiceHandoffAloneDoesNotSatisfyRequiredAnalysis(t *testing.T) {
 	// producer's handoff would bind, completing successfully because
 	// LinkCompletedResult does not go through the four apply() entry points
 	// this gate guards.
-	linkTransition := domain.WorkstreamTransition{WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
-		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: "model-forged-id"}}
+	linkTransition := domain.WorkstreamTransition{
+		WorkstreamID: "ws-1", ExpectedRevision: 0, Action: domain.WorkstreamActionLinkCompletedResult,
+		ResultLink: &domain.WorkstreamResultLink{ID: "link-1", ResultIdentity: "model-forged-id"},
+	}
 	if _, _, err := service.LinkCompletedResult(ctx(), binding, "T12345678", identity.ResultID, linkTransition, "confirmation-1"); err != nil {
 		t.Fatalf("establishing the handoff: %v", err)
 	}

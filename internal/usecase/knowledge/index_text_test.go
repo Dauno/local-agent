@@ -132,7 +132,12 @@ func TestBuildKnowledgeIndexTextKinds(t *testing.T) {
 }
 
 func TestBuildKnowledgeIndexTextRejectsBrokenUnions(t *testing.T) {
-	if _, err := BuildKnowledgeIndexText(domain.KnowledgeRetrievalClaim, port.KnowledgeAuthoritativeItem{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Preference: &domain.KnowledgePreference{ID: 1}}, "", nil); err == nil {
+	if _, err := BuildKnowledgeIndexText(
+		domain.KnowledgeRetrievalClaim,
+		port.KnowledgeAuthoritativeItem{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Preference: &domain.KnowledgePreference{ID: 1}},
+		"",
+		nil,
+	); err == nil {
 		t.Fatal("BuildKnowledgeIndexText(claim without claim payload) succeeded")
 	}
 	if _, err := BuildKnowledgeIndexText(domain.KnowledgeRetrievalClaim, port.KnowledgeAuthoritativeItem{Kind: "unknown", ID: "x"}, "", nil); err == nil {

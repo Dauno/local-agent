@@ -118,7 +118,10 @@ func confirmUpgrade(streams Streams, preview rollout.UpgradePreview) bool {
 		return confirm(first) && confirm("El proceso v33 desplegado no participa en el protocolo de bloqueo de este comando. Confirme que ese proceso esta detenido antes de continuar.")
 	case rollout.UpgradeAdoption:
 		first := fmt.Sprintf(adoptionSummaryFormat, preview.ResolvedBackupDir)
-		return confirm(first) && confirm("Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v43. Confirme que ningun proceso asi esta en ejecucion antes de continuar.")
+		return confirm(first) &&
+			confirm(
+				"Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v43. Confirme que ningun proceso asi esta en ejecucion antes de continuar.",
+			)
 	default:
 		return confirm(resumeNeededSummaryText)
 	}
@@ -177,7 +180,11 @@ func newDBRollbackCheckCommand(backend Backend, streams Streams) *cobra.Command 
 				_, _ = fmt.Fprintln(streams.Out, "rollback drain clear: 0 sessions have a pending discovery marker; safe to run a schema-v41-compatible binary at or before 3cfe091")
 				return nil
 			}
-			_, _ = fmt.Fprintf(streams.Out, "rollback blocked: %d sessions have a pending discovery marker; let the current binary drain them or cancel them explicitly before rolling back to a binary at or before 3cfe091\n", len(status.PendingSessionIdentities))
+			_, _ = fmt.Fprintf(
+				streams.Out,
+				"rollback blocked: %d sessions have a pending discovery marker; let the current binary drain them or cancel them explicitly before rolling back to a binary at or before 3cfe091\n",
+				len(status.PendingSessionIdentities),
+			)
 			for _, identity := range status.PendingSessionIdentities {
 				_, _ = fmt.Fprintln(streams.Out, identity)
 			}

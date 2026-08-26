@@ -216,11 +216,34 @@ func rank(t *testing.T, candidates ...domain.KnowledgeRankCandidate) []domain.Kn
 }
 
 func TestKnowledgeRankingTiersOrderBeforeFusion(t *testing.T) {
-	ranked := rank(t,
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalDocument, ID: "doc-2", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic}, SemanticRank: 1},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "claim-1", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 1},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "claim-rel", Tier: domain.KnowledgeRankTierRelation, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonRelation}},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "claim-exact", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactIdentifier}},
+	ranked := rank(
+		t,
+		domain.KnowledgeRankCandidate{
+			Kind:         domain.KnowledgeRetrievalDocument,
+			ID:           "doc-2",
+			Tier:         domain.KnowledgeRankTierFused,
+			Reasons:      []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic},
+			SemanticRank: 1,
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:        domain.KnowledgeRetrievalClaim,
+			ID:          "claim-1",
+			Tier:        domain.KnowledgeRankTierFused,
+			Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			LexicalRank: 1,
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "claim-rel",
+			Tier:    domain.KnowledgeRankTierRelation,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonRelation},
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "claim-exact",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactIdentifier},
+		},
 	)
 	want := []string{"claim-exact", "claim-rel", "claim-1", "doc-2"}
 	if len(ranked) != len(want) {
@@ -238,9 +261,22 @@ func TestKnowledgeRankingIntegerRRFIsDeterministic(t *testing.T) {
 	// with integer division.
 	const wantRank1 = 1_000_000 / 61
 	const wantRank2 = 1_000_000 / 62
-	ranked := rank(t,
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 2},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c2", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 1},
+	ranked := rank(
+		t,
+		domain.KnowledgeRankCandidate{
+			Kind:        domain.KnowledgeRetrievalClaim,
+			ID:          "c1",
+			Tier:        domain.KnowledgeRankTierFused,
+			Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			LexicalRank: 2,
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:        domain.KnowledgeRetrievalClaim,
+			ID:          "c2",
+			Tier:        domain.KnowledgeRankTierFused,
+			Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			LexicalRank: 1,
+		},
 	)
 	if len(ranked) != 2 || ranked[0].ID != "c2" || ranked[1].ID != "c1" {
 		t.Fatalf("fused order = %+v", ranked)
@@ -249,9 +285,22 @@ func TestKnowledgeRankingIntegerRRFIsDeterministic(t *testing.T) {
 		t.Fatalf("fused scores = %d/%d, want %d/%d", ranked[0].FusedScore, ranked[1].FusedScore, wantRank1, wantRank2)
 	}
 	// Repeating the identical input must reproduce the identical order.
-	again := rank(t,
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 2},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c2", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 1},
+	again := rank(
+		t,
+		domain.KnowledgeRankCandidate{
+			Kind:        domain.KnowledgeRetrievalClaim,
+			ID:          "c1",
+			Tier:        domain.KnowledgeRankTierFused,
+			Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			LexicalRank: 2,
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:        domain.KnowledgeRetrievalClaim,
+			ID:          "c2",
+			Tier:        domain.KnowledgeRankTierFused,
+			Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			LexicalRank: 1,
+		},
 	)
 	if len(again) != 2 || again[0].ID != "c2" || again[0].FusedScore != wantRank1 || again[1].FusedScore != wantRank2 {
 		t.Fatalf("repeated fusion order diverged = %+v", again)
@@ -259,10 +308,28 @@ func TestKnowledgeRankingIntegerRRFIsDeterministic(t *testing.T) {
 }
 
 func TestKnowledgeRankingDedupesByIdentityAndMergesReasons(t *testing.T) {
-	ranked := rank(t,
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic, domain.KnowledgeRetrievalReasonLexical}, SemanticRank: 3, LexicalRank: 5},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c2", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactIdentifier}},
+	ranked := rank(
+		t,
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "c1",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:         domain.KnowledgeRetrievalClaim,
+			ID:           "c1",
+			Tier:         domain.KnowledgeRankTierFused,
+			Reasons:      []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic, domain.KnowledgeRetrievalReasonLexical},
+			SemanticRank: 3,
+			LexicalRank:  5,
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "c2",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactIdentifier},
+		},
 	)
 	if len(ranked) != 2 {
 		t.Fatalf("deduped count = %d, want 2", len(ranked))
@@ -280,9 +347,20 @@ func TestKnowledgeRankingDedupesByIdentityAndMergesReasons(t *testing.T) {
 		}
 	}
 	// Duplicate reasons must not repeat.
-	dup := rank(t,
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}},
+	dup := rank(
+		t,
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "c1",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "c1",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+		},
 	)
 	if len(dup) != 1 || len(dup[0].Reasons) != 1 {
 		t.Fatalf("duplicate reason merge = %+v", dup)
@@ -290,11 +368,32 @@ func TestKnowledgeRankingDedupesByIdentityAndMergesReasons(t *testing.T) {
 }
 
 func TestKnowledgeRankingTiesUseKindThenIdentity(t *testing.T) {
-	ranked := rank(t,
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalDocument, ID: "b", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "z", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "a", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalPreference, ID: "m", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}},
+	ranked := rank(
+		t,
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalDocument,
+			ID:      "b",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "z",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalClaim,
+			ID:      "a",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:    domain.KnowledgeRetrievalPreference,
+			ID:      "m",
+			Tier:    domain.KnowledgeRankTierExact,
+			Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+		},
 	)
 	if len(ranked) != 4 {
 		t.Fatalf("tie count = %d", len(ranked))
@@ -326,9 +425,22 @@ func TestKnowledgeRankingTiesUseKindThenIdentity(t *testing.T) {
 }
 
 func TestKnowledgeRankingUsesBestChannelRankPerIdentity(t *testing.T) {
-	ranked := rank(t,
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 5},
-		domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "c1", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 2},
+	ranked := rank(
+		t,
+		domain.KnowledgeRankCandidate{
+			Kind:        domain.KnowledgeRetrievalClaim,
+			ID:          "c1",
+			Tier:        domain.KnowledgeRankTierFused,
+			Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			LexicalRank: 5,
+		},
+		domain.KnowledgeRankCandidate{
+			Kind:        domain.KnowledgeRetrievalClaim,
+			ID:          "c1",
+			Tier:        domain.KnowledgeRankTierFused,
+			Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			LexicalRank: 2,
+		},
 	)
 	if len(ranked) != 1 || ranked[0].FusedScore != 1_000_000/62 {
 		t.Fatalf("best-rank fusion = %+v, want score %d", ranked, 1_000_000/62)
@@ -347,20 +459,94 @@ func TestKnowledgeRankingRejectsMalformedCandidates(t *testing.T) {
 		{"unknown reason", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{"invented"}}},
 		{"negative lexical rank", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, LexicalRank: -1}},
 		{"negative semantic rank", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, SemanticRank: -1}},
-		{"rank over hard max", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, LexicalRank: domain.HardMaxKnowledgeRetrievalRank + 1}},
+		{
+			"rank over hard max",
+			domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, LexicalRank: domain.HardMaxKnowledgeRetrievalRank + 1},
+		},
 		{"exact with channel rank", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierExact, LexicalRank: 1}},
-		{"exact with lexical reason", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierExact, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}}},
+		{
+			"exact with lexical reason",
+			domain.KnowledgeRankCandidate{
+				Kind:    domain.KnowledgeRetrievalClaim,
+				ID:      "x",
+				Tier:    domain.KnowledgeRankTierExact,
+				Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			},
+		},
 		{"relation with channel rank", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierRelation, SemanticRank: 2}},
-		{"relation with exact reason", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierRelation, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject}}},
-		{"fused without ranks", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}}},
-		{"fused with relation reason", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonRelation}, LexicalRank: 1}},
+		{
+			"relation with exact reason",
+			domain.KnowledgeRankCandidate{
+				Kind:    domain.KnowledgeRetrievalClaim,
+				ID:      "x",
+				Tier:    domain.KnowledgeRankTierRelation,
+				Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonExactSubject},
+			},
+		},
+		{
+			"fused without ranks",
+			domain.KnowledgeRankCandidate{
+				Kind:    domain.KnowledgeRetrievalClaim,
+				ID:      "x",
+				Tier:    domain.KnowledgeRankTierFused,
+				Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+			},
+		},
+		{
+			"fused with relation reason",
+			domain.KnowledgeRankCandidate{
+				Kind:        domain.KnowledgeRetrievalClaim,
+				ID:          "x",
+				Tier:        domain.KnowledgeRankTierFused,
+				Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonRelation},
+				LexicalRank: 1,
+			},
+		},
 		{"exact without reasons", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierExact}},
 		{"relation without reasons", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierRelation}},
 		{"fused without reasons", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, LexicalRank: 1}},
-		{"fused lexical rank without lexical reason", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic}, LexicalRank: 1, SemanticRank: 2}},
-		{"fused semantic rank without semantic reason", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, LexicalRank: 1, SemanticRank: 2}},
-		{"fused lexical reason without rank", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical}, SemanticRank: 2}},
-		{"fused semantic reason without rank", domain.KnowledgeRankCandidate{Kind: domain.KnowledgeRetrievalClaim, ID: "x", Tier: domain.KnowledgeRankTierFused, Reasons: []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic}, LexicalRank: 2}},
+		{
+			"fused lexical rank without lexical reason",
+			domain.KnowledgeRankCandidate{
+				Kind:         domain.KnowledgeRetrievalClaim,
+				ID:           "x",
+				Tier:         domain.KnowledgeRankTierFused,
+				Reasons:      []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic},
+				LexicalRank:  1,
+				SemanticRank: 2,
+			},
+		},
+		{
+			"fused semantic rank without semantic reason",
+			domain.KnowledgeRankCandidate{
+				Kind:         domain.KnowledgeRetrievalClaim,
+				ID:           "x",
+				Tier:         domain.KnowledgeRankTierFused,
+				Reasons:      []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+				LexicalRank:  1,
+				SemanticRank: 2,
+			},
+		},
+		{
+			"fused lexical reason without rank",
+			domain.KnowledgeRankCandidate{
+				Kind:         domain.KnowledgeRetrievalClaim,
+				ID:           "x",
+				Tier:         domain.KnowledgeRankTierFused,
+				Reasons:      []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonLexical},
+				SemanticRank: 2,
+			},
+		},
+		{
+			"fused semantic reason without rank",
+			domain.KnowledgeRankCandidate{
+				Kind:        domain.KnowledgeRetrievalClaim,
+				ID:          "x",
+				Tier:        domain.KnowledgeRankTierFused,
+				Reasons:     []domain.KnowledgeRetrievalReason{domain.KnowledgeRetrievalReasonSemantic},
+				LexicalRank: 2,
+			},
+		},
 	}
 	for _, candidate := range malformed {
 		if ranked, err := domain.RankKnowledgeCandidates([]domain.KnowledgeRankCandidate{candidate.candidate}); err == nil || ranked != nil {
@@ -597,12 +783,36 @@ func TestKnowledgeMetricLabelCombinationsAreFrozen(t *testing.T) {
 		{"candidates without channel", domain.MetricKnowledgeRetrievalCandidates, map[string]string{}},
 		{"failure without reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "lexical"}},
 		{"failure with stale reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "lexical", domain.MetricLabelReason: "stale_index"}},
-		{"failure with wrong channel for reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "lexical", domain.MetricLabelReason: "semantic_unavailable"}},
-		{"failure relation channel with lexical reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "relation", domain.MetricLabelReason: "lexical_unavailable"}},
-		{"failure semantic channel with relation reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "semantic", domain.MetricLabelReason: "relation_unavailable"}},
-		{"failure relation channel with counter reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "relation", domain.MetricLabelReason: "counter_unavailable"}},
-		{"failure lexical channel with counter reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "lexical", domain.MetricLabelReason: "counter_unavailable"}},
-		{"failure semantic channel with counter reason", domain.MetricKnowledgeRetrievalChannelFailure, map[string]string{domain.MetricLabelChannel: "semantic", domain.MetricLabelReason: "counter_unavailable"}},
+		{
+			"failure with wrong channel for reason",
+			domain.MetricKnowledgeRetrievalChannelFailure,
+			map[string]string{domain.MetricLabelChannel: "lexical", domain.MetricLabelReason: "semantic_unavailable"},
+		},
+		{
+			"failure relation channel with lexical reason",
+			domain.MetricKnowledgeRetrievalChannelFailure,
+			map[string]string{domain.MetricLabelChannel: "relation", domain.MetricLabelReason: "lexical_unavailable"},
+		},
+		{
+			"failure semantic channel with relation reason",
+			domain.MetricKnowledgeRetrievalChannelFailure,
+			map[string]string{domain.MetricLabelChannel: "semantic", domain.MetricLabelReason: "relation_unavailable"},
+		},
+		{
+			"failure relation channel with counter reason",
+			domain.MetricKnowledgeRetrievalChannelFailure,
+			map[string]string{domain.MetricLabelChannel: "relation", domain.MetricLabelReason: "counter_unavailable"},
+		},
+		{
+			"failure lexical channel with counter reason",
+			domain.MetricKnowledgeRetrievalChannelFailure,
+			map[string]string{domain.MetricLabelChannel: "lexical", domain.MetricLabelReason: "counter_unavailable"},
+		},
+		{
+			"failure semantic channel with counter reason",
+			domain.MetricKnowledgeRetrievalChannelFailure,
+			map[string]string{domain.MetricLabelChannel: "semantic", domain.MetricLabelReason: "counter_unavailable"},
+		},
 		{"stale index without stale reason", domain.MetricKnowledgeRetrievalStaleIndex, map[string]string{domain.MetricLabelChannel: "lexical", domain.MetricLabelReason: "lexical_unavailable"}},
 		{"stale index without channel", domain.MetricKnowledgeRetrievalStaleIndex, map[string]string{domain.MetricLabelReason: "stale_index"}},
 		{"stale index on exact channel", domain.MetricKnowledgeRetrievalStaleIndex, map[string]string{domain.MetricLabelChannel: "exact", domain.MetricLabelReason: "stale_index"}},

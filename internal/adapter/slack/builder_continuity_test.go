@@ -161,10 +161,13 @@ func (s *builderDraftStoreFake) Get(_ context.Context, draftID string) (*port.Ag
 	}
 	return s.draft, nil
 }
+
 func (*builderDraftStoreFake) FindByNameAndDefinitionHash(context.Context, string, string) (*port.AgentDraft, error) {
 	return nil, nil
 }
+
 func (*builderDraftStoreFake) MarkPreviewed(context.Context, string, string, int) error { return nil }
+
 func (s *builderDraftStoreFake) UpdateStatus(context.Context, string, port.AgentDraftStatus, port.AgentDraftStatus) error {
 	s.statusCalls++
 	return nil

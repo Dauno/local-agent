@@ -262,7 +262,13 @@ func TestComposeLexicalRetrievalEmbeddingEnabledConstructsEverything(t *testing.
 		t.Fatalf("Retrieve() error = %v", err)
 	}
 	if len(result.Cards) != 1 || result.Cards[0].Identity() != "claim:"+identity {
-		t.Fatalf("Retrieve() cards = %v failures = %v omitted = %d selected = %v, want the seeded claim through the semantic channel", result.Cards, result.Diagnostics.Failures, result.Diagnostics.OmittedCount, result.Diagnostics.SelectedIdentities)
+		t.Fatalf(
+			"Retrieve() cards = %v failures = %v omitted = %d selected = %v, want the seeded claim through the semantic channel",
+			result.Cards,
+			result.Diagnostics.Failures,
+			result.Diagnostics.OmittedCount,
+			result.Diagnostics.SelectedIdentities,
+		)
 	}
 	if result.Cards[0].Claim.RetrievalReason != string(domain.KnowledgeRetrievalReasonSemantic) {
 		t.Fatalf("card reason = %q, want semantic (exact/lexical must stay empty)", result.Cards[0].Claim.RetrievalReason)
@@ -615,8 +621,14 @@ func TestKnowledgeRetrievalRestartRollbackSequence(t *testing.T) {
 	// an empty fingerprint the semantic channel is dead — proven
 	// behaviorally below, not just by field inspection.
 	phaseEResult, err := compositionE.retriever.Retrieve(ctx, domain.KnowledgeRetrievalRequest{
-		Binding:        knowledgeRestartBinding(),
-		Workstream:     &domain.WorkstreamSnapshot{ID: "ws-restart", Project: "my-project", OwnerActor: "U00000001", ConversationKey: domain.ConversationKey("slack:T00000001:dm:C00000001"), Status: domain.WorkstreamActive},
+		Binding: knowledgeRestartBinding(),
+		Workstream: &domain.WorkstreamSnapshot{
+			ID:              "ws-restart",
+			Project:         "my-project",
+			OwnerActor:      "U00000001",
+			ConversationKey: domain.ConversationKey("slack:T00000001:dm:C00000001"),
+			Status:          domain.WorkstreamActive,
+		},
 		ExchangeTS:     "1700000000.000000",
 		CurrentMessage: "semantically related but lexically unrelated probe",
 		Now:            time.Now().UTC(),

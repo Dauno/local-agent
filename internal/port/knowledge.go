@@ -28,7 +28,14 @@ type KnowledgeStore interface {
 	CreateClaim(ctx context.Context, claim domain.KnowledgeClaim, limits domain.KnowledgeLimits) (domain.KnowledgeClaim, error)
 	GetClaim(ctx context.Context, id domain.KnowledgeClaimID, readable []domain.KnowledgeScopeRef) (domain.KnowledgeClaim, error)
 	CorrectClaim(ctx context.Context, replacement domain.KnowledgeClaim, source domain.KnowledgeSourceClass, limits domain.KnowledgeLimits) (domain.KnowledgeClaim, error)
-	TransitionClaimStatus(ctx context.Context, id domain.KnowledgeClaimID, expectedRev int, next domain.KnowledgeClaimStatus, source domain.KnowledgeSourceClass, sourceRef string) (domain.KnowledgeClaim, error)
+	TransitionClaimStatus(
+		ctx context.Context,
+		id domain.KnowledgeClaimID,
+		expectedRev int,
+		next domain.KnowledgeClaimStatus,
+		source domain.KnowledgeSourceClass,
+		sourceRef string,
+	) (domain.KnowledgeClaim, error)
 	ForgetSubject(ctx context.Context, subject string, scopeKind domain.KnowledgeScopeKind, scopeID, sourceRef string) (bool, error)
 	AddEvidence(ctx context.Context, claimID domain.KnowledgeClaimID, revisionNumber int, evidence domain.KnowledgeEvidence) error
 	CreatePreference(ctx context.Context, preference domain.KnowledgePreference, limits domain.KnowledgeLimits) (domain.KnowledgePreference, error)
