@@ -2,6 +2,8 @@ package slack
 
 import (
 	"context"
+	"encoding/json/jsontext"
+	"encoding/json/v2"
 	"errors"
 	"fmt"
 	"regexp"
@@ -17,9 +19,14 @@ import (
 )
 
 const (
-	confirmationRenderMode        = "confirmation_v1"
+	confirmationRenderModeV1      = "confirmation_v1"
+	confirmationRenderModeV2      = "confirmation_v2"
+	confirmationRenderMode        = confirmationRenderModeV2
+	confirmationTemplateV1        = "confirmation_message"
+	confirmationTemplateV2        = "confirmation_message_v2"
 	approveActionID               = "local_agent.confirm.approve"
 	rejectActionID                = "local_agent.confirm.reject"
+	statusActionID                = "local_agent.job.status"
 	confirmationMetadataEventType = "local_agent_confirmation_prompt"
 )
 
@@ -110,7 +117,11 @@ func (p *ConfirmationPublisher) PublishConfirmation(ctx context.Context, deliver
 		return port.ConfirmationPublishedResult{}, errors.New("slack channel is required for confirmation publishing")
 	}
 
-	fallbackText, blocks, err := compileConfirmationMessage(p.renderer, delivery)
+	renderMode := confirmationRenderModeForDelivery(delivery)
+	if renderMode == "" {
+		return port.ConfirmationPublishedResult{}, errors.New("unsupported confirmation renderer mode")
+	}
+	fallbackText, blocks, err := compileConfirmationMessageForMode(p.renderer, delivery, renderMode)
 	if err != nil {
 		if p.renderErr != nil {
 			err = p.renderErr
@@ -156,7 +167,11 @@ func (p *ConfirmationPublisher) RecoverConfirmation(ctx context.Context, deliver
 	if err != nil {
 		return port.ConfirmationPublishedResult{}, false, fmt.Errorf("read Slack confirmation history: %w", secure.NewRedactor().Error(err))
 	}
-	expectedDigest := port.ConfirmationContentDigest(delivery)
+	renderMode := confirmationRenderModeForDelivery(delivery)
+	if renderMode == "" {
+		return port.ConfirmationPublishedResult{}, false, errors.New("unsupported confirmation renderer mode")
+	}
+	expectedDigest := confirmationContentDigestForMode(delivery, renderMode)
 	var timestamp string
 	for _, message := range messages {
 		if message.Metadata.EventType != confirmationMetadataEventType {
@@ -166,10 +181,10 @@ func (p *ConfirmationPublisher) RecoverConfirmation(ctx context.Context, deliver
 		if correlationID != delivery.CorrelationID {
 			continue
 		}
-		renderMode, _ := message.Metadata.EventPayload["render_mode"].(string)
+		messageRenderMode, _ := message.Metadata.EventPayload["render_mode"].(string)
 		contentDigest, _ := message.Metadata.EventPayload["content_sha256"].(string)
 		if timestamp != "" || message.User != p.botUserID || message.Hidden || message.Edited != nil || len(message.Files) != 0 ||
-			message.Timestamp == "" || renderMode != confirmationRenderMode || contentDigest != expectedDigest {
+			message.Timestamp == "" || messageRenderMode != renderMode || contentDigest != expectedDigest {
 			return port.ConfirmationPublishedResult{}, false, errors.New("slack confirmation recovery evidence is ambiguous or invalid")
 		}
 		timestamp = message.Timestamp
@@ -194,41 +209,42 @@ func (p *ConfirmationPublisher) UpdateConfirmation(ctx context.Context, delivery
 		return errors.New("slack channel is required for confirmation update")
 	}
 
-	summary := delivery.Summary
-	originalCallID := delivery.OriginalCallID
-
-	var headerText string
-	var footerText string
+	var statusText string
 	now := time.Now().UTC()
 	switch delivery.Status {
 	case port.ConfirmationConsumed, port.ConfirmationApproved:
-		headerText = fmt.Sprintf(":white_check_mark: %s", summary)
-		footerText = terminalConfirmationFooter(true, now)
+		statusText = "Confirmation approved"
 	case port.ConfirmationRejected:
-		headerText = fmt.Sprintf(":x: %s", summary)
-		footerText = terminalConfirmationFooter(false, now)
+		statusText = "Confirmation rejected"
 	case port.ConfirmationExpired:
-		headerText = fmt.Sprintf(":hourglass: %s", summary)
-		footerText = expiredConfirmationFooter(now)
+		statusText = "Confirmation expired"
 	case port.ConfirmationFailed:
-		headerText = fmt.Sprintf(":warning: %s", summary)
-		footerText = fmt.Sprintf("_Failed %s_", now.Format("15:04"))
+		statusText = "Confirmation failed"
 	default:
 		return fmt.Errorf("confirmation delivery status %s is not terminal", delivery.Status)
 	}
 
-	headerBlock := slackapi.NewSectionBlock(
-		slackapi.NewTextBlockObject("mrkdwn", headerText, false, false),
-		nil, nil,
-	)
+	headerText := fmt.Sprintf("*%s*\n%s", statusText, escapeSlackMrkdwn(delivery.Summary))
+	headerBlock := slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", headerText, false, false), nil, nil)
 
 	detailFields := []*slackapi.TextBlockObject{
-		slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Call ID:*\n`%s`", originalCallID), false, false),
-		slackapi.NewTextBlockObject("mrkdwn", footerText, false, false),
+		slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Call ID:*\n`%s`", escapeSlackMrkdwn(delivery.OriginalCallID)), false, false),
+		slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Status:*\n%s", statusText), false, false),
+		slackapi.NewTextBlockObject("mrkdwn", fmt.Sprintf("*Updated:*\n%s UTC", now.Format("15:04")), false, false),
 	}
 	detailBlock := slackapi.NewSectionBlock(nil, detailFields, nil)
 
 	blocks := []slackapi.Block{headerBlock, detailBlock}
+	if text := strings.TrimSpace(terminalText); text != "" {
+		terminal := "Confirmation result:\n" + neutralizeUnsafeControls(text)
+		if utf8.RuneCountInString(terminal) > maxRendererCompositionTextLength {
+			return fmt.Errorf("confirmation result exceeds %d character limit", maxRendererCompositionTextLength)
+		}
+		blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("plain_text", terminal, false, false), nil, nil))
+	}
+	if err := validateCompiledBlocks(confirmationTemplateV2, blocks, false); err != nil {
+		return fmt.Errorf("validate confirmation update blocks: %w", err)
+	}
 
 	callCtx := ctx
 	cancel := func() {}
@@ -237,13 +253,25 @@ func (p *ConfirmationPublisher) UpdateConfirmation(ctx context.Context, delivery
 	}
 	defer cancel()
 
-	plainText := strings.Join([]string{headerText, footerText, originalCallID}, "\n")
+	plainText := confirmationUpdateFallback(statusText, delivery, terminalText)
 
 	if err := p.client.UpdateBlocks(callCtx, delivery.ChannelID, delivery.SlackMessageTS, blocks, plainText); err != nil {
 		safeErr := secure.NewRedactor().Error(err)
 		return fmt.Errorf("update confirmation blocks: %w", safeErr)
 	}
 	return nil
+}
+
+func confirmationUpdateFallback(statusText string, delivery port.ConfirmationDelivery, terminalText string) string {
+	parts := []string{
+		statusText,
+		"Summary: " + neutralizeUnsafeControls(delivery.Summary),
+		"Call ID: " + neutralizeUnsafeControls(delivery.OriginalCallID),
+	}
+	if text := strings.TrimSpace(terminalText); text != "" {
+		parts = append(parts, "Result: "+neutralizeUnsafeControls(text))
+	}
+	return truncateConfirmationText(strings.Join(parts, "\n"), maxFallbackText)
 }
 
 func renderConfirmationBlocks(delivery port.ConfirmationDelivery) []slackapi.Block {
@@ -259,12 +287,27 @@ func renderConfirmationBlocks(delivery port.ConfirmationDelivery) []slackapi.Blo
 }
 
 func compileConfirmationMessage(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
-	fallback, blocks, err := renderer.CompileMessageWithFallback("confirmation_message", TemplateContext{Values: map[string]string{
+	return compileConfirmationMessageV2(renderer, delivery)
+}
+
+func compileConfirmationMessageForMode(renderer *TemplateRenderer, delivery port.ConfirmationDelivery, renderMode string) (string, []slackapi.Block, error) {
+	switch renderMode {
+	case confirmationRenderModeV1:
+		return compileConfirmationMessageV1(renderer, delivery)
+	case confirmationRenderModeV2:
+		return compileConfirmationMessageV2(renderer, delivery)
+	default:
+		return "", nil, errors.New("unsupported confirmation renderer mode")
+	}
+}
+
+func compileConfirmationMessageV1(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
+	fallback, blocks, err := renderer.CompileMessageWithFallback(confirmationTemplateV1, TemplateContext{Values: map[string]string{
 		"summary":          fmt.Sprintf(":lock: %s", neutralizeUnsafeControls(delivery.Summary)),
 		"original_call_id": fmt.Sprintf("*Call ID:*\n`%s`", delivery.OriginalCallID),
 		"expires_at":       fmt.Sprintf("*Expires:*\n%s UTC", delivery.Expiry.UTC().Format("15:04")),
 		"wrapper_call_id":  delivery.WrapperCallID,
-		"fallback_text":    confirmationFallbackText(delivery),
+		"fallback_text":    confirmationFallbackTextV1(delivery),
 	}})
 	if err != nil || strings.TrimSpace(delivery.Payload) == "" {
 		return fallback, blocks, err
@@ -275,6 +318,189 @@ func compileConfirmationMessage(renderer *TemplateRenderer, delivery port.Confir
 	}
 	blocks = append(payloadBlocks, blocks...)
 	return fallback, blocks, nil
+}
+
+func compileConfirmationMessageV2(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
+	display := buildConfirmationDisplay(delivery)
+	fallback, blocks, err := renderer.CompileMessageWithFallback(confirmationTemplateV2, TemplateContext{Values: map[string]string{
+		"title_summary":    confirmationTitleSummary(delivery.Summary),
+		"original_call_id": fmt.Sprintf("*Call ID:*\n`%s`", escapeSlackMrkdwn(delivery.OriginalCallID)),
+		"expires_at":       fmt.Sprintf("*Expires:*\n%s UTC", delivery.Expiry.UTC().Format("15:04")),
+		"project":          display.Project,
+		"proposed_task":    display.ProposedTask,
+		"wrapper_call_id":  delivery.WrapperCallID,
+		"fallback_text":    confirmationFallbackTextV2(delivery, display),
+	}})
+	if err != nil {
+		return fallback, blocks, err
+	}
+	if display.WorkstreamData != "" {
+		workstreamBlocks := confirmationWorkstreamBlocks(display.WorkstreamData)
+		if len(blocks)+len(workstreamBlocks) > maxBlocksPerMessage {
+			return "", nil, fmt.Errorf("confirmation exceeds %d block limit", maxBlocksPerMessage)
+		}
+		for index, block := range blocks {
+			if _, ok := block.(*slackapi.ActionBlock); !ok {
+				continue
+			}
+			withWorkstream := make([]slackapi.Block, 0, len(blocks)+len(workstreamBlocks))
+			withWorkstream = append(withWorkstream, blocks[:index]...)
+			withWorkstream = append(withWorkstream, workstreamBlocks...)
+			withWorkstream = append(withWorkstream, blocks[index:]...)
+			blocks = withWorkstream
+			break
+		}
+	}
+	if err := validateCompiledBlocks(confirmationTemplateV2, blocks, false); err != nil {
+		return "", nil, fmt.Errorf("validate confirmation blocks: %w", err)
+	}
+	return fallback, blocks, nil
+}
+
+type confirmationDisplay struct {
+	Project        string
+	ProposedTask   string
+	WorkstreamData string
+}
+
+func buildConfirmationDisplay(delivery port.ConfirmationDelivery) confirmationDisplay {
+	display := confirmationDisplay{
+		Project:      "Project: not provided",
+		ProposedTask: "Proposed task: not provided",
+	}
+	if strings.TrimSpace(delivery.Payload) == "" {
+		return display
+	}
+
+	var payload map[string]jsontext.Value
+	if err := json.Unmarshal([]byte(delivery.Payload), &payload); err != nil {
+		display.ProposedTask = "Proposed task:\n" + neutralizeUnsafeControls(delivery.Payload)
+		return display
+	}
+	if project := confirmationPayloadString(payload, "project"); project != "" {
+		display.Project = "Project: " + neutralizeUnsafeControls(project)
+	}
+	task := confirmationPayloadString(payload, "task")
+	if task == "" {
+		if raw := payload["task"]; len(raw) > 0 {
+			task = confirmationTaskObjectText(raw)
+		}
+	}
+	if task == "" {
+		task = confirmationPayloadString(payload, "objective")
+	}
+	if task != "" {
+		display.ProposedTask = "Proposed task:\n" + neutralizeUnsafeControls(task)
+	}
+	display.WorkstreamData = confirmationWorkstreamData(payload)
+	return display
+}
+
+func confirmationPayloadValue(payload map[string]jsontext.Value, key string) (jsontext.Value, bool) {
+	if value, ok := payload[key]; ok {
+		return value, true
+	}
+	for candidate, value := range payload {
+		if strings.EqualFold(candidate, key) {
+			return value, true
+		}
+	}
+	return nil, false
+}
+
+func confirmationPayloadString(payload map[string]jsontext.Value, key string) string {
+	raw, ok := confirmationPayloadValue(payload, key)
+	if !ok {
+		return ""
+	}
+	var value string
+	if err := json.Unmarshal([]byte(raw), &value); err != nil {
+		return ""
+	}
+	return value
+}
+
+func confirmationTaskObjectText(raw jsontext.Value) string {
+	var task map[string]jsontext.Value
+	if err := json.Unmarshal([]byte(raw), &task); err != nil {
+		return string(raw)
+	}
+	if description := confirmationPayloadString(task, "description"); description != "" {
+		return description
+	}
+	return string(raw)
+}
+
+func confirmationWorkstreamData(payload map[string]jsontext.Value) string {
+	keys := []struct {
+		key   string
+		label string
+	}{
+		{"workstream_id", "Workstream ID"},
+		{"expected_revision", "Expected revision"},
+		{"action", "Action"},
+		{"task_id", "Task ID"},
+		{"current_phase", "Current phase"},
+		{"payload_digest", "Payload digest"},
+		{"source_result_identities", "Source result identities"},
+	}
+	var lines []string
+	for _, item := range keys {
+		raw, ok := confirmationPayloadValue(payload, item.key)
+		if !ok || string(raw) == "null" {
+			continue
+		}
+		value := confirmationPayloadString(payload, item.key)
+		if value == "" {
+			value = string(raw)
+		}
+		lines = append(lines, item.label+": "+neutralizeUnsafeControls(value))
+	}
+	return strings.Join(lines, "\n")
+}
+
+func confirmationWorkstreamBlocks(data string) []slackapi.Block {
+	const prefix = "Workstream data:\n"
+	chunks := confirmationPayloadChunks(data, maxRendererCompositionTextLength-utf8.RuneCountInString(prefix))
+	blocks := make([]slackapi.Block, 0, len(chunks))
+	for _, chunk := range chunks {
+		blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("plain_text", prefix+chunk, false, false), nil, nil))
+	}
+	return blocks
+}
+
+func confirmationTitleSummary(summary string) string {
+	return "*Confirmation required*\n" + escapeSlackMrkdwn(summary)
+}
+
+func confirmationFallbackTextV2(delivery port.ConfirmationDelivery, display confirmationDisplay) string {
+	parts := []string{
+		"Confirmation required: " + neutralizeUnsafeControls(delivery.Summary),
+		"Call ID: " + neutralizeUnsafeControls(delivery.OriginalCallID),
+		"Expires: " + delivery.Expiry.UTC().Format("15:04") + " UTC",
+		display.Project,
+		display.ProposedTask,
+	}
+	if display.WorkstreamData != "" {
+		parts = append(parts, "Workstream data:\n"+display.WorkstreamData)
+	}
+	return truncateConfirmationText(strings.Join(parts, "\n"), maxFallbackText)
+}
+
+func truncateConfirmationText(value string, limit int) string {
+	if limit <= 0 || utf8.RuneCountInString(value) <= limit {
+		return value
+	}
+	marker := "..."
+	if limit <= utf8.RuneCountInString(marker) {
+		return string([]rune(value)[:limit])
+	}
+	runes := []rune(value)
+	return string(runes[:limit-utf8.RuneCountInString(marker)]) + marker
+}
+
+func escapeSlackMrkdwn(value string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 }
 
 func confirmationPayloadChunks(value string, maxRunes int) []string {
@@ -292,10 +518,35 @@ func confirmationPayloadChunks(value string, maxRunes int) []string {
 }
 
 func confirmationContentDigest(delivery port.ConfirmationDelivery) string {
-	return port.ConfirmationContentDigest(delivery)
+	return confirmationContentDigestForMode(delivery, confirmationRenderModeForDelivery(delivery))
 }
 
-func confirmationFallbackText(delivery port.ConfirmationDelivery) string {
+func confirmationContentDigestForMode(delivery port.ConfirmationDelivery, renderMode string) string {
+	switch renderMode {
+	case confirmationRenderModeV2:
+		return port.ConfirmationContentDigestV2(delivery)
+	case confirmationRenderModeV1:
+		return port.ConfirmationContentDigest(delivery)
+	default:
+		return ""
+	}
+}
+
+func confirmationRenderModeForDelivery(delivery port.ConfirmationDelivery) string {
+	if delivery.RendererMode == "" {
+		return confirmationRenderModeV2
+	}
+	if delivery.RendererMode == confirmationRenderModeV1 || delivery.RendererMode == confirmationRenderModeV2 {
+		return delivery.RendererMode
+	}
+	return ""
+}
+
+func isConfirmationRendererMode(renderMode string) bool {
+	return renderMode == confirmationRenderModeV1 || renderMode == confirmationRenderModeV2
+}
+
+func confirmationFallbackTextV1(delivery port.ConfirmationDelivery) string {
 	text := fmt.Sprintf("Confirmation required: %s\nCall ID: %s\nExpires: %s UTC",
 		neutralizeUnsafeControls(delivery.Summary), delivery.OriginalCallID, delivery.Expiry.UTC().Format("15:04"))
 	if delivery.Payload != "" {
@@ -308,31 +559,31 @@ func confirmationFallbackText(delivery port.ConfirmationDelivery) string {
 	return text
 }
 
+func confirmationFallbackText(delivery port.ConfirmationDelivery) string {
+	display := buildConfirmationDisplay(delivery)
+	return confirmationFallbackTextV2(delivery, display)
+}
+
 func confirmationMetadata(delivery port.ConfirmationDelivery) slackapi.SlackMetadata {
+	renderMode := confirmationRenderModeForDelivery(delivery)
 	return slackapi.SlackMetadata{
 		EventType: confirmationMetadataEventType,
 		EventPayload: map[string]any{
 			"correlation_id": delivery.CorrelationID,
-			"render_mode":    confirmationRenderMode,
-			"content_sha256": confirmationContentDigest(delivery),
+			"render_mode":    renderMode,
+			"content_sha256": confirmationContentDigestForMode(delivery, renderMode),
 		},
 	}
 }
 
 func normalizeInteractiveAction(callback *slackapi.InteractionCallback) (domain.ConfirmationInteractiveAction, bool) {
-	if callback == nil {
+	if callback == nil || callback.Type != slackapi.InteractionTypeBlockActions || len(callback.ActionCallback.BlockActions) != 1 {
 		return domain.ConfirmationInteractiveAction{}, false
 	}
-	if callback.Type != slackapi.InteractionTypeBlockActions {
+	action := callback.ActionCallback.BlockActions[0]
+	if action == nil {
 		return domain.ConfirmationInteractiveAction{}, false
 	}
-
-	blockActions := callback.ActionCallback.BlockActions
-	if len(blockActions) != 1 {
-		return domain.ConfirmationInteractiveAction{}, false
-	}
-
-	action := blockActions[0]
 	var approved bool
 	switch action.ActionID {
 	case approveActionID:
@@ -342,13 +593,30 @@ func normalizeInteractiveAction(callback *slackapi.InteractionCallback) (domain.
 	default:
 		return domain.ConfirmationInteractiveAction{}, false
 	}
+	normalized, ok := normalizeConfirmationActionContext(callback, action.Value)
+	if !ok {
+		return domain.ConfirmationInteractiveAction{}, false
+	}
+	normalized.Approved = approved
+	return normalized, true
+}
 
-	wrapperCallID := action.Value
-	if wrapperCallID == "" || len(wrapperCallID) > 2048 {
+func normalizeJobStatusAction(callback *slackapi.InteractionCallback) (domain.ConfirmationInteractiveAction, bool) {
+	if callback == nil || callback.Type != slackapi.InteractionTypeBlockActions || len(callback.ActionCallback.BlockActions) != 1 {
+		return domain.ConfirmationInteractiveAction{}, false
+	}
+	action := callback.ActionCallback.BlockActions[0]
+	if action == nil || action.ActionID != statusActionID {
+		return domain.ConfirmationInteractiveAction{}, false
+	}
+	return normalizeConfirmationActionContext(callback, action.Value)
+}
+
+func normalizeConfirmationActionContext(callback *slackapi.InteractionCallback, wrapperCallID string) (domain.ConfirmationInteractiveAction, bool) {
+	if wrapperCallID == "" || utf8.RuneCountInString(wrapperCallID) > maxRendererOptionValueLength {
 		return domain.ConfirmationInteractiveAction{}, false
 	}
 
-	var key domain.ConversationKey
 	teamID := callback.Team.ID
 	channelID := callback.Channel.ID
 	messageTS := callback.Message.Timestamp
@@ -385,19 +653,25 @@ func normalizeInteractiveAction(callback *slackapi.InteractionCallback) (domain.
 		correlationID, correlationOK = callback.Message.Metadata.EventPayload["correlation_id"].(string)
 		rendererMode, rendererOK = callback.Message.Metadata.EventPayload["render_mode"].(string)
 		contentDigest, digestOK = callback.Message.Metadata.EventPayload["content_sha256"].(string)
-		if !correlationOK || correlationID == "" || !rendererOK || rendererMode != confirmationRenderMode || !digestOK || len(contentDigest) != 64 {
+		if !correlationOK || correlationID == "" || !rendererOK || !isConfirmationRendererMode(rendererMode) || !digestOK || len(contentDigest) != 64 {
 			return domain.ConfirmationInteractiveAction{}, false
 		}
 	}
 
-	if channelID[0] == 'D' {
+	var key domain.ConversationKey
+	switch channelID[0] {
+	case 'D':
 		if threadTS == "" {
 			key = domain.ConversationKey(fmt.Sprintf("slack:%s:dm:%s", teamID, channelID))
 		} else {
 			key = domain.ConversationKey(fmt.Sprintf("slack:%s:dm:%s:thread:%s", teamID, channelID, threadTS))
 		}
-	} else {
+	case 'C':
 		key = domain.ConversationKey(fmt.Sprintf("slack:%s:channel:%s:thread:%s", teamID, channelID, threadTS))
+	case 'G':
+		key = domain.ConversationKey(fmt.Sprintf("slack:%s:group:%s:thread:%s", teamID, channelID, threadTS))
+	default:
+		return domain.ConfirmationInteractiveAction{}, false
 	}
 
 	return domain.ConfirmationInteractiveAction{
@@ -411,17 +685,5 @@ func normalizeInteractiveAction(callback *slackapi.InteractionCallback) (domain.
 		CorrelationID:   correlationID,
 		RendererMode:    rendererMode,
 		ContentSHA256:   contentDigest,
-		Approved:        approved,
 	}, true
-}
-
-func terminalConfirmationFooter(approved bool, now time.Time) string {
-	if approved {
-		return fmt.Sprintf("_Approved %s_", now.Format("15:04"))
-	}
-	return fmt.Sprintf("_Rejected %s_", now.Format("15:04"))
-}
-
-func expiredConfirmationFooter(now time.Time) string {
-	return fmt.Sprintf("_Expired %s_", now.Format("15:04"))
 }

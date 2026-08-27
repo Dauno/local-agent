@@ -9,6 +9,7 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
@@ -177,6 +178,15 @@ func TestNormalizeInteractiveActionAcceptsDocumentedPayloadWithoutMetadata(t *te
 	}
 }
 
+func TestNormalizeInteractiveActionAcceptsPendingV1Metadata(t *testing.T) {
+	t.Parallel()
+	callback := newTestCallback(approveActionID, "wrapper-v1", "T12345678", "U12345678", "C12345678", "1720000001.000001", "")
+	callback.Message.Metadata.EventPayload["render_mode"] = confirmationRenderModeV1
+	if _, ok := normalizeInteractiveAction(&callback); !ok {
+		t.Fatal("normalizeInteractiveAction rejected a pending v1 confirmation")
+	}
+}
+
 func TestNormalizeInteractiveActionRejectsConflictingContainer(t *testing.T) {
 	t.Parallel()
 	callback := newTestCallback(approveActionID, "wrapper-abc", "T12345678", "U12345678", "C12345678", "1720000001.000001", "")
@@ -195,9 +205,128 @@ func TestRenderConfirmationBlocks(t *testing.T) {
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
 	blocks := renderConfirmationBlocks(delivery)
-	if len(blocks) != 3 {
-		t.Fatalf("renderConfirmationBlocks returned %d blocks, want 3", len(blocks))
+	if len(blocks) != 4 {
+		t.Fatalf("renderConfirmationBlocks returned %d blocks, want 4", len(blocks))
 	}
+}
+
+func TestConfirmationV2RendersOrderedSafeBlocks(t *testing.T) {
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Write <@U12345678> & report",
+		Payload: `{"project":"repo","task":"Inspect <@U12345678> and report","workstream_id":"ws-1","expected_revision":4,"action":"propose_task","task_id":"task-1","current_phase":"plan"}`,
+		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	fallback, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if utf8.RuneCountInString(fallback) > maxFallbackText || strings.Contains(fallback, "<@U12345678>") {
+		t.Fatalf("fallback = %q", fallback)
+	}
+	if len(blocks) != 5 {
+		t.Fatalf("blocks = %d, want title, metadata, task, workstream, actions", len(blocks))
+	}
+	title := blocks[0].(*slackapi.SectionBlock)
+	if title.Text.Type != slackapi.MarkdownType || title.Text.Text != "*Confirmation required*\nWrite &lt;@U12345678&gt; &amp; report" {
+		t.Fatalf("title block = %#v", title.Text)
+	}
+	metadata := blocks[1].(*slackapi.SectionBlock)
+	if len(metadata.Fields) != 2 || metadata.Fields[0].Type != slackapi.MarkdownType || metadata.Fields[1].Type != slackapi.MarkdownType {
+		t.Fatalf("metadata block = %#v", metadata)
+	}
+	task := blocks[2].(*slackapi.SectionBlock)
+	if task.Text.Type != slackapi.PlainTextType || !strings.Contains(task.Text.Text, "Inspect &lt;@U12345678>") || len(task.Fields) != 1 || task.Fields[0].Type != slackapi.PlainTextType || task.Fields[0].Text != "Project: repo" {
+		t.Fatalf("task block = %#v", task)
+	}
+	workstream := blocks[3].(*slackapi.SectionBlock)
+	if workstream.Text.Type != slackapi.PlainTextType || !strings.Contains(workstream.Text.Text, "Workstream data:") || !strings.Contains(workstream.Text.Text, "Workstream ID: ws-1") {
+		t.Fatalf("workstream block = %#v", workstream)
+	}
+	actions := blocks[4].(*slackapi.ActionBlock)
+	if len(actions.Elements.ElementSet) != 3 {
+		t.Fatalf("confirmation buttons = %d, want 3", len(actions.Elements.ElementSet))
+	}
+	approve := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
+	reject := actions.Elements.ElementSet[1].(*slackapi.ButtonBlockElement)
+	status := actions.Elements.ElementSet[2].(*slackapi.ButtonBlockElement)
+	if approve.ActionID != approveActionID || reject.ActionID != rejectActionID || status.ActionID != statusActionID ||
+		approve.Value != delivery.WrapperCallID || reject.Value != delivery.WrapperCallID || status.Value != delivery.WrapperCallID {
+		t.Fatalf("confirmation buttons = %#v", actions.Elements.ElementSet)
+	}
+	if approve.Text.Type != slackapi.PlainTextType || reject.Text.Type != slackapi.PlainTextType || status.Text.Type != slackapi.PlainTextType || status.Text.Text != "Ver estado" {
+		t.Fatalf("button text types = %q, %q, %q", approve.Text.Type, reject.Text.Type, status.Text.Type)
+	}
+}
+
+func TestConfirmationV2RendersStructStyleTaskDescription(t *testing.T) {
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-task",
+		Summary:       "Approve task",
+		Payload:       `{"project":"repo","task":{"ID":"task-1","Project":"repo","Description":"Inspect the repository"}}`,
+		Expiry:        time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	_, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	task := blocks[2].(*slackapi.SectionBlock)
+	if task.Text.Text != "Proposed task:\nInspect the repository" {
+		t.Fatalf("task text = %q", task.Text.Text)
+	}
+}
+
+func TestConfirmationV2UsesUnicodeAndExactSlackLimits(t *testing.T) {
+	renderer := mustEmbeddedRenderer(t)
+	tests := []struct {
+		name        string
+		valueKey    string
+		limit       int
+		wantAtLimit bool
+	}{
+		{name: "fallback", valueKey: "fallback_text", limit: maxFallbackText, wantAtLimit: true},
+		{name: "section field", valueKey: "project", limit: maxRendererSectionFieldLength, wantAtLimit: true},
+		{name: "section text", valueKey: "proposed_task", limit: maxRendererCompositionTextLength, wantAtLimit: true},
+		{name: "button value", valueKey: "wrapper_call_id", limit: maxRendererOptionValueLength, wantAtLimit: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			context := confirmationV2TemplateContext()
+			context.Values[test.valueKey] = strings.Repeat("界", test.limit)
+			if _, _, err := renderer.CompileMessageWithFallback(confirmationTemplateV2, context); (err == nil) != test.wantAtLimit {
+				t.Fatalf("at-limit compile error = %v", err)
+			}
+			context.Values[test.valueKey] += "界"
+			if _, _, err := renderer.CompileMessageWithFallback(confirmationTemplateV2, context); err == nil {
+				t.Fatal("limit+1 value was accepted")
+			}
+		})
+	}
+}
+
+func TestConfirmationTemplateValidatesButtonTextAndURL(t *testing.T) {
+	files := embeddedTemplateFiles(t)
+	replaceMessage(files, confirmationTemplateV2, `"text": {"type": "plain_text", "text": "Approve", "emoji": false}`, `"text": {"type": "plain_text", "text": "`+strings.Repeat("x", maxRendererButtonTextLength)+`", "emoji": false}`)
+	if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err != nil {
+		t.Fatalf("button text at limit rejected: %v", err)
+	}
+
+	files = embeddedTemplateFiles(t)
+	replaceMessage(files, confirmationTemplateV2, `"style": "primary"`, `"url": "javascript:alert(1)", "style": "primary"`)
+	if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err == nil {
+		t.Fatal("javascript button URL was accepted")
+	}
+}
+
+func confirmationV2TemplateContext() TemplateContext {
+	return TemplateContext{Values: map[string]string{
+		"title_summary":    "*Confirmation required*\nSummary",
+		"original_call_id": "*Call ID:*\n`call-1`",
+		"expires_at":       "*Expires:*\n15:04 UTC",
+		"project":          "Project: repo",
+		"proposed_task":    "Proposed task:\nInspect the repository",
+		"wrapper_call_id":  "wrapper-1",
+		"fallback_text":    "Confirmation required: Summary",
+	}}
 }
 
 func TestConfirmationMetadata(t *testing.T) {
@@ -234,7 +363,8 @@ func TestConfirmationContentDigestPreservesLegacyV1(t *testing.T) {
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Actor: "U12345678",
 		TeamID: "T12345678", ChannelID: "D12345678", ThreadTS: "1710000000.000000",
 		Summary: "Write file", ParameterHash: "abc123",
-		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+		RendererMode: confirmationRenderModeV1,
+		Expiry:       time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
 	const legacyV1 = "2f36fd991b846946e691510ec93c1356e769b5088f7f97731c25d5102d39c2b7"
 	if got := confirmationContentDigest(delivery); got != legacyV1 {
@@ -243,6 +373,29 @@ func TestConfirmationContentDigestPreservesLegacyV1(t *testing.T) {
 	delivery.Payload = `{"action":"cancel_workstream"}`
 	if got := confirmationContentDigest(delivery); got == legacyV1 {
 		t.Fatal("payload-bearing confirmation reused legacy digest")
+	}
+}
+
+func TestConfirmationContentDigestV2BindsPresentationContract(t *testing.T) {
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Actor: "U12345678",
+		TeamID: "T12345678", ChannelID: "D12345678", ThreadTS: "1710000000.000000",
+		Summary: "Write file", ParameterHash: "abc123", RendererMode: confirmationRenderModeV2,
+		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	v2Digest := port.ConfirmationContentDigestV2(delivery)
+	if v2Digest != port.ConfirmationContentDigest(delivery) {
+		t.Fatalf("v2 digest dispatch = %q, want %q", port.ConfirmationContentDigest(delivery), v2Digest)
+	}
+	v1 := delivery
+	v1.RendererMode = confirmationRenderModeV1
+	if v2Digest == port.ConfirmationContentDigest(v1) {
+		t.Fatal("v2 digest reused the v1 digest")
+	}
+	withPayload := delivery
+	withPayload.Payload = `{"project":"repo","task":"Inspect the repository"}`
+	if v2Digest == port.ConfirmationContentDigestV2(withPayload) {
+		t.Fatal("v2 digest omitted display payload data")
 	}
 }
 
@@ -255,7 +408,7 @@ func TestConfirmationPayloadPrecedesActionsAndAppearsInFallback(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	fallback, blocks, err := compileConfirmationMessage(renderer, delivery)
+	fallback, blocks, err := compileConfirmationMessageV1(renderer, delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -275,7 +428,7 @@ func TestConfirmationPayloadPrecedesActionsAndAppearsInFallback(t *testing.T) {
 		t.Fatalf("last block = %#v, want actions after payload", blocks[len(blocks)-1])
 	}
 	delivery.Payload = `{"action":"cancel_workstream"}`
-	if fallback := confirmationFallbackText(delivery); !strings.Contains(fallback, delivery.Payload) {
+	if fallback := confirmationFallbackTextV1(delivery); !strings.Contains(fallback, delivery.Payload) {
 		t.Fatal("bounded accessible fallback omitted confirmation payload")
 	}
 }
@@ -491,28 +644,36 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 		t.Fatalf("posted metadata payload = %#v", client.postedMetadata[0].EventPayload)
 	}
 	blocks := client.postedBlocks[0]
-	if len(blocks) != 3 {
-		t.Fatalf("confirmation blocks = %d, want 3", len(blocks))
+	if len(blocks) != 4 {
+		t.Fatalf("confirmation blocks = %d, want 4", len(blocks))
 	}
 	header := blocks[0].(*slackapi.SectionBlock)
-	if header.Text == nil || header.Text.Text != ":lock: Write file" {
+	if header.Text == nil || header.Text.Type != slackapi.MarkdownType || header.Text.Text != "*Confirmation required*\nWrite file" {
 		t.Fatalf("confirmation header = %#v", header.Text)
 	}
 	details := blocks[1].(*slackapi.SectionBlock)
 	if len(details.Fields) != 2 || details.Fields[0].Text != "*Call ID:*\n`orig-abc`" || details.Fields[1].Text != "*Expires:*\n15:30 UTC" {
 		t.Fatalf("confirmation details = %#v", details.Fields)
 	}
-	actions := blocks[2].(*slackapi.ActionBlock)
-	if actions.BlockID != "confirmation_buttons" || len(actions.Elements.ElementSet) != 2 {
+	projectTask := blocks[2].(*slackapi.SectionBlock)
+	if projectTask.Text == nil || projectTask.Text.Type != slackapi.PlainTextType || projectTask.Text.Text != "Proposed task: not provided" || len(projectTask.Fields) != 1 || projectTask.Fields[0].Type != slackapi.PlainTextType || projectTask.Fields[0].Text != "Project: not provided" {
+		t.Fatalf("confirmation project and task = %#v", projectTask)
+	}
+	actions := blocks[3].(*slackapi.ActionBlock)
+	if actions.BlockID != "confirmation_buttons" || len(actions.Elements.ElementSet) != 3 {
 		t.Fatalf("confirmation actions = %#v", actions)
 	}
 	approve := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
 	reject := actions.Elements.ElementSet[1].(*slackapi.ButtonBlockElement)
+	status := actions.Elements.ElementSet[2].(*slackapi.ButtonBlockElement)
 	if approve.ActionID != approveActionID || approve.Value != delivery.WrapperCallID || approve.Style != slackapi.StylePrimary || approve.Text.Text != "Approve" {
 		t.Fatalf("approve button = %#v", approve)
 	}
 	if reject.ActionID != rejectActionID || reject.Value != delivery.WrapperCallID || reject.Style != slackapi.StyleDanger || reject.Text.Text != "Reject" {
 		t.Fatalf("reject button = %#v", reject)
+	}
+	if status.ActionID != statusActionID || status.Value != delivery.WrapperCallID || status.Text.Text != "Ver estado" {
+		t.Fatalf("status button = %#v", status)
 	}
 }
 
@@ -537,6 +698,12 @@ func TestConfirmationPublisherUpdate(t *testing.T) {
 	}
 	if client.updatedTS[0] != "1720000001.000001" {
 		t.Errorf("updated timestamp = %q", client.updatedTS[0])
+	}
+	if got := client.updatedBlocks[0][0].(*slackapi.SectionBlock).Text.Text; strings.Contains(got, ":white_check_mark:") || !strings.HasPrefix(got, "*Confirmation approved*") {
+		t.Fatalf("updated title = %q", got)
+	}
+	if got := client.updatedBlocks[0][2].(*slackapi.SectionBlock).Text; got.Type != slackapi.PlainTextType || got.Text != "Confirmation result:\ndone" {
+		t.Fatalf("updated result = %#v", got)
 	}
 }
 
@@ -599,6 +766,28 @@ func TestConfirmationPublisherRecoversMatchingPrompt(t *testing.T) {
 	result, found, err := pub.RecoverConfirmation(t.Context(), delivery)
 	if err != nil || !found || result.SlackMessageTS != "1720000001.000001" {
 		t.Fatalf("RecoverConfirmation() = %#v, %t, %v", result, found, err)
+	}
+}
+
+func TestConfirmationPublisherRecoversPendingV1Prompt(t *testing.T) {
+	t.Parallel()
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-v1", OriginalCallID: "orig-v1", Actor: "U12345678",
+		TeamID: "T12345678", ChannelID: "C12345678", ThreadTS: "1720000000.000000",
+		Summary: "Write file", ParameterHash: "abc123", CorrelationID: "confirmation:wrapper-v1",
+		RendererMode: confirmationRenderModeV1, Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
+	}}}
+	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
+	result, found, err := pub.RecoverConfirmation(t.Context(), delivery)
+	if err != nil || !found || result.SlackMessageTS != "1720000001.000001" {
+		t.Fatalf("RecoverConfirmation(v1) = %#v, %t, %v", result, found, err)
+	}
+	_, blocks, err := compileConfirmationMessageForMode(mustEmbeddedRenderer(t), delivery, confirmationRenderModeV1)
+	if err != nil || len(blocks) != 3 {
+		t.Fatalf("v1 renderer compatibility = blocks:%d err:%v", len(blocks), err)
 	}
 }
 

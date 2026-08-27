@@ -36,6 +36,9 @@ type ConfirmationDelivery struct {
 // ConfirmationContentDigest binds a rendered confirmation to its durable
 // identity and presentation without exposing tool parameters.
 func ConfirmationContentDigest(delivery ConfirmationDelivery) string {
+	if delivery.RendererMode == "confirmation_v2" {
+		return ConfirmationContentDigestV2(delivery)
+	}
 	if delivery.Payload == "" {
 		return confirmationContentDigestV1(delivery)
 	}
@@ -51,6 +54,44 @@ func ConfirmationContentDigest(delivery ConfirmationDelivery) string {
 		ParameterHash  string `json:"parameter_hash"`
 		Expiry         int64  `json:"expiry"`
 	}{
+		WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
+		Actor: delivery.Actor, TeamID: delivery.TeamID, ChannelID: delivery.ChannelID,
+		ThreadTS: delivery.ThreadTS, Summary: delivery.Summary, Payload: delivery.Payload,
+		ParameterHash: delivery.ParameterHash, Expiry: delivery.Expiry.Unix(),
+	})
+	digest := sha256.Sum256(canonical)
+	return fmt.Sprintf("%x", digest)
+}
+
+// ConfirmationContentDigestV2 binds the v2 confirmation layout and its
+// display contract to the durable confirmation identity. The layout marker
+// makes a presentation change visible even when the delivery data is equal.
+func ConfirmationContentDigestV2(delivery ConfirmationDelivery) string {
+	canonical, _ := json.Marshal(struct {
+		RendererMode   string `json:"renderer_mode"`
+		Layout         string `json:"layout"`
+		Title          string `json:"title"`
+		CallIDLabel    string `json:"call_id_label"`
+		ExpiryLabel    string `json:"expiry_label"`
+		ProjectLabel   string `json:"project_label"`
+		TaskLabel      string `json:"task_label"`
+		Workstream     string `json:"workstream_label"`
+		WrapperCallID  string `json:"wrapper_call_id"`
+		OriginalCallID string `json:"original_call_id"`
+		Actor          string `json:"actor"`
+		TeamID         string `json:"team_id"`
+		ChannelID      string `json:"channel_id"`
+		ThreadTS       string `json:"thread_ts"`
+		Summary        string `json:"summary"`
+		Payload        string `json:"payload"`
+		ParameterHash  string `json:"parameter_hash"`
+		Expiry         int64  `json:"expiry"`
+	}{
+		RendererMode: "confirmation_v2",
+		Layout: "section:title_summary;section:call_id,expires_at;" +
+			"section:project,proposed_task;section:workstream_data?;actions:approve,reject,status",
+		Title: "Confirmation required", CallIDLabel: "Call ID", ExpiryLabel: "Expires",
+		ProjectLabel: "Project", TaskLabel: "Proposed task", Workstream: "Workstream data",
 		WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
 		Actor: delivery.Actor, TeamID: delivery.TeamID, ChannelID: delivery.ChannelID,
 		ThreadTS: delivery.ThreadTS, Summary: delivery.Summary, Payload: delivery.Payload,
@@ -105,6 +146,12 @@ type ConfirmationPublisher interface {
 	PublishConfirmation(ctx context.Context, delivery ConfirmationDelivery) (ConfirmationPublishedResult, error)
 	RecoverConfirmation(ctx context.Context, delivery ConfirmationDelivery) (ConfirmationPublishedResult, bool, error)
 	UpdateConfirmation(ctx context.Context, delivery ConfirmationDelivery, terminalText string) error
+}
+
+// JobAcceptancePublisher publishes the host-owned receipt after a delegated
+// job passes confirmation. It publishes a new message, not a prompt update.
+type JobAcceptancePublisher interface {
+	PublishJobAccepted(ctx context.Context, job domain.ExternalAgentJob) error
 }
 
 // ConfirmationPublishedResult carries the opaque message identifier

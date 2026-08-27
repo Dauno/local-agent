@@ -18,6 +18,7 @@ import (
 
 var (
 	_ port.ExternalAgentJobStore                     = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobWrapperStore              = (*ExternalAgentJobStore)(nil)
 	_ port.ExpiredExternalAgentJobRecovery           = (*ExternalAgentJobStore)(nil)
 	_ port.ExternalAgentJobNotificationStore         = (*ExternalAgentJobStore)(nil)
 	_ port.ExternalAgentJobNotificationRetryStore    = (*ExternalAgentJobStore)(nil)
@@ -167,6 +168,35 @@ func (s *ExternalAgentJobStore) GetJob(ctx context.Context, jobID string) (*doma
 		return nil, fmt.Errorf("get external-agent job: %w", err)
 	}
 	return &job, nil
+}
+
+// GetJobByWrapperCallID resolves the durable job identity used by a
+// confirmation button. Duplicate wrapper IDs fail closed.
+func (s *ExternalAgentJobStore) GetJobByWrapperCallID(ctx context.Context, wrapperCallID string) (*domain.ExternalAgentJob, error) {
+	if s == nil || s.db == nil || strings.TrimSpace(wrapperCallID) == "" || strings.ContainsAny(wrapperCallID, "\x00\r\n") {
+		return nil, nil
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT `+jobColumns+` FROM external_agent_jobs WHERE wrapper_call_id = ? LIMIT 2`, wrapperCallID)
+	if err != nil {
+		return nil, fmt.Errorf("get external-agent job by wrapper call ID: %w", err)
+	}
+	defer func() { _ = rows.Close() }()
+
+	var found *domain.ExternalAgentJob
+	for rows.Next() {
+		job, scanErr := scanJob(rows)
+		if scanErr != nil {
+			return nil, fmt.Errorf("scan external-agent job by wrapper call ID: %w", scanErr)
+		}
+		if found != nil {
+			return nil, errors.New("external-agent wrapper call ID is ambiguous")
+		}
+		found = &job
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("read external-agent job by wrapper call ID: %w", err)
+	}
+	return found, nil
 }
 
 // InspectJob returns only fields approved for the local administrative view.

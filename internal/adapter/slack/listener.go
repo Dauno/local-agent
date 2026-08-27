@@ -70,6 +70,7 @@ type Listener struct {
 	allowedUserIDs     []string
 	interactiveHandler func(context.Context, domain.ConfirmationInteractiveAction) error
 	responsePublisher  port.ResponsePublisher
+	jobStatusHandler   *JobStatusHandler
 	builderPresenter   *BuilderModalPresenter
 	builderHandler     *BuilderSubmissionHandler
 	dispatcher         *InteractiveDispatcher
@@ -102,6 +103,14 @@ func (l *Listener) SetInteractiveHandler(handler func(context.Context, domain.Co
 func (l *Listener) WithResponsePublisher(publisher port.ResponsePublisher) *Listener {
 	if l != nil {
 		l.responsePublisher = publisher
+	}
+	return l
+}
+
+// WithJobStatusHandler configures the handler for v2 confirmation status actions.
+func (l *Listener) WithJobStatusHandler(handler *JobStatusHandler) *Listener {
+	if l != nil {
+		l.jobStatusHandler = handler
 	}
 	return l
 }
@@ -419,6 +428,14 @@ func (l *Listener) handleBuilderOpenAction(ctx context.Context, callback slack.I
 		l.publishBuilderModalFallback(ctx, callback, nil)
 	}
 	return nil
+}
+
+func (l *Listener) handleJobStatusAction(ctx context.Context, callback slack.InteractionCallback) error {
+	if l.jobStatusHandler == nil {
+		l.logger.Warn("job status action ignored because its handler is not configured")
+		return nil
+	}
+	return l.jobStatusHandler.Handle(ctx, callback)
 }
 
 func (l *Listener) handleConfirmationAction(ctx context.Context, callback slack.InteractionCallback) error {

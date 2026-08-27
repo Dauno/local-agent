@@ -9,6 +9,7 @@ import (
 	"io"
 	"io/fs"
 	"maps"
+	"net/url"
 	"path"
 	"slices"
 	"sort"
@@ -32,14 +33,18 @@ var requiredTemplateNames = []string{
 	"agent_preview",
 	"builder_modal",
 	"confirmation_message",
+	"confirmation_message_v2",
+	"job_accepted_message",
 	"onboarding_message",
 }
 
 var requiredTemplateSet = map[string]struct{}{
-	"agent_preview":        {},
-	"builder_modal":        {},
-	"confirmation_message": {},
-	"onboarding_message":   {},
+	"agent_preview":           {},
+	"builder_modal":           {},
+	"confirmation_message":    {},
+	"confirmation_message_v2": {},
+	"job_accepted_message":    {},
+	"onboarding_message":      {},
 }
 
 // TemplateCatalog is the validated, immutable set of declarative Slack
@@ -391,6 +396,14 @@ var scalarKeysByTemplate = map[string]map[string]struct{}{
 	},
 	"confirmation_message": {
 		"summary": {}, "original_call_id": {}, "expires_at": {}, "wrapper_call_id": {}, "fallback_text": {},
+	},
+	"confirmation_message_v2": {
+		"title_summary": {}, "original_call_id": {}, "expires_at": {}, "project": {},
+		"proposed_task": {}, "wrapper_call_id": {}, "fallback_text": {},
+	},
+	"job_accepted_message": {
+		"job_id": {}, "status": {}, "created_at": {}, "updated_at": {},
+		"status_sentence": {}, "fallback_text": {},
 	},
 	"agent_preview": {
 		"name": {}, "agent_class": {}, "provider_profile": {}, "execution_mode": {},
@@ -763,6 +776,9 @@ func parseOption(data []byte, templateName, fieldPath string) (templateOption, e
 	if err := validateTemplateString(templateName, fieldPath+".url", raw.URL, false, false); err != nil {
 		return templateOption{}, err
 	}
+	if err := validateSlackButtonURL(raw.URL, fieldPath+".url"); err != nil {
+		return templateOption{}, err
+	}
 	return option, nil
 }
 
@@ -962,6 +978,9 @@ func parseButton(element *templateElement, raw rawElement, templateName, fieldPa
 		return err
 	}
 	if err := validateTemplateString(templateName, fieldPath+".url", raw.URL, false, false); err != nil {
+		return err
+	}
+	if err := validateSlackButtonURL(raw.URL, fieldPath+".url"); err != nil {
 		return err
 	}
 	if raw.Style != "" && raw.Style != "primary" && raw.Style != "danger" {
@@ -1177,6 +1196,30 @@ func allowedScalarPlacement(templateName, key string, placement scalarPlacement,
 		case "wrapper_call_id":
 			return placement == placementElementValue && (actionID == approveActionID || actionID == rejectActionID)
 		}
+	case "confirmation_message_v2":
+		switch key {
+		case "fallback_text":
+			return placement == placementFallback
+		case "title_summary":
+			return placement == placementSectionText
+		case "original_call_id", "expires_at":
+			return placement == placementSectionField
+		case "project":
+			return placement == placementSectionField
+		case "proposed_task":
+			return placement == placementSectionText
+		case "wrapper_call_id":
+			return placement == placementElementValue && (actionID == approveActionID || actionID == rejectActionID || actionID == statusActionID)
+		}
+	case "job_accepted_message":
+		switch key {
+		case "fallback_text":
+			return placement == placementFallback
+		case "job_id", "status", "created_at", "updated_at":
+			return placement == placementSectionField
+		case "status_sentence":
+			return placement == placementSectionText
+		}
 	case "agent_preview":
 		switch key {
 		case "fallback_text":
@@ -1206,6 +1249,14 @@ var requiredScalarOccurrences = map[string]map[string]int{
 	},
 	"confirmation_message": {
 		"summary": 1, "original_call_id": 1, "expires_at": 1, "wrapper_call_id": 2, "fallback_text": 1,
+	},
+	"confirmation_message_v2": {
+		"title_summary": 1, "original_call_id": 1, "expires_at": 1, "project": 1,
+		"proposed_task": 1, "wrapper_call_id": 3, "fallback_text": 1,
+	},
+	"job_accepted_message": {
+		"job_id": 1, "status": 1, "created_at": 1, "updated_at": 1,
+		"status_sentence": 1, "fallback_text": 1,
 	},
 	"agent_preview": {
 		"name": 1, "agent_class": 1, "sha256": 1, "draft_id": 1, "fallback_text": 1,
@@ -1275,7 +1326,7 @@ func validateBlocks(doc templateDocument, blocks []templateBlock, modal bool) er
 				}
 			}
 			for fieldIndex, field := range block.Fields {
-				if err := validateBlockText(doc.Name, field, fmt.Sprintf("%s.fields[%d]", fieldPath, fieldIndex)); err != nil {
+				if err := validateBlockText(doc.Name, field, fmt.Sprintf("%s.fields[%d]", fieldPath, fieldIndex), maxRendererSectionFieldLength); err != nil {
 					return err
 				}
 			}
@@ -1353,7 +1404,7 @@ func validateBuilderInputLimit(templateName string, block templateBlock) error {
 	return nil
 }
 
-func validateBlockText(templateName string, text *templateText, fieldPath string) error {
+func validateBlockText(templateName string, text *templateText, fieldPath string, limit ...int) error {
 	if text == nil {
 		return fmt.Errorf("%s is required", fieldPath)
 	}
@@ -1361,12 +1412,15 @@ func validateBlockText(templateName string, text *templateText, fieldPath string
 		return fmt.Errorf("%s has invalid text type %q", fieldPath, text.Type)
 	}
 	if literal, ok := literalTemplateString(text.Text); ok {
-		limit := maxRendererCompositionTextLength
+		textLimit := maxRendererCompositionTextLength
 		if templateName == "agent_preview" && text.Type == "mrkdwn" {
-			limit = builderBlockTextLimit
+			textLimit = builderBlockTextLimit
 		}
-		if utf8.RuneCountInString(literal) > limit {
-			return fmt.Errorf("%s exceeds %d character limit", fieldPath, limit)
+		if len(limit) > 0 {
+			textLimit = limit[0]
+		}
+		if utf8.RuneCountInString(literal) > textLimit {
+			return fmt.Errorf("%s exceeds %d character limit", fieldPath, textLimit)
 		}
 	}
 	return nil
@@ -1443,8 +1497,14 @@ func validateElement(doc templateDocument, element *templateElement, modal bool,
 		if element.Text == nil {
 			return fmt.Errorf("%s.text is required", fieldPath)
 		}
+		if element.Text.Type != "plain_text" {
+			return fmt.Errorf("%s.text must be plain_text", fieldPath)
+		}
 		if err := validateTemplateTextLimit(doc.Name, element.Text, fieldPath+".text", maxRendererButtonTextLength); err != nil {
 			return err
+		}
+		if literal, ok := literalTemplateString(element.Value); ok && utf8.RuneCountInString(literal) > maxRendererOptionValueLength {
+			return fmt.Errorf("%s.value exceeds %d character limit", fieldPath, maxRendererOptionValueLength)
 		}
 	default:
 		return fmt.Errorf("%s has unsupported element type %q", fieldPath, element.Type)
@@ -1503,6 +1563,19 @@ func validateTemplateRepresentatives(doc templateDocument) error {
 			"expires_at": "2030-01-01T00:00:00Z", "wrapper_call_id": "wrapper-1",
 			"fallback_text": "Confirmation required: A confirmation summary",
 		}
+	case "confirmation_message_v2":
+		context.Values = map[string]string{
+			"title_summary": "*Confirmation required*\nA confirmation summary", "original_call_id": "*Call ID:*\n`call-1`",
+			"expires_at": "*Expires:*\n15:04 UTC", "project": "Project: workspace",
+			"proposed_task": "Proposed task:\nInspect the repository", "wrapper_call_id": "wrapper-1",
+			"fallback_text": "Confirmation required: A confirmation summary",
+		}
+	case "job_accepted_message":
+		context.Values = map[string]string{
+			"job_id": "job-1", "status": "queued", "created_at": "2030-01-01T00:00:00Z",
+			"updated_at": "2030-01-01T00:00:00Z", "status_sentence": "The host accepted the job.",
+			"fallback_text": "Job accepted / running: job-1 (queued)",
+		}
 	case "agent_preview":
 		context.Values = map[string]string{
 			"name": "incident_analyst", "agent_class": "LlmAgent", "provider_profile": "openai/fast",
@@ -1531,6 +1604,7 @@ var allowedInteractiveActionIDs = map[string]bool{
 	"local_agent.builder.request_install": true,
 	"local_agent.confirm.approve":         true,
 	"local_agent.confirm.reject":          true,
+	statusActionID:                        true,
 	"local_agent.onboarding.describe":     true,
 }
 
@@ -1560,6 +1634,7 @@ var allowedMessageActionIDs = map[string]bool{
 	"local_agent.builder.request_install": true,
 	"local_agent.confirm.approve":         true,
 	"local_agent.confirm.reject":          true,
+	statusActionID:                        true,
 	"local_agent.onboarding.describe":     true,
 }
 
@@ -1579,6 +1654,20 @@ func validateLiteralID(value, fieldPath string) error {
 		if r < 0x21 || r > 0x7e {
 			return fmt.Errorf("%s must contain printable ASCII only", fieldPath)
 		}
+	}
+	return nil
+}
+
+func validateSlackButtonURL(value, fieldPath string) error {
+	if value == "" {
+		return nil
+	}
+	parsed, err := url.Parse(value)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return fmt.Errorf("%s must be an absolute http or https URL", fieldPath)
+	}
+	if strings.ContainsAny(value, "\r\n") {
+		return fmt.Errorf("%s must not contain line breaks", fieldPath)
 	}
 	return nil
 }
