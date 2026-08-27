@@ -1,5 +1,10 @@
 # Release Notes
 
+## v0.11.0 (2026-08-26)
+
+- Renamed external-agent status and inspection output from `acp_session_id` to `session_id`.
+- Removed obsolete refactor handoff and Slack image attachment planning documents.
+
 ## v0.10.0 (2026-08-25)
 
 - Enabled gofumpt and golines (200-char limit) in the formatter chain and reformatted the tree.
