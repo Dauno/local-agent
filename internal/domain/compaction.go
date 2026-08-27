@@ -265,34 +265,57 @@ func ClassifyConversationTurns(contents []Content, options TurnClassificationOpt
 		}
 	}
 
-	contentStart := 0
-	for index := range turns {
-		contentEnd := contentStart + len(turns[index].Contents)
-		if activeStart >= contentStart && activeStart < contentEnd {
-			callNames := make(map[string]string)
-			for _, content := range turns[index].Contents {
-				for _, part := range content.Parts {
-					if part.FunctionCall != nil {
-						callNames[part.FunctionCall.ID] = part.FunctionCall.Name
-					}
+	if index := ConversationTurnIndexAt(turns, activeStart, len(contents)); index >= 0 {
+		callNames := make(map[string]string)
+		for _, content := range turns[index].Contents {
+			for _, part := range content.Parts {
+				if part.FunctionCall != nil {
+					callNames[part.FunctionCall.ID] = part.FunctionCall.Name
 				}
 			}
-			for openID := range openIDs {
-				name, ok := callNames[openID]
-				if !ok {
-					continue
-				}
-				turns[index].HasOpenInvocation = true
-				if name == ConfirmationFunctionName {
-					turns[index].HasOpenConfirmation = true
-				}
-			}
-			turns[index].Closed = false
-			break
 		}
-		contentStart = contentEnd
+		for openID := range openIDs {
+			name, ok := callNames[openID]
+			if !ok {
+				continue
+			}
+			turns[index].HasOpenInvocation = true
+			if name == ConfirmationFunctionName {
+				turns[index].HasOpenConfirmation = true
+			}
+		}
+		turns[index].Closed = false
 	}
 	return turns, activeStart, nil
+}
+
+func turnContentCount(turns []ConversationTurn) int {
+	count := 0
+	for _, turn := range turns {
+		count += len(turn.Contents)
+	}
+	return count
+}
+
+// ConversationTurnIndexAt returns the index of the turn containing
+// contentIndex, or -1 if none. totalContents is the length of the content
+// slice that produced turns. Turns may cover only a suffix of that slice:
+// ClassifyConversationTurns drops any leading content before the first plain
+// user-text turn, so the offset of turns[0] is totalContents minus the total
+// content covered by turns, not zero.
+func ConversationTurnIndexAt(turns []ConversationTurn, contentIndex, totalContents int) int {
+	coveredContents := turnContentCount(turns)
+	if contentIndex < 0 || contentIndex >= totalContents || totalContents < coveredContents {
+		return -1
+	}
+	offset := totalContents - coveredContents
+	for index, turn := range turns {
+		if contentIndex >= offset && contentIndex < offset+len(turn.Contents) {
+			return index
+		}
+		offset += len(turn.Contents)
+	}
+	return -1
 }
 
 func invocationStartAt(contents []Content, callIndex int) int {

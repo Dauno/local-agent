@@ -222,6 +222,38 @@ func TestCompilerAcceptsVisualEstimatorForNonEmptyBudgetTurn(t *testing.T) {
 	}
 }
 
+// TestCompilerHandlesLeadingNonTurnPrefix guards against a regression where
+// Compile failed with "active start N maps to no turn" whenever the input
+// contents began with content that ClassifyConversationTurns excludes from
+// its turn list (any content before the first plain user-text turn, such as
+// an orphaned model-role content left over from an earlier step).
+func TestCompilerHandlesLeadingNonTurnPrefix(t *testing.T) {
+	counter, err := tokencounter.New(tokencounter.StrategyEstimator, tokencounter.EstimatorVisualTileConservativeV1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	contents := []domain.Content{
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "orphaned prefix content"}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "first request"}}},
+		{Role: domain.ContentRoleModel, Parts: []domain.ContentPart{{Text: "reply"}}},
+		{Role: domain.ContentRoleUser, Parts: []domain.ContentPart{{Text: "second request"}}},
+	}
+	result, err := New(newFakeResultStore(), counter).Compile(t.Context(), domain.CompileRequest{
+		Contents: contents,
+		ModelBudget: domain.RequestBudget{
+			HardTokens:   10_000,
+			TargetTokens: 10_000,
+		},
+	})
+	if err != nil {
+		t.Fatalf("compile with leading non-turn prefix failed: %v", err)
+	}
+	want := contents[1:]
+	if !reflect.DeepEqual(result.Contents, want) {
+		t.Fatalf("compiled contents = %#v, want %#v", result.Contents, want)
+	}
+}
+
 func (s *fakeResultStore) ReadChunk(_ context.Context, req domain.ResultChunkRequest) (domain.ResultChunk, error) {
 	content, ok := s.results[req.Ref]
 	if !ok {

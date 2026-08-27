@@ -349,17 +349,6 @@ func turnCost(contents []domain.Content) int {
 	return cost
 }
 
-func turnIndexForContentStart(turns []domain.ConversationTurn, contentStart int) int {
-	offset := 0
-	for i, turn := range turns {
-		if contentStart >= offset && contentStart < offset+len(turn.Contents) {
-			return i
-		}
-		offset += len(turn.Contents)
-	}
-	return -1
-}
-
 func assembleContents(summary, recent, capsule, active []domain.Content) []domain.Content {
 	result := make([]domain.Content, 0, len(summary)+len(recent)+len(capsule)+len(active))
 	result = append(result, summary...)
@@ -385,7 +374,7 @@ func validateProjectedContents(contents []domain.Content, openInvocationIDs map[
 	if len(turns) == 0 {
 		return nil
 	}
-	activeIndex := max(turnIndexForContentStart(turns, activeStart), 0)
+	activeIndex := max(domain.ConversationTurnIndexAt(turns, activeStart, len(contents)), 0)
 	if activeIndex > 0 {
 		if err := domain.ValidateContentProtocol(domain.FlattenTurns(turns[:activeIndex]), domain.ProtocolValidationOptions{
 			RequireComplete:            true,

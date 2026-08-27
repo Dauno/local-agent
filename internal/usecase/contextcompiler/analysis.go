@@ -124,7 +124,7 @@ func analyzeCompilationWithSerializer(req domain.CompileRequest, serialize respo
 		return state, nil
 	}
 
-	activeTurnIdx := turnIndexForContentStart(turns, activeStart)
+	activeTurnIdx := domain.ConversationTurnIndexAt(turns, activeStart, len(inputContents))
 	if activeTurnIdx < 0 || activeTurnIdx >= len(turns) {
 		return state, fmt.Errorf("context compiler: active start %d maps to no turn", activeStart)
 	}

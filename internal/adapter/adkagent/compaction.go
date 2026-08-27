@@ -98,7 +98,7 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 	if request.MaxHistoryChars > 0 {
 		maxHistoryChars = request.MaxHistoryChars
 	}
-	activeTurnIndex := turnIndexForContentStart(turns, activeStart, len(request.Contents)-turnContentCount(turns))
+	activeTurnIndex := domain.ConversationTurnIndexAt(turns, activeStart, len(request.Contents))
 	if activeTurnIndex < 0 || activeTurnIndex >= len(turns) {
 		return domain.CompactionResult{}, errors.New("active ADK suffix does not map to a turn")
 	}
@@ -190,25 +190,6 @@ func (p *Projector) Project(_ context.Context, request domain.CompactionRequest)
 	return domain.CompactionResult{Contents: resultContents, Diagnostics: diagnostics}, nil
 }
 
-func turnIndexForContentStart(turns []domain.ConversationTurn, contentStart, prefixContents int) int {
-	contentOffset := prefixContents
-	for index, turn := range turns {
-		if contentStart >= contentOffset && contentStart < contentOffset+len(turn.Contents) {
-			return index
-		}
-		contentOffset += len(turn.Contents)
-	}
-	return -1
-}
-
-func turnContentCount(turns []domain.ConversationTurn) int {
-	count := 0
-	for _, turn := range turns {
-		count += len(turn.Contents)
-	}
-	return count
-}
-
 func summaryReference(text string, limit int) string {
 	text = strings.TrimSpace(text)
 	if utf8.RuneCountInString(text) > limit {
@@ -236,7 +217,7 @@ func validateProjectedContents(contents []domain.Content) error {
 	if len(turns) == 0 {
 		return nil
 	}
-	activeTurnIndex := turnIndexForContentStart(turns, activeStart, 0)
+	activeTurnIndex := domain.ConversationTurnIndexAt(turns, activeStart, len(contents))
 	if activeTurnIndex > 0 {
 		if err := validateSelectedTurns(turns[:activeTurnIndex], false); err != nil {
 			return err
