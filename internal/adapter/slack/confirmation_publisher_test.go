@@ -235,7 +235,8 @@ func TestConfirmationV2RendersOrderedSafeBlocks(t *testing.T) {
 		t.Fatalf("metadata block = %#v", metadata)
 	}
 	task := blocks[2].(*slackapi.SectionBlock)
-	if task.Text.Type != slackapi.PlainTextType || !strings.Contains(task.Text.Text, "Inspect &lt;@U12345678>") || len(task.Fields) != 1 || task.Fields[0].Type != slackapi.PlainTextType || task.Fields[0].Text != "Project: repo" {
+	if task.Text.Type != slackapi.PlainTextType || !strings.Contains(task.Text.Text, "Inspect &lt;@U12345678>") || len(task.Fields) != 1 || task.Fields[0].Type != slackapi.PlainTextType ||
+		task.Fields[0].Text != "Project: repo" {
 		t.Fatalf("task block = %#v", task)
 	}
 	workstream := blocks[3].(*slackapi.SectionBlock)
@@ -305,7 +306,12 @@ func TestConfirmationV2UsesUnicodeAndExactSlackLimits(t *testing.T) {
 
 func TestConfirmationTemplateValidatesButtonTextAndURL(t *testing.T) {
 	files := embeddedTemplateFiles(t)
-	replaceMessage(files, confirmationTemplateV2, `"text": {"type": "plain_text", "text": "Approve", "emoji": false}`, `"text": {"type": "plain_text", "text": "`+strings.Repeat("x", maxRendererButtonTextLength)+`", "emoji": false}`)
+	replaceMessage(
+		files,
+		confirmationTemplateV2,
+		`"text": {"type": "plain_text", "text": "Approve", "emoji": false}`,
+		`"text": {"type": "plain_text", "text": "`+strings.Repeat("x", maxRendererButtonTextLength)+`", "emoji": false}`,
+	)
 	if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err != nil {
 		t.Fatalf("button text at limit rejected: %v", err)
 	}
@@ -656,7 +662,9 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 		t.Fatalf("confirmation details = %#v", details.Fields)
 	}
 	projectTask := blocks[2].(*slackapi.SectionBlock)
-	if projectTask.Text == nil || projectTask.Text.Type != slackapi.PlainTextType || projectTask.Text.Text != "Proposed task: not provided" || len(projectTask.Fields) != 1 || projectTask.Fields[0].Type != slackapi.PlainTextType || projectTask.Fields[0].Text != "Project: not provided" {
+	if projectTask.Text == nil || projectTask.Text.Type != slackapi.PlainTextType || projectTask.Text.Text != "Proposed task: not provided" || len(projectTask.Fields) != 1 ||
+		projectTask.Fields[0].Type != slackapi.PlainTextType ||
+		projectTask.Fields[0].Text != "Project: not provided" {
 		t.Fatalf("confirmation project and task = %#v", projectTask)
 	}
 	actions := blocks[3].(*slackapi.ActionBlock)

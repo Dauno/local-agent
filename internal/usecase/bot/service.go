@@ -1491,7 +1491,8 @@ func (s *Service) validConfirmationInteraction(delivery port.ConfirmationDeliver
 		return OutcomeIgnoredFollowup, true
 	}
 	hasMetadata := interactive.CorrelationID != "" || interactive.RendererMode != "" || interactive.ContentSHA256 != ""
-	if hasMetadata && (!isRichConfirmationRendererMode(interactive.RendererMode) || interactive.RendererMode != delivery.RendererMode || delivery.CorrelationID != interactive.CorrelationID || interactive.ContentSHA256 != expectedDigest) {
+	if hasMetadata &&
+		(!isRichConfirmationRendererMode(interactive.RendererMode) || interactive.RendererMode != delivery.RendererMode || delivery.CorrelationID != interactive.CorrelationID || interactive.ContentSHA256 != expectedDigest) {
 		s.logger.Warn("confirmation interaction metadata mismatch", "wrapper_call_id", wrapperCallID)
 		return OutcomeIgnoredFollowup, true
 	}

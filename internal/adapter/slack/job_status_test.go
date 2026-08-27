@@ -48,7 +48,8 @@ func (s *fakeJobStatusConfirmationStore) MarkPublished(context.Context, string, 
 	return nil
 }
 
-func (s *fakeJobStatusConfirmationStore) MarkConsumed(context.Context, string) error   { return nil }
+func (s *fakeJobStatusConfirmationStore) MarkConsumed(context.Context, string) error { return nil }
+
 func (s *fakeJobStatusConfirmationStore) RejectDelivery(context.Context, string) error { return nil }
 
 func (s *fakeJobStatusConfirmationStore) GetByWrapperCallID(context.Context, string) (*port.ConfirmationDelivery, error) {
