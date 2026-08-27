@@ -267,6 +267,24 @@ func TestProgressProcessFailedDoesNotRegressTerminalPhases(t *testing.T) {
 	}
 }
 
+func TestProgressProcessFailedRecordsErrorClassButNotAfterTerminal(t *testing.T) {
+	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
+	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
+	progress.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventProcessFailed, ErrorClass: ExternalAgentErrorClassStdoutTooLarge}, base)
+	if progress.ErrorClass != ExternalAgentErrorClassStdoutTooLarge {
+		t.Fatalf("error class = %q, want %q", progress.ErrorClass, ExternalAgentErrorClassStdoutTooLarge)
+	}
+
+	// A process failure after a terminal prompt response is not authoritative:
+	// its class must not overwrite a projection that already completed.
+	completed := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
+	completed.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventPromptResponse, StopReason: ExternalAgentStopReasonEndTurn}, base)
+	completed.Apply(ExternalAgentProgressEvent{Kind: ExternalAgentEventProcessFailed, ErrorClass: ExternalAgentErrorClassProcessExit}, base.Add(time.Second))
+	if completed.ErrorClass != "" {
+		t.Fatalf("error class after a completed turn = %q, want empty", completed.ErrorClass)
+	}
+}
+
 func TestProgressStopReasonPhases(t *testing.T) {
 	base := time.Date(2026, 8, 4, 2, 0, 0, 0, time.UTC)
 	progress := ExternalAgentJobProgress{JobID: "job_1", Attempt: 1}
@@ -291,6 +309,7 @@ func TestProgressValidateAllowlists(t *testing.T) {
 		JobID: "job_1", Attempt: 1, Phase: ExternalAgentPhaseToolRunning,
 		LastEventKind: ExternalAgentEventToolCallUpdate, LastToolKind: ExternalAgentToolKindExecute,
 		LastToolStatus: ExternalAgentToolStatusRunning, StopReason: ExternalAgentStopReasonEndTurn,
+		ErrorClass: ExternalAgentErrorClassProviderFailed,
 	}
 	if err := valid.Validate(); err != nil {
 		t.Fatalf("valid projection rejected: %v", err)
@@ -304,6 +323,7 @@ func TestProgressValidateAllowlists(t *testing.T) {
 		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, LastToolStatus: ExternalAgentToolStatus("bogus")},
 		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, LastToolKind: ExternalAgentToolKind("bogus")},
 		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, StopReason: "bogus"},
+		{JobID: "job_1", Phase: ExternalAgentPhaseStarting, ErrorClass: ExternalAgentErrorClass("bogus")},
 	}
 	for index, projection := range invalid {
 		if err := projection.Validate(); err == nil {

@@ -39,7 +39,7 @@ func (f *fakeSQLiteRuntimeChecker) CheckSQLiteRuntime(_ context.Context, path st
 
 func healthySQLiteRuntime() domain.SQLiteRuntimeHealth {
 	return domain.SQLiteRuntimeHealth{
-		SchemaVersion: 43, JournalMode: "wal", Synchronous: 2,
+		SchemaVersion: 44, JournalMode: "wal", Synchronous: 2,
 		BusyTimeoutMillis: 5000, ForeignKeys: true, MaxOpenConnections: 4,
 	}
 }
@@ -60,7 +60,7 @@ func TestDoctorReportsHealthySQLiteRuntime(t *testing.T) {
 	if checker.calls != 1 {
 		t.Fatalf("checker calls = %d, want 1", checker.calls)
 	}
-	for _, want := range []string{"schema_version=43", "journal_mode=wal", "synchronous=2", "busy_timeout_ms=5000", "foreign_keys=true", "max_open_connections=4"} {
+	for _, want := range []string{"schema_version=44", "journal_mode=wal", "synchronous=2", "busy_timeout_ms=5000", "foreign_keys=true", "max_open_connections=4"} {
 		if !strings.Contains(result.Detail, want) {
 			t.Fatalf("detail %q missing %q", result.Detail, want)
 		}

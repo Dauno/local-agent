@@ -1017,6 +1017,7 @@ type jobStatusResult struct {
 	PendingPerm            bool   `json:"pending_permission"`
 	PromptElapsed          int64  `json:"prompt_elapsed_seconds"`
 	StopReason             string `json:"stop_reason"`
+	ErrorClass             string `json:"error_class,omitempty"`
 	ProcessAlive           *bool  `json:"process_alive"`
 	ResultAvailable        bool   `json:"result_available"`
 	ResultSHA256           string `json:"result_sha256,omitempty"`
@@ -1033,6 +1034,7 @@ func statusViewToJobResult(status domain.ExternalAgentJobStatusView) jobStatusRe
 		LastEventKind: string(status.LastEventKind),
 		ActiveTools:   status.ActiveToolCount, PendingPerm: status.PendingPermission,
 		PromptElapsed: status.PromptElapsedSeconds, StopReason: status.StopReason,
+		ErrorClass:      string(status.ErrorClass),
 		ProcessAlive:    status.ProcessAlive,
 		ResultAvailable: status.ResultAvailable, ResultSHA256: status.ResultSHA256,
 		ResultBytes: status.ResultBytes, DeliveryMode: string(status.DeliveryMode), ErrorCode: status.ErrorCode,

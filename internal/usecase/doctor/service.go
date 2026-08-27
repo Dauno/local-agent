@@ -23,11 +23,11 @@ const (
 	defaultAuxiliaryModelTimeoutSeconds = 120
 )
 
-// This release's v43 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
+// This release's v44 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
 // checkpoint 6). A database or connection outside this contract fails
 // doctor with actionable remediation rather than being silently accepted.
 const (
-	expectedSQLiteSchemaVersion      = 43
+	expectedSQLiteSchemaVersion      = 44
 	expectedSQLiteJournalMode        = "wal"
 	expectedSQLiteSynchronous        = 2 // PRAGMA synchronous FULL
 	expectedSQLiteBusyTimeoutMillis  = 5000
@@ -649,7 +649,7 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 	default:
 		if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
 			report.fail("SQLite connection model", strings.Join(problems, "; "),
-				"Restore the v43 connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
+				fmt.Sprintf("Restore the v%d connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", expectedSQLiteSchemaVersion), false)
 		} else {
 			report.pass("SQLite connection model", fmt.Sprintf(
 				"schema_version=%d journal_mode=%s synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
@@ -1197,7 +1197,7 @@ func validateConnectionPragmas(health domain.SQLiteRuntimeHealth) []string {
 }
 
 // validateSQLiteRuntimeContract compares an observed connection model
-// against this release's full v43 contract and returns one problem string
+// against this release's full v44 contract and returns one problem string
 // per mismatch, or nil when the connection model is healthy.
 func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
 	var problems []string

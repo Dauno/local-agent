@@ -427,6 +427,10 @@ type ExternalAgentJobInspection struct {
 	PendingPermission        bool                        `json:"pending_permission"`
 	PromptElapsedSeconds     int64                       `json:"prompt_elapsed_seconds"`
 	StopReason               string                      `json:"stop_reason"`
+	// ErrorClass is the bounded, redaction-safe reason the last process_failed
+	// event recorded. Empty until a failure occurs; a terminal prompt response
+	// never sets it, so it always describes an actual process failure.
+	ErrorClass ExternalAgentErrorClass `json:"error_class,omitempty"`
 	// ProcessAlive is nil when the current process has no trustworthy runtime
 	// handle (for example the read-only CLI); it must never be rendered as dead.
 	ProcessAlive *bool `json:"process_alive"`
@@ -948,7 +952,10 @@ type ExternalAgentJobStatusView struct {
 	PendingPermission        bool
 	PromptElapsedSeconds     int64
 	StopReason               string
-	ProcessAlive             *bool
+	// ErrorClass is the bounded, redaction-safe reason the last process_failed
+	// event recorded. Empty until a failure occurs.
+	ErrorClass   ExternalAgentErrorClass
+	ProcessAlive *bool
 }
 
 // ExternalAgentJobShutdownStats is content-free lifecycle telemetry.

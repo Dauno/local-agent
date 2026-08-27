@@ -38,6 +38,16 @@ const (
 	CodeProcessFailed     = "process_failed"
 	CodeTimeout           = "timeout"
 	CodeNoResponse        = "no_response"
+	// CodeLineTooLarge and CodeStdoutTooLarge distinguish a local adapter
+	// bound from an actual process crash: both are protocol violations, but
+	// only these two are fixed by raising MaxLineBytes/MaxStdoutBytes rather
+	// than by the CLI or the network.
+	CodeLineTooLarge   = "protocol_line_too_large"
+	CodeStdoutTooLarge = "protocol_stdout_too_large"
+	// CodeProviderFailure means the CLI ran to completion and reported its own
+	// failure through the stream (stream.failure matched), as opposed to the
+	// adapter losing the process (CodeProcessFailed).
+	CodeProviderFailure = "provider_reported_failure"
 )
 
 // CLIError classifies a direct native CLI failure.
@@ -51,7 +61,15 @@ type CLIError struct {
 func (e *CLIError) Error() string { return fmt.Sprintf("agent CLI error %s: %s", e.Code, e.Message) }
 func (e *CLIError) Unwrap() error { return e.Cause }
 
-type ProtocolViolation struct{ Reason string }
+// ProtocolViolation reports a malformed or oversized stream. Code is empty
+// for violations that only ever mean a broken stream (malformed NDJSON, an
+// event after the terminal event, an unresolved session ID); it is set to
+// CodeLineTooLarge or CodeStdoutTooLarge for the two violations that are
+// actually a local adapter bound, not a CLI-side problem.
+type ProtocolViolation struct {
+	Reason string
+	Code   string
+}
 
 func (e *ProtocolViolation) Error() string { return "agent CLI stream violation: " + e.Reason }
 
@@ -75,8 +93,11 @@ type Config struct {
 }
 
 const (
-	defaultMaxStdoutBytes = 4 << 20
-	defaultMaxLineBytes   = 1 << 20
+	// defaultMaxLineBytes bounds one NDJSON event. A single tool-output event
+	// can exceed the old 1 MiB bound. The separate stdout limit keeps the whole
+	// exchange bounded while allowing several large activity events.
+	defaultMaxStdoutBytes = 16 << 20
+	defaultMaxLineBytes   = 4 << 20
 	defaultMaxStderrBytes = 8 << 10
 	defaultWaitDelay      = 5 * time.Second
 )

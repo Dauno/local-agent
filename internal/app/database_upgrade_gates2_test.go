@@ -119,22 +119,22 @@ func corruptFixtureCases() []struct {
 		seed    map[string]string
 		wantKey string
 	}{
-		{"baseline-without-cutoff", 43, map[string]string{keyBaselineStr: "jobs=0;activations=0"}, keyBaselineStr},
-		{"cutoff-without-baseline", 43, map[string]string{keyCutoffStr: "12345"}, keyCutoffStr},
-		{"malformed-baseline", 43, map[string]string{keyBaselineStr: "bogus"}, keyBaselineStr},
-		{"malformed-cutoff", 43, map[string]string{keyCutoffStr: "soon"}, keyCutoffStr},
-		{"partial-backup-identity", 43, partialIdentity, keyBackupVerified},
-		{"marker-beside-identity", 43, appendSeed(rowTwoBase, keyNotRequired, validTime), keyNotRequired},
-		{"relative-backup-path", 43, merge(rowTwoBase, map[string]string{keyBackupPath: "relative.db"}), keyBackupPath},
-		{"malformed-bytes", 43, merge(rowTwoBase, map[string]string{keyBackupBytes: "big"}), keyBackupBytes},
-		{"short-sha", 43, merge(rowTwoBase, map[string]string{keyBackupSHA: "abc"}), keyBackupSHA},
-		{"source-version-zero", 43, merge(rowTwoBase, map[string]string{keyBackupSource: "0"}), keyBackupSource},
-		{"bad-verified-at", 43, merge(rowTwoBase, map[string]string{keyBackupVerified: "not-a-time"}), keyBackupVerified},
-		{"bad-not-required-at", 43, map[string]string{keyNotRequired: "not-a-time"}, keyNotRequired},
-		{"unknown-postflight", 43, map[string]string{keyPostStatus: "weird"}, keyPostStatus},
-		{"status-without-detail", 43, map[string]string{keyPostStatus: "passed"}, keyPostStatus},
-		{"detail-without-status", 43, map[string]string{keyPostDetail: "orphan detail"}, keyPostDetail},
-		{"identity-without-baseline", 43, map[string]string{
+		{"baseline-without-cutoff", 44, map[string]string{keyBaselineStr: "jobs=0;activations=0"}, keyBaselineStr},
+		{"cutoff-without-baseline", 44, map[string]string{keyCutoffStr: "12345"}, keyCutoffStr},
+		{"malformed-baseline", 44, map[string]string{keyBaselineStr: "bogus"}, keyBaselineStr},
+		{"malformed-cutoff", 44, map[string]string{keyCutoffStr: "soon"}, keyCutoffStr},
+		{"partial-backup-identity", 44, partialIdentity, keyBackupVerified},
+		{"marker-beside-identity", 44, appendSeed(rowTwoBase, keyNotRequired, validTime), keyNotRequired},
+		{"relative-backup-path", 44, merge(rowTwoBase, map[string]string{keyBackupPath: "relative.db"}), keyBackupPath},
+		{"malformed-bytes", 44, merge(rowTwoBase, map[string]string{keyBackupBytes: "big"}), keyBackupBytes},
+		{"short-sha", 44, merge(rowTwoBase, map[string]string{keyBackupSHA: "abc"}), keyBackupSHA},
+		{"source-version-zero", 44, merge(rowTwoBase, map[string]string{keyBackupSource: "0"}), keyBackupSource},
+		{"bad-verified-at", 44, merge(rowTwoBase, map[string]string{keyBackupVerified: "not-a-time"}), keyBackupVerified},
+		{"bad-not-required-at", 44, map[string]string{keyNotRequired: "not-a-time"}, keyNotRequired},
+		{"unknown-postflight", 44, map[string]string{keyPostStatus: "weird"}, keyPostStatus},
+		{"status-without-detail", 44, map[string]string{keyPostStatus: "passed"}, keyPostStatus},
+		{"detail-without-status", 44, map[string]string{keyPostDetail: "orphan detail"}, keyPostDetail},
+		{"identity-without-baseline", 44, map[string]string{
 			keyBackupPath: "/tmp/x.db", keyBackupBytes: "10", keyBackupSHA: testSHAValid,
 			keyBackupSource: "41", keyBackupVerified: validTime,
 		}, keyBaselineStr},
@@ -189,7 +189,7 @@ func TestOutOfRangeSchemasRefuseBeforeLockOrBackup(t *testing.T) {
 			var unsupported rollout.UnsupportedSourceSchemaError
 			if !errors.As(previewErr, &unsupported) || unsupported.Found != version ||
 				unsupported.MinSupported != rollout.MinSourceVersion || unsupported.MaxSupported != rollout.MaxSourceVersion {
-				t.Fatalf("preview err = %v (%T), want UnsupportedSourceSchemaError{%d,[33,43]}", previewErr, previewErr, version)
+				t.Fatalf("preview err = %v (%T), want UnsupportedSourceSchemaError{%d,[33,44]}", previewErr, previewErr, version)
 			}
 			preflightErr := h.application.requireRolloutComplete(ctx(), h.paths.DatabaseFile)
 			if !errors.As(preflightErr, &unsupported) || unsupported.Found != version {

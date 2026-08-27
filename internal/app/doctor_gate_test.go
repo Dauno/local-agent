@@ -141,7 +141,7 @@ func TestDoctorV33JournalDeleteRunsGatedChecksAndLeavesBytesUnchanged(t *testing
 	if connectionModel.Status != doctor.StatusPass || connectionModel.Fatal {
 		t.Fatalf("connection model = %#v", connectionModel)
 	}
-	for _, want := range []string{"schema v33", "current binary requires v43", "run local-agent db upgrade", "journal_mode=delete"} {
+	for _, want := range []string{"schema v33", "current binary requires v44", "run local-agent db upgrade", "journal_mode=delete"} {
 		if !strings.Contains(connectionModel.Detail, want) {
 			t.Fatalf("detail %q missing %q", connectionModel.Detail, want)
 		}
@@ -172,11 +172,11 @@ func TestDoctorV33JournalDeleteRunsGatedChecksAndLeavesBytesUnchanged(t *testing
 	}
 }
 
-// TestDoctorV43RunsEverythingWithoutSkips proves no regression at the
+// TestDoctorV44RunsEverythingWithoutSkips proves no regression at the
 // current release version: every check runs, none skips, WAL is enforced,
 // and the run exits clean.
-func TestDoctorV43RunsEverythingWithoutSkips(t *testing.T) {
-	dbPath := writeDoctorGateFixture(t, 43, false)
+func TestDoctorV44RunsEverythingWithoutSkips(t *testing.T) {
+	dbPath := writeDoctorGateFixture(t, 44, false)
 	before := sha256File(t, dbPath)
 
 	service, err := doctor.New(doctorGateDependencies(dbPath, nil))
@@ -187,7 +187,7 @@ func TestDoctorV43RunsEverythingWithoutSkips(t *testing.T) {
 
 	connectionModel := findGateResult(t, report, "SQLite connection model")
 	if connectionModel.Status != doctor.StatusPass ||
-		!strings.Contains(connectionModel.Detail, "schema_version=43") ||
+		!strings.Contains(connectionModel.Detail, "schema_version=44") ||
 		!strings.Contains(connectionModel.Detail, "journal_mode=wal") {
 		t.Fatalf("connection model = %#v", connectionModel)
 	}
@@ -202,10 +202,10 @@ func TestDoctorV43RunsEverythingWithoutSkips(t *testing.T) {
 			if result.Name == "model API key" {
 				continue
 			}
-			t.Fatalf("unexpected skip at v43: %#v", result)
+			t.Fatalf("unexpected skip at v44: %#v", result)
 		}
 		if result.Status == doctor.StatusFail {
-			t.Fatalf("unexpected failure at v43: %#v (%s)", result, result.Detail)
+			t.Fatalf("unexpected failure at v44: %#v (%s)", result, result.Detail)
 		}
 	}
 	if code := report.ExitCode(); code != 0 {
@@ -222,16 +222,16 @@ func (failingRuntimeChecker) CheckSQLiteRuntime(context.Context, string) (domain
 	return domain.SQLiteRuntimeHealth{}, errors.New("connection probe refused")
 }
 
-// TestDoctorFutureSchemaIsFatalWithNoLaterChecks proves the detected > 43
+// TestDoctorFutureSchemaIsFatalWithNoLaterChecks proves the detected > 44
 // branch fails the connection-model check fatally, stops every later check,
 // and drives exit code 2.
 func TestDoctorFutureSchemaIsFatalWithNoLaterChecks(t *testing.T) {
-	dbPath := writeDoctorGateFixture(t, 44, false)
+	dbPath := writeDoctorGateFixture(t, 45, false)
 	service, err := doctor.New(doctorGateDependencies(dbPath, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertFatalStop(t, service.Run(context.Background(), false), "user_version=44")
+	assertFatalStop(t, service.Run(context.Background(), false), "user_version=45")
 }
 
 // TestDoctorUnreadableSchemaIsFatalWithNoLaterChecks proves a failed schema

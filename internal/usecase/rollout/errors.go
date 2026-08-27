@@ -9,9 +9,9 @@ var (
 	// ErrFutureSchema reports a schema newer than this binary's target.
 	ErrFutureSchema = errors.New("database schema is newer than this binary supports")
 
-	// ErrSchemaUpgradeRequired reports a schema in [33, 40] that db upgrade
-	// must process before ordinary commands may open the file.
-	ErrSchemaUpgradeRequired = errors.New("database schema is behind this binary's v43")
+	// ErrSchemaUpgradeRequired reports an accepted schema below TargetVersion.
+	// The db upgrade command must process it before ordinary commands open it.
+	ErrSchemaUpgradeRequired = fmt.Errorf("database schema is behind this binary's v%d", TargetVersion)
 
 	// ErrBackupPrimitiveUnsupported reports platforms without the backup
 	// primitive. Distinct from ErrMutationLockUnsupported so a caller can
@@ -52,8 +52,8 @@ var (
 	// re-read match counts diverge from the previewed --expect-* counts.
 	ErrLegacyIdentityQuarantineMismatch = errors.New("legacy identity quarantine match counts diverged from the expected counts")
 
-	// ErrLegacyCutoffNotRecorded reports a database that reached v41 without
-	// db upgrade ever freezing a rollout cutoff. Its message is the operator
+	// ErrLegacyCutoffNotRecorded reports a database that reached the target
+	// without db upgrade freezing a rollout cutoff. Its message is the operator
 	// text the preview renders verbatim.
 	ErrLegacyCutoffNotRecorded = errors.New("no cutoff recorded, run local-agent db upgrade")
 )

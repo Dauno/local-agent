@@ -115,11 +115,11 @@ func TestApplyRowOneFullRunPinsFrozenOrdering(t *testing.T) {
 	if err != nil {
 		t.Fatalf("apply: %v", err)
 	}
-	if !report.RolloutAdvanced || report.ToVersion != 43 || !report.PostflightOK {
+	if !report.RolloutAdvanced || report.ToVersion != 44 || !report.PostflightOK {
 		t.Fatalf("report = %+v", report)
 	}
-	if got := queryUserVersion(t, dbPath); got != 43 {
-		t.Fatalf("user_version = %d, want 43", got)
+	if got := queryUserVersion(t, dbPath); got != 44 {
+		t.Fatalf("user_version = %d, want 44", got)
 	}
 
 	// Call-order gate: capture once, under the lock, strictly before the
@@ -263,7 +263,7 @@ func TestRowTwoIntactResumeSkipsCaptureBackupAndRecord(t *testing.T) {
 	if report.Backup.Path != identity.Path {
 		t.Fatalf("report backup = %+v, want the revalidated record", report.Backup)
 	}
-	if got := queryUserVersion(t, dbPath); got != 43 {
+	if got := queryUserVersion(t, dbPath); got != 44 {
 		t.Fatalf("user_version = %d", got)
 	}
 	plain, _ = sqlOpenPlain(dbPath)
@@ -423,7 +423,7 @@ func TestAdoptionWritesFixedZeroWithoutMeasuringOrMigrating(t *testing.T) {
 	if report.Backup.Path == "" {
 		t.Fatal("adoption must still produce a verified backup")
 	}
-	if got := queryUserVersion(t, h.paths.DatabaseFile); got != 43 {
+	if got := queryUserVersion(t, h.paths.DatabaseFile); got != 44 {
 		t.Fatalf("user_version moved to %d on adoption", got)
 	}
 

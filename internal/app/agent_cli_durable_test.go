@@ -333,15 +333,38 @@ func TestAgentCLIProgressEventMapping(t *testing.T) {
 	}
 }
 
-// The failure class is bounded and never carries the error text.
+// The failure class is bounded and never carries the error text: an
+// unrecognized error, or a domain.ExternalAgentError code this function does
+// not special-case, both fall back to the generic process-exit class rather
+// than leaking anything through.
 func TestAgentCLIFailureClassIsBounded(t *testing.T) {
 	t.Parallel()
 	plain := externalAgentFailureClass(errors.New("codex wrote /etc/passwd"))
-	if plain != string(domain.ExternalAgentErrorProcessExit) {
+	if plain != domain.ExternalAgentErrorClassProcessExit {
 		t.Fatalf("class = %q, want the default process-exit class", plain)
 	}
-	typed := externalAgentFailureClass(&domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultTooLarge, Err: errors.New("secret")})
-	if typed != string(domain.ExternalAgentErrorResultTooLarge) {
-		t.Fatalf("class = %q, want the typed code", typed)
+	unmapped := externalAgentFailureClass(&domain.ExternalAgentError{Code: domain.ExternalAgentErrorResultTooLarge, Err: errors.New("secret")})
+	if unmapped != domain.ExternalAgentErrorClassProcessExit {
+		t.Fatalf("class = %q, want the default process-exit class for an unmapped code", unmapped)
+	}
+	timeout := externalAgentFailureClass(&domain.ExternalAgentError{Code: domain.ExternalAgentErrorIdleTimeout, Err: errors.New("secret")})
+	if timeout != domain.ExternalAgentErrorClassTimeout {
+		t.Fatalf("class = %q, want timeout", timeout)
+	}
+	// The real-world path: agentcli.CLIError is what generateAgentCLIText
+	// actually returns, and every one of its distinct codes must map to its
+	// own class rather than collapsing into the generic default.
+	for code, want := range map[string]domain.ExternalAgentErrorClass{
+		agentcli.CodeLineTooLarge:    domain.ExternalAgentErrorClassLineTooLarge,
+		agentcli.CodeStdoutTooLarge:  domain.ExternalAgentErrorClassStdoutTooLarge,
+		agentcli.CodeProviderFailure: domain.ExternalAgentErrorClassProviderFailed,
+		agentcli.CodeTimeout:         domain.ExternalAgentErrorClassTimeout,
+		agentcli.CodeNoResponse:      domain.ExternalAgentErrorClassNoResponse,
+		agentcli.CodeProcessFailed:   domain.ExternalAgentErrorClassProcessExit,
+	} {
+		got := externalAgentFailureClass(&agentcli.CLIError{Code: code, Message: "secret detail"})
+		if got != want {
+			t.Fatalf("class for CLIError code %q = %q, want %q", code, got, want)
+		}
 	}
 }

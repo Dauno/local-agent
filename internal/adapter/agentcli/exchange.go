@@ -172,6 +172,12 @@ func (l *LLM) exchangeCommand(ctx context.Context, workingDir string, args []str
 	}
 	diagnostic := <-stderrCh
 	waitErr := cmd.Wait()
+	// The CLI writes its transcript as it runs, so one already exists by the
+	// time the process exits, win or lose. Reporting it only on the success
+	// path left every failed or completion_unknown job with no transcript to
+	// reconcile from, even though the file was sitting on disk the whole
+	// time.
+	l.reportTranscript(report, capturedSession)
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", &CLIError{Code: CodeTimeout, Message: "agent CLI call cancelled", Retryable: errors.Is(ctxErr, context.DeadlineExceeded), Cause: ctxErr}
 	}
@@ -181,7 +187,6 @@ func (l *LLM) exchangeCommand(ctx context.Context, workingDir string, args []str
 	if waitErr != nil {
 		return "", classifyProcessError(l.command, waitErr, diagnostic)
 	}
-	l.reportTranscript(report, capturedSession)
 	return text, nil
 }
 
@@ -368,7 +373,7 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter, expectedSess
 		line := scanner.Bytes()
 		total += len(line) + 1
 		if total > l.maxStdoutBytes {
-			return "", &ProtocolViolation{Reason: fmt.Sprintf("stdout exceeded %d bytes", l.maxStdoutBytes)}
+			return "", &ProtocolViolation{Code: CodeStdoutTooLarge, Reason: fmt.Sprintf("stdout exceeded %d bytes", l.maxStdoutBytes)}
 		}
 		if len(strings.TrimSpace(string(line))) == 0 {
 			continue
@@ -443,12 +448,12 @@ func (l *LLM) readStdout(reader io.Reader, report ActivityReporter, expectedSess
 	// operator to the descriptor for a problem that was never there.
 	if err := scanner.Err(); err != nil {
 		if errors.Is(err, bufio.ErrTooLong) {
-			return "", &ProtocolViolation{Reason: fmt.Sprintf("agent CLI emitted a line longer than %d bytes", l.maxLineBytes)}
+			return "", &ProtocolViolation{Code: CodeLineTooLarge, Reason: fmt.Sprintf("agent CLI emitted a line longer than %d bytes", l.maxLineBytes)}
 		}
 		return "", &CLIError{Code: CodeProcessFailed, Message: "reading agent CLI output failed", Cause: err}
 	}
 	if failed {
-		return "", &CLIError{Code: CodeProcessFailed, Message: "agent CLI reported a failed turn"}
+		return "", &CLIError{Code: CodeProviderFailure, Message: "agent CLI reported a failed turn"}
 	}
 	if l.provider.Session != nil && capturedSessionID == "" {
 		return "", &CLIError{Code: CodeProcessFailed, Message: "descriptor session.id did not resolve"}
@@ -742,7 +747,11 @@ func classifyProcessError(command string, err error, diagnostic diagnosticSummar
 func (l *LLM) annotateProtocol(err error, diagnostic diagnosticSummary) error {
 	var violation *ProtocolViolation
 	if errors.As(err, &violation) {
-		return &CLIError{Code: CodeProcessFailed, Message: l.sanitizeText(violation.Reason) + diagnosticSuffix("stderr", diagnostic)}
+		code := violation.Code
+		if code == "" {
+			code = CodeProcessFailed
+		}
+		return &CLIError{Code: code, Message: l.sanitizeText(violation.Reason) + diagnosticSuffix("stderr", diagnostic)}
 	}
 	return err
 }

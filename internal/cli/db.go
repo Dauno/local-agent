@@ -24,12 +24,13 @@ type DatabaseRollbackCheckBackend interface {
 	CheckRollbackDrain(ctx context.Context) (rollout.SummaryDiscoveryDrainStatus, error)
 }
 
-const (
-	databaseAlreadyCompleteText = "database already at schema v43; nothing to do"
-	freshUpgradeSummaryFormat   = "will migrate v%d to v43; backup will be written under %s"
-	adoptionSummaryFormat       = "database is already at v43 but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under %s"
-	resumeNeededSummaryText     = "database is at v43 with an incomplete rollout (postflight not yet passed); will re-run postflight"
-	upgradeCancelledText        = "Actualizacion cancelada."
+const upgradeCancelledText = "Actualizacion cancelada."
+
+var (
+	databaseAlreadyCompleteText = fmt.Sprintf("database already at schema v%d; nothing to do", rollout.TargetVersion)
+	freshUpgradeSummaryFormat   = fmt.Sprintf("will migrate v%%d to v%d; backup will be written under %%s", rollout.TargetVersion)
+	adoptionSummaryFormat       = fmt.Sprintf("database is already at v%d but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under %%s", rollout.TargetVersion)
+	resumeNeededSummaryText     = fmt.Sprintf("database is at v%d with an incomplete rollout (postflight not yet passed); will re-run postflight", rollout.TargetVersion)
 )
 
 func newDBCommand(backend Backend, streams Streams) *cobra.Command {
@@ -50,7 +51,7 @@ func newDBUpgradeCommand(backend Backend, streams Streams) *cobra.Command {
 	var backupDir string
 	command := &cobra.Command{
 		Use:   "upgrade",
-		Short: "Migrate the database to schema v43 through a verified backup",
+		Short: fmt.Sprintf("Migrate the database to schema v%d through a verified backup", rollout.TargetVersion),
 		Long: "Classifies the durable database state, shows what will happen, and after " +
 			"confirmation creates a verified backup before any write. A previously " +
 			"interrupted run resumes from its durable state without repeating a completed row.",
@@ -114,13 +115,13 @@ func confirmUpgrade(streams Streams, preview rollout.UpgradePreview) bool {
 	}
 	switch preview.Kind {
 	case rollout.UpgradeFreshUpgrade:
-		first := fmt.Sprintf("Aplicar la migracion de schema v%d a v43 sobre %s. Se creara un backup verificado antes de escribir. Confirmar.", preview.FromVersion, preview.DatabasePath)
+		first := fmt.Sprintf("Aplicar la migracion de schema v%d a v%d sobre %s. Se creara un backup verificado antes de escribir. Confirmar.", preview.FromVersion, preview.ToVersion, preview.DatabasePath)
 		return confirm(first) && confirm("El proceso v33 desplegado no participa en el protocolo de bloqueo de este comando. Confirme que ese proceso esta detenido antes de continuar.")
 	case rollout.UpgradeAdoption:
 		first := fmt.Sprintf(adoptionSummaryFormat, preview.ResolvedBackupDir)
 		return confirm(first) &&
 			confirm(
-				"Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v43. Confirme que ningun proceso asi esta en ejecucion antes de continuar.",
+				fmt.Sprintf("Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v%d. Confirme que ningun proceso asi esta en ejecucion antes de continuar.", preview.ToVersion),
 			)
 	default:
 		return confirm(resumeNeededSummaryText)

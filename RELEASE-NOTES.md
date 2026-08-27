@@ -1,5 +1,11 @@
 # Release Notes
 
+## v0.11.2 (2026-08-27)
+
+- Increased agent CLI output limits and preserved transcript paths after failed or interrupted runs.
+- Added redaction-safe failure classes to durable external-agent progress and inspection output.
+- Added schema v44 with a database upgrade migration for the new failure classification.
+
 ## v0.11.1 (2026-08-27)
 
 - Fixed context compaction and compilation when history starts with model content before the first user input.

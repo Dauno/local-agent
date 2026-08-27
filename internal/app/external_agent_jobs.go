@@ -20,6 +20,8 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/workpoll"
 )
 
+const transcriptPathWriteTimeout = 5 * time.Second
+
 type externalAgentSchedules struct {
 	jobs          *workpoll.Scheduler
 	notifications *workpoll.Scheduler
@@ -112,10 +114,13 @@ func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain
 				}
 				sessionErr = d.store.AssignExternalAgentSession(ctx, job.ID, job.LeaseOwner, job.Attempt, activity.SessionID)
 			case agentcli.ActivityTranscriptResolved:
-				// Best effort. The path is derived data, so losing it never
-				// fails a run that already produced its result.
+				// Best effort. A timeout can cancel the run context before the
+				// process exits. Use a short cleanup context so the transcript
+				// still reaches the durable job while its lease remains valid.
 				if d.store != nil {
-					_ = d.store.AssignTranscriptPath(ctx, job.ID, job.LeaseOwner, job.Attempt, activity.TranscriptPath)
+					writeCtx, cancelWrite := context.WithTimeout(context.WithoutCancel(ctx), transcriptPathWriteTimeout)
+					_ = d.store.AssignTranscriptPath(writeCtx, job.ID, job.LeaseOwner, job.Attempt, activity.TranscriptPath)
+					cancelWrite()
 				}
 			default:
 				if recorder != nil {
@@ -172,14 +177,38 @@ type agentCLISessionRecoveryModel interface {
 	Resume(context.Context, string, string) (string, error)
 }
 
-// externalAgentFailureClass is the bounded classification the progress projection stores
-// for a failed run. It never carries the error text.
-func externalAgentFailureClass(err error) string {
-	var externalAgentErr *domain.ExternalAgentError
-	if errors.As(err, &externalAgentErr) && externalAgentErr.Code != "" {
-		return string(externalAgentErr.Code)
+// externalAgentFailureClass is the bounded classification the progress
+// projection stores for a failed run. It never carries the error text: a
+// closed set of causes only, so it stays safe to persist and to surface to an
+// operator without redacting anything.
+func externalAgentFailureClass(err error) domain.ExternalAgentErrorClass {
+	var cliErr *agentcli.CLIError
+	if errors.As(err, &cliErr) {
+		switch cliErr.Code {
+		case agentcli.CodeLineTooLarge:
+			return domain.ExternalAgentErrorClassLineTooLarge
+		case agentcli.CodeStdoutTooLarge:
+			return domain.ExternalAgentErrorClassStdoutTooLarge
+		case agentcli.CodeProviderFailure:
+			return domain.ExternalAgentErrorClassProviderFailed
+		case agentcli.CodeTimeout:
+			return domain.ExternalAgentErrorClassTimeout
+		case agentcli.CodeNoResponse:
+			return domain.ExternalAgentErrorClassNoResponse
+		default:
+			return domain.ExternalAgentErrorClassProcessExit
+		}
 	}
-	return string(domain.ExternalAgentErrorProcessExit)
+	var externalAgentErr *domain.ExternalAgentError
+	if errors.As(err, &externalAgentErr) {
+		switch externalAgentErr.Code {
+		case domain.ExternalAgentErrorIdleTimeout, domain.ExternalAgentErrorJobTimeout:
+			return domain.ExternalAgentErrorClassTimeout
+		case domain.ExternalAgentErrorCompletedWithoutFinalText:
+			return domain.ExternalAgentErrorClassNoResponse
+		}
+	}
+	return domain.ExternalAgentErrorClassProcessExit
 }
 
 // normalizeForegroundResult produces the complete persisted identity for a

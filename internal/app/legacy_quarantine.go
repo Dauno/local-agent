@@ -62,8 +62,8 @@ func (a *Application) requirePostflightPassed(ctx context.Context, databasePath 
 		return newTerminalSchemaError(rollout.ErrUnsupportedSourceSchema, current)
 	}
 	if current < rollout.TargetVersion {
-		// Only db upgrade records a passing postflight, and it does so at v41
-		// (FIND-192): a passed row seen below target is residual, corrupt, or
+		// Only db upgrade records a passing postflight at the target schema.
+		// A passed row seen below target is residual, corrupt, or
 		// seeded, and this command must never trust it.
 		return postflightNotPassedQuarantineError{}
 	}

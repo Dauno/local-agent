@@ -52,6 +52,7 @@ var migrations = map[int]migrationFunc{
 	41: migrateV41,
 	42: migrateV42,
 	43: migrateV43,
+	44: migrateV44,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -88,7 +89,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// if it cannot prove full coverage by count.
 	// V42 removes retired memory V1 tables and imported legacy documents. V43
 	// adds an optional transcript path to external-agent jobs. Existing rows
-	// stay empty and are never replayed or inferred.
+	// stay empty and are never replayed or inferred. V44 adds a bounded
+	// process-failure classification to the live progress projection; existing
+	// rows stay empty for the same reason.
 	// Older schemas retain the existing explicit-reset requirement.
 	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 &&
 		current != 24 &&
@@ -109,7 +112,8 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		current != 39 &&
 		current != 40 &&
 		current != 41 &&
-		current != 42 {
+		current != 42 &&
+		current != 43 {
 		return &StateResetNeededError{Found: current, Supported: SchemaVersion}
 	}
 

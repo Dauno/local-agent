@@ -36,6 +36,34 @@ func ValidExternalAgentProgressPhase(phase ExternalAgentProgressPhase) bool {
 	}
 }
 
+// ExternalAgentErrorClass is the bounded, redaction-safe classification of a
+// process_failed event: a closed set of causes, never the raw stderr text or
+// provider error message, so it stays safe to persist and to surface to an
+// operator or the model.
+type ExternalAgentErrorClass string
+
+const (
+	ExternalAgentErrorClassLineTooLarge   ExternalAgentErrorClass = "protocol_line_too_large"
+	ExternalAgentErrorClassStdoutTooLarge ExternalAgentErrorClass = "protocol_stdout_too_large"
+	ExternalAgentErrorClassProviderFailed ExternalAgentErrorClass = "provider_reported_failure"
+	ExternalAgentErrorClassProcessExit    ExternalAgentErrorClass = "process_exit"
+	ExternalAgentErrorClassTimeout        ExternalAgentErrorClass = "timeout"
+	ExternalAgentErrorClassNoResponse     ExternalAgentErrorClass = "no_response"
+)
+
+// ValidExternalAgentErrorClass reports whether class belongs to the bounded
+// allowlist. An empty class is valid: no failure has been recorded yet.
+func ValidExternalAgentErrorClass(class ExternalAgentErrorClass) bool {
+	switch class {
+	case "", ExternalAgentErrorClassLineTooLarge, ExternalAgentErrorClassStdoutTooLarge,
+		ExternalAgentErrorClassProviderFailed, ExternalAgentErrorClassProcessExit,
+		ExternalAgentErrorClassTimeout, ExternalAgentErrorClassNoResponse:
+		return true
+	default:
+		return false
+	}
+}
+
 // ExternalAgentProgressHealth is an orthogonal interpretation of recency and
 // transport/process state. No health value changes job state.
 type ExternalAgentProgressHealth string
@@ -177,7 +205,7 @@ type ExternalAgentProgressEvent struct {
 	// StopReason is the bounded terminal stop reason of a prompt response.
 	StopReason string
 	// ErrorClass is the bounded host-owned classification for process failure.
-	ErrorClass string
+	ErrorClass ExternalAgentErrorClass
 	// PID is present only for the process_started event and is never durable.
 	PID int
 	// UsageIncreased is set by the host recorder to gate repeated usage
@@ -229,6 +257,7 @@ type ExternalAgentJobProgress struct {
 	ToolOverflow             bool
 	PendingPermission        bool
 	StopReason               string
+	ErrorClass               ExternalAgentErrorClass
 	CreatedAt                time.Time
 	UpdatedAt                time.Time
 	// toolStates is in-memory-only per-CallID accounting used by Apply while
@@ -267,6 +296,9 @@ func (p ExternalAgentJobProgress) Validate() error {
 	}
 	if p.StopReason != "" && !validStopReason(p.StopReason) {
 		return errProgressInvalid("invalid stop reason")
+	}
+	if !ValidExternalAgentErrorClass(p.ErrorClass) {
+		return errProgressInvalid("invalid error class")
 	}
 	return nil
 }
@@ -353,9 +385,14 @@ func (p *ExternalAgentJobProgress) Apply(event ExternalAgentProgressEvent, now t
 		p.StopReason = event.StopReason
 	case ExternalAgentEventProcessFailed:
 		// A terminal prompt response is authoritative: a later process
-		// failure signal must never regress completed or cancelled.
+		// failure signal must never regress completed or cancelled, and the
+		// class it carries only describes a failure that is actually
+		// recorded.
 		if p.Phase != ExternalAgentPhaseCompleted && p.Phase != ExternalAgentPhaseCancelled {
 			p.Phase = ExternalAgentPhaseFailed
+			if event.ErrorClass != "" {
+				p.ErrorClass = event.ErrorClass
+			}
 		}
 	}
 }

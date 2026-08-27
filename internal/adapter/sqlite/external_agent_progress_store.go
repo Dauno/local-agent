@@ -58,8 +58,8 @@ func (s *ExternalAgentJobStore) WriteJobProgress(ctx context.Context, jobID, own
 		job_id, attempt, phase, last_event_kind,
 		last_transport_activity_at, last_session_update_at, last_meaningful_progress_at,
 		prompt_started_at, active_tool_count, last_tool_call_id, last_tool_kind,
-		last_tool_status, tool_overflow, pending_permission, stop_reason, created_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		last_tool_status, tool_overflow, pending_permission, stop_reason, error_class, created_at, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(job_id) DO UPDATE SET
 		attempt = excluded.attempt,
 		phase = excluded.phase,
@@ -75,13 +75,14 @@ func (s *ExternalAgentJobStore) WriteJobProgress(ctx context.Context, jobID, own
 		tool_overflow = excluded.tool_overflow,
 		pending_permission = excluded.pending_permission,
 		stop_reason = CASE WHEN attempt != excluded.attempt THEN excluded.stop_reason WHEN excluded.stop_reason != '' THEN excluded.stop_reason ELSE stop_reason END,
+		error_class = CASE WHEN attempt != excluded.attempt THEN excluded.error_class WHEN excluded.error_class != '' THEN excluded.error_class ELSE error_class END,
 		created_at = CASE WHEN attempt != excluded.attempt THEN excluded.created_at ELSE created_at END,
 		updated_at = excluded.updated_at`,
 		progress.JobID, progress.Attempt, progress.Phase, progress.LastEventKind,
 		unix(progress.LastTransportActivityAt), unix(progress.LastSessionUpdateAt), unix(progress.LastMeaningfulProgressAt),
 		unix(progress.PromptStartedAt), progress.ActiveToolCount, progress.LastToolCallID, progress.LastToolKind,
 		progress.LastToolStatus, boolInt(progress.ToolOverflow), boolInt(progress.PendingPermission), progress.StopReason,
-		unix(now), unix(now))
+		progress.ErrorClass, unix(now), unix(now))
 	if err != nil {
 		return fmt.Errorf("persist external-agent progress: %w", err)
 	}
@@ -97,6 +98,7 @@ func (s *ExternalAgentJobStore) ReadJobProgress(ctx context.Context, jobID strin
 	var (
 		progress                                           domain.ExternalAgentJobProgress
 		phase, lastEventKind, lastToolKind, lastToolStatus string
+		errorClass                                         string
 		transport, session, meaningful, promptStarted      int64
 		overflow, pending                                  int
 		created, updated                                   int64
@@ -104,18 +106,19 @@ func (s *ExternalAgentJobStore) ReadJobProgress(ctx context.Context, jobID strin
 	err := s.db.QueryRowContext(ctx, `SELECT job_id, attempt, phase, last_event_kind,
 		last_transport_activity_at, last_session_update_at, last_meaningful_progress_at,
 		prompt_started_at, active_tool_count, last_tool_call_id, last_tool_kind,
-		last_tool_status, tool_overflow, pending_permission, stop_reason, created_at, updated_at
+		last_tool_status, tool_overflow, pending_permission, stop_reason, error_class, created_at, updated_at
 		FROM external_agent_job_progress WHERE job_id = ?`, jobID).
 		Scan(&progress.JobID, &progress.Attempt, &phase, &lastEventKind,
 			&transport, &session, &meaningful, &promptStarted, &progress.ActiveToolCount,
 			&progress.LastToolCallID, &lastToolKind, &lastToolStatus, &overflow, &pending,
-			&progress.StopReason, &created, &updated)
+			&progress.StopReason, &errorClass, &created, &updated)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("read external-agent progress: %w", err)
 	}
+	progress.ErrorClass = domain.ExternalAgentErrorClass(errorClass)
 	progress.Phase = domain.ExternalAgentProgressPhase(phase)
 	progress.LastEventKind = domain.ExternalAgentEventKind(lastEventKind)
 	progress.LastToolKind = domain.ExternalAgentToolKind(lastToolKind)

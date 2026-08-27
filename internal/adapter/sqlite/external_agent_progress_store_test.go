@@ -23,7 +23,7 @@ func TestJobProgressStoreRoundTrip(t *testing.T) {
 		LastSessionUpdateAt: base.Add(time.Second), LastMeaningfulProgressAt: base.Add(time.Second),
 		PromptStartedAt: base, ActiveToolCount: 1, LastToolCallID: "tool-9",
 		LastToolKind: domain.ExternalAgentToolKindExecute, LastToolStatus: domain.ExternalAgentToolStatusRunning,
-		PendingPermission: true, UpdatedAt: base.Add(time.Second),
+		PendingPermission: true, ErrorClass: domain.ExternalAgentErrorClassProviderFailed, UpdatedAt: base.Add(time.Second),
 	}
 	if err := store.WriteJobProgress(ctx, "job-progress", "owner-1", 1, progress); err != nil {
 		t.Fatalf("write progress: %v", err)
@@ -34,7 +34,8 @@ func TestJobProgressStoreRoundTrip(t *testing.T) {
 	}
 	if loaded == nil || loaded.Phase != domain.ExternalAgentPhaseToolRunning || loaded.LastToolCallID != "tool-9" ||
 		!loaded.PendingPermission || loaded.Attempt != 1 || loaded.ActiveToolCount != 1 ||
-		loaded.LastToolStatus != domain.ExternalAgentToolStatusRunning {
+		loaded.LastToolStatus != domain.ExternalAgentToolStatusRunning ||
+		loaded.ErrorClass != domain.ExternalAgentErrorClassProviderFailed {
 		t.Fatalf("loaded progress = %+v", loaded)
 	}
 }
@@ -126,7 +127,8 @@ func TestJobProgressStoreResetsAttemptScopedFields(t *testing.T) {
 		LastMeaningfulProgressAt: base, PromptStartedAt: base.Add(-time.Minute),
 		ActiveToolCount: 1, LastToolCallID: "old-tool", LastToolKind: domain.ExternalAgentToolKindExecute,
 		LastToolStatus: domain.ExternalAgentToolStatusRunning, ToolOverflow: true,
-		PendingPermission: true, StopReason: domain.ExternalAgentStopReasonMaxTokens, UpdatedAt: base,
+		PendingPermission: true, StopReason: domain.ExternalAgentStopReasonMaxTokens,
+		ErrorClass: domain.ExternalAgentErrorClassProcessExit, UpdatedAt: base,
 	}
 	if err := store.WriteJobProgress(ctx, "job-cas", "owner-1", 1, first); err != nil {
 		t.Fatalf("write first attempt: %v", err)
@@ -150,7 +152,8 @@ func TestJobProgressStoreResetsAttemptScopedFields(t *testing.T) {
 		!loaded.LastTransportActivityAt.IsZero() || !loaded.LastSessionUpdateAt.IsZero() ||
 		!loaded.LastMeaningfulProgressAt.IsZero() || !loaded.PromptStartedAt.IsZero() ||
 		loaded.ActiveToolCount != 0 || loaded.LastToolCallID != "" || loaded.LastToolKind != "" ||
-		loaded.LastToolStatus != "" || loaded.ToolOverflow || loaded.PendingPermission || loaded.StopReason != "" {
+		loaded.LastToolStatus != "" || loaded.ToolOverflow || loaded.PendingPermission || loaded.StopReason != "" ||
+		loaded.ErrorClass != "" {
 		t.Fatalf("second attempt retained first-attempt state: %+v", loaded)
 	}
 	if loaded.CreatedAt != nextTime || loaded.UpdatedAt != nextTime {

@@ -385,6 +385,7 @@ func (s *Service) StatusProjection(ctx context.Context, jobID, actor string, con
 	view.ActiveToolCount = progress.ActiveToolCount
 	view.PendingPermission = progress.PendingPermission
 	view.StopReason = progress.StopReason
+	view.ErrorClass = progress.ErrorClass
 	view.ProcessAlive = alive
 	if !progress.PromptStartedAt.IsZero() {
 		elapsed := max(now.Sub(progress.PromptStartedAt), 0)

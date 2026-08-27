@@ -186,16 +186,17 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 	var activeTools int
 	var pending int
 	var stopReason string
+	var errorClass string
 	err := s.db.QueryRowContext(ctx, `SELECT j.status, j.status_revision, j.finished_at, j.acp_session_id, j.transcript_path, j.provider, j.profile,
 		COALESCE(p.phase, ''), COALESCE(p.last_event_kind, ''), COALESCE(p.last_transport_activity_at, 0),
 		COALESCE(p.last_session_update_at, 0), COALESCE(p.last_meaningful_progress_at, 0),
 		COALESCE(p.prompt_started_at, 0), COALESCE(p.active_tool_count, 0),
-		COALESCE(p.pending_permission, 0), COALESCE(p.stop_reason, '')
+		COALESCE(p.pending_permission, 0), COALESCE(p.stop_reason, ''), COALESCE(p.error_class, '')
 		FROM external_agent_jobs j
 		LEFT JOIN external_agent_job_progress p ON p.job_id = j.job_id
 		WHERE j.job_id = ?`, jobID).
 		Scan(&status, &statusRevision, &finishedAt, &sessionID, &transcriptPath, &provider, &profile, &phase, &lastEventKind,
-			&transport, &session, &meaningful, &promptStarted, &activeTools, &pending, &stopReason)
+			&transport, &session, &meaningful, &promptStarted, &activeTools, &pending, &stopReason, &errorClass)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -216,6 +217,7 @@ func (s *ExternalAgentJobStore) InspectJob(ctx context.Context, jobID string) (*
 		ActiveToolCount:          activeTools,
 		PendingPermission:        pending != 0,
 		StopReason:               stopReason,
+		ErrorClass:               domain.ExternalAgentErrorClass(errorClass),
 	}
 	rows, err := s.db.QueryContext(ctx, `SELECT status_revision, kind, publish_state,
 		attempts, lease_owner, lease_expiry, last_error_code, next_attempt_at, recovered_slack_ts,

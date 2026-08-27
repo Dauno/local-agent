@@ -66,6 +66,12 @@ func TestHelperProcess(t *testing.T) {
 		}
 	case "ignored-after-terminal":
 		_, _ = os.Stdout.WriteString(`{"type":"result","is_error":false,"result":"ok"}` + "\n" + `{"type":"rate_limit_event"}` + "\n")
+	case "large-stream":
+		padding := strings.Repeat("x", (1<<20)+128)
+		for range 5 {
+			_, _ = os.Stdout.WriteString(`{"type":"progress","padding":"` + padding + `"}` + "\n")
+		}
+		_, _ = os.Stdout.WriteString(`{"type":"result","is_error":false,"result":"final text"}` + "\n")
 	case "session":
 		sessionID := "session-1234"
 		for _, argument := range os.Args {
@@ -74,6 +80,14 @@ func TestHelperProcess(t *testing.T) {
 			}
 		}
 		_, _ = os.Stdout.WriteString(`{"type":"thread.started","thread_id":"` + sessionID + `"}` + "\n" + `{"type":"result","is_error":false,"result":"resumed text"}` + "\n")
+	case "session-then-failure":
+		sessionID := "session-1234"
+		for _, argument := range os.Args {
+			if strings.HasPrefix(argument, "session=") {
+				sessionID = strings.TrimPrefix(argument, "session=")
+			}
+		}
+		_, _ = os.Stdout.WriteString(`{"type":"thread.started","thread_id":"` + sessionID + `"}` + "\n" + `{"type":"result","is_error":true,"result":"bad"}` + "\n")
 	default:
 		_, _ = os.Stdout.WriteString(
 			`{"type":"assistant","message":{"content":[{"type":"thinking","text":"secret reasoning"}]}}` + "\n" + `{"type":"result","is_error":false,"result":"final text"}` + "\n",
@@ -156,6 +170,45 @@ func TestSessionEventCapturesIDAndCanonicalTranscriptBeforeIgnore(t *testing.T) 
 	}
 	if resolvedTranscript.SessionID != "session-1234" || resolvedTranscript.TranscriptPath != transcript {
 		t.Fatalf("transcript activity = %+v, want the resolved path", resolvedTranscript)
+	}
+}
+
+// TestFailedTurnStillResolvesTranscript guards against a regression where a
+// job that failed after announcing its session (a completion_unknown
+// candidate, since it may already have taken side effects) left no
+// transcript to reconcile from, even though the CLI had already written one.
+func TestFailedTurnStillResolvesTranscript(t *testing.T) {
+	transcriptRoot := t.TempDir()
+	transcript := filepath.Join(transcriptRoot, "2026", "08", "25", "rollout-now-session-1234.jsonl")
+	if err := os.MkdirAll(filepath.Dir(transcript), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(transcript, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	llm := sessionLLM(t,
+		[]string{"-test.run=^TestHelperProcess$", "helper-agent-cli", "mode=session-then-failure"},
+		agentdef.CLISessionResume{ResumeFlag: []string{"resume", "{{session_id}}"}},
+		filepath.Join(transcriptRoot, "**", "rollout-*-{{session_id}}.jsonl"),
+	)
+	var resolvedTranscript agentcli.Activity
+	ctx := agentcli.WithActivityReporter(t.Context(), func(activity agentcli.Activity) {
+		if activity.Kind == agentcli.ActivityTranscriptResolved {
+			resolvedTranscript = activity
+		}
+	})
+	request := &model.LLMRequest{Contents: []*genai.Content{genai.NewContentFromText(delegate("workspace", "task"), genai.RoleUser)}}
+	sawError := false
+	for _, err := range llm.GenerateContent(ctx, request, false) {
+		if err != nil {
+			sawError = true
+		}
+	}
+	if !sawError {
+		t.Fatal("expected the failing turn to report an error")
+	}
+	if resolvedTranscript.SessionID != "session-1234" || resolvedTranscript.TranscriptPath != transcript {
+		t.Fatalf("transcript activity on a failed turn = %+v, want the resolved path", resolvedTranscript)
 	}
 }
 
@@ -291,8 +344,15 @@ func TestDirectCLIParsesFinalTextAndKeepsPromptOffArgv(t *testing.T) {
 func TestDirectCLIClassifiesNativeFailure(t *testing.T) {
 	_, err := collect(t, testLLM(t, "failure", ""))
 	var cliErr *agentcli.CLIError
-	if !errors.As(err, &cliErr) || cliErr.Code != agentcli.CodeProcessFailed {
+	if !errors.As(err, &cliErr) || cliErr.Code != agentcli.CodeProviderFailure {
 		t.Fatalf("error = %v", err)
+	}
+}
+
+func TestDefaultStreamBoundsAcceptSeveralCodexSizedEvents(t *testing.T) {
+	response, err := collect(t, testLLM(t, "large-stream", ""))
+	if err != nil || response == nil || response.Content.Parts[0].Text != "final text" {
+		t.Fatalf("response = %+v, error = %v", response, err)
 	}
 }
 
