@@ -871,7 +871,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		KnowledgeRetrievalLimits: knowledgeRetrievalLimits,
 		WorkstreamsEnabled:       cfg.Orchestration.Workstreams.Enabled,
 		KnowledgeGateEnabled:     cfg.Orchestration.Knowledge.Enabled,
-	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, ActivationStore: activationStore, CompletionReader: externalJobService, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler, Workstreams: workstreamService, Coordinator: coordinator, Knowledge: knowledgeService, KnowledgeBindings: knowledgeBindings, KnowledgeRetriever: knowledgeRetriever, KnowledgeRetrievalBindings: bindingsResolver})
+	}, botusecase.Dependencies{Store: infra.store, Runtime: runtime, ActivationStore: activationStore, CompletionReader: externalJobService, JobReader: externalJobService, JobAcceptancePublisher: infra.confirmationPublisher, History: infra.history, Publisher: infra.publisher, Logger: models.logger, Exchange: infra.store, ModelCalls: infra.modelCalls, SanitizeContent: models.redactor.String, Enricher: infra.contextEnricher, ConfirmationStore: confirmationStore, ConfirmationPublisher: infra.confirmationPublisher, StructuredPublisher: infra.blockPublisher, FileLoader: infra.fileLoader, AttachmentProc: infra.attachmentProc, MaxAttachmentBytes: int64(cfg.Slack.Files.MaxBytesPerFile), MaxAttachmentChars: cfg.Slack.Files.MaxProcessedChars, StandardStore: infra.store, OnboardingStore: infra.store, ProgressPublisher: infra.standardPublisher, PromptPublisher: infra.standardPublisher, OnboardingPublisher: infra.standardPublisher, StreamingRuntime: runtime, IncrementalPublisher: infra.standardPublisher, SummaryScheduler: summaryScheduler, Workstreams: workstreamService, Coordinator: coordinator, Knowledge: knowledgeService, KnowledgeBindings: knowledgeBindings, KnowledgeRetriever: knowledgeRetriever, KnowledgeRetrievalBindings: bindingsResolver})
 	if err != nil {
 		return nil, err
 	}
@@ -1196,6 +1196,15 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 	cfg := setup.cfg
 	socket := socketmode.New(infra.api, socketmode.OptionLog(infra.sdkLog))
 	listener := slackadapter.NewListener(socket, slackadapter.NewRouter(infra.auth.UserID, cfg.Slack.StandardAgent.ThreadedDM), models.logger).WithAllowedUserIDs(cfg.Slack.AllowedUserIDs)
+	if composition != nil && composition.externalJobService != nil && infra.api != nil && infra.store != nil {
+		statusHandler := slackadapter.NewJobStatusHandler(
+			infra.api,
+			infra.slackTimeout,
+			adaptersqlite.NewConfirmationStore(infra.store),
+			composition.externalJobService,
+		)
+		listener = listener.WithJobStatusHandler(statusHandler)
+	}
 	if composition != nil && composition.agentBuilderSvc != nil && setup.defs != nil && infra.publisher != nil && infra.store != nil {
 		providerNames := make([]string, 0, len(setup.defs.Providers))
 		totalProfiles := 0

@@ -1,0 +1,32 @@
+{
+  "name": "job_accepted_message",
+  "schema_version": 1,
+  "surface": "message",
+  "payload": {
+    "fallback_text": "{{value.fallback_text}}",
+    "blocks": [
+      {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "*Job accepted / running*"}
+      },
+      {
+        "type": "section",
+        "fields": [
+          {"type": "mrkdwn", "text": "{{value.job_id}}"},
+          {"type": "mrkdwn", "text": "{{value.status}}"}
+        ]
+      },
+      {
+        "type": "section",
+        "fields": [
+          {"type": "mrkdwn", "text": "{{value.created_at}}"},
+          {"type": "mrkdwn", "text": "{{value.updated_at}}"}
+        ]
+      },
+      {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "{{value.status_sentence}}", "emoji": false}
+      }
+    ]
+  }
+}

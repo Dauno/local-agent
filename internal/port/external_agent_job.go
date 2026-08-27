@@ -66,6 +66,12 @@ type ExternalAgentJobStore interface {
 	ListExpiredRunning(ctx context.Context, now time.Time) ([]domain.ExternalAgentJob, error)
 }
 
+// ExternalAgentJobWrapperStore resolves a durable job by its opaque wrapper call
+// ID. It does not apply actor or conversation authorization.
+type ExternalAgentJobWrapperStore interface {
+	GetJobByWrapperCallID(ctx context.Context, wrapperCallID string) (*domain.ExternalAgentJob, error)
+}
+
 // ExternalAgentJobNativeResultStore resolves the normalized V2 result bound to
 // one exact terminal job revision. Missing bindings fail closed.
 type ExternalAgentJobNativeResultStore interface {
@@ -213,6 +219,12 @@ type ExternalAgentJobProgressStore interface {
 type ExternalAgentProcessRegistry interface {
 	Register(jobID string, attempt int, pid int)
 	ProcessAlive(jobID string, attempt int) *bool
+}
+
+// ExternalAgentJobWrapperReader resolves a job by wrapper call ID after it
+// applies actor and conversation authorization.
+type ExternalAgentJobWrapperReader interface {
+	StatusByWrapperCallID(ctx context.Context, wrapperCallID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error)
 }
 
 // ExternalAgentJobStatusProjectionReader is the optional authorized status

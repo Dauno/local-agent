@@ -18,7 +18,9 @@ import (
 
 const (
 	DefaultDedupeTTL            = 7 * 24 * time.Hour
-	confirmationRendererMode    = "confirmation_v1"
+	confirmationRendererModeV1  = "confirmation_v1"
+	confirmationRendererModeV2  = "confirmation_v2"
+	confirmationRendererMode    = confirmationRendererModeV2
 	knowledgeDisabledMessage    = "Knowledge commands are disabled in this installation."
 	knowledgeUnavailableMessage = "Knowledge is temporarily unavailable. Try again."
 )
@@ -74,26 +76,28 @@ type Dependencies struct {
 	Logger           port.Logger
 	ModelCalls       port.ModelCallLimiter
 
-	SanitizeContent       func(string) string
-	Exchange              port.AssistantExchangeWriter
-	Enricher              port.ContextEnricher
-	ConfirmationStore     port.ConfirmationDeliveryStore
-	ConfirmationPublisher port.ConfirmationPublisher
-	StructuredPublisher   port.StructuredPublisher
-	FileLoader            port.FileLoader
-	AttachmentProc        port.AttachmentProcessor
-	MaxAttachmentBytes    int64
-	MaxAttachmentChars    int
-	StandardStore         port.StandardExperienceStore
-	OnboardingStore       port.OnboardingDeliveryStore
-	ProgressPublisher     port.ProgressPublisher
-	PromptPublisher       port.SuggestedPromptPublisher
-	OnboardingPublisher   port.OnboardingPublisher
-	StreamingRuntime      port.StreamingAgentRuntime
-	IncrementalPublisher  port.IncrementalPublisher
-	SummaryScheduler      port.SummaryScheduler
-	ExchangeFinder        port.AssistantExchangeFinder
-	Workstreams           port.WorkstreamService
+	SanitizeContent        func(string) string
+	Exchange               port.AssistantExchangeWriter
+	Enricher               port.ContextEnricher
+	ConfirmationStore      port.ConfirmationDeliveryStore
+	ConfirmationPublisher  port.ConfirmationPublisher
+	JobReader              port.ExternalAgentJobWrapperReader
+	JobAcceptancePublisher port.JobAcceptancePublisher
+	StructuredPublisher    port.StructuredPublisher
+	FileLoader             port.FileLoader
+	AttachmentProc         port.AttachmentProcessor
+	MaxAttachmentBytes     int64
+	MaxAttachmentChars     int
+	StandardStore          port.StandardExperienceStore
+	OnboardingStore        port.OnboardingDeliveryStore
+	ProgressPublisher      port.ProgressPublisher
+	PromptPublisher        port.SuggestedPromptPublisher
+	OnboardingPublisher    port.OnboardingPublisher
+	StreamingRuntime       port.StreamingAgentRuntime
+	IncrementalPublisher   port.IncrementalPublisher
+	SummaryScheduler       port.SummaryScheduler
+	ExchangeFinder         port.AssistantExchangeFinder
+	Workstreams            port.WorkstreamService
 	// Coordinator serializes durable mutations and model turns within one
 	// canonical conversation. When nil, the service creates the per-process
 	// limiter it has always used; composition injects one shared instance so
@@ -131,41 +135,43 @@ const (
 )
 
 type Service struct {
-	cfg                   Config
-	store                 port.ConversationStore
-	runtime               port.AgentRuntime
-	activationStore       port.ExternalAgentJobActivationStore
-	completionReader      port.ExternalAgentJobReader
-	history               port.HistoryReader
-	publisher             port.ResponsePublisher
-	clock                 port.Clock
-	logger                port.Logger
-	limiter               port.ConversationCoordinator
-	modelCalls            port.ModelCallLimiter
-	sanitize              func(string) string
-	exchange              port.AssistantExchangeWriter
-	knowledge             port.KnowledgeCommands
-	knowledgeBindings     port.KnowledgeBindingResolver
-	knowledgeRetriever    port.KnowledgeRetriever
-	retrievalBindings     port.KnowledgeRetrievalBindingResolver
-	enricher              port.ContextEnricher
-	confirmationStore     port.ConfirmationDeliveryStore
-	confirmationPublisher port.ConfirmationPublisher
-	structuredPublisher   port.StructuredPublisher
-	fileLoader            port.FileLoader
-	attachmentProc        port.AttachmentProcessor
-	maxAttachmentBytes    int64
-	maxAttachmentChars    int
-	standardStore         port.StandardExperienceStore
-	onboardingStore       port.OnboardingDeliveryStore
-	progressPublisher     port.ProgressPublisher
-	promptPublisher       port.SuggestedPromptPublisher
-	onboardingPublisher   port.OnboardingPublisher
-	streamingRuntime      port.StreamingAgentRuntime
-	incrementalPublisher  port.IncrementalPublisher
-	summaryScheduler      port.SummaryScheduler
-	exchangeFinder        port.AssistantExchangeFinder
-	workstreams           port.WorkstreamService
+	cfg                    Config
+	store                  port.ConversationStore
+	runtime                port.AgentRuntime
+	activationStore        port.ExternalAgentJobActivationStore
+	completionReader       port.ExternalAgentJobReader
+	history                port.HistoryReader
+	publisher              port.ResponsePublisher
+	clock                  port.Clock
+	logger                 port.Logger
+	limiter                port.ConversationCoordinator
+	modelCalls             port.ModelCallLimiter
+	sanitize               func(string) string
+	exchange               port.AssistantExchangeWriter
+	knowledge              port.KnowledgeCommands
+	knowledgeBindings      port.KnowledgeBindingResolver
+	knowledgeRetriever     port.KnowledgeRetriever
+	retrievalBindings      port.KnowledgeRetrievalBindingResolver
+	enricher               port.ContextEnricher
+	confirmationStore      port.ConfirmationDeliveryStore
+	confirmationPublisher  port.ConfirmationPublisher
+	jobReader              port.ExternalAgentJobWrapperReader
+	jobAcceptancePublisher port.JobAcceptancePublisher
+	structuredPublisher    port.StructuredPublisher
+	fileLoader             port.FileLoader
+	attachmentProc         port.AttachmentProcessor
+	maxAttachmentBytes     int64
+	maxAttachmentChars     int
+	standardStore          port.StandardExperienceStore
+	onboardingStore        port.OnboardingDeliveryStore
+	progressPublisher      port.ProgressPublisher
+	promptPublisher        port.SuggestedPromptPublisher
+	onboardingPublisher    port.OnboardingPublisher
+	streamingRuntime       port.StreamingAgentRuntime
+	incrementalPublisher   port.IncrementalPublisher
+	summaryScheduler       port.SummaryScheduler
+	exchangeFinder         port.AssistantExchangeFinder
+	workstreams            port.WorkstreamService
 }
 
 type confirmationExpirer interface {
@@ -271,10 +277,12 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		history:          deps.History, publisher: deps.Publisher, clock: deps.Clock, logger: deps.Logger,
 		limiter: deps.Coordinator, modelCalls: deps.ModelCalls, sanitize: deps.SanitizeContent,
 		exchange: deps.Exchange, enricher: deps.Enricher,
-		confirmationStore:     deps.ConfirmationStore,
-		confirmationPublisher: deps.ConfirmationPublisher,
-		structuredPublisher:   deps.StructuredPublisher,
-		fileLoader:            deps.FileLoader, attachmentProc: deps.AttachmentProc,
+		confirmationStore:      deps.ConfirmationStore,
+		confirmationPublisher:  deps.ConfirmationPublisher,
+		jobReader:              deps.JobReader,
+		jobAcceptancePublisher: deps.JobAcceptancePublisher,
+		structuredPublisher:    deps.StructuredPublisher,
+		fileLoader:             deps.FileLoader, attachmentProc: deps.AttachmentProc,
 		maxAttachmentBytes:   deps.MaxAttachmentBytes,
 		maxAttachmentChars:   deps.MaxAttachmentChars,
 		standardStore:        deps.StandardStore,
@@ -1196,7 +1204,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 		}
 		for _, delivery := range expired {
 			first, err := s.expireAndResumeConfirmation(ctx, delivery, func() error {
-				if s.confirmationPublisher == nil || delivery.RendererMode != confirmationRendererMode {
+				if s.confirmationPublisher == nil || !isRichConfirmationRendererMode(delivery.RendererMode) {
 					return nil
 				}
 				expiredDelivery := delivery
@@ -1223,7 +1231,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 		if delivery.Status == port.ConfirmationPublished {
 			continue
 		}
-		if delivery.RendererMode == confirmationRendererMode {
+		if isRichConfirmationRendererMode(delivery.RendererMode) {
 			if s.confirmationPublisher == nil {
 				return fmt.Errorf("recover confirmation %s: rich confirmation publisher is unavailable", delivery.WrapperCallID)
 			}
@@ -1421,7 +1429,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 		s.publishIfText(ctx, invocation, interactive, "Confirmation not found or already processed.", "confirmation-not-found reply failed")
 		return OutcomeIgnoredFollowup
 	}
-	if interactive == nil && delivery.RendererMode == confirmationRendererMode {
+	if interactive == nil && isRichConfirmationRendererMode(delivery.RendererMode) {
 		s.logger.Warn("typed command rejected for interactive confirmation", "wrapper_call_id", wrapperCallID)
 		s.publishIfText(ctx, invocation, interactive, "Use the buttons on the confirmation prompt.", "interactive-only confirmation reply failed")
 		return OutcomeIgnoredFollowup
@@ -1476,14 +1484,15 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 }
 
 func (s *Service) validConfirmationInteraction(delivery port.ConfirmationDelivery, interactive domain.ConfirmationInteractiveAction, wrapperCallID string) (Outcome, bool) {
-	expectedDigest := port.ConfirmationContentDigest(delivery)
-	if delivery.RendererMode != confirmationRendererMode || delivery.TeamID != interactive.TeamID || delivery.ChannelID != interactive.ChannelID ||
+	expectedDigest := confirmationDeliveryDigest(delivery)
+	if !isRichConfirmationRendererMode(delivery.RendererMode) || delivery.TeamID != interactive.TeamID || delivery.ChannelID != interactive.ChannelID ||
 		delivery.ThreadTS != interactive.ThreadTS || delivery.SlackMessageTS == "" || delivery.SlackMessageTS != interactive.MessageTS {
 		s.logger.Warn("confirmation interaction identity mismatch", "wrapper_call_id", wrapperCallID)
 		return OutcomeIgnoredFollowup, true
 	}
 	hasMetadata := interactive.CorrelationID != "" || interactive.RendererMode != "" || interactive.ContentSHA256 != ""
-	if hasMetadata && (interactive.RendererMode != confirmationRendererMode || delivery.CorrelationID != interactive.CorrelationID || interactive.ContentSHA256 != expectedDigest) {
+	if hasMetadata &&
+		(!isRichConfirmationRendererMode(interactive.RendererMode) || interactive.RendererMode != delivery.RendererMode || delivery.CorrelationID != interactive.CorrelationID || interactive.ContentSHA256 != expectedDigest) {
 		s.logger.Warn("confirmation interaction metadata mismatch", "wrapper_call_id", wrapperCallID)
 		return OutcomeIgnoredFollowup, true
 	}
@@ -1496,6 +1505,17 @@ func (s *Service) validConfirmationInteraction(delivery port.ConfirmationDeliver
 		return OutcomeDenied, true
 	}
 	return "", false
+}
+
+func isRichConfirmationRendererMode(renderMode string) bool {
+	return renderMode == confirmationRendererModeV1 || renderMode == confirmationRendererModeV2
+}
+
+func confirmationDeliveryDigest(delivery port.ConfirmationDelivery) string {
+	if delivery.RendererMode == confirmationRendererModeV2 {
+		return port.ConfirmationContentDigestV2(delivery)
+	}
+	return port.ConfirmationContentDigest(delivery)
 }
 
 func (s *Service) handleExpiredConfirmation(
@@ -1529,6 +1549,21 @@ func (s *Service) handleExpiredConfirmation(
 		_ = publishExpired()
 	}
 	return OutcomeIgnoredFollowup
+}
+
+func (s *Service) acceptedJob(ctx context.Context, wrapperCallID, actor string, conversationKey domain.ConversationKey, approved bool) *domain.ExternalAgentJob {
+	if !approved || s.jobReader == nil || s.jobAcceptancePublisher == nil {
+		return nil
+	}
+	job, err := s.jobReader.StatusByWrapperCallID(ctx, wrapperCallID, actor, conversationKey)
+	if err != nil || job == nil {
+		return nil
+	}
+	if job.ID == "" || job.WrapperCallID != wrapperCallID || job.Actor != actor || job.ConversationKey != conversationKey {
+		s.logger.Warn("accepted job binding mismatch", "wrapper_call_id", wrapperCallID)
+		return nil
+	}
+	return job
 }
 
 func (s *Service) resumeConfirmation(
@@ -1599,9 +1634,25 @@ func (s *Service) resumeConfirmation(
 		return OutcomeModelFailed
 	}
 
+	acceptedJob := s.acceptedJob(ctx, wrapperCallID, actor, delivery.ConversationKey, approved)
+
 	// Resume can produce another confirmation before it produces text. Treat it
 	// exactly like an initial turn: persist and publish the new delivery first.
 	if turn.PendingConfirmation != nil {
+		if acceptedJob != nil {
+			if interactive != nil && s.confirmationPublisher != nil {
+				acceptedDelivery := delivery
+				acceptedDelivery.Status = port.ConfirmationConsumed
+				if err := s.confirmationPublisher.UpdateConfirmation(ctx, acceptedDelivery, ""); err != nil {
+					s.logger.Error("confirmation prompt update failed", "wrapper_call_id", wrapperCallID, "error", err)
+				}
+			}
+			if err := s.jobAcceptancePublisher.PublishJobAccepted(ctx, *acceptedJob); err != nil {
+				s.updateProgress(ctx, progress, domain.ProgressFailed)
+				s.logger.Error("accepted job receipt publish failed", "wrapper_call_id", wrapperCallID, "error", err)
+				return OutcomePublishFailed
+			}
+		}
 		s.updateProgress(ctx, progress, domain.ProgressWaitingConfirmation)
 		resumeInvocation := invocation
 		if interactive != nil {
@@ -1640,6 +1691,23 @@ func (s *Service) resumeConfirmation(
 	if interactive != nil {
 		target = domain.ReplyTarget{ChannelID: delivery.ChannelID, ThreadTS: delivery.ThreadTS}
 	}
+	if acceptedJob != nil {
+		if err := s.jobAcceptancePublisher.PublishJobAccepted(ctx, *acceptedJob); err != nil {
+			s.updateProgress(ctx, progress, domain.ProgressFailed)
+			s.logger.Error("accepted job receipt publish failed", "wrapper_call_id", wrapperCallID, "error", err)
+			return OutcomePublishFailed
+		}
+		s.updateProgress(ctx, progress, domain.ProgressCleared)
+		s.logger.Info("confirmation processed",
+			"wrapper_call_id", wrapperCallID,
+			"approved", approved,
+			"actor", delivery.Actor)
+		if s.summaryScheduler != nil {
+			s.scheduleSummary(ctx, delivery.ConversationKey)
+		}
+		return OutcomeResponded
+	}
+
 	if _, pubErr := s.publisher.Publish(ctx, target, safeText); pubErr != nil {
 		s.updateProgress(ctx, progress, domain.ProgressFailed)
 		s.logger.Error("confirmation result publish failed", "error", pubErr)

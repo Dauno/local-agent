@@ -80,6 +80,7 @@ type Service struct {
 
 var (
 	_ port.ExternalAgentJobReader             = (*Service)(nil)
+	_ port.ExternalAgentJobWrapperReader      = (*Service)(nil)
 	_ port.ExternalAgentJobNativeResultReader = (*Service)(nil)
 	_ port.ExternalAgentJobActivationReader   = (*Service)(nil)
 	_ port.ExternalAgentJobHostCompleter      = (*Service)(nil)
@@ -322,6 +323,30 @@ func (s *Service) Status(ctx context.Context, jobID, actor string, conversationK
 	})
 	if !actorMatch || !conversationMatch {
 		s.logger.Warn("external-agent job authorization mismatch", "job_id", job.ID, "actor_match", actorMatch, "conversation_match", conversationMatch)
+		return nil, errors.New("external-agent job operation is not authorized")
+	}
+	return job, nil
+}
+
+// StatusByWrapperCallID resolves and authorizes the job referenced by a
+// confirmation button without exposing an unbound job lookup to Slack.
+func (s *Service) StatusByWrapperCallID(ctx context.Context, wrapperCallID, actor string, conversationKey domain.ConversationKey) (*domain.ExternalAgentJob, error) {
+	if strings.TrimSpace(wrapperCallID) == "" || utf8.RuneCountInString(wrapperCallID) > 2048 ||
+		strings.TrimSpace(actor) == "" || !domain.ValidKnowledgeConversationKey(conversationKey) {
+		return nil, errors.New("external-agent job operation binding is required")
+	}
+	wrapperStore, ok := s.store.(port.ExternalAgentJobWrapperStore)
+	if !ok {
+		return nil, errors.New("external-agent job wrapper lookup is unavailable")
+	}
+	job, err := wrapperStore.GetJobByWrapperCallID(ctx, wrapperCallID)
+	if err != nil {
+		return nil, err
+	}
+	if job == nil {
+		return nil, errors.New("external-agent job was not found")
+	}
+	if job.Actor != actor || job.ConversationKey != conversationKey {
 		return nil, errors.New("external-agent job operation is not authorized")
 	}
 	return job, nil

@@ -25,6 +25,7 @@ const (
 	maxRendererPlaceholderLength      = 150
 	maxRendererButtonTextLength       = 75
 	maxRendererSectionFields          = 10
+	maxRendererSectionFieldLength     = 2000
 	maxRendererActionElements         = 25
 	maxRendererIDLength               = 255
 	maxRendererPlainTextInputLength   = 3000
@@ -649,7 +650,7 @@ func validateCompiledBlocks(templateName string, blocks []slackapi.Block, modal 
 				}
 			}
 			for _, field := range typed.Fields {
-				if err := validateCompiledText(field, maxRendererCompositionTextLength, "section.fields"); err != nil {
+				if err := validateCompiledText(field, maxRendererSectionFieldLength, "section.fields"); err != nil {
 					return err
 				}
 			}
@@ -768,7 +769,16 @@ func validateCompiledElement(element slackapi.BlockElement, modal bool, actionID
 		if typed.Text == nil {
 			return errors.New("button text is required")
 		}
-		if err := validateCompiledText(typed.Text, maxRendererCompositionTextLength, "button.text"); err != nil {
+		if typed.Text.Type != "plain_text" {
+			return errors.New("button text must be plain_text")
+		}
+		if err := validateCompiledText(typed.Text, maxRendererButtonTextLength, "button.text"); err != nil {
+			return err
+		}
+		if utf8.RuneCountInString(typed.Value) > maxRendererOptionValueLength {
+			return fmt.Errorf("button value exceeds %d character limit", maxRendererOptionValueLength)
+		}
+		if err := validateSlackButtonURL(typed.URL, "button.url"); err != nil {
 			return err
 		}
 	default:
@@ -805,6 +815,9 @@ func validateCompiledOption(option *slackapi.OptionBlockObject) error {
 		if err := validateCompiledText(option.Description, maxRendererOptionTextLength, "option.description"); err != nil {
 			return err
 		}
+	}
+	if err := validateSlackButtonURL(option.URL, "option.url"); err != nil {
+		return err
 	}
 	return nil
 }

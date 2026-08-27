@@ -148,7 +148,7 @@ func TestTemplateCatalogExtractsIDsAndValidatesDispatcherCoverage(t *testing.T) 
 	if !reflect.DeepEqual(ids.ModalCallbacks, []string{builderSubmitCallbackID}) {
 		t.Fatalf("modal callbacks = %v", ids.ModalCallbacks)
 	}
-	if !reflect.DeepEqual(ids.Actions, []string{"agent_type", "local_agent.builder.open", builderInstallActionID, approveActionID, rejectActionID, "local_agent.onboarding.describe"}) {
+	if !reflect.DeepEqual(ids.Actions, []string{"agent_type", "local_agent.builder.open", builderInstallActionID, approveActionID, rejectActionID, statusActionID, "local_agent.onboarding.describe"}) {
 		t.Fatalf("actions = %v", ids.Actions)
 	}
 	if !reflect.DeepEqual(ids.BuilderBlocks, []string{"agent_type", "description", "execution_mode", "instruction", "model", "name", "timeout_seconds"}) {

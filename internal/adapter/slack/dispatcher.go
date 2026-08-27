@@ -227,6 +227,11 @@ func newListenerDispatcher(listener *Listener) (*InteractiveDispatcher, error) {
 			ActionHandler: listener.handleConfirmationAction,
 		},
 		{
+			ID:            statusActionID,
+			EventType:     InteractiveEventBlockActions,
+			ActionHandler: listener.handleJobStatusAction,
+		},
+		{
 			ID:            "local_agent.onboarding.describe",
 			EventType:     InteractiveEventBlockActions,
 			ActionHandler: listener.handleOnboardingDescribeAction,
