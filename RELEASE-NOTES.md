@@ -1,5 +1,9 @@
 # Release Notes
 
+## v0.11.1 (2026-08-27)
+
+- Fixed context compaction and compilation when history starts with model content before the first user input.
+
 ## v0.11.0 (2026-08-26)
 
 - Renamed external-agent status and inspection output from `acp_session_id` to `session_id`.
