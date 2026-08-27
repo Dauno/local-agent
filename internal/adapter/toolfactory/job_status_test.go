@@ -69,8 +69,8 @@ func TestJobStatusJSONContract(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if result["acp_session_id"] != "ses_full_identity_0123456789" {
-		t.Fatalf("acp_session_id = %v", result["acp_session_id"])
+	if result["session_id"] != "ses_full_identity_0123456789" {
+		t.Fatalf("session_id = %v", result["session_id"])
 	}
 	if result["phase"] != "tool_running" || result["health"] != "possibly_stalled" {
 		t.Fatalf("phase/health = %v/%v", result["phase"], result["health"])
@@ -118,8 +118,8 @@ func TestJobStatusQueuedSessionIsEmpty(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if result["acp_session_id"] != "" {
-		t.Fatalf("queued acp_session_id = %q, want empty", result["acp_session_id"])
+	if result["session_id"] != "" {
+		t.Fatalf("queued session_id = %q, want empty", result["session_id"])
 	}
 	if result["phase"] != "" || result["health"] != "" {
 		t.Fatalf("queued projection = %v/%v", result["phase"], result["health"])
@@ -375,8 +375,8 @@ func TestJobStatusTerminalRetainsSessionID(t *testing.T) {
 	if err := json.Unmarshal(raw, &result); err != nil {
 		t.Fatalf("decode: %v", err)
 	}
-	if result["acp_session_id"] != "ses_terminal_identity_9876543210" {
-		t.Fatalf("terminal acp_session_id = %v", result["acp_session_id"])
+	if result["session_id"] != "ses_terminal_identity_9876543210" {
+		t.Fatalf("terminal session_id = %v", result["session_id"])
 	}
 }
 

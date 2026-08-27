@@ -1006,7 +1006,7 @@ type jobStatusResult struct {
 	JobID                  string `json:"job_id"`
 	Status                 string `json:"status"`
 	StatusRevision         int    `json:"status_revision"`
-	ExternalAgentSessionID string `json:"acp_session_id"`
+	ExternalAgentSessionID string `json:"session_id"`
 	Phase                  string `json:"phase"`
 	Health                 string `json:"health"`
 	LastEventKind          string `json:"last_event_kind"`
@@ -1056,7 +1056,7 @@ func (f *Factory) jobStatusTool(actor string, key domain.ConversationKey) (tool.
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "job_status",
-		Description: "Returns the status of an external-agent durable job created in this Slack conversation. Read-only; actor and destination are bound by the host. When acp_session_id is non-empty, the response must always be presented with the complete external-agent session line verbatim; presenting an authorized status without that line is a contract failure, not optional summarization.",
+		Description: "Returns the status of an external-agent durable job created in this Slack conversation. Read-only; actor and destination are bound by the host. When session_id is non-empty, the response must always be presented with the complete external-agent session line verbatim; presenting an authorized status without that line is a contract failure, not optional summarization. The session_id is the identifier to use for debugging or inspecting the run directly in the underlying CLI (Codex, Claude Code, Pi); the job_id alone is not enough for that. Always surface session_id (labeled \"session id\", never \"acp_session_id\") in any user-facing message about this job, not only when job_status is called explicitly.",
 	}, func(ctx agent.Context, args jobIDArgs) (jobStatusResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return jobStatusResult{}, errors.New("job_id is required")

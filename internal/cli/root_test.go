@@ -331,7 +331,7 @@ func TestJobsInspectRendersSessionAndProgress(t *testing.T) {
 	text := output.String()
 	for _, want := range []string{
 		"job_id: job_bb3ed6",
-		"acp_session_id: ses_full_identity_0123456789",
+		"session_id: ses_full_identity_0123456789",
 		"transcript_path: /home/operator/.codex/sessions/rollout-session.jsonl",
 		"phase: tool_running",
 		"health: possibly_stalled",
@@ -359,7 +359,7 @@ func TestJobsInspectRendersPendingSession(t *testing.T) {
 	if code := Execute(t.Context(), root, []string{"jobs", "inspect", "job_queued"}, &stderr); code != 0 {
 		t.Fatalf("exit=%d stderr=%s", code, stderr.String())
 	}
-	if !strings.Contains(output.String(), "acp_session_id: pending") {
+	if !strings.Contains(output.String(), "session_id: pending") {
 		t.Fatalf("queued output missing pending session:\n%s", output.String())
 	}
 }
@@ -375,7 +375,7 @@ func TestJobsReconcileRendersSessionID(t *testing.T) {
 	if code := Execute(t.Context(), root, []string{"jobs", "reconcile", "job_123", "--expect-revision", "5", "--confirm"}, &stderr); code != 0 {
 		t.Fatalf("confirmed exit=%d stderr=%q", code, stderr.String())
 	}
-	if !strings.Contains(output.String(), "acp_session_id: ses_reconciled_identity") {
+	if !strings.Contains(output.String(), "session_id: ses_reconciled_identity") {
 		t.Fatalf("reconcile output missing session ID:\n%s", output.String())
 	}
 	if !strings.Contains(output.String(), "result_available: true") {

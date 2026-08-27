@@ -419,7 +419,7 @@ func newJobsReconcileCommand(backend Backend, streams Streams) *cobra.Command {
 				return &ExitError{Code: 1, Cause: err}
 			}
 			_, _ = fmt.Fprintf(streams.Out, "job_id: %s\nstatus: %s\nstatus_revision: %d\nresult_available: %t\n", view.JobID, view.Status, view.StatusRevision, view.ResultAvailable)
-			_, _ = fmt.Fprintf(streams.Out, "acp_session_id: %s\n", inspectionSessionID(view.ExternalAgentSessionID))
+			_, _ = fmt.Fprintf(streams.Out, "session_id: %s\n", inspectionSessionID(view.ExternalAgentSessionID))
 			if view.ErrorCode != "" {
 				_, _ = fmt.Fprintf(streams.Out, "error_code: %s\n", view.ErrorCode)
 			}
@@ -501,7 +501,7 @@ func writeJobInspection(out io.Writer, view domain.ExternalAgentJobInspection) {
 	}
 	_, _ = fmt.Fprintf(out, "status: %s\n", view.Status)
 	_, _ = fmt.Fprintf(out, "status_revision: %d\n", view.StatusRevision)
-	_, _ = fmt.Fprintf(out, "acp_session_id: %s\n", inspectionSessionID(view.ExternalAgentSessionID))
+	_, _ = fmt.Fprintf(out, "session_id: %s\n", inspectionSessionID(view.ExternalAgentSessionID))
 	_, _ = fmt.Fprintf(out, "transcript_path: %s\n", inspectionTranscriptPath(view.TranscriptPath))
 	if view.Phase != "" || view.Health != "" || view.ProcessAlive != nil {
 		_, _ = fmt.Fprintf(out, "phase: %s\n", view.Phase)

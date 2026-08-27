@@ -409,7 +409,7 @@ type ExternalAgentJobInspection struct {
 	Profile                string                 `json:"profile"`
 	Status                 ExternalAgentJobStatus `json:"status"`
 	StatusRevision         int                    `json:"status_revision"`
-	ExternalAgentSessionID string                 `json:"acp_session_id"`
+	ExternalAgentSessionID string                 `json:"session_id"`
 	// TranscriptPath is what the run recorded. An empty value is not proof of
 	// absence: a host that still holds the descriptor can derive the path.
 	TranscriptPath string                               `json:"transcript_path"`
