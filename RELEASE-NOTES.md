@@ -1,5 +1,12 @@
 # Release Notes
 
+## v0.12.0 (2026-08-27)
+
+- Slack confirmation v2: improved confirmation message and new confirmation_message_v2 template. The approve/reject action IDs (local_agent.confirm.approve / local_agent.confirm.reject) and the WrapperCallID button contract stay unchanged.
+- New "Ver estado" button (action_id local_agent.job.status) in the confirmation flow. It answers with an ephemeral message and full authorization: only the original actor in the same conversation, and the WrapperCallID must resolve to a job of that actor.
+- New host-owned "job accepted / running" card (Block Kit) published when a delegated job is approved, showing job ID, status, and timestamps. Result buttons and terminal card are postponed.
+- Applied golangci-lint formatter fixes (gofumpt, golines).
+
 ## v0.11.2 (2026-08-27)
 
 - Increased agent CLI output limits and preserved transcript paths after failed or interrupted runs.
