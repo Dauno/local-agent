@@ -1,5 +1,11 @@
 # Release Notes
 
+## v0.14.1 (2026-08-28)
+
+- Improved Slack confirmation and job-accepted cards with bounded text that respects Slack limits.
+- Prevented startup reconciliation from updating unpublished expired confirmations.
+- Reduced external-agent confirmation hints while preserving the full task payload.
+
 ## v0.14.0 (2026-08-28)
 
 - Expanded declarative Slack templates to support Block Kit types handled by slack-go while preserving placeholder and action validation.
