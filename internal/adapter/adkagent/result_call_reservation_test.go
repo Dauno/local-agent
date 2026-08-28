@@ -26,9 +26,9 @@ func (reservationTestTool) IsLongRunning() bool { return false }
 var _ tool.Tool = reservationTestTool{}
 
 func TestResultCallReservationLimitsOnlyProducerToolsPerModelStep(t *testing.T) {
-	producer := reservationTestTool{name: "opencode"}
+	producer := reservationTestTool{name: "agentcli"}
 	reader := reservationTestTool{name: "workstream_get"}
-	reservation := newResultCallReservation([]tool.Tool{producer, reader}, map[string]struct{}{"opencode": {}}, 1)
+	reservation := newResultCallReservation([]tool.Tool{producer, reader}, map[string]struct{}{"agentcli": {}}, 1)
 	if reservation == nil {
 		t.Fatal("reservation was not created")
 	}

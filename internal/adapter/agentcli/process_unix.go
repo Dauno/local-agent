@@ -8,7 +8,7 @@ import (
 )
 
 // configureProcessGroup places the child in its own process group so the entire
-// subprocess tree (including an opencode grandchild) can be terminated together.
+// subprocess tree, including CLI grandchildren, can be terminated together.
 func configureProcessGroup(cmd *exec.Cmd) {
 	if cmd.SysProcAttr == nil {
 		cmd.SysProcAttr = &syscall.SysProcAttr{}

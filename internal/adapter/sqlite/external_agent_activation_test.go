@@ -192,7 +192,7 @@ func TestPublicationActivationRequiresBothRouteAndDetachedMode(t *testing.T) {
 			job := activationTestJob("activation-dual-"+tt.name, now)
 			job.Mode = tt.mode
 			terminalizeActivationTestJob(t, jobs, job, now)
-			markdown := "OpenCode job `" + job.ID + "` completed.\n\nresult"
+			markdown := "External-agent job `" + job.ID + "` completed.\n\nresult"
 			digest := fmt.Sprintf("%x", sha256.Sum256([]byte(markdown)))
 			// The persisted route is immutable, so the matrix is exercised with
 			// explicit storage rows rather than constructor fixtures.

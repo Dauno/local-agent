@@ -65,7 +65,7 @@ func TestDetachedJobCompletionPublishesDurableSlackDelivery(t *testing.T) {
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	job := domain.ExternalAgentJob{
-		ID: "job_integration_1", Mode: domain.JobDetached, Provider: "opencode", Profile: "build",
+		ID: "job_integration_1", Mode: domain.JobDetached, Provider: "agentcli", Profile: "build",
 		PrimaryProject: "workspace", RegistryRevision: "r1", Task: "task stays out of delivery logs",
 		Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678:thread:1710000000.000001",
 		Status: domain.JobQueued, TimeoutAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
@@ -88,7 +88,7 @@ func TestDetachedJobCompletionPublishesDurableSlackDelivery(t *testing.T) {
 		Text: content, ResultSHA256: digest, ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryContentSHA256: digest,
 		DeliveryContentBytes: int64(len(content)), DeliveryMaxMarkdownParts: 6,
-		DeliveryCanonicalMarkdown: "OpenCode job `job_integration_1` completed.\n\n" + content,
+		DeliveryCanonicalMarkdown: "External-agent job `job_integration_1` completed.\n\n" + content,
 	}
 	if err := jobs.Transition(t.Context(), job.ID, claimed.LeaseOwner, claimed.Attempt, domain.JobCompleted, result, "", now.Add(time.Second)); err != nil {
 		t.Fatal(err)
@@ -159,7 +159,7 @@ func TestDetachedJobCompletionPublishesDurableSlackDelivery(t *testing.T) {
 	if !ok {
 		t.Fatalf("Slack metadata payload = %#v", request.Metadata)
 	}
-	canonical := "OpenCode job `job_integration_1` completed.\n\n" + content
+	canonical := "External-agent job `job_integration_1` completed.\n\n" + content
 	canonicalDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(canonical)))
 	if payload["job_id"] != job.ID || payload["status_revision"] != float64(delivery.StatusRevision) || payload["notification_sha256"] != canonicalDigest {
 		t.Fatalf("Slack job metadata = %#v", payload)
@@ -425,7 +425,7 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 			completeVisible = true
 			mu.Unlock()
 			response.Header().Set("Content-Type", "application/json")
-			_, _ = response.Write([]byte(`{"ok":true,"files":[{"id":"F123","title":"OpenCode result job_file_integration"}]}`))
+			_, _ = response.Write([]byte(`{"ok":true,"files":[{"id":"F123","title":"External-agent result job_file_integration"}]}`))
 		case "/files.info":
 			mu.Lock()
 			visible := completeVisible
@@ -435,7 +435,7 @@ func TestDetachedJobFileDeliveryRecoversAcrossWorkerRestarts(t *testing.T) {
 				channels = `["D12345678"]`
 			}
 			response.Header().Set("Content-Type", "application/json")
-			_, _ = fmt.Fprintf(response, `{"ok":true,"file":{"id":"F123","name":"opencode-job_file_integration.md","size":%d,"user":"B12345678","channels":%s}}`, len(content), channels)
+			_, _ = fmt.Fprintf(response, `{"ok":true,"file":{"id":"F123","name":"external-agent-job_file_integration.md","size":%d,"user":"B12345678","channels":%s}}`, len(content), channels)
 		case "/conversations.replies", "/conversations.history":
 			mu.Lock()
 			gotStatusTS := statusTS
@@ -595,7 +595,7 @@ func integrationDetachedJob(id string, now time.Time) domain.ExternalAgentJob {
 	return domain.ExternalAgentJob{
 		ID:               id,
 		Mode:             domain.JobDetached,
-		Provider:         "opencode",
+		Provider:         "agentcli",
 		Profile:          "build",
 		PrimaryProject:   "workspace",
 		RegistryRevision: "r1",
@@ -609,7 +609,7 @@ func integrationDetachedJob(id string, now time.Time) domain.ExternalAgentJob {
 		UpdatedAt:        now,
 		RequestSHA256: domain.ExternalAgentJobRequestDigest(
 			domain.ExternalAgentJobRequest{
-				Provider:         "opencode",
+				Provider:         "agentcli",
 				Profile:          "build",
 				PrimaryProject:   "workspace",
 				RegistryRevision: "r1",
@@ -628,6 +628,6 @@ func integrationMarkdownResult(jobID, content string) *domain.ExternalAgentInvoc
 	return &domain.ExternalAgentInvocationResult{
 		Text: content, ResultSHA256: digest, ResultBytes: int64(len(content)), DeliveryMode: domain.JobResultDeliveryMarkdown,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len(content)),
-		DeliveryMaxMarkdownParts: 6, DeliveryCanonicalMarkdown: "OpenCode job `" + jobID + "` completed.\n\n" + content,
+		DeliveryMaxMarkdownParts: 6, DeliveryCanonicalMarkdown: "External-agent job `" + jobID + "` completed.\n\n" + content,
 	}
 }

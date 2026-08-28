@@ -15,9 +15,9 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 	renderer := mustEmbeddedRenderer(t)
 	profiles := []BuilderProviderProfile{
 		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/z", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/a", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "codex/b", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "other/ignored", ProviderType: "unsupported"},
 	}
@@ -50,7 +50,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		Profiles: profiles,
 		Values: map[string]string{
 			"name": "incident_analyst", "description": "desc", "instruction": "instruction",
-			"agent_type": "acp", "model": "opencode/a", "execution_mode": domain.ExecutionModeDurableJob,
+			"agent_type": "agent_cli", "model": "agentcli/a", "execution_mode": domain.ExecutionModeDurableJob,
 		},
 	})
 	if err != nil {
@@ -63,7 +63,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		t.Fatalf("ACP block IDs = %v", got)
 	}
 	externalAgentModel := acp.Blocks.BlockSet[5].(*slackapi.InputBlock).Element.(*slackapi.SelectBlockElement)
-	if got := optionValues(externalAgentModel.Options); strings.Join(got, ",") != "codex/b,opencode/a,opencode/z" {
+	if got := optionValues(externalAgentModel.Options); strings.Join(got, ",") != "agentcli/a,agentcli/z,codex/b" {
 		t.Fatalf("ACP model options = %v", got)
 	}
 	timeout := acp.Blocks.BlockSet[7].(*slackapi.InputBlock).Element.(*slackapi.PlainTextInputBlockElement)
@@ -80,7 +80,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		Profiles: profiles,
 		Values: map[string]string{
 			"name": "incident_analyst", "description": "desc", "instruction": "instruction",
-			"agent_type": "acp", "model": "opencode/a", "execution_mode": domain.ExecutionModeDurableJob,
+			"agent_type": "agent_cli", "model": "agentcli/a", "execution_mode": domain.ExecutionModeDurableJob,
 		},
 	}))
 	if err != nil {
@@ -124,7 +124,7 @@ func TestTemplateRendererRejectsClosedLanguageViolations(t *testing.T) {
 		},
 		{
 			name: "unknown condition",
-			edit: func(files map[string][]byte) { replaceBuilder(files, `"$if": "is_acp"`, `"$if": "is_llm"`) },
+			edit: func(files map[string][]byte) { replaceBuilder(files, `"$if": "is_external_agent"`, `"$if": "is_llm"`) },
 		},
 		{
 			name: "dynamic ID",

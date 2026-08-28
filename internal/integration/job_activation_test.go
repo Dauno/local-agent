@@ -173,7 +173,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if notificationPublisher.calls != 1 {
 		t.Fatalf("notification publishes = %d, want 1", notificationPublisher.calls)
 	}
-	if notificationPublisher.notification.CanonicalMarkdown != "OpenCode job `job_activation_e2e` completed. Root integration is pending." {
+	if notificationPublisher.notification.CanonicalMarkdown != "External-agent job `job_activation_e2e` completed. Root integration is pending." {
 		t.Fatalf("terminal notification repeated result prose: %q", notificationPublisher.notification.CanonicalMarkdown)
 	}
 
@@ -441,7 +441,7 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 	if notificationPublisher.calls != 1 {
 		t.Fatalf("notification publishes = %d, want 1", notificationPublisher.calls)
 	}
-	if notificationPublisher.notification.CanonicalMarkdown != "OpenCode job `job_proposal_e2e` completed. Root integration is pending." {
+	if notificationPublisher.notification.CanonicalMarkdown != "External-agent job `job_proposal_e2e` completed. Root integration is pending." {
 		t.Fatalf("terminal notification repeated result prose: %q", notificationPublisher.notification.CanonicalMarkdown)
 	}
 	var statusRevision int
@@ -1380,7 +1380,7 @@ func (d *detachedDispatcherRuntime) Run(ctx context.Context, job domain.External
 	result.ResultSHA256 = digest
 	result.ResultBytes = size
 	result.DeliveryMode = domain.JobResultDeliveryMarkdown
-	result.DeliveryCanonicalMarkdown = fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text)
+	result.DeliveryCanonicalMarkdown = fmt.Sprintf("External-agent job `%s` completed.\n\n%s", job.ID, text)
 	result.DeliveryPolicyVersion = domain.JobDeliveryPolicyV1
 	result.DeliveryMaxMarkdownParts = 6
 	result.DeliveryContentSHA256 = digest
@@ -1635,7 +1635,7 @@ func newForegroundExternalAgentTool(t *testing.T, runtime externalAgentInvoker, 
 		}
 		result, err := runtime.Run(context.Background(), domain.ExternalAgentInvocationRequest{
 			PrimaryProject: args.Project, PrimaryPath: projectRoot,
-			ProfileName: "opencode/build", ProviderName: "opencode", RegistryRevision: "r1",
+			ProfileName: "agentcli/build", ProviderName: "agentcli", RegistryRevision: "r1",
 			Task: args.Task, Actor: actor, TeamID: "T12345678", ConversationKey: key,
 		})
 		if err != nil {

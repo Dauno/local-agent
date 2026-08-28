@@ -700,11 +700,11 @@ func validateExternalAgent(problems *[]FieldError, cfg ExternalAgentConfig) {
 		value int
 		max   int
 	}{
-		{"acp.max_inline_result_bytes", cfg.MaxInlineResultBytes, maxInlineCeiling},
-		{"acp.max_result_artifact_bytes", cfg.MaxResultArtifactBytes, maxArtifactCeiling},
-		{"acp.max_job_timeout_seconds", cfg.MaxJobTimeoutSeconds, maxTimeoutCeiling},
-		{"acp.worker_concurrency", cfg.WorkerConcurrency, 64},
-		{"acp.artifact_retention_days", cfg.ArtifactRetentionDays, 3650},
+		{"external_agent.max_inline_result_bytes", cfg.MaxInlineResultBytes, maxInlineCeiling},
+		{"external_agent.max_result_artifact_bytes", cfg.MaxResultArtifactBytes, maxArtifactCeiling},
+		{"external_agent.max_job_timeout_seconds", cfg.MaxJobTimeoutSeconds, maxTimeoutCeiling},
+		{"external_agent.worker_concurrency", cfg.WorkerConcurrency, 64},
+		{"external_agent.artifact_retention_days", cfg.ArtifactRetentionDays, 3650},
 	}
 	for _, item := range positive {
 		if item.value <= 0 {
@@ -714,31 +714,31 @@ func validateExternalAgent(problems *[]FieldError, cfg ExternalAgentConfig) {
 		}
 	}
 	if cfg.DefaultJobTimeoutSeconds <= 0 {
-		addConfigProblem(problems, "acp.default_job_timeout_seconds", "must be greater than zero")
+		addConfigProblem(problems, "external_agent.default_job_timeout_seconds", "must be greater than zero")
 	} else if cfg.DefaultJobTimeoutSeconds > cfg.MaxJobTimeoutSeconds {
-		addConfigProblem(problems, "acp.default_job_timeout_seconds", "must not exceed acp.max_job_timeout_seconds")
+		addConfigProblem(problems, "external_agent.default_job_timeout_seconds", "must not exceed external_agent.max_job_timeout_seconds")
 	}
 	if cfg.ReconciliationTimeoutSeconds <= 0 {
-		addConfigProblem(problems, "acp.reconciliation_timeout_seconds", "must be greater than zero")
+		addConfigProblem(problems, "external_agent.reconciliation_timeout_seconds", "must be greater than zero")
 	} else if cfg.MaxJobTimeoutSeconds > 0 && cfg.ReconciliationTimeoutSeconds > cfg.MaxJobTimeoutSeconds {
-		addConfigProblem(problems, "acp.reconciliation_timeout_seconds", "must not exceed acp.max_job_timeout_seconds")
+		addConfigProblem(problems, "external_agent.reconciliation_timeout_seconds", "must not exceed external_agent.max_job_timeout_seconds")
 	}
 	if cfg.ProgressWarningSeconds <= 0 {
-		addConfigProblem(problems, "acp.progress_warning_seconds", "must be greater than zero")
+		addConfigProblem(problems, "external_agent.progress_warning_seconds", "must be greater than zero")
 	} else if cfg.MaxJobTimeoutSeconds > 0 && cfg.ProgressWarningSeconds > cfg.MaxJobTimeoutSeconds {
-		addConfigProblem(problems, "acp.progress_warning_seconds", "must not exceed acp.max_job_timeout_seconds")
+		addConfigProblem(problems, "external_agent.progress_warning_seconds", "must not exceed external_agent.max_job_timeout_seconds")
 	}
 	if cfg.Delivery.MaxMarkdownParts < 1 || cfg.Delivery.MaxMarkdownParts > 8 {
-		addConfigProblem(problems, "acp.delivery.max_markdown_parts", "must be between 1 and 8")
+		addConfigProblem(problems, "external_agent.delivery.max_markdown_parts", "must be between 1 and 8")
 	}
 	if cfg.Delivery.MaxFileBytes <= 0 {
-		addConfigProblem(problems, "acp.delivery.max_file_bytes", "must be greater than zero")
+		addConfigProblem(problems, "external_agent.delivery.max_file_bytes", "must be greater than zero")
 	} else if cfg.MaxResultArtifactBytes > 0 && cfg.Delivery.MaxFileBytes > cfg.MaxResultArtifactBytes {
-		addConfigProblem(problems, "acp.delivery.max_file_bytes", "must not exceed acp.max_result_artifact_bytes")
+		addConfigProblem(problems, "external_agent.delivery.max_file_bytes", "must not exceed external_agent.max_result_artifact_bytes")
 	}
 	if cfg.Delivery.MaxMarkdownParts > 0 && cfg.MaxInlineResultBytes > 0 &&
 		int64(cfg.MaxInlineResultBytes) > int64(cfg.Delivery.MaxMarkdownParts*domain.SlackMarkdownChunkRunes) {
-		addConfigProblem(problems, "acp.max_inline_result_bytes", "must fit within configured Markdown delivery capacity")
+		addConfigProblem(problems, "external_agent.max_inline_result_bytes", "must fit within configured Markdown delivery capacity")
 	}
 }
 

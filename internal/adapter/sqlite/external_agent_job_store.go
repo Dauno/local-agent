@@ -1353,7 +1353,7 @@ func (s *ExternalAgentJobStore) MarkNotificationUnknown(ctx context.Context, not
 		return ErrNotificationStateConflict
 	}
 	if permanent {
-		markdown := fmt.Sprintf("OpenCode job `%s` completed, but its result could not be delivered.\nDelivery code: `%s`.", notification.JobID, code)
+		markdown := fmt.Sprintf("External-agent job `%s` completed, but its result could not be delivered.\nDelivery code: `%s`.", notification.JobID, code)
 		digest := sha256.Sum256([]byte(markdown))
 		_, err = tx.ExecContext(ctx, `INSERT INTO external_agent_job_notifications (
 			job_id, status_revision, kind, canonical_markdown, content_sha256,

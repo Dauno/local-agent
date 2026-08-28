@@ -668,7 +668,7 @@ func (f *Factory) previewAgentDefTool(actor string, key domain.ConversationKey) 
 		Name            string           `json:"name" jsonschema:"nombre del agente en snake_case (3-64 caracteres)"`
 		Description     string           `json:"description" jsonschema:"descripcion breve para routing del LLM (max 500 caracteres)"`
 		Instruction     string           `json:"instruction" jsonschema:"instruccion completa del agente (max 3000 caracteres)"`
-		Kind            domain.AgentKind `json:"kind,omitempty" jsonschema:"tipo de agente: llm o acp (por defecto llm)"`
+		Kind            domain.AgentKind `json:"kind,omitempty" jsonschema:"tipo de agente: llm o agent_cli (por defecto llm)"`
 		ProviderProfile string           `json:"provider_profile,omitempty" jsonschema:"perfil en formato provider/profile"`
 		Model           string           `json:"model,omitempty" jsonschema:"alias legacy de provider_profile"`
 		ExecutionMode   string           `json:"execution_mode,omitempty" jsonschema:"foreground o durable_job (solo external-agent)"`

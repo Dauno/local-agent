@@ -1188,7 +1188,7 @@ func TestIsReservedAgentName(t *testing.T) {
 func TestIsDirectToolName(t *testing.T) {
 	t.Parallel()
 
-	for _, name := range []string{"list_repos", "create_worktree", "manage_opencode"} {
+	for _, name := range []string{"list_repos", "create_worktree", "export_json"} {
 		if !agentdef.IsDirectToolName(name) {
 			t.Errorf("IsDirectToolName(%q) = false", name)
 		}
@@ -1313,14 +1313,14 @@ func TestValidateAgentEligibility(t *testing.T) {
 			agent.ToolScope = nil
 			return agent
 		}(), providers: agentCLIEligibilityProviders(), want: false},
-		{name: "durable agent_cli missing confirmation", agent: func() agentdef.AgentDef {
+		{name: "durable agent_cli without confirmation is eligible", agent: func() agentdef.AgentDef {
 			agent := base
 			agent.Model = "cli/p1"
 			agent.ToolScope = nil
 			agent.ExecutionMode = agentdef.ExecutionModeDurableJob
 			agent.Confirmation = ""
 			return agent
-		}(), providers: agentCLIEligibilityProviders(), want: true},
+		}(), providers: agentCLIEligibilityProviders(), want: false},
 		{name: "retired AcpAgent class", agent: func() agentdef.AgentDef {
 			agent := base
 			agent.AgentClass = "AcpAgent"
@@ -1405,7 +1405,6 @@ func TestDirectToolNameParity(t *testing.T) {
 		"export_markdown",
 		"export_csv",
 		"export_json",
-		"manage_opencode",
 	}
 	for _, name := range registeredToolNames {
 		if !agentdef.IsDirectToolName(name) {

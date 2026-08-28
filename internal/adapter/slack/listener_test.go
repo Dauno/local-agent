@@ -233,7 +233,7 @@ func TestListenerACKsBlockActionBeforeUpdatingBuilderView(t *testing.T) {
 		Data: slack.InteractionCallback{
 			Type:           slack.InteractionTypeBlockActions,
 			View:           slack.View{CallbackID: builderSubmitCallbackID, ID: "V123", Hash: "hash-1"},
-			ActionCallback: slack.ActionCallbacks{BlockActions: []*slack.BlockAction{{ActionID: "agent_type", Value: "acp"}}},
+			ActionCallback: slack.ActionCallbacks{BlockActions: []*slack.BlockAction{{ActionID: "agent_type", Value: "agent_cli"}}},
 		},
 		Request: &socketmode.Request{Type: socketmode.RequestTypeInteractive, EnvelopeID: "builder-action"},
 	}

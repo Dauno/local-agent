@@ -101,17 +101,17 @@ func TestAgentDraftStoreRoundTripAndCompareAndSet(t *testing.T) {
 	}
 }
 
-func TestAgentDraftStoreExternalAgentModelIsNullable(t *testing.T) {
+func TestAgentDraftStoreTranslatesAgentCLIKindForLegacySchema(t *testing.T) {
 	ctx := context.Background()
 	store, _ := newTestStore(t)
 	drafts := NewAgentDraftStore(store)
 	now := time.Date(2026, 7, 28, 12, 0, 0, 0, time.UTC)
 	draft := &port.AgentDraft{
-		DraftID: "draft-acp", TeamID: "T12345678", ActorID: "U12345678",
-		ConversationKey: "slack:T12345678:dm:D12345678", Name: "acp_worker",
-		DefinitionHash: "hash", CatalogRevision: 1, Kind: "acp",
+		DraftID: "draft-agent-cli", TeamID: "T12345678", ActorID: "U12345678",
+		ConversationKey: "slack:T12345678:dm:D12345678", Name: "cli_worker", Model: "pi/default",
+		DefinitionHash: "hash", CatalogRevision: 1, Kind: "agent_cli",
 		ExecutionMode: "foreground", TimeoutSeconds: 7200,
-		CanonicalYAML: "agent_class: AcpAgent\n", Status: port.DraftStatusPreviewed,
+		CanonicalYAML: "agent_class: LlmAgent\nmodel: pi/default\n", Status: port.DraftStatusPreviewed,
 		CreatedAt: now, ExpiresAt: now.Add(time.Hour),
 	}
 	if err := drafts.Create(ctx, draft); err != nil {
@@ -121,15 +121,22 @@ func TestAgentDraftStoreExternalAgentModelIsNullable(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got == nil || got.Model != "" || got.Kind != "acp" || got.TimeoutSeconds != 7200 {
-		t.Fatalf("ACP draft = %#v", got)
+	if got == nil || got.Model != "pi/default" || got.Kind != "agent_cli" || got.TimeoutSeconds != 7200 {
+		t.Fatalf("agent CLI draft = %#v", got)
 	}
-	var isNull bool
-	if err := store.db.QueryRowContext(ctx, "SELECT model IS NULL FROM agent_drafts WHERE draft_id = ?", draft.DraftID).Scan(&isNull); err != nil {
+	var storedKind, storedModel string
+	if err := store.db.QueryRowContext(ctx, "SELECT kind, model FROM agent_drafts WHERE draft_id = ?", draft.DraftID).Scan(&storedKind, &storedModel); err != nil {
 		t.Fatal(err)
 	}
-	if !isNull {
-		t.Fatal("ACP model should be stored as NULL")
+	if storedKind != "acp" || storedModel != "pi/default" {
+		t.Fatalf("stored draft = %q/%q, want legacy kind and current model", storedKind, storedModel)
+	}
+	found, err := drafts.FindByNameAndDefinitionHash(ctx, draft.Name, draft.DefinitionHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if found == nil || found.Kind != "agent_cli" || found.Model != "pi/default" {
+		t.Fatalf("found agent CLI draft = %#v", found)
 	}
 }
 
@@ -149,7 +156,12 @@ func TestAgentDraftStoreRejectsInvalidV2Policies(t *testing.T) {
 		mutate func(*port.AgentDraft)
 	}{
 		{name: "invalid kind", mutate: func(d *port.AgentDraft) { d.Kind = "other" }},
-		{name: "ACP timeout too high", mutate: func(d *port.AgentDraft) { d.Kind = "acp"; d.ExecutionMode = "foreground"; d.TimeoutSeconds = 86401 }},
+		{name: "agent CLI timeout too high", mutate: func(d *port.AgentDraft) {
+			d.Kind = "agent_cli"
+			d.Model = "pi/default"
+			d.ExecutionMode = "foreground"
+			d.TimeoutSeconds = 86401
+		}},
 		{name: "LLM durable job", mutate: func(d *port.AgentDraft) { d.ExecutionMode = "durable_job" }},
 	}
 	for _, tt := range tests {

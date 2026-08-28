@@ -208,6 +208,26 @@ func TestBuilderSubmissionUsesMetadataTargetWhenCallbackOmitsLocation(t *testing
 	}
 }
 
+func TestBuilderSubmissionPersistsAgentCLIProfile(t *testing.T) {
+	key := domain.ConversationKey("slack:T12345678:dm:D12345678")
+	metadata, err := encodeBuilderInteractionContext("U12345678", key)
+	if err != nil {
+		t.Fatal(err)
+	}
+	callback := builderSubmissionCallback(string(domain.AgentKindAgentCLI), "agentcli/default")
+	callback.Team.ID = "T12345678"
+	callback.User.ID = "U12345678"
+	callback.View.PrivateMetadata = metadata
+	store := &builderDraftStoreFake{}
+	handler := NewBuilderSubmissionHandler(store, agentbuilder.New(), validBuilderDefinitions(), &builderPublisherFake{})
+	if err := handler.PreviewAndPublish(t.Context(), callback); err != nil {
+		t.Fatal(err)
+	}
+	if store.created == nil || store.created.Kind != string(domain.AgentKindAgentCLI) || store.created.Model != "agentcli/default" {
+		t.Fatalf("created agent CLI draft = %#v", store.created)
+	}
+}
+
 func TestBuilderInstallUsesDraftConversationWithoutCallbackLocation(t *testing.T) {
 	key := "slack:T12345678:channel:C12345678:thread:1785451523.453999"
 	store := &builderDraftStoreFake{draft: &port.AgentDraft{
@@ -238,6 +258,20 @@ func validBuilderDefinitions() *agentdef.Definitions {
 			Name: "openai", Type: agentdef.ProviderTypeOpenAICompatible,
 			BaseURL: "https://model.example/v1", APIKeyEnv: "MODEL_KEY",
 			Profiles: map[string]agentdef.Profile{"fast": {Model: "test-model"}},
+		},
+		"agentcli": {
+			Name: "agentcli", Type: agentdef.ProviderTypeAgentCLI, Executable: "agentcli",
+			Version:    &agentdef.CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "0.0.0"},
+			Invocation: &agentdef.CLIInvocation{Prompt: "stdin", Args: []string{"run", "-"}},
+			Stream: &agentdef.CLIStream{
+				Format: "ndjson", FinalText: agentdef.CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"},
+				Failure: agentdef.CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
+				Activity: &agentdef.CLIActivity{
+					When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{},
+				},
+				TerminalTypes: []string{"result", "error"},
+			},
+			Profiles: map[string]agentdef.Profile{"default": {Model: "test-model"}},
 		},
 	}}
 }

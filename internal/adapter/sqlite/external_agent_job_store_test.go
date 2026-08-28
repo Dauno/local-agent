@@ -368,7 +368,7 @@ func TestExternalAgentJobStoreRejectsEveryOwnerMutationAfterLeaseExpiry(t *testi
 
 func testExternalAgentJob(now time.Time) domain.ExternalAgentJob {
 	request := domain.ExternalAgentJobRequest{
-		Provider: "opencode", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "r1",
+		Provider: "agentcli", Profile: "build", PrimaryProject: "workspace", RegistryRevision: "r1",
 		Task: "task", Mode: domain.JobForeground, WrapperCallID: "wrapper-1", OriginalCallID: "original-1",
 		Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678",
 		Timeout: time.Hour,

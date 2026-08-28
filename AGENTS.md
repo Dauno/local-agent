@@ -107,27 +107,24 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
 | `internal/adapter` | Concrete implementations. | Must not import other adapters (composed in `internal/app`). |
 | `internal/app` | Composition root. | Must not import CLI layer. |
 
-**Adapters** (16): acpclient, adkagent, adkartifact, agentcli, codexshim, envfile, fsproject, fssandbox, logging, memorycurator, memoryprojector, modelcalllimiter, openaillm, slack, sqlite, toolfactory.
+**Adapters** (25): adkagent, adkartifact, agentcli, codexshim, envfile, filesystem, fsartifact, fsproject, fssandbox, goast, logging, lspclient, lspdiscovery, memoryprojector, metrics, modelcalllimiter, openaillm, openaistt, rangedreader, recoverableresult, slack, sqlite, tokencounter, toolfactory, toolrunner.
 
-**Usecases** (6): bootstrap, bot, doctor, memory, opencode, sandbox.
+**Usecases** (16): agentbuilder, bootstrap, bot, canvas, contextcompiler, contextsummary, doctor, externalagent, generatedfile, knowledge, resultanalysis, results, rollout, sandbox, workpoll, workstream.
 
 **Other internal packages**: `agentdef` (agent/provider YAML definitions, stdlib+yaml.v3 only), `cliprotocol` (stdlib-only `cli-v1` NDJSON wire contract between the `agent_cli` adapter and shim processes), `manifest` (Slack app manifest rendering), `secure` (credential redaction), `cli` (cobra delivery; also hosts the hidden `shim codex` mapper command), `buildinfo` (version metadata), `config` (path resolution).
 
-### Agent CLI provider (`agent_cli`) and ACP agent (`acp`)
+### Agent CLI provider (`agent_cli`)
 
-- Three provider types: `openai_compatible`, `agent_cli`, and `acp` (for OpenCode via Agent Client Protocol).
+- Two provider types: `openai_compatible` and `agent_cli`. The earlier `acp` provider type, its client adapter, and its dedicated use case have been removed. Every external CLI agent now runs through `agent_cli`.
 - `agent_cli` providers: `shim.command` (`self` or PATH executable) + `shim.args`; profiles carry `model`, optional `agent`, `approval` (`reject` default | `auto`), `variant`. HTTP fields are rejected.
-- `acp` providers: `command` + `args` (e.g., `opencode acp`); profiles carry `model` + `config_options` (ACP session config IDs) + `permission_option_kind` (`reject_once` or `allow_once`). HTTP fields and `shim` are rejected for `acp`.
 - `internal/adapter/agentcli` implements ADK `model.LLM` by spawning one shim process per model call: one `cli-v1` NDJSON request on stdin, bounded stdout/stderr, process-group kill on cancellation. Text-only: ADK tools, function history, images, and streaming are rejected before launch.
-- `internal/adapter/acpclient` implements `port.ExternalAgentRuntime` by spawning `opencode acp` for ACP v1 JSON-RPC over stdio: initialize, session/new, set_config_option, prompt, and close per invocation. It negotiates optional `loadSession`/`session/resume` for bounded reconciliation; absent support returns an actionable typed failure.
-- OpenCode is now an external ACP agent, not a version-pinned CLI shim. ACP profiles use direct session config option IDs (`model`, `effort`, `mode`). `openableshim` adapter has been removed.
-- `AcpAgent` agent class: declarative YAML with `runtime: opencode/profile-name` and `confirmation: required`. Becomes a typed ADK FunctionTool with structured `project`/`task` arguments. Each invocation is bound to exactly one registered project; ACP requests never send `additionalDirectories`. Uses `port.ExternalAgentRuntime` for invocation.
+- The `AcpAgent` agent class is retired: `internal/agentdef` rejects it. Every agent, including durable `agent_cli` leaves, declares `agent_class: LlmAgent`.
 - `internal/adapter/codexshim` maps `cli-v1` to `codex exec --json --ephemeral --color never -`. Accepts exactly Codex CLI `0.144.5`; unchanged.
+- `confirmation: required` is opt-in per agent, not mandatory for `execution_mode: durable_job`. An `agent_cli` leaf that omits `confirmation` runs its durable job without a Slack approval gate; declare `confirmation: required` on any leaf whose CLI profile can mutate files or run commands. `internal/app/agent_tools.go` (`newAgentCLIDurableTool`) reads this field at tool-build time. The Slack agent-builder wizard (`internal/usecase/agentbuilder/service.go`) no longer forces `confirmation: required` either; a wizard-built `agent_cli` agent also runs without a confirmation gate unless the installed YAML is hand-edited to add it.
 - Every run receives the full canonical `sandbox.projects` registry; the app root must be registered. A CLI-backed root gets **no** ADK tool factory.
-- An `openai_compatible` root may declare `agent_tools` referencing leaf agents of three forms: `agent_cli` leaves (no ADK tools, native CLI tools only, must omit `tool_scope`), `openai_compatible` leaves that must declare `tool_scope: invocation_scoped` (e.g. `explore`), and `AcpAgent` leaves (external ACP agents with structured `project`/`task` arguments and required confirmation). Scoped leaves receive the same invocation-scoped read-only tools as the root (`list_messages`, `list_repos`, `list_directory`, `read_file`, `list_worktrees`) bound to the trusted Slack actor and conversation key — never mutable tools or confirmations. All children are exposed through ADK `AgentTool`, use isolated in-memory child sessions, receive the root-owned `delegated_global_instruction` safety policy rather than Slack-specific root context, and do not change the durable root provider family.
+- An `openai_compatible` root may declare `agent_tools` referencing leaf agents of two forms: `agent_cli` leaves (no ADK tools, native CLI tools only, must omit `tool_scope`; may run `execution_mode: foreground` or `durable_job`, with an opt-in `confirmation: required` gate) and `openai_compatible` leaves that must declare `tool_scope: invocation_scoped` (e.g. `explore`). Scoped leaves receive the same invocation-scoped read-only tools as the root (`list_messages`, `list_repos`, `list_directory`, `read_file`, `list_worktrees`) bound to the trusted Slack actor and conversation key — never mutable tools or confirmations. All children are exposed through ADK `AgentTool`, use isolated in-memory child sessions, receive the root-owned `delegated_global_instruction` safety policy rather than Slack-specific root context, and do not change the durable root provider family.
 - `port.AgentToolFactory.ToolsForInvocation` returns `([]any, error)`; a construction failure fails the turn instead of producing a partial tool list. `internal/app/agent_tools.go` prepares child models at startup and composes scoped children per invocation (`compositeAgentToolFactory`).
 - Durable sessions are stamped with `local_agent_provider_family` state; startup and each turn fail closed on family mismatch (`init --reset-state` to switch families).
-- Foreground ACP calls composed with the durable job service use a synchronous compatibility facade. Worker calls carry `JobID` and bypass the facade to prevent recursion; probes and management retain direct ACP clients.
 
 ### Durable external-agent result delivery
 
@@ -136,14 +133,14 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
   one transaction. Result-delivery fields introduced at v22 remain keyed by
   `(job_id, status_revision, kind)`; pre-v22 rows remain `legacy_v1` and are
   never replayed or regenerated.
-- Durable ACP results are redacted and control-sanitized before mode selection.
-  Results use complete `markdown_v1` multipart delivery up to
-  `acp.delivery.max_markdown_parts` (1-8), otherwise use a private verified
-  `.md` artifact uploaded to the originating thread. No second confirmation is
-  created.
+- Durable external-agent results are redacted and control-sanitized before
+  mode selection. Results use complete `markdown_v1` multipart delivery up to
+  `external_agent.delivery.max_markdown_parts` (1-8), otherwise use a private
+  verified `.md` artifact uploaded to the originating thread. No second
+  confirmation is created.
 - Result artifacts use bounded 0600 files, opaque references, verified owner
   and SHA-256 reads, and retention skips unpublished delivery references. Raw
-  ACP artifacts are never uploaded.
+  external-agent artifacts are never uploaded.
 - `externalagent.NotificationWorker` is independent from execution leases. It
   claims `pending`, stale `publishing`, or `unknown` rows and marks publication
   only with owner/attempt CAS. Restart and ambiguous Slack results reconcile
@@ -156,8 +153,8 @@ Hexagonal. Strict dependency rules enforced by `internal/architecture/dependenci
   through URL request, byte upload, completion, and reconciliation.
 - `completion_unknown` never replays the original task. `Service.Status`,
   `CancelForConversation`, and `Reconcile` require actor/conversation binding;
-  reconciliation uses capability-negotiated ACP sessions and remains
-  actionable when the provider cannot load/resume.
+  reconciliation uses capability-negotiated external-agent sessions and
+  remains actionable when the provider cannot load/resume.
 
 ### Completion routes
 
@@ -216,7 +213,7 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 
 ## Data directory
 
-`.local-agent/` is mostly gitignored. Contains: `config.yaml`, `local-agent.db` (SQLite), `app-manifest.local.yaml`, `local.env.example`, and `memory/` (OKF file projections). Exceptions: `agents/` and `providers/` subdirs hold YAML definitions and are tracked in git.
+`.local-agent/` is gitignored. It contains config, state, generated files, memory, and local YAML definitions.
 
 `docs/` is gitignored but contains authoritative TRDs — prefer those over guessing architecture.
 
@@ -234,15 +231,9 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - **Dedupe**: at-most-once by event + message keys. Ephemeral Slack history recovery is not persisted.
 - **Canonical keys**: `slack:{team}:dm:{channel}` or `slack:{team}:channel:{channel}:thread:{root_ts}`.
 - **ADK session IDs**: `adk:{canonical-conversation-key}` — deterministic, opaque, never derived from untrusted text.
-- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 32 (external-agent contract chain: v30 → v31 → v32).
+- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 44 (external-agent contract chain: v30 → v31 → v32).
 - **Memory**: curated entity memory stored in SQLite; `.local-agent/memory/` holds OKF file projections. Memory retrieval is deterministic (no LLM routing) and runs before each model call. Memory failure is non-fatal.
 - **Ephemeral context**: Slack enrichment and memory snippets are injected per-turn via the user message text; they must never become durable ADK events.
 - **Sandbox**: workspace inspection is enabled by default for the registered application root through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env` and `.git` at every depth (including symlinks).
-- **ACP artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, verified owner/digest reads, and are cleaned by `acp.artifact_retention_days` only when no unpublished delivery references them. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, delivery policy, and v32 job/outbox fields without reading result content or secrets. Durable ACP file fallback requires Slack `files:write`.
+- **External-agent artifacts**: private result artifacts live under `<state.dir>/artifacts`, use bounded 0600 files, verified owner/digest reads, and are cleaned by `external_agent.artifact_retention_days` only when no unpublished delivery references them. Cleanup is non-recursive and never follows symlinks. Offline doctor checks the artifact directory, delivery policy, and v32 job/outbox fields without reading result content or secrets. Durable external-agent file fallback requires Slack `files:write`.
 - **Worktrees**: new worktrees live under `.worktrees/<name>` relative to the repo root (gitignored). Use the repo alias `git wtadd <name> [git-worktree-add args...]`, which resolves to `git worktree add .worktrees/<name> <args...>`.
-
-## OpenCode config
-
-`.opencode/opencode.json` enables `lsp: true` (Go gopls), connects to ADK docs via MCP server, and references external instruction files (`caveman.md`, `soul-rules.md`) that apply to sessions in this repo. Skills directory has 7 Google ADK skills. No repo-local agents configured.
-
-OpenCode is integrated via ACP (Agent Client Protocol) through `opencode acp`. Provider YAML in `.local-agent/providers/opencode.yaml` uses `type: acp` with `command: opencode` and `args: [acp]`. OpenCode management operators (for upgrade/rollback) are configured via `opencode.management.allowed_user_ids` in `.local-agent/config.yaml`. `openableshim` adapter has been removed.

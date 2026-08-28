@@ -299,7 +299,7 @@ func TestDurableDispatcherKeepsFamiliesApart(t *testing.T) {
 	t.Parallel()
 	dispatcher := &externalAgentJobDispatcher{children: []preparedAgentTool{durableCLIChild(&captureModel{text: "x"})}}
 	job := durableCLIJob()
-	job.Provider = "opencode"
+	job.Provider = "agentcli"
 
 	matched, _, _ := dispatcher.runAgentCLI(context.Background(), job, new(bool))
 	if matched {

@@ -29,8 +29,11 @@ const upgradeCancelledText = "Actualizacion cancelada."
 var (
 	databaseAlreadyCompleteText = fmt.Sprintf("database already at schema v%d; nothing to do", rollout.TargetVersion)
 	freshUpgradeSummaryFormat   = fmt.Sprintf("will migrate v%%d to v%d; backup will be written under %%s", rollout.TargetVersion)
-	adoptionSummaryFormat       = fmt.Sprintf("database is already at v%d but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under %%s", rollout.TargetVersion)
-	resumeNeededSummaryText     = fmt.Sprintf("database is at v%d with an incomplete rollout (postflight not yet passed); will re-run postflight", rollout.TargetVersion)
+	adoptionSummaryFormat       = fmt.Sprintf(
+		"database is already at v%d but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under %%s",
+		rollout.TargetVersion,
+	)
+	resumeNeededSummaryText = fmt.Sprintf("database is at v%d with an incomplete rollout (postflight not yet passed); will re-run postflight", rollout.TargetVersion)
 )
 
 func newDBCommand(backend Backend, streams Streams) *cobra.Command {
@@ -115,14 +118,20 @@ func confirmUpgrade(streams Streams, preview rollout.UpgradePreview) bool {
 	}
 	switch preview.Kind {
 	case rollout.UpgradeFreshUpgrade:
-		first := fmt.Sprintf("Aplicar la migracion de schema v%d a v%d sobre %s. Se creara un backup verificado antes de escribir. Confirmar.", preview.FromVersion, preview.ToVersion, preview.DatabasePath)
+		first := fmt.Sprintf(
+			"Aplicar la migracion de schema v%d a v%d sobre %s. Se creara un backup verificado antes de escribir. Confirmar.",
+			preview.FromVersion,
+			preview.ToVersion,
+			preview.DatabasePath,
+		)
 		return confirm(first) && confirm("El proceso v33 desplegado no participa en el protocolo de bloqueo de este comando. Confirme que ese proceso esta detenido antes de continuar.")
 	case rollout.UpgradeAdoption:
 		first := fmt.Sprintf(adoptionSummaryFormat, preview.ResolvedBackupDir)
 		return confirm(first) &&
-			confirm(
-				fmt.Sprintf("Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v%d. Confirme que ningun proceso asi esta en ejecucion antes de continuar.", preview.ToVersion),
-			)
+			confirm(fmt.Sprintf(
+				"Este comando no puede detectar si un binario que no implementa el bloqueo de este comando sigue escribiendo esta base de datos v%d. Confirme que ningun proceso asi esta en ejecucion antes de continuar.",
+				preview.ToVersion,
+			))
 	default:
 		return confirm(resumeNeededSummaryText)
 	}

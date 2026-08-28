@@ -633,7 +633,7 @@ func parseBlock(data []byte, templateName, fieldPath string) (templateBlock, err
 	if err := rejectUnknownObjectKeys(keys, allowed); err != nil {
 		return templateBlock{}, fmt.Errorf("%s: %w", fieldPath, err)
 	}
-	if raw.Condition != "" && raw.Condition != "is_acp" {
+	if raw.Condition != "" && raw.Condition != "is_external_agent" {
 		return templateBlock{}, fmt.Errorf("%s.$if has unknown condition %q", fieldPath, raw.Condition)
 	}
 	if err := validateLiteralString(raw.Type, templateName, fieldPath+".type"); err != nil {
@@ -1312,7 +1312,7 @@ func validateBlocks(doc templateDocument, blocks []templateBlock, modal bool) er
 				return fmt.Errorf("unregistered message block ID %q", block.BlockID)
 			}
 		}
-		if block.Condition != "" && block.Condition != "is_acp" {
+		if block.Condition != "" && block.Condition != "is_external_agent" {
 			return fmt.Errorf("%s has unknown condition %q", fieldPath, block.Condition)
 		}
 		switch block.Type {

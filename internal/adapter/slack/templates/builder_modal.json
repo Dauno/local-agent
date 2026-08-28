@@ -35,7 +35,7 @@
           "action_id": "agent_type",
           "options": [
             {"text": {"type": "plain_text", "text": "LLM", "emoji": false}, "value": "llm"},
-            {"text": {"type": "plain_text", "text": "ACP", "emoji": false}, "value": "acp"}
+            {"text": {"type": "plain_text", "text": "Agent CLI", "emoji": false}, "value": "agent_cli"}
           ],
           "initial_option": "{{value.agent_type}}"
         },
@@ -79,7 +79,7 @@
         }
       },
       {
-        "$if": "is_acp",
+        "$if": "is_external_agent",
         "type": "input",
         "block_id": "execution_mode",
         "label": {"type": "plain_text", "text": "Ejecucion", "emoji": false},
@@ -95,7 +95,7 @@
         }
       },
       {
-        "$if": "is_acp",
+        "$if": "is_external_agent",
         "type": "input",
         "block_id": "timeout_seconds",
         "label": {"type": "plain_text", "text": "Timeout (segundos)", "emoji": false},

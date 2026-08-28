@@ -321,11 +321,8 @@ func (s *Service) Run(ctx context.Context, includeLive bool) Report {
 	durableExternalAgent := false
 	if defs != nil {
 		for _, definition := range defs.Agents {
-			// A durable leaf is an external agent on an agent CLI provider. The
-			// retired AcpAgent class used to identify it; keeping that test
-			// after the class was removed left this always false, so the
-			// generated manifest silently dropped the files:write scope that
-			// durable result delivery needs.
+			// A durable leaf on an agent CLI provider needs the files:write
+			// scope for result delivery.
 			if definition.ExecutionMode != agentdef.ExecutionModeDurableJob {
 				continue
 			}
@@ -638,8 +635,12 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 		report.skip("SQLite connection model", fmt.Sprintf("requires schema v%d, database is v%d", minimumSchemaConnectionModel, detected))
 	case detected < expectedSQLiteSchemaVersion:
 		if problems := validatePreUpgradeConnectionModel(health); len(problems) > 0 {
-			report.fail("SQLite connection model", strings.Join(problems, "; "),
-				"Restore the connection contract: synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", false)
+			report.fail(
+				"SQLite connection model",
+				strings.Join(problems, "; "),
+				"Restore the connection contract: synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.",
+				false,
+			)
 		} else {
 			report.pass("SQLite connection model", fmt.Sprintf(
 				"schema v%d, current binary requires v%d; run local-agent db upgrade; journal_mode=%s (informational); synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",
@@ -648,8 +649,15 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 		}
 	default:
 		if problems := validateSQLiteRuntimeContract(health); len(problems) > 0 {
-			report.fail("SQLite connection model", strings.Join(problems, "; "),
-				fmt.Sprintf("Restore the v%d connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.", expectedSQLiteSchemaVersion), false)
+			report.fail(
+				"SQLite connection model",
+				strings.Join(problems, "; "),
+				fmt.Sprintf(
+					"Restore the v%d connection contract: WAL journal mode, synchronous=FULL, busy_timeout=5000ms, foreign_keys on, and a 4-connection pool. Do not hand-edit pragmas.",
+					expectedSQLiteSchemaVersion,
+				),
+				false,
+			)
 		} else {
 			report.pass("SQLite connection model", fmt.Sprintf(
 				"schema_version=%d journal_mode=%s synchronous=%d busy_timeout_ms=%d foreign_keys=%t max_open_connections=%d",

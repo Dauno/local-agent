@@ -235,7 +235,7 @@ func compileBlocks(templateName string, source []templateBlock, env renderEnviro
 			blocks = append(blocks, collection...)
 			continue
 		}
-		if sourceBlock.Condition == "is_acp" && !env.isExternalAgent {
+		if sourceBlock.Condition == "is_external_agent" && !env.isExternalAgent {
 			continue
 		}
 		block, err := compileBlock(sourceBlock, env, fmt.Sprintf("blocks[%d]", index))

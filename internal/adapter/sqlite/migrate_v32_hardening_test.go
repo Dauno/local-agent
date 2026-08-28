@@ -25,7 +25,7 @@ func seedGrandfatheredV25DeliveryRows(t *testing.T, db *sql.DB) {
 			job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 			task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 			conversation_key, status, result_sha256, result_bytes, status_revision, timeout_at, created_at, updated_at)
-			VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+			VALUES (?, ?, 'agentcli', 'build', 'workspace', '[]', 'r1',
 			'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
 			'slack:T12345678:dm:D12345678', 'completed', ?, ?, 1, 2, 1, 1)`,
 			id, mode, id+"-call", resultSHA, resultBytes); err != nil {
@@ -49,11 +49,11 @@ func seedGrandfatheredV25DeliveryRows(t *testing.T, db *sql.DB) {
 
 	fileContent := "file bytes"
 	fileDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(fileContent)))
-	fileMarkdown := "OpenCode job `gf-file-pending` completed. The complete result was attached."
-	publishedMarkdown := "OpenCode job `gf-file-published` completed. The complete result was attached."
+	fileMarkdown := "External-agent job `gf-file-pending` completed. The complete result was attached."
+	publishedMarkdown := "External-agent job `gf-file-published` completed. The complete result was attached."
 	markdownContent := "safe result"
 	markdownDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(markdownContent)))
-	markdown := "OpenCode job `gf-markdown` completed.\n\nsafe result"
+	markdown := "External-agent job `gf-markdown` completed.\n\nsafe result"
 
 	// File-mode deliveries stuck in pending or unknown with the historical
 	// 'not_applicable' upload state: the CR1 grandfathered shape.
@@ -143,8 +143,8 @@ func assertGrandfatheredUpgradeState(t *testing.T, store *Store) {
 	fileDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(fileContent)))
 	markdownContent := "safe result"
 	markdownDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(markdownContent)))
-	fileMarkdown := "OpenCode job `gf-file-pending` completed. The complete result was attached."
-	markdown := "OpenCode job `gf-markdown` completed.\n\nsafe result"
+	fileMarkdown := "External-agent job `gf-file-pending` completed. The complete result was attached."
+	markdown := "External-agent job `gf-markdown` completed.\n\nsafe result"
 
 	type row struct {
 		uploadState, notificationSHA, resultSHA, markdown string
@@ -189,7 +189,7 @@ func assertGrandfatheredUpgradeState(t *testing.T, store *Store) {
 	if got.uploadState != "not_applicable" || got.notificationSHA != "" || got.notificationBytes != 0 || got.resultSHA != "" {
 		t.Fatalf("published grandfathered row = %q/%q/%d/%q, want untouched defaults", got.uploadState, got.notificationSHA, got.notificationBytes, got.resultSHA)
 	}
-	if got.markdown != "OpenCode job `gf-file-published` completed. The complete result was attached." {
+	if got.markdown != "External-agent job `gf-file-published` completed. The complete result was attached." {
 		t.Fatalf("published grandfathered row content was changed: %q", got.markdown)
 	}
 	// Control rows keep their complete identities.
@@ -318,7 +318,7 @@ func TestMigrationV32RollsBackEntirelyWithGrandfatheredRows(t *testing.T) {
 		Scan(&uploadState, &markdown); err != nil {
 		t.Fatal(err)
 	}
-	if uploadState != "not_applicable" || markdown != "OpenCode job `gf-file-pending` completed. The complete result was attached." {
+	if uploadState != "not_applicable" || markdown != "External-agent job `gf-file-pending` completed. The complete result was attached." {
 		t.Fatalf("grandfathered row after rollback = %q/%q, want untouched", uploadState, markdown)
 	}
 	var columnCount int

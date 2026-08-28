@@ -41,7 +41,7 @@ type RuntimeConfig struct {
 	SummaryStore      port.SummaryStore
 	EpochStore        port.ContextEpochStore
 	Metrics           port.MetricRecorder
-	// Result-producing ACP tools are limited per model step. The input frame
+	// Result-producing external-agent tools are limited per model step. The input frame
 	// reserves their bounded result capacity before each provider call.
 	ResultProducingToolNames         []string
 	ResultProducingCallsPerStep      int
@@ -1192,7 +1192,7 @@ func extractConfirmation(fc *genai.FunctionCall) *domain.PendingConfirmation {
 // real payload, rather than relying on the bare RequireConfirmation flag
 // (whose ADK-synthesized hint always mentions "FunctionResponse" and is
 // discarded by usableConfirmationHint). This covers workstream_ tools and
-// the durable ACP delegation tool without hardcoding either tool's name; a
+// the durable external-agent delegation tool without hardcoding either tool's name; a
 // missing payload on a call that did present a custom hint is a defect,
 // not a normal path, and fails closed rather than silently proceeding with
 // an unidentified request.

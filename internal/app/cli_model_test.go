@@ -181,7 +181,7 @@ func TestNewModelForResolvedAgentCLINeedsNoKey(t *testing.T) {
 	paths := testPathsFor(t, cfg, root)
 
 	provider := agentdef.Provider{
-		Name:       "opencode",
+		Name:       "agentcli",
 		Type:       agentdef.ProviderTypeAgentCLI,
 		Executable: "go",
 		Version:    &agentdef.CLIVersion{Command: []string{"version"}, Pattern: `go version go(?P<version>\d+\.\d+\.\d+)`, Min: "1.0.0"},

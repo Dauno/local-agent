@@ -25,7 +25,7 @@ func TestExternalAgentJobAllowsOnlyDeclaredTransitions(t *testing.T) {
 
 func TestExternalAgentJobRequestDigestExcludesHostPaths(t *testing.T) {
 	request := domain.ExternalAgentJobRequest{
-		Provider: "opencode", Profile: "build", PrimaryProject: "workspace",
+		Provider: "agentcli", Profile: "build", PrimaryProject: "workspace",
 		RegistryRevision: "rev-1",
 		Task:             "create a document", Mode: domain.JobDetached,
 		PermissionOptionKind: "allow_once",
@@ -79,7 +79,7 @@ func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing
 	job := domain.ExternalAgentJob{ID: "job_1", Status: domain.JobCompleted, StatusRevision: 2, ConversationKey: "slack:T12345678:dm:D12345678"}
 	resultText := strings.Repeat("result-", 4000)
 	notification, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
-		Text: resultText, DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryCanonicalMarkdown: "OpenCode job `job_1` completed.\n\n" + resultText,
+		Text: resultText, DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryCanonicalMarkdown: "External-agent job `job_1` completed.\n\n" + resultText,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryMaxMarkdownParts: 6, DeliveryContentBytes: int64(len([]byte(resultText))),
 	})
 	if err != nil {
@@ -117,7 +117,7 @@ func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testi
 		Text: resultText, ResultSHA256: digest, ResultBytes: int64(len([]byte(resultText))),
 		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(resultText))),
-		DeliveryCanonicalMarkdown: "OpenCode job `job_1` completed.\n\n" + resultText, DeliveryMaxMarkdownParts: 6,
+		DeliveryCanonicalMarkdown: "External-agent job `job_1` completed.\n\n" + resultText, DeliveryMaxMarkdownParts: 6,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -129,7 +129,7 @@ func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testi
 	if notification.NotificationSHA256 == notification.ResultSHA256 {
 		t.Fatal("notification and result identity collide")
 	}
-	if notification.CanonicalMarkdown != "OpenCode job `job_1` completed. Root integration is pending." {
+	if notification.CanonicalMarkdown != "External-agent job `job_1` completed. Root integration is pending." {
 		t.Fatalf("activation notification repeated result prose: %q", notification.CanonicalMarkdown)
 	}
 	if notification.ResultSHA256 != digest || notification.ResultBytes != int64(len([]byte(resultText))) {
@@ -145,7 +145,7 @@ func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testi
 		Text: resultText, ResultSHA256: digest, ResultBytes: int64(len([]byte(resultText))),
 		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(resultText))),
-		DeliveryCanonicalMarkdown: "OpenCode job `job_1` completed.\n\n" + resultText, DeliveryMaxMarkdownParts: 6,
+		DeliveryCanonicalMarkdown: "External-agent job `job_1` completed.\n\n" + resultText, DeliveryMaxMarkdownParts: 6,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -165,7 +165,7 @@ func TestDetachedActivationLegacyNotificationUsesTerminalMarker(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !notification.RootActivationRequired || notification.CanonicalMarkdown != "OpenCode job `job_1` completed. Root integration is pending." {
+	if !notification.RootActivationRequired || notification.CanonicalMarkdown != "External-agent job `job_1` completed. Root integration is pending." {
 		t.Fatalf("activation notification = %+v", notification)
 	}
 }

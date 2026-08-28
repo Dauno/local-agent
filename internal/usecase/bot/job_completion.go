@@ -84,7 +84,7 @@ func (s *Service) PublishActivationFallback(ctx context.Context, supplied domain
 		return port.NewActivationProcessError("activation_exchange_unavailable", true, errAssistantExchangeUnavailable)
 	}
 	fallback := fmt.Sprintf(
-		"OpenCode job `%s` finished, but the integrated root response is unavailable (error code `%s`). The job result remains available through normal job status and result reads.",
+		"External-agent job `%s` finished, but the integrated root response is unavailable (error code `%s`). The job result remains available through normal job status and result reads.",
 		current.JobID,
 		current.LastErrorCode,
 	)

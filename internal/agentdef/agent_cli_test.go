@@ -145,12 +145,12 @@ func TestAgentCLIAcceptsDurableExecution(t *testing.T) {
 	}
 }
 
-// A durable job is delivered after the root turn ends, so the user must have
-// approved it before it started.
-func TestDurableAgentCLIRequiresConfirmation(t *testing.T) {
+// confirmation is opt-in: a durable job may run without a confirmation gate
+// when the agent definition omits the field.
+func TestDurableAgentCLIConfirmationOptional(t *testing.T) {
 	err := loadCLIWithLeaf(t, durableLeaf+"execution_mode: durable_job\n")
-	if err == nil || !strings.Contains(err.Error(), "durable_job requires confirmation") {
-		t.Fatalf("error = %v, want the confirmation requirement", err)
+	if err != nil {
+		t.Fatalf("durable agent_cli leaf without confirmation must load: %v", err)
 	}
 }
 

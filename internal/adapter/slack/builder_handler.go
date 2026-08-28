@@ -123,7 +123,7 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 		Name:            draftInput.Name,
 		Description:     draftInput.Description,
 		Instruction:     draftInput.Instruction,
-		Model:           draftInput.Model,
+		Model:           preview.AgentDef.Model,
 		Kind:            string(draftInput.Kind),
 		ExecutionMode:   preview.AgentDef.ExecutionMode,
 		TimeoutSeconds:  preview.AgentDef.TimeoutSec,
@@ -333,7 +333,7 @@ func validateBuilderDraft(callback slackapi.InteractionCallback, draft domain.Ag
 			return errors.New("execution_mode solo admite foreground para LLM")
 		}
 		if draft.TimeoutSeconds != 0 {
-			return errors.New("timeout_seconds solo es valido para ACP")
+			return errors.New("timeout_seconds solo es valido para agent_cli")
 		}
 		return nil
 	}

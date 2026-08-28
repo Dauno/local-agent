@@ -30,7 +30,7 @@ type Config struct {
 	Sandbox          SandboxConfig           `yaml:"sandbox"`
 	Canvases         CanvasesConfig          `yaml:"canvases"`
 	Exports          ExportsConfig           `yaml:"exports"`
-	ExternalAgent    ExternalAgentConfig     `yaml:"acp"`
+	ExternalAgent    ExternalAgentConfig     `yaml:"external_agent"`
 	CodeIntelligence *CodeIntelligenceConfig `yaml:"code_intelligence"`
 	Orchestration    OrchestrationConfig     `yaml:"orchestration"`
 

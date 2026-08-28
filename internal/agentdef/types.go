@@ -69,8 +69,7 @@ func IsDirectToolName(name string) bool {
 		"export_json",
 		"preview_agent_def",
 		"install_agent_def",
-		"publish_builder_launcher",
-		"manage_opencode":
+		"publish_builder_launcher":
 		return true
 	default:
 		return false

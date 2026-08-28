@@ -384,7 +384,7 @@ func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification
 		if notification.UploadState != domain.JobResultUploadPending {
 			return port.PublishedResponse{}, permanentUploadError("result_file_upload_unknown")
 		}
-		filename := "opencode-" + notification.JobID + ".md"
+		filename := "external-agent-" + notification.JobID + ".md"
 		var target port.GeneratedFileUploadTarget
 		var requestErr error
 		if markdownUploader, ok := p.uploader.(port.MarkdownResultUploader); ok {
@@ -464,7 +464,7 @@ func (p *JobNotificationPublisher) publishFile(ctx context.Context, notification
 		}
 	}
 	if notification.UploadState != domain.JobResultUploadCompleted {
-		if err := p.uploader.CompleteUpload(ctx, notification.SlackFileID, notification.Target.ChannelID, notification.Target.ThreadTS, "OpenCode result "+notification.JobID); err != nil {
+		if err := p.uploader.CompleteUpload(ctx, notification.SlackFileID, notification.Target.ChannelID, notification.Target.ThreadTS, "External-agent result "+notification.JobID); err != nil {
 			return port.PublishedResponse{}, classifyUploadError("result_file_completion_failed", err, true)
 		}
 		if p.deliveryStore != nil {
@@ -741,7 +741,7 @@ func (p *JobNotificationPublisher) inspectFile(ctx context.Context, notification
 	if p.history != nil {
 		botUserID = p.history.botUserID
 	}
-	if file.ID != notification.SlackFileID || file.Name != "opencode-"+notification.JobID+".md" || file.Size != int(contentBytes) ||
+	if file.ID != notification.SlackFileID || file.Name != "external-agent-"+notification.JobID+".md" || file.Size != int(contentBytes) ||
 		(requireVisible && !fileVisibleInChannel(file, notification.Target.ChannelID)) ||
 		(file.User != "" && botUserID != "" && file.User != botUserID) {
 		return nil, errors.New("file delivery evidence is inconsistent")

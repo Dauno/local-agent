@@ -28,7 +28,7 @@ const (
 )
 
 func detachedCompletionMarker(jobID string) string {
-	return fmt.Sprintf("OpenCode job `%s` completed. Root integration is pending.", jobID)
+	return fmt.Sprintf("External-agent job `%s` completed. Root integration is pending.", jobID)
 }
 
 func rootActivationRequired(job ExternalAgentJob) bool {
@@ -445,14 +445,14 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 		return ExternalAgentJobNotification{}, errors.New("external-agent notification identity is invalid")
 	}
 	activationRequired := rootActivationRequired(job)
-	markdown := fmt.Sprintf("OpenCode job `%s` %s.", job.ID, job.Status)
+	markdown := fmt.Sprintf("External-agent job `%s` %s.", job.ID, job.Status)
 	if activationRequired {
 		markdown = detachedCompletionMarker(job.ID)
 	} else if job.Status == JobCompleted && strings.TrimSpace(job.ResultSummary) != "" {
 		markdown += "\n\nSummary: " + job.ResultSummary
 	}
 	if job.Status == JobCompletionUnknown {
-		markdown = fmt.Sprintf("OpenCode job `%s` was interrupted after external actions may have occurred. It was not retried; reconciliation is required.", job.ID)
+		markdown = fmt.Sprintf("External-agent job `%s` was interrupted after external actions may have occurred. It was not retried; reconciliation is required.", job.ID)
 	}
 	if job.Status == JobFailed {
 		markdown += " The operation failed with a host-owned error code."
@@ -549,7 +549,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result ExternalAgentInvoc
 		}
 	}
 	activationRequired := rootActivationRequired(job)
-	markdown := fmt.Sprintf("OpenCode job `%s` completed.", job.ID)
+	markdown := fmt.Sprintf("External-agent job `%s` completed.", job.ID)
 	if activationRequired {
 		markdown = detachedCompletionMarker(job.ID)
 	}
@@ -568,7 +568,7 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result ExternalAgentInvoc
 			return ExternalAgentJobNotification{}, errors.New("result delivery artifact reference is invalid")
 		}
 		uploadState = JobResultUploadPending
-		markdown += fmt.Sprintf(" The complete result was attached as `opencode-%s.md` (%d bytes, SHA-256 `%s`).", job.ID, contentBytes, contentDigest)
+		markdown += fmt.Sprintf(" The complete result was attached as `external-agent-%s.md` (%d bytes, SHA-256 `%s`).", job.ID, contentBytes, contentDigest)
 	case JobResultDeliveryMarkdown:
 		if result.ArtifactRef != "" || result.DeliveryArtifactRef != "" {
 			return ExternalAgentJobNotification{}, errors.New("markdown delivery cannot reference an artifact")

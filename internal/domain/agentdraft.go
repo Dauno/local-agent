@@ -13,9 +13,9 @@ type AgentDraft struct {
 	Name            string
 	Description     string
 	Instruction     string
-	Model           string // optional; provider/profile for LLM, empty for ACP
+	Model           string // optional legacy alias for an LLM provider/profile
 	Kind            AgentKind
 	ProviderProfile string // canonical provider/profile reference
-	ExecutionMode   string // foreground or durable_job for ACP
-	TimeoutSeconds  int    // ACP only
+	ExecutionMode   string // foreground or durable_job for agent_cli
+	TimeoutSeconds  int    // agent_cli only
 }

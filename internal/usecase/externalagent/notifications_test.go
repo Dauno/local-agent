@@ -212,7 +212,7 @@ func TestNotificationWorkerRetriesDefinitiveFailureWithPersistedBackoff(t *testi
 func TestNotificationWorkerDoesNotReissueAmbiguousFileRequestWithoutID(t *testing.T) {
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "OpenCode job `job-1` completed.", NotificationSHA256: "digest",
+		CanonicalMarkdown: "External-agent job `job-1` completed.", NotificationSHA256: "digest",
 		RendererVersion: domain.JobNotificationRenderer, DeliveryMode: domain.JobResultDeliveryFile,
 		PublishState: domain.NotificationPublishState("unknown"),
 	}}
@@ -234,8 +234,8 @@ func TestNotificationWorkerUsesHostCompletionBeforePublishingMaterializedResult(
 	store := &fakeNotificationStore{notification: domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
-		CanonicalMarkdown:  "OpenCode job `job-1` completed.\n\n" + content,
-		NotificationSHA256: contentSHA256ForTest("OpenCode job `job-1` completed.\n\n" + content), NotificationBytes: int64(len([]byte("OpenCode job `job-1` completed.\n\n" + content))),
+		CanonicalMarkdown:  "External-agent job `job-1` completed.\n\n" + content,
+		NotificationSHA256: contentSHA256ForTest("External-agent job `job-1` completed.\n\n" + content), NotificationBytes: int64(len([]byte("External-agent job `job-1` completed.\n\n" + content))),
 		ResultSHA256: contentSHA256ForTest(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
@@ -275,7 +275,7 @@ func TestNotificationWorkerPreservesBoundedResultErrorCodes(t *testing.T) {
 			notification := domain.ExternalAgentJobNotification{
 				JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
 				Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
-				CanonicalMarkdown: "OpenCode job `job-1` completed.",
+				CanonicalMarkdown: "External-agent job `job-1` completed.",
 				RendererVersion:   domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
 				DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
 				MaxMarkdownParts: 1,
@@ -308,7 +308,7 @@ func TestNotificationWorkerRejectsHostCompletionResultIdentityMismatch(t *testin
 	notification := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
-		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
+		CanonicalMarkdown: "External-agent job `job-1` completed.\n\n" + content,
 		ResultSHA256:      strings.Repeat("a", 64), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,
@@ -344,7 +344,7 @@ func TestNotificationWorkerRejectsDeliveryV1WithoutHostCompleter(t *testing.T) {
 	notification := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 4, Kind: domain.JobNotificationTerminal,
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678",
-		CanonicalMarkdown: "OpenCode job `job-1` completed.",
+		CanonicalMarkdown: "External-agent job `job-1` completed.",
 		ResultSHA256:      contentSHA256ForTest(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer, PublishState: domain.NotificationPending,
 		DeliveryMode: domain.JobResultDeliveryMarkdown, PolicyVersion: domain.JobDeliveryPolicyV1,

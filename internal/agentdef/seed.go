@@ -142,38 +142,6 @@ func SeedAttachmentAnalyzer(modelRef string) AgentDef {
 	}
 }
 
-// SeedOpenCodeProviderExample returns the inactive agent_cli provider example
-// written as opencode.yaml.example. Activating it is an explicit operator
-// action; init never changes active agents.
-func SeedOpenCodeProviderExample() Provider {
-	return Provider{
-		Name:       "opencode",
-		Type:       ProviderTypeAgentCLI,
-		Executable: "opencode",
-		Version:    &CLIVersion{Command: []string{"--version"}, Pattern: `(?P<version>\d+\.\d+\.\d+)`, Min: "0.0.0"},
-		Invocation: &CLIInvocation{Prompt: "stdin", Args: []string{"run", "-"}},
-		Stream: &CLIStream{
-			Format:        "ndjson",
-			FinalText:     CLIFinalText{When: map[string]string{"type": "result"}, Path: "text"},
-			Failure:       CLIFailure{WhenAny: []map[string]string{{"type": "error"}}},
-			Activity:      &CLIActivity{When: map[string]string{"type": "activity"}, TypeField: "name", DiscardTypes: []string{}},
-			TerminalTypes: []string{"result", "error"},
-		},
-		// `doctor --live` runs this to report saved-login status. It reads only
-		// the exit status, because the native output can carry account
-		// identifiers.
-		Auth: &CLIAuth{Command: []string{"auth", "list"}, Success: "opencode auth list succeeded; saved credentials are available"},
-		Profiles: map[string]Profile{
-			"build": {
-				Model:    "anthropic/model-name",
-				Agent:    "build",
-				Approval: ApprovalAuto,
-				Variant:  "high",
-			},
-		},
-	}
-}
-
 func MarshalProvider(p Provider) ([]byte, error) {
 	return yaml.Marshal(p)
 }

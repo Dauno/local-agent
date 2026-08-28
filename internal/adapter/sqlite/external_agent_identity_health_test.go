@@ -21,7 +21,7 @@ func insertIdentityJobRow(t *testing.T, db *sql.DB, id, mode, status, sha string
 		task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 		conversation_key, status, result_summary, result_artifact, result_sha256, result_bytes,
 		timeout_at, created_at, updated_at)
-		VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+		VALUES (?, ?, 'agentcli', 'build', 'workspace', '[]', 'r1',
 		'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', ?, 'result summary', '', ?, ?, 2, 1, 1)`,
 		id, mode, id+"-call", status, sha, bytes); err != nil {
@@ -64,7 +64,7 @@ func insertIdentityNotificationRowWithResultAtRevision(
 		renderer_version, channel_id, next_attempt_at, created_at, updated_at,
 		delivery_mode, policy_version, artifact_ref, result_bytes, max_markdown_parts, upload_state,
 		notification_sha256, notification_bytes, result_sha256, root_activation_required, published_at, publish_state)
-		VALUES (?, ?, 'terminal', ?, 'OpenCode job `+id+` completed.', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+		VALUES (?, ?, 'terminal', ?, 'External-agent job `+id+` completed.', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
 		'markdown_v1', 'D12345678', 1, 1, 1, 'markdown', 'legacy_v1', '', ?, 1, 'not_applicable',
 		?, ?, ?, 0, 1, 'published')`,
 		id, revision, terminalStatus, resultBytes, notificationSHA, notificationBytes, resultSHA); err != nil {
@@ -346,7 +346,7 @@ func TestV32RouteTriggerRejectsNULSuffixedDigest(t *testing.T) {
 			job_id, status_revision, kind, terminal_status, canonical_markdown, content_sha256, renderer_version,
 			channel_id, next_attempt_at, created_at, updated_at, root_activation_required,
 			notification_sha256, notification_bytes)
-			VALUES ('route-nul-job', 1, 'terminal', 'completed', 'OpenCode job route-nul-job completed.',
+			VALUES ('route-nul-job', 1, 'terminal', 'completed', 'External-agent job route-nul-job completed.',
 			'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'markdown_v1',
 			'D12345678', 1, 1, 1, 1, ?, 1)`, digest)
 		return err

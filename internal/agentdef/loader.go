@@ -343,11 +343,6 @@ func ValidateAgentEligibility(agent AgentDef, providers map[string]Provider) []s
 	if agent.AgentClass != "" && agent.AgentClass != "LlmAgent" {
 		errs = append(errs, fmt.Sprintf("%s: agent_class must be LlmAgent", prefix))
 	}
-	// A durable job is delivered after the turn ends, so the user must have
-	// approved it before it started.
-	if agent.ExecutionMode == ExecutionModeDurableJob && agent.Confirmation != "required" {
-		errs = append(errs, fmt.Sprintf("%s: durable_job requires confirmation: required", prefix))
-	}
 	if provider, ok := providerForAgent(agent, providers); ok {
 		switch provider.Type {
 		case ProviderTypeAgentCLI:
@@ -796,9 +791,9 @@ func validateAgent(a AgentDef, providers map[string]Provider) []string {
 	if a.Runtime != "" {
 		errs = append(errs, fmt.Sprintf("%s: runtime is not supported; use model with an agent_cli provider", prefix))
 	}
-	// Durable execution is available to agent_cli leaves as well as ACP ones.
-	// Both are external agents that outlive one model call, so both may declare
-	// a confirmation gate and a durable execution mode. Every other agent class
+	// Durable execution is available to agent_cli leaves. These external agents
+	// can outlive one model call, so they can declare a confirmation gate and a
+	// durable execution mode. Every other agent class
 	// runs inside the model call and may declare neither.
 	if isAgentCLIModel(a.Model, providers) {
 		errs = append(errs, validateExternalAgentExecution(prefix, a)...)
@@ -1024,7 +1019,7 @@ func ValidateAttachmentModelCapability(resolved *ResolvedModel) []string {
 	}
 	var errs []string
 	if resolved.Type() != ProviderTypeOpenAICompatible {
-		errs = append(errs, "attachment_analyzer cannot use an agent_cli or acp provider because image processing requires the ADK load_artifacts tool; select an openai_compatible profile")
+		errs = append(errs, "attachment_analyzer cannot use an agent_cli provider because image processing requires the ADK load_artifacts tool; select an openai_compatible profile")
 		return errs
 	}
 	if resolved.CounterStrategy != "estimator" {
@@ -1053,9 +1048,8 @@ func isAgentCLIModel(reference string, providers map[string]Provider) bool {
 	return exists && provider.Type == ProviderTypeAgentCLI
 }
 
-// validateExternalAgentExecution checks the durable-execution fields shared by
-// the two external-agent families. The bounds match validateAcpAgent so a leaf
-// cannot gain a longer timeout by switching provider family.
+// validateExternalAgentExecution checks the execution fields for agent_cli
+// leaves. The timeout bound matches the durable external-agent runtime.
 func validateExternalAgentExecution(prefix string, a AgentDef) []string {
 	var errs []string
 	switch a.Confirmation {
@@ -1070,11 +1064,6 @@ func validateExternalAgentExecution(prefix string, a AgentDef) []string {
 	}
 	if a.TimeoutSeconds < 0 || a.TimeoutSeconds > MaxExternalAgentTimeoutSeconds {
 		errs = append(errs, fmt.Sprintf("%s: timeout_seconds must be between 0 and %d", prefix, MaxExternalAgentTimeoutSeconds))
-	}
-	// A durable job is delivered to Slack after the root turn ends, so the user
-	// must have approved it before it started.
-	if a.ExecutionMode == ExecutionModeDurableJob && a.Confirmation != "required" {
-		errs = append(errs, fmt.Sprintf("%s: execution_mode durable_job requires confirmation: required", prefix))
 	}
 	return errs
 }

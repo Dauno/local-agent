@@ -207,12 +207,39 @@ func TestExternalAgentDeliveryPolicyValidation(t *testing.T) {
 
 func TestExternalAgentDeliveryFileBoundDefaultsToConfiguredArtifactBound(t *testing.T) {
 	t.Parallel()
-	cfg, err := config.Parse([]byte("acp:\n  max_result_artifact_bytes: 1048576\n"))
+	cfg, err := config.Parse([]byte("external_agent:\n  max_result_artifact_bytes: 1048576\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.ExternalAgent.Delivery.MaxFileBytes != cfg.ExternalAgent.MaxResultArtifactBytes {
 		t.Fatalf("max_file_bytes = %d, artifact bound = %d", cfg.ExternalAgent.Delivery.MaxFileBytes, cfg.ExternalAgent.MaxResultArtifactBytes)
+	}
+}
+
+func TestLegacyACPConfigKeyLoadsAndMarshalsAsExternalAgent(t *testing.T) {
+	t.Parallel()
+	cfg, err := config.Parse([]byte("# delivery policy\nacp:\n  max_result_artifact_bytes: 1048576\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ExternalAgent.MaxResultArtifactBytes != 1048576 {
+		t.Fatalf("max_result_artifact_bytes = %d, want 1048576", cfg.ExternalAgent.MaxResultArtifactBytes)
+	}
+	data, err := config.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(data)
+	if strings.Contains(text, "\nacp:") || !strings.Contains(text, "\nexternal_agent:") || !strings.Contains(text, "# delivery policy") {
+		t.Fatalf("canonical legacy config = %q", text)
+	}
+}
+
+func TestConfigRejectsBothExternalAgentKeys(t *testing.T) {
+	t.Parallel()
+	_, err := config.Parse([]byte("acp: {}\nexternal_agent: {}\n"))
+	if err == nil || !strings.Contains(err.Error(), "both acp and external_agent") {
+		t.Fatalf("error = %v, want ambiguous key rejection", err)
 	}
 }
 
@@ -304,7 +331,7 @@ exports:
   max_filename_chars: 128
   max_content_bytes: 1048576
   timeout_seconds: 30
-acp:
+external_agent:
   max_inline_result_bytes: 65536
   max_result_artifact_bytes: 16777216
    default_job_timeout_seconds: 7200
@@ -554,7 +581,7 @@ func TestValidationReportsTypedFieldErrors(t *testing.T) {
 		"runtime.slack_api_timeout_seconds",
 		"runtime.max_concurrent_model_calls",
 		"runtime.shutdown_grace_seconds",
-		"acp.reconciliation_timeout_seconds",
+		"external_agent.reconciliation_timeout_seconds",
 		"slack.allowed_user_ids[0]",
 		"slack.allowed_team_ids[0]",
 		"slack.allowed_channel_ids[0]",

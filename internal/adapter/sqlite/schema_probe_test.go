@@ -30,7 +30,7 @@ func seedCompletedJobWithoutIdentity(t *testing.T, db execer, jobID string) {
 		job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 		task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 		conversation_key, status, timeout_at, created_at, updated_at)
-		VALUES (?, 'detached', 'opencode', 'build', 'workspace', '[]', 'r1',
+		VALUES (?, 'detached', 'agentcli', 'build', 'workspace', '[]', 'r1',
 		'task', 'request', ? || '-wrapper', ? || '-original', 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', 'completed', 2, 1, 1)`
 	if _, err := db.ExecContext(context.Background(), query, jobID, jobID, jobID); err != nil {

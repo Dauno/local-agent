@@ -8,7 +8,7 @@ func TestMigrationV44AddsErrorClassWithoutInferringHistoricalRows(t *testing.T) 
 		job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 		task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 		conversation_key, status, acp_session_id, timeout_at, created_at, updated_at)
-		VALUES ('legacy-progress-job', 'detached', 'opencode', 'build', 'workspace', '[]', 'r1',
+		VALUES ('legacy-progress-job', 'detached', 'agentcli', 'build', 'workspace', '[]', 'r1',
 		'task', 'request', 'wrapper', 'original', 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', 'completion_unknown', 'legacy-session', 2, 1, 1)`); err != nil {
 		t.Fatal(err)

@@ -226,7 +226,7 @@ func newProgressTestStore(t *testing.T) *ExternalAgentJobStore {
 	now := time.Now().UTC().Add(-time.Minute)
 	for _, jobID := range []string{"job-progress", "job-cas", "job-terminal", "job-inspect"} {
 		job := domain.ExternalAgentJob{
-			ID: jobID, Mode: domain.JobDetached, Provider: "opencode", Profile: "default",
+			ID: jobID, Mode: domain.JobDetached, Provider: "agentcli", Profile: "default",
 			PrimaryProject: "workspace", Task: "task", Status: domain.JobRunning,
 			Attempt: 1, LeaseOwner: "owner-1", LeaseExpiry: now.Add(5 * time.Minute),
 			TimeoutAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,

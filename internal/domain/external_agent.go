@@ -217,25 +217,3 @@ func (r *GitDeliveryResult) Validate(targetProject, worktreeRoot string) error {
 	}
 	return nil
 }
-
-type OpenCodeManagementOperation string
-
-const (
-	OpCodeManageStatus   OpenCodeManagementOperation = "status"
-	OpCodeManageProbe    OpenCodeManagementOperation = "probe"
-	OpCodeManageUpgrade  OpenCodeManagementOperation = "upgrade"
-	OpCodeManageRollback OpenCodeManagementOperation = "rollback"
-)
-
-type OpenCodeManagementRequest struct {
-	Operation  OpenCodeManagementOperation
-	ActorID    string
-	OperatorID string
-}
-
-type OpenCodeManagementResult struct {
-	Success        bool
-	PriorVersion   string
-	CurrentVersion string
-	Diagnostic     string
-}

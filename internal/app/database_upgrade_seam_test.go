@@ -324,7 +324,7 @@ func seedFatalJobField(t *testing.T, dbPath, field string) {
 			job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 			task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 			conversation_key, status, timeout_at, created_at, updated_at)
-			VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+			VALUES (?, ?, 'agentcli', 'build', 'workspace', '[]', 'r1',
 			'task', 'request', ? || '-wrapper', ? || '-original', 'U12345678', 'T12345678',
 			'slack:T12345678:dm:D12345678', ?, 2, 1, 1)`
 		if _, err := plain.ExecContext(ctx, query, jobID, mode, jobID, jobID, status); err != nil {

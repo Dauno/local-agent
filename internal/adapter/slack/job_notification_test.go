@@ -63,7 +63,7 @@ func TestJobNotificationPublisherEmitsDistinctIdentityPairsForDeliveredResult(t 
 		Text: text, ResultSHA256: contentSHA256(text), ResultBytes: int64(len([]byte(text))),
 		DeliveryMode: domain.JobResultDeliveryMarkdown, DeliveryPolicyVersion: domain.JobDeliveryPolicyV1,
 		DeliveryContentSHA256: contentSHA256(text), DeliveryContentBytes: int64(len([]byte(text))),
-		DeliveryCanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + text, DeliveryMaxMarkdownParts: 1,
+		DeliveryCanonicalMarkdown: "External-agent job `job-1` completed.\n\n" + text, DeliveryMaxMarkdownParts: 1,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -116,7 +116,7 @@ func TestJobNotificationHistoryRejectsPartialEvidenceBeforeRetry(t *testing.T) {
 func TestFileNotificationWithoutSlackIdentityRetriesInsteadOfReconciling(t *testing.T) {
 	notification := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 3, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "OpenCode job `job-1` completed. The complete result was attached.",
+		CanonicalMarkdown: "External-agent job `job-1` completed. The complete result was attached.",
 		ResultSHA256:      "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
 		ResultBytes:       4, RendererVersion: domain.JobNotificationRenderer,
 		Target: domain.ReplyTarget{ChannelID: "D12345678"}, ConversationKey: "slack:T12345678:dm:D12345678", DeliveryMode: domain.JobResultDeliveryFile,
@@ -154,7 +154,7 @@ func TestJobNotificationRejectsDestinationMismatch(t *testing.T) {
 	content := "safe result"
 	notification := domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 3, Kind: domain.JobNotificationTerminal,
-		CanonicalMarkdown: "OpenCode job `job-1` completed.\n\n" + content,
+		CanonicalMarkdown: "External-agent job `job-1` completed.\n\n" + content,
 		ResultSHA256:      contentSHA256(content), ResultBytes: int64(len(content)),
 		RendererVersion: domain.JobNotificationRenderer,
 		Target:          domain.ReplyTarget{ChannelID: "D99999999"}, ConversationKey: "slack:T12345678:dm:D12345678",
@@ -182,7 +182,7 @@ func TestFileNotificationPublishesCompleteExternalUpload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if response.LastMessageTS == "" || uploader.requestedFilename != "opencode-job-1.md" || uploader.requestedBytes != len(content) {
+	if response.LastMessageTS == "" || uploader.requestedFilename != "external-agent-job-1.md" || uploader.requestedBytes != len(content) {
 		t.Fatalf("response=%#v requested=%q/%d", response, uploader.requestedFilename, uploader.requestedBytes)
 	}
 	if string(uploader.uploaded) != content || uploader.completedFileID != "F123" || uploader.completedChannel != "D12345678" || uploader.completedThread != "" {
@@ -204,7 +204,7 @@ func TestFileNotificationRestartContinuesPersistedUploadStages(t *testing.T) {
 			http.NotFound(w, request)
 			return
 		}
-		_, _ = fmt.Fprintf(w, `{"ok":true,"file":{"id":"F123","name":"opencode-job-1.md","size":%d,"user":"BOT"}}`, len(content))
+		_, _ = fmt.Fprintf(w, `{"ok":true,"file":{"id":"F123","name":"external-agent-job-1.md","size":%d,"user":"BOT"}}`, len(content))
 	}))
 	t.Cleanup(server.Close)
 	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
@@ -256,8 +256,8 @@ func TestFileNotificationRestartAfterCompletionPublishesOnlyStatus(t *testing.T)
 }
 
 func TestJobNotificationValidationVerifiesCanonicalMarkdownIdentity(t *testing.T) {
-	markdown := "OpenCode job `job-1` completed.\n\nsafe result"
-	fileMarkdown := "OpenCode job `job-1` completed. The complete result was attached."
+	markdown := "External-agent job `job-1` completed.\n\nsafe result"
+	fileMarkdown := "External-agent job `job-1` completed. The complete result was attached."
 	otherDigest := contentSHA256("some other result")
 	build := func(mode domain.JobResultDeliveryMode, mutate func(*domain.ExternalAgentJobNotification)) domain.ExternalAgentJobNotification {
 		t.Helper()
@@ -499,7 +499,7 @@ func preV32EvidencePayload(notification domain.ExternalAgentJobNotification) map
 
 func TestJobNotificationReconcileAcceptsPreV32MarkdownEvidence(t *testing.T) {
 	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
-		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+		"External-agent job `job-1` completed.\n\nsafe result", "safe result", "")
 	notification.UploadState = domain.JobResultUploadNotApplicable
 	notification.SlackFileID = ""
 	message := slackapi.Message{
@@ -519,12 +519,12 @@ func TestJobNotificationReconcileAcceptsPreV32FileEvidence(t *testing.T) {
 			http.NotFound(w, request)
 			return
 		}
-		_, _ = fmt.Fprint(w, `{"ok":true,"file":{"id":"F123","name":"opencode-job-1.md","size":10,"user":"BOT","channels":["D12345678"]}}`)
+		_, _ = fmt.Fprint(w, `{"ok":true,"file":{"id":"F123","name":"external-agent-job-1.md","size":10,"user":"BOT","channels":["D12345678"]}}`)
 	}))
 	t.Cleanup(server.Close)
 	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.URL+"/"))
 	notification := preV32DeliveryNotification(domain.JobResultDeliveryFile,
-		"OpenCode job `job-1` completed. The complete result was attached.", "file bytes", "job-1-delivery.result")
+		"External-agent job `job-1` completed. The complete result was attached.", "file bytes", "job-1-delivery.result")
 	message := slackapi.Message{
 		User: "BOT", Timestamp: "1710000000.000001",
 		Metadata: slackapi.SlackMetadata{EventType: jobNotificationMetadataEventType, EventPayload: preV32EvidencePayload(notification)},
@@ -538,7 +538,7 @@ func TestJobNotificationReconcileAcceptsPreV32FileEvidence(t *testing.T) {
 
 func TestJobNotificationReconcileFailsClosedOnEvidenceIdentityMismatch(t *testing.T) {
 	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
-		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+		"External-agent job `job-1` completed.\n\nsafe result", "safe result", "")
 	notification.UploadState = domain.JobResultUploadNotApplicable
 	notification.SlackFileID = ""
 	part := renderMarkdownV1(notification.CanonicalMarkdown, false)[0]
@@ -618,7 +618,7 @@ func onlyIdentityField(payload map[string]any, keep string) map[string]any {
 // slots and the byte count) rather than a single digest.
 func TestJobNotificationReconcileRequiresAllIdentityFields(t *testing.T) {
 	notification := preV32DeliveryNotification(domain.JobResultDeliveryMarkdown,
-		"OpenCode job `job-1` completed.\n\nsafe result", "safe result", "")
+		"External-agent job `job-1` completed.\n\nsafe result", "safe result", "")
 	notification.UploadState = domain.JobResultUploadNotApplicable
 	notification.SlackFileID = ""
 	makeMessage := func(payload map[string]any) slackapi.Message {
@@ -665,8 +665,8 @@ func TestJobNotificationReconcileRequiresAllIdentityFields(t *testing.T) {
 // rejected in both delivery modes before any history lookup instead of being
 // reconciled as legacy.
 func TestJobNotificationReconcileRejectsNegativeNotificationBytes(t *testing.T) {
-	markdown := "OpenCode job `job-1` completed.\n\nsafe result"
-	fileMarkdown := "OpenCode job `job-1` completed. The complete result was attached."
+	markdown := "External-agent job `job-1` completed.\n\nsafe result"
+	fileMarkdown := "External-agent job `job-1` completed. The complete result was attached."
 	history := newHistoryReader(&jobNotificationHistoryRecorder{}, "BOT", 0, nil, false)
 	for _, mode := range []domain.JobResultDeliveryMode{domain.JobResultDeliveryMarkdown, domain.JobResultDeliveryFile} {
 		for _, negative := range []int64{-1, -5} {
@@ -706,7 +706,7 @@ func markdownTestNotification(t *testing.T, wantParts int) domain.ExternalAgentJ
 	notification, err := domain.NewExternalAgentJobDelivery(job, domain.ExternalAgentInvocationResult{
 		Text: text, ResultSHA256: digest, ResultBytes: int64(len([]byte(text))), DeliveryMode: domain.JobResultDeliveryMarkdown,
 		DeliveryPolicyVersion: domain.JobDeliveryPolicyV1, DeliveryContentSHA256: digest, DeliveryContentBytes: int64(len([]byte(text))),
-		DeliveryMaxMarkdownParts: 6, DeliveryCanonicalMarkdown: fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text),
+		DeliveryMaxMarkdownParts: 6, DeliveryCanonicalMarkdown: fmt.Sprintf("External-agent job `%s` completed.\n\n%s", job.ID, text),
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -735,7 +735,7 @@ func fileTestNotification(content string, state domain.JobResultUploadState, fil
 	return domain.ExternalAgentJobNotification{
 		JobID: "job-1", StatusRevision: 3, Kind: domain.JobNotificationTerminal,
 		Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678", HostResultText: content,
-		CanonicalMarkdown: fmt.Sprintf("OpenCode job `job-1` completed. The complete result was attached as `opencode-job-1.md` (%d bytes, SHA-256 `%s`).", len(content), digest),
+		CanonicalMarkdown: fmt.Sprintf("External-agent job `job-1` completed. The complete result was attached as `external-agent-job-1.md` (%d bytes, SHA-256 `%s`).", len(content), digest),
 		ResultSHA256:      digest, ResultBytes: int64(len(content)), RendererVersion: domain.JobNotificationRenderer,
 		Target:       domain.ReplyTarget{ChannelID: "D12345678", CorrelationID: "job:job-1:3:terminal"},
 		DeliveryMode: domain.JobResultDeliveryFile, PolicyVersion: domain.JobDeliveryPolicyV1,

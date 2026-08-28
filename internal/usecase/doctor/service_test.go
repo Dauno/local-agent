@@ -62,7 +62,7 @@ func (f *fakeCLI) CheckProvider(_ context.Context, resolved *agentdef.ResolvedMo
 		f.describeCalls++
 		name := f.shimName
 		if name == "" {
-			name = "opencode"
+			name = "agentcli"
 		}
 		return CLIProviderCheck{Detail: "profile validated", ProviderName: name}, nil
 	}
@@ -801,13 +801,13 @@ profiles:
     token_counter:
       strategy: byte_bound
 `,
-		filepath.Join(stateDir, "providers", "opencode.yaml"): `
-name: opencode
+		filepath.Join(stateDir, "providers", "agentcli.yaml"): `
+name: agentcli
 type: agent_cli
-executable: opencode
+executable: agentcli
 version:
   command: [--version]
-  pattern: 'opencode (?P<version>\d+\.\d+\.\d+)'
+  pattern: 'agentcli (?P<version>\d+\.\d+\.\d+)'
   min: "0.0.0"
 invocation:
   prompt: stdin
@@ -820,7 +820,7 @@ stream:
   terminal_types: [result, error]
 profiles:
   build:
-    model: opencode/big-pickle
+    model: agentcli/big-pickle
 `,
 		filepath.Join(stateDir, "agents", "root_agent.yaml"): `
 agent_class: LlmAgent
@@ -828,12 +828,12 @@ name: root_agent
 model: deepseek/root
 global_instruction: policy
 instruction: delegate coding tasks
-agent_tools: [opencode_worker]
+agent_tools: [agentcli_worker]
 `,
-		filepath.Join(stateDir, "agents", "opencode_worker.yaml"): `
+		filepath.Join(stateDir, "agents", "agentcli_worker.yaml"): `
 agent_class: LlmAgent
-name: opencode_worker
-model: opencode/build
+name: agentcli_worker
+model: agentcli/build
 description: Handles delegated coding tasks.
 instruction: complete the delegated task
 include_contents: none
@@ -863,7 +863,7 @@ include_contents: none
 	if report.ExitCode() != 0 {
 		t.Fatalf("doctor failed: %#v", report.Results)
 	}
-	if len(cli.models) != 1 || cli.models[0] != "opencode/big-pickle" || cli.describeCalls != 1 {
+	if len(cli.models) != 1 || cli.models[0] != "agentcli/big-pickle" || cli.describeCalls != 1 {
 		t.Fatalf("agent tool CLI validation = models %v, describes %d", cli.models, cli.describeCalls)
 	}
 }
@@ -1034,12 +1034,12 @@ func writeDoctorCLIDefinitions(t *testing.T, stateDir string, includeAttachment 
 		t.Fatal(err)
 	}
 	provider := `
-name: opencode
+name: agentcli
 type: agent_cli
-executable: opencode
+executable: agentcli
 version:
   command: [--version]
-  pattern: 'opencode (?P<version>\d+\.\d+\.\d+)'
+  pattern: 'agentcli (?P<version>\d+\.\d+\.\d+)'
   min: "0.0.0"
 invocation:
   prompt: stdin
@@ -1061,7 +1061,7 @@ profiles:
 	rootAgent := `
 agent_class: LlmAgent
 name: root_agent
-model: opencode/root
+model: agentcli/root
 global_instruction: policy
 instruction: root
 `
@@ -1069,11 +1069,11 @@ instruction: root
 agent_class: LlmAgent
 name: worker
 description: Handles worker tasks.
-model: opencode/worker
+model: agentcli/worker
 instruction: work
 `
 	files := map[string]string{
-		filepath.Join(stateDir, "providers", "opencode.yaml"): provider,
+		filepath.Join(stateDir, "providers", "agentcli.yaml"): provider,
 		filepath.Join(stateDir, "agents", "root_agent.yaml"):  rootAgent,
 		filepath.Join(stateDir, "agents", "worker.yaml"):      worker,
 	}
@@ -1081,7 +1081,7 @@ instruction: work
 		files[filepath.Join(stateDir, "agents", "attachment_analyzer.yaml")] = `
 agent_class: LlmAgent
 name: attachment_analyzer
-model: opencode/attachment
+model: agentcli/attachment
 instruction: inspect image
 `
 	}

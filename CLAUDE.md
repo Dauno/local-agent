@@ -68,7 +68,7 @@ These are mine. Do not cite the specification as their source.
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 `local-agent` is a local-first Slack bot in Go. It connects via Slack Socket Mode, uses Google ADK for
-agent orchestration, calls an OpenAI-compatible Chat Completions endpoint (or spawns CLI/ACP agent
+agent orchestration, calls an OpenAI-compatible Chat Completions endpoint (or starts agent CLI
 providers), and persists conversation state in a project-local SQLite database.
 
 **Read `AGENTS.md` first.** It is the authoritative, actively-maintained deep-dive on architecture,
@@ -140,7 +140,7 @@ a misplaced import (e.g. a usecase reaching into an adapter, or two adapters imp
 - **New agent-facing tool or capability**: usually spans `internal/adapter/toolfactory` (tool
   registration/scoping) and the owning `internal/usecase/*` package for the business logic.
 - **Durable state / schema changes**: SQLite migrations live in `internal/adapter/sqlite`, gated by
-  `PRAGMA user_version`. Current version is defined in `internal/adapter/sqlite/migrate.go` — see
+  `PRAGMA user_version`. Current version is defined in `internal/adapter/sqlite/db.go`. See
   AGENTS.md's "Durable external-agent result delivery" section for the versioning discipline expected
   (CAS transactions, one-way schema bumps, no silent replay of legacy rows).
 - **Agent/provider YAML definitions**: `internal/agentdef` (parsing) and `.local-agent/agents/` /
@@ -148,12 +148,11 @@ a misplaced import (e.g. a usecase reaching into an adapter, or two adapters imp
 
 ## Data directory
 
-`.local-agent/` is mostly gitignored (`config.yaml`, `local-agent.db`, `app-manifest.local.yaml`,
-`local.env.example`, `memory/`). Exceptions tracked in git: `agents/`, `providers/`, `workflows/`.
+`.local-agent/` is gitignored. It contains config, state, generated files, memory, and local YAML definitions.
 
 `docs/` is gitignored going forward but still tracked from prior commits — it holds authoritative TRDs
 (technical requirements docs) per feature area. Prefer reading the relevant TRD over guessing intent
-when working on ACP, context compaction, memory, workstream orchestration, etc.
+when working on external agents, context compaction, memory, or workstream orchestration.
 
 ## Testing conventions
 

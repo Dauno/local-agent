@@ -45,8 +45,8 @@ type LLMAgentDocument struct {
 
 	// Project, AdditionalDirectories, and OutputSchema apply only to an agent
 	// CLI model. They make the node an external-agent step that runs in the
-	// workflow's target project, the same shape an AcpAgent node has. A node
-	// that leaves Project empty stays an ordinary in-process LLM step.
+	// workflow's target project. A node that leaves Project empty stays an
+	// ordinary in-process LLM step.
 	Project               string
 	AdditionalDirectories []string
 	OutputSchema          string

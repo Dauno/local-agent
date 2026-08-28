@@ -1972,7 +1972,7 @@ func createCompletionUnknownJob(t *testing.T, service *Service, store port.Exter
 
 func testRequestWithTimeout(mode domain.ExternalAgentJobMode, timeout time.Duration) domain.ExternalAgentJobRequest {
 	return domain.ExternalAgentJobRequest{
-		Provider:         "opencode",
+		Provider:         "agentcli",
 		Profile:          "build",
 		PrimaryProject:   "workspace",
 		RegistryRevision: "r1",

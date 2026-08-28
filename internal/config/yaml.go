@@ -116,7 +116,7 @@ var configSchema = []schemaField{
 		{name: "max_content_bytes"},
 		{name: "timeout_seconds"},
 	}},
-	{name: "acp", children: []schemaField{
+	{name: "external_agent", children: []schemaField{
 		{name: "max_inline_result_bytes"},
 		{name: "max_result_artifact_bytes"},
 		{name: "default_job_timeout_seconds"},
@@ -241,6 +241,9 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("decode configuration YAML: %w", err)
 	}
 	removeMappingEntries(root, "agent", "model", "memory")
+	if err := migrateLegacyExternalAgentKey(root); err != nil {
+		return Config{}, err
+	}
 
 	effective, err := configNode(Default())
 	if err != nil {
@@ -253,7 +256,7 @@ func Parse(data []byte) (Config, error) {
 		return Config{}, fmt.Errorf("decode typed configuration: %w", err)
 	}
 	maxFileBytesExplicit := false
-	if _, externalAgentNode, externalAgentPresent := mappingEntry(root, "acp"); externalAgentPresent {
+	if _, externalAgentNode, externalAgentPresent := mappingEntry(root, "external_agent"); externalAgentPresent {
 		if _, deliveryNode, deliveryPresent := mappingEntry(externalAgentNode, "delivery"); deliveryPresent {
 			_, _, maxFileBytesExplicit = mappingEntry(deliveryNode, "max_file_bytes")
 		}
@@ -489,6 +492,18 @@ func mergeKnownFields(dst, src *yaml.Node, schema []schemaField) {
 		preservePresentation(replacement, dstValue)
 		replaceMappingValue(dst, field.name, replacement)
 	}
+}
+
+func migrateLegacyExternalAgentKey(root *yaml.Node) error {
+	legacyKey, _, legacyPresent := mappingEntry(root, "acp")
+	_, _, currentPresent := mappingEntry(root, "external_agent")
+	if legacyPresent && currentPresent {
+		return errors.New("configuration must not contain both acp and external_agent")
+	}
+	if legacyPresent {
+		legacyKey.Value = "external_agent"
+	}
+	return nil
 }
 
 func mappingEntry(mapping *yaml.Node, name string) (key, value *yaml.Node, found bool) {

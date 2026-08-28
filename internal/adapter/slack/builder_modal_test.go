@@ -18,7 +18,7 @@ import (
 
 func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
-		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/default", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
 		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
 		{Reference: "codex/b", ProviderType: agentdef.ProviderTypeAgentCLI},
@@ -70,7 +70,7 @@ func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 		t.Fatal("agent_type input does not dispatch actions")
 	}
 	typeSelect := typeBlock.Element.(*slackapi.SelectBlockElement)
-	assertStaticSelect(t, typeSelect, "agent_type", []string{"llm", "acp"}, "llm")
+	assertStaticSelect(t, typeSelect, "agent_type", []string{"llm", "agent_cli"}, "llm")
 
 	model := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement)
 	assertStaticSelect(t, model, "model", []string{"openai/a", "openai/z"}, "openai/z")
@@ -78,9 +78,9 @@ func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 
 func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
-		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/z", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/ignored", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/a", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "other/ignored", ProviderType: "unsupported"},
 	})
 	view := presenter.BuildViewForKind(domain.AgentKindAgentCLI, map[string]string{
@@ -88,7 +88,7 @@ func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
 		"description":     "Description",
 		"instruction":     "Instruction",
 		"agent_type":      string(domain.AgentKindAgentCLI),
-		"model":           "opencode/z",
+		"model":           "agentcli/z",
 		"execution_mode":  domain.ExecutionModeDurableJob,
 		"timeout_seconds": "86400",
 	})
@@ -102,7 +102,7 @@ func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
 	}
 
 	model := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement)
-	assertStaticSelect(t, model, "model", []string{"opencode/a", "opencode/z"}, "opencode/z")
+	assertStaticSelect(t, model, "model", []string{"agentcli/a", "agentcli/z"}, "agentcli/z")
 
 	modeBlock := builderInputBlock(t, view, "execution_mode")
 	assertBuilderInput(t, modeBlock, "Ejecucion", "")
@@ -121,7 +121,7 @@ func TestBuilderModalPresenterPreservesValuesAndPrivateMetadata(t *testing.T) {
 	const metadata = `{"v":1,"actor_id":"U12345678","conversation_key":"slack:T12345678:dm:D12345678"}`
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
 		{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/default", ProviderType: agentdef.ProviderTypeAgentCLI},
 	})
 	callback := slackapi.InteractionCallback{
 		View: slackapi.View{
@@ -136,7 +136,7 @@ func TestBuilderModalPresenterPreservesValuesAndPrivateMetadata(t *testing.T) {
 			"description":     {"description": {BlockID: "description", ActionID: "description", Value: "preserved description"}},
 			"instruction":     {"instruction": {BlockID: "instruction", ActionID: "instruction", Value: "preserved instruction"}},
 			"agent_type":      {"agent_type": {BlockID: "agent_type", ActionID: "agent_type", SelectedOption: slackapi.OptionBlockObject{Value: string(domain.AgentKindAgentCLI)}}},
-			"model":           {"model": {BlockID: "model", ActionID: "model", SelectedOption: slackapi.OptionBlockObject{Value: "opencode/default"}}},
+			"model":           {"model": {BlockID: "model", ActionID: "model", SelectedOption: slackapi.OptionBlockObject{Value: "agentcli/default"}}},
 			"execution_mode":  {"execution_mode": {BlockID: "execution_mode", ActionID: "execution_mode", SelectedOption: slackapi.OptionBlockObject{Value: domain.ExecutionModeDurableJob}}},
 			"timeout_seconds": {"timeout_seconds": {BlockID: "timeout_seconds", ActionID: "timeout_seconds", Value: "1234"}},
 		}},
@@ -158,7 +158,7 @@ func TestBuilderModalPresenterPreservesValuesAndPrivateMetadata(t *testing.T) {
 	if got := builderInputBlock(t, view, "instruction").Element.(*slackapi.PlainTextInputBlockElement).InitialValue; got != "preserved instruction" {
 		t.Fatalf("preserved instruction = %q", got)
 	}
-	if got := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement).InitialOption.Value; got != "opencode/default" {
+	if got := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement).InitialOption.Value; got != "agentcli/default" {
 		t.Fatalf("preserved model = %q", got)
 	}
 	if got := builderInputBlock(t, view, "execution_mode").Element.(*slackapi.SelectBlockElement).InitialOption.Value; got != domain.ExecutionModeDurableJob {
@@ -212,7 +212,7 @@ func TestBuilderModalUpdateRejectsMissingViewIdentity(t *testing.T) {
 				Data: slackapi.InteractionCallback{
 					Type:           slackapi.InteractionTypeBlockActions,
 					View:           slackapi.View{CallbackID: builderSubmitCallbackID, ID: test.id, Hash: test.hash},
-					ActionCallback: slackapi.ActionCallbacks{BlockActions: []*slackapi.BlockAction{{ActionID: "agent_type", Value: "acp"}}},
+					ActionCallback: slackapi.ActionCallbacks{BlockActions: []*slackapi.BlockAction{{ActionID: "agent_type", Value: "agent_cli"}}},
 				},
 				Request: &socketmode.Request{Type: socketmode.RequestTypeInteractive, EnvelopeID: "builder-action-" + strings.ReplaceAll(test.name, " ", "-")},
 			}
@@ -243,7 +243,7 @@ func TestBuilderModalUpdateRejectsMissingViewIdentity(t *testing.T) {
 func testBuilderProviderProfiles() []BuilderProviderProfile {
 	return []BuilderProviderProfile{
 		{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/default", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/default", ProviderType: agentdef.ProviderTypeAgentCLI},
 	}
 }
 
@@ -313,9 +313,9 @@ func TestBuilderModalTemplateCopyAndOrderChangesDriveRenderer(t *testing.T) {
 
 func TestBuilderModalPresenterIsDeterministic(t *testing.T) {
 	profiles := []BuilderProviderProfile{
-		{Reference: "opencode/z", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/z", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-		{Reference: "opencode/a", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "agentcli/a", ProviderType: agentdef.ProviderTypeAgentCLI},
 		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
 	}
 	first := NewBuilderModalPresenterWithProviders(profiles)
@@ -323,7 +323,7 @@ func TestBuilderModalPresenterIsDeterministic(t *testing.T) {
 	for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindAgentCLI} {
 		values := map[string]string{"agent_type": string(kind), "model": "openai/a"}
 		if kind == domain.AgentKindAgentCLI {
-			values["model"] = "opencode/a"
+			values["model"] = "agentcli/a"
 		}
 		firstJSON, err := json.Marshal(first.BuildViewForKind(kind, values))
 		if err != nil {

@@ -371,7 +371,7 @@ func seedLegacyExternalAgentNotification(t *testing.T, db *sql.DB) {
 		job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 		task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 		conversation_key, status, timeout_at, created_at, updated_at)
-		VALUES ('migration-job', 'detached', 'opencode', 'build', 'workspace', '[]', 'r1',
+		VALUES ('migration-job', 'detached', 'agentcli', 'build', 'workspace', '[]', 'r1',
 		'task', 'request', 'wrapper', 'original', 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', 'completed', 2, 1, 1)`); err != nil {
 		t.Fatal(err)
@@ -820,7 +820,7 @@ func insertV30JobRow(t *testing.T, db *sql.DB, id, mode, status, summary, artifa
 		task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 		conversation_key, status, result_summary, result_artifact, result_sha256, result_bytes,
 		status_revision, timeout_at, created_at, updated_at)
-		VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+		VALUES (?, ?, 'agentcli', 'build', 'workspace', '[]', 'r1',
 		'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', ?, ?, ?, ?, ?, 1, 2, 1, 1)`,
 		id, mode, id+"-call", status, summary, artifact, sha, bytes); err != nil {
@@ -977,7 +977,7 @@ func TestMigrationV31RetiresForegroundActivationsByState(t *testing.T) {
 	}
 	insertV30JobRow(t, raw, "det-pending", "detached", "completed", "ok", "", "", 0)
 	insertV30ActivationRow(t, raw, "det-pending", "pending")
-	insertV30LegacyNotification(t, raw, "fg-pending", "OpenCode job `fg-pending` completed.\n\nok")
+	insertV30LegacyNotification(t, raw, "fg-pending", "External-agent job `fg-pending` completed.\n\nok")
 	if err := raw.Close(); err != nil {
 		t.Fatal(err)
 	}
@@ -1067,7 +1067,7 @@ func TestMigrationV31RetiresForegroundActivationsByState(t *testing.T) {
 		Scan(&markdown, &rootRequired, &resultSHA, &resultBytes); err != nil {
 		t.Fatal(err)
 	}
-	if markdown != "OpenCode job `fg-pending` completed.\n\nok" || rootRequired != 0 || resultSHA != digest || resultBytes != 2 {
+	if markdown != "External-agent job `fg-pending` completed.\n\nok" || rootRequired != 0 || resultSHA != digest || resultBytes != 2 {
 		t.Fatalf("v32 backfill after v31 = %q/%d/%s/%d, want preserved markdown, route 0, identity %s/2", markdown, rootRequired, resultSHA, resultBytes, digest)
 	}
 }
@@ -1215,7 +1215,7 @@ func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.
 			job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 			task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 			conversation_key, status, result_sha256, result_bytes, status_revision, timeout_at, created_at, updated_at)
-			VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+			VALUES (?, ?, 'agentcli', 'build', 'workspace', '[]', 'r1',
 			'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
 			'slack:T12345678:dm:D12345678', ?, ?, ?, 1, 2, 1, 1)`,
 			id, mode, id+"-call", status, resultSHA, resultBytes); err != nil {
@@ -1234,7 +1234,7 @@ func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.
 		}
 	}
 
-	markdownText := "OpenCode job `matrix-detached` completed.\n\nsafe result"
+	markdownText := "External-agent job `matrix-detached` completed.\n\nsafe result"
 	markdownDigest := fmt.Sprintf("%x", sha256.Sum256([]byte(markdownText)))
 	resultDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("safe result")))
 	legacyMarkdown := "legacy summary"
@@ -1243,12 +1243,12 @@ func TestOpenExistingUpgradesV30ToV32WithExplicitRoutesAndIdentities(t *testing.
 	insertV30Job("matrix-detached-markdown", "detached", "completed", resultDigest, int64(len("safe result")))
 	insertV30Notification("matrix-detached-markdown", "completed", markdownText, resultDigest, "delivery_v1", "markdown", "", int64(len("safe result")))
 
-	fileMarkdown := "OpenCode job `matrix-detached-file` completed. The complete result was attached."
+	fileMarkdown := "External-agent job `matrix-detached-file` completed. The complete result was attached."
 	fileDigest := fmt.Sprintf("%x", sha256.Sum256([]byte("file bytes")))
 	insertV30Job("matrix-detached-file", "detached", "completed", fileDigest, int64(len("file bytes")))
 	insertV30Notification("matrix-detached-file", "completed", fileMarkdown, fileDigest, "delivery_v1", "file", "matrix-detached-file-delivery.result", int64(len("file bytes")))
 
-	failedMarkdown := "OpenCode job `matrix-detached-failed` failed."
+	failedMarkdown := "External-agent job `matrix-detached-failed` failed."
 	insertV30Job("matrix-detached-failed", "detached", "failed", "", 0)
 	insertV30Notification("matrix-detached-failed", "failed", failedMarkdown, fmt.Sprintf("%x", sha256.Sum256([]byte(failedMarkdown))), "legacy_v1", "markdown", "", 0)
 
@@ -1356,7 +1356,7 @@ func TestMigrationV32ScopesIdentityBackfillToCompatibleSnapshots(t *testing.T) {
 			job_id, mode, provider, profile, primary_project, additional_projects, registry_revision,
 			task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id,
 			conversation_key, status, result_sha256, result_bytes, status_revision, timeout_at, created_at, updated_at)
-			VALUES (?, ?, 'opencode', 'build', 'workspace', '[]', 'r1',
+			VALUES (?, ?, 'agentcli', 'build', 'workspace', '[]', 'r1',
 			'task', 'request', 'wrapper', ?, 'U12345678', 'T12345678',
 			'slack:T12345678:dm:D12345678', ?, ?, ?, ?, 2, 1, 1)`,
 			id, mode, id+"-call", status, resultSHA, resultBytes, revision); err != nil {
@@ -1379,7 +1379,7 @@ func TestMigrationV32ScopesIdentityBackfillToCompatibleSnapshots(t *testing.T) {
 
 	newContent := "current result"
 	newDigest := contentSHA256Hex(newContent)
-	newMarkdown := "OpenCode job `legacy-old` completed.\n\ncurrent result"
+	newMarkdown := "External-agent job `legacy-old` completed.\n\ncurrent result"
 
 	// legacy-old: the job was reconciled to revision 2, so the row carries
 	// only the completed result identity of the newer event. The R1
@@ -1388,7 +1388,7 @@ func TestMigrationV32ScopesIdentityBackfillToCompatibleSnapshots(t *testing.T) {
 	// delivery bytes that the backfill must clear together with the empty
 	// digest (atomic pair).
 	insertMultiRevJob("legacy-old", "detached", "completed", 2, newDigest, int64(len(newContent)))
-	oldMarkdown := "OpenCode job `legacy-old` was interrupted after external actions may have occurred. It was not retried; reconciliation is required."
+	oldMarkdown := "External-agent job `legacy-old` was interrupted after external actions may have occurred. It was not retried; reconciliation is required."
 	insertMultiRevNotification("legacy-old", 1, "completion_unknown", oldMarkdown, contentSHA256Hex(oldMarkdown), "legacy_v1", "markdown", 17)
 
 	// legacy-current: a legacy terminal notification that snapshots the
@@ -1405,7 +1405,7 @@ func TestMigrationV32ScopesIdentityBackfillToCompatibleSnapshots(t *testing.T) {
 	// legacy terminal notification at the same revision.
 	singleContent := "safe result"
 	singleDigest := contentSHA256Hex(singleContent)
-	singleMarkdown := "OpenCode job `single-current` completed.\n\nsafe result"
+	singleMarkdown := "External-agent job `single-current` completed.\n\nsafe result"
 	insertMultiRevJob("single-current", "detached", "completed", 1, singleDigest, int64(len(singleContent)))
 	insertMultiRevNotification("single-current", 1, "completed", singleMarkdown, contentSHA256Hex(singleMarkdown), "legacy_v1", "markdown", 0)
 

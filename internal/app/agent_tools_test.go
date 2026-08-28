@@ -71,7 +71,7 @@ func (m *delegatingRootModel) GenerateContent(_ context.Context, _ *model.LLMReq
 	call := m.calls
 	target := m.target
 	if target == "" {
-		target = "opencode_worker"
+		target = "agentcli_worker"
 	}
 	return func(yield func(*model.LLMResponse, error) bool) {
 		if call == 1 {
@@ -107,7 +107,7 @@ func TestAgentToolModelForcesNonStreamingCall(t *testing.T) {
 
 func TestNewAgentToolAgentUsesDefinition(t *testing.T) {
 	definition := agentdef.AgentDef{
-		Name:            "opencode_worker",
+		Name:            "agentcli_worker",
 		Description:     "Handles delegated coding tasks.",
 		Instruction:     "Return a concise result.",
 		IncludeContents: "none",
@@ -124,7 +124,7 @@ func TestNewAgentToolAgentUsesDefinition(t *testing.T) {
 func TestADKAgentToolExecutesTextOnlyChild(t *testing.T) {
 	childModel := &streamRecordingModel{}
 	child, err := newAgentToolAgent(agentdef.AgentDef{
-		Name:            "opencode_worker",
+		Name:            "agentcli_worker",
 		Description:     "Handles delegated repository tasks.",
 		Instruction:     "Complete the delegated task.",
 		IncludeContents: "none",
@@ -399,7 +399,7 @@ func TestCompositeFactoryFailsInsteadOfDroppingConfiguredChild(t *testing.T) {
 func TestCompositeFactoryKeepsCLIChildrenToolLess(t *testing.T) {
 	cliChildModel := &streamRecordingModel{}
 	cliChild, err := newAgentToolAgent(agentdef.AgentDef{
-		Name:            "opencode_worker",
+		Name:            "agentcli_worker",
 		Description:     "Handles delegated coding tasks.",
 		Instruction:     "Complete the delegated task.",
 		IncludeContents: "none",
@@ -410,7 +410,7 @@ func TestCompositeFactoryKeepsCLIChildrenToolLess(t *testing.T) {
 	factory := newCompositeAgentToolFactory(&fakeBaseFactory{}, []preparedAgentTool{
 		{definition: exploreDefinition(), model: &exploringChildModel{}},
 		{
-			definition: agentdef.AgentDef{Name: "opencode_worker"},
+			definition: agentdef.AgentDef{Name: "agentcli_worker"},
 			model:      cliChildModel,
 			cliTool:    agenttool.New(cliChild, &agenttool.Config{}),
 		},
@@ -421,14 +421,14 @@ func TestCompositeFactoryKeepsCLIChildrenToolLess(t *testing.T) {
 		t.Fatal(err)
 	}
 	names := toolNames(t, raw)
-	want := []string{"explore", "opencode_worker", "list_repos", "read_file"}
+	want := []string{"explore", "agentcli_worker", "list_repos", "read_file"}
 	if strings.Join(names, ",") != strings.Join(want, ",") {
 		t.Fatalf("tool names = %v, want %v", names, want)
 	}
 
 	root, err := llmagent.New(llmagent.Config{
 		Name:        "root_agent",
-		Model:       &delegatingRootModel{target: "opencode_worker"},
+		Model:       &delegatingRootModel{target: "agentcli_worker"},
 		Instruction: "Delegate coding tasks.",
 		Mode:        llmagent.ModeChat,
 		Tools:       rawAsTools(t, raw),
@@ -650,6 +650,94 @@ func runDelegatingTurn(t *testing.T, root agent.Agent) string {
 		}
 	}
 	return final
+}
+
+type durableToolRootModel struct{ calls int }
+
+func (*durableToolRootModel) Name() string { return "durable-tool-root" }
+
+func (m *durableToolRootModel) GenerateContent(_ context.Context, _ *model.LLMRequest, _ bool) iter.Seq2[*model.LLMResponse, error] {
+	m.calls++
+	call := m.calls
+	return func(yield func(*model.LLMResponse, error) bool) {
+		if call == 1 {
+			yield(&model.LLMResponse{
+				Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
+					ID: "durable-call-1", Name: "cli_leaf", Args: map[string]any{"project": "workspace", "task": "inspect"},
+				}}}},
+				FinishReason: genai.FinishReasonStop,
+				TurnComplete: true,
+			}, nil)
+			return
+		}
+		yield(&model.LLMResponse{
+			Content:      genai.NewContentFromText("job accepted", genai.RoleModel),
+			FinishReason: genai.FinishReasonStop,
+			TurnComplete: true,
+		}, nil)
+	}
+}
+
+type recordingJobStarter struct {
+	calls   int
+	request domain.ExternalAgentJobRequest
+}
+
+func (s *recordingJobStarter) Start(_ context.Context, request domain.ExternalAgentJobRequest) (*domain.ExternalAgentJob, error) {
+	s.calls++
+	s.request = request
+	return &domain.ExternalAgentJob{ID: "job-1", RequestSHA256: "digest"}, nil
+}
+
+func TestDurableAgentCLIToolUsesOptionalConfirmationPolicy(t *testing.T) {
+	for _, test := range []struct {
+		name                 string
+		confirmation         string
+		wantStarts           int
+		wantConfirmationText bool
+	}{
+		{name: "omitted starts immediately", wantStarts: 1},
+		{name: "required requests confirmation", confirmation: "required", wantConfirmationText: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			starter := &recordingJobStarter{}
+			definition := agentdef.AgentDef{
+				Name: "cli_leaf", Model: "codex/build", Description: "Delegates work.",
+				Confirmation: test.confirmation,
+			}
+			durable, err := newAgentCLIDurableTool(
+				definition,
+				&agentdef.ResolvedModel{Provider: agentdef.Provider{Name: "codex", Type: agentdef.ProviderTypeAgentCLI}},
+				map[string]string{"workspace": t.TempDir()},
+				time.Minute,
+				"sha256:test",
+				starter,
+				nil,
+				"U12345678",
+				"slack:T12345678:dm:D12345678",
+			)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := strings.Contains(durable.Description(), "Requires confirmation"); got != test.wantConfirmationText {
+				t.Fatalf("confirmation description = %v, want %v", got, test.wantConfirmationText)
+			}
+			root, err := llmagent.New(llmagent.Config{
+				Name: "root_agent", Model: &durableToolRootModel{}, Instruction: "Delegate.",
+				Mode: llmagent.ModeChat, Tools: []tool.Tool{durable},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = runDelegatingTurn(t, root)
+			if starter.calls != test.wantStarts {
+				t.Fatalf("job starts = %d, want %d", starter.calls, test.wantStarts)
+			}
+			if test.wantStarts == 1 && (starter.request.Profile != "codex/build" || starter.request.Task != "inspect") {
+				t.Fatalf("job request = %#v", starter.request)
+			}
+		})
+	}
 }
 
 func TestResolveExternalAgentProjectRejectsUnknownName(t *testing.T) {

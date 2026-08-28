@@ -200,7 +200,7 @@ func buildUpgradedDoctorFixture(t *testing.T) string {
 	}
 	insertV30JobRow(t, raw, "det-pending", "detached", "completed", "ok", "", "", 0)
 	insertV30ActivationRow(t, raw, "det-pending", "pending")
-	insertV30LegacyNotification(t, raw, "fg-pending", "OpenCode job `fg-pending` completed.\n\nok")
+	insertV30LegacyNotification(t, raw, "fg-pending", "External-agent job `fg-pending` completed.\n\nok")
 	// The v30-era helper seeds an ancient retry due; a healthy upgraded store
 	// has no overdue legacy rows, so clear it before the doctor run.
 	if _, err := raw.ExecContext(context.Background(), `UPDATE external_agent_job_notifications

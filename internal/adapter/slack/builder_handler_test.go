@@ -21,7 +21,7 @@ func TestBuilderSubmissionValidatesKindAndProviderBeforeACK(t *testing.T) {
 			Type:     agentdef.ProviderTypeOpenAICompatible,
 			Profiles: map[string]agentdef.Profile{"fast": {}},
 		},
-		"opencode": {
+		"agentcli": {
 			Type:     agentdef.ProviderTypeAgentCLI,
 			Profiles: map[string]agentdef.Profile{"default": {}},
 		},
@@ -36,7 +36,7 @@ func TestBuilderSubmissionValidatesKindAndProviderBeforeACK(t *testing.T) {
 	}{
 		{name: "invalid kind", kind: "unsupported", profile: "openai/fast", fieldWant: "agent_type"},
 		{name: "wrong provider for agent_cli", kind: "agent_cli", profile: "openai/fast", fieldWant: "model"},
-		{name: "wrong provider for LLM", kind: "llm", profile: "opencode/default", fieldWant: "model"},
+		{name: "wrong provider for LLM", kind: "llm", profile: "agentcli/default", fieldWant: "model"},
 		{name: "unknown provider", kind: "llm", profile: "missing/default", fieldWant: "model"},
 	}
 	for _, tt := range tests {

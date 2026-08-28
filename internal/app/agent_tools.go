@@ -645,8 +645,8 @@ func combineInstructions(globalInstruction, instruction string) string {
 
 // newAgentCLIDurableTool exposes an agent CLI leaf that runs as a durable job.
 //
-// It uses structured {project, task} arguments, a confirmation gate, and an
-// acceptance receipt. The root turn ends once
+// It uses structured {project, task} arguments, an optional confirmation gate,
+// and an acceptance receipt. The root turn ends once
 // the job is accepted; the durable worker produces the result and Slack
 // receives it later.
 func newAgentCLIDurableTool(
@@ -666,9 +666,14 @@ func newAgentCLIDurableTool(
 	if len(projectRoots) == 0 {
 		return nil, errors.New("agent CLI durable tools require at least one registered sandbox project")
 	}
+	requiresConfirmation := definition.Confirmation == "required"
+	description := definition.Description
+	if requiresConfirmation {
+		description += " Requires confirmation because the agent CLI may modify files and run commands within its approval policy."
+	}
 	return functiontool.New(functiontool.Config{
 		Name:        definition.Name,
-		Description: definition.Description + " Requires confirmation because the agent CLI may modify files and run commands within its approval policy.",
+		Description: description,
 	}, func(ctx agent.Context, args externalAgentArgs) (externalAgentResult, error) {
 		primaryPath, err := resolveExternalAgentProject(projectRoots, args.Project)
 		if err != nil {
@@ -677,16 +682,18 @@ func newAgentCLIDurableTool(
 		if strings.TrimSpace(args.Task) == "" {
 			return externalAgentResult{}, errors.New("agent CLI task must not be empty")
 		}
-		confirmation := ctx.ToolConfirmation()
-		if confirmation == nil {
-			hint, payload := externalAgentDelegationConfirmation(ctx, completionBindings, actor, key, args)
-			if err := ctx.RequestConfirmation(hint, payload); err != nil {
-				return externalAgentResult{}, err
+		if requiresConfirmation {
+			confirmation := ctx.ToolConfirmation()
+			if confirmation == nil {
+				hint, payload := externalAgentDelegationConfirmation(ctx, completionBindings, actor, key, args)
+				if err := ctx.RequestConfirmation(hint, payload); err != nil {
+					return externalAgentResult{}, err
+				}
+				return externalAgentResult{}, nil
 			}
-			return externalAgentResult{}, nil
-		}
-		if !confirmation.Confirmed {
-			return externalAgentResult{}, errors.New("agent CLI delegation confirmation was rejected")
+			if !confirmation.Confirmed {
+				return externalAgentResult{}, errors.New("agent CLI delegation confirmation was rejected")
+			}
 		}
 		if jobStarter == nil || actor == "" || key == "" || registryRevision == "" {
 			return externalAgentResult{}, errors.New("durable agent CLI execution is not configured for this invocation")

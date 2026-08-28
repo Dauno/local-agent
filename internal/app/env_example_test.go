@@ -110,12 +110,12 @@ func TestPrepareSetupRewritesEnvExampleForAgentCLIWithoutKey(t *testing.T) {
 	application, _, _ := newSeamApplication(t)
 	stateDir := filepath.Join(application.root, ".local-agent")
 	provider := `
-name: opencode
+name: agentcli
 type: agent_cli
-executable: opencode
+executable: agentcli
 version:
   command: [--version]
-  pattern: 'opencode (?P<version>\d+\.\d+\.\d+)'
+  pattern: 'agentcli (?P<version>\d+\.\d+\.\d+)'
   min: "0.0.0"
 invocation:
   prompt: stdin
@@ -132,7 +132,7 @@ profiles:
     agent: build
     approval: auto
 `
-	writeRootAgentProvider(t, stateDir, "opencode.yaml", provider, "opencode/root")
+	writeRootAgentProvider(t, stateDir, "agentcli.yaml", provider, "agentcli/root")
 
 	snapshot, _, err := application.PrepareSetup(context.Background())
 	if err != nil {

@@ -219,22 +219,6 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, err
 	}
 
-	openCodeProvider := agentdef.SeedOpenCodeProviderExample()
-	openCodeData, err := agentdef.MarshalProvider(openCodeProvider)
-	if err != nil {
-		return Snapshot{}, fmt.Errorf("marshal OpenCode provider template: %w", err)
-	}
-	openCodeData = append([]byte(
-		"# Rename this file to opencode.yaml to enable the OpenCode agent CLI provider.\n"+
-			"# Requirements: OpenCode installed and logged in, sandbox.enabled: true with the\n"+
-			"# local-agent application root registered in sandbox.projects, and a native\n"+
-			"# OpenCode model reference in profiles.\n"+
-			"# Switching root_agent.model between provider families requires:\n"+
-			"#   local-agent init --reset-state\n"), openCodeData...)
-	if err := s.writeSeedFile(ctx, "OpenCode provider template", filepath.Join(providersDir, "opencode.yaml.example"), openCodeData); err != nil {
-		return Snapshot{}, err
-	}
-
 	if err := s.files.CheckRegularFileOrMissing(ctx, paths.DatabaseFile); err != nil {
 		return Snapshot{}, fmt.Errorf("validate SQLite path: %w", err)
 	}
@@ -415,7 +399,7 @@ func renderEnvExample(apiKeyEnv string) []byte {
 }
 
 // RewriteEnvExample replaces .env.example with the keys the resolved root
-// agent actually needs. An ACP or Agent CLI provider has no api_key_env, so
+// agent actually needs. An Agent CLI provider has no api_key_env, so
 // apiKeyEnv is empty and no model key placeholder is written: a fabricated
 // key line would mislead operators into thinking one is required.
 func (s *Service) RewriteEnvExample(ctx context.Context, paths config.Paths, apiKeyEnv string) error {

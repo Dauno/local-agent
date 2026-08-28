@@ -341,7 +341,7 @@ func (d *externalAgentJobDispatcher) materialize(ctx context.Context, job domain
 	if err != nil {
 		return result, err
 	}
-	canonical := fmt.Sprintf("OpenCode job `%s` completed.\n\n%s", job.ID, text)
+	canonical := fmt.Sprintf("External-agent job `%s` completed.\n\n%s", job.ID, text)
 	parts := slackadapter.RenderMarkdownParts(canonical, d.partLabels)
 	mode := domain.JobResultDeliveryMarkdown
 	artifactRef := ""

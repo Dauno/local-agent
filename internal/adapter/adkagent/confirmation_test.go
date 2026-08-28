@@ -56,7 +56,7 @@ func TestExtractConfirmationRendersPayloadForAnyHostIssuedHint(t *testing.T) {
 	call := &genai.FunctionCall{
 		ID: "wrapper-1",
 		Args: map[string]any{
-			"originalFunctionCall": &genai.FunctionCall{ID: "original-1", Name: "opencode_worker", Args: map[string]any{"project": "workspace", "task": "review the failing test"}},
+			"originalFunctionCall": &genai.FunctionCall{ID: "original-1", Name: "agentcli_worker", Args: map[string]any{"project": "workspace", "task": "review the failing test"}},
 			"toolConfirmation": toolconfirmation.ToolConfirmation{
 				Hint:    `Approve delegating workstream "ws-1" task "review the failing test" (project "workspace") to an external agent at revision 4.`,
 				Payload: payload,
@@ -77,7 +77,7 @@ func TestExtractConfirmationRendersPayloadForAnyHostIssuedHint(t *testing.T) {
 // defect for any tool, not just workstream_ ones.
 func TestExtractConfirmationRejectsCustomHintWithoutHostPayload(t *testing.T) {
 	call := &genai.FunctionCall{ID: "wrapper-1", Args: map[string]any{
-		"originalFunctionCall": &genai.FunctionCall{ID: "original-1", Name: "opencode_worker", Args: map[string]any{"task": "review"}},
+		"originalFunctionCall": &genai.FunctionCall{ID: "original-1", Name: "agentcli_worker", Args: map[string]any{"task": "review"}},
 		"toolConfirmation":     toolconfirmation.ToolConfirmation{Hint: "Approve delegating task to an external agent."},
 	}}
 	if confirmation := extractConfirmation(call); confirmation != nil {

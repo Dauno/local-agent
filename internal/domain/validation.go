@@ -51,11 +51,3 @@ func ValidateExternalAgentTimeout(seconds int) error {
 	}
 	return nil
 }
-
-// ValidateExternalAgentAllowlist enforces the supported external-agent provider name.
-func ValidateExternalAgentAllowlist(providerName string) error {
-	if providerName == "opencode" {
-		return nil
-	}
-	return fmt.Errorf("external-agent provider %q is not allowed", providerName)
-}

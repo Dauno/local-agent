@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
@@ -49,9 +50,12 @@ func (s *AgentDraftStore) Create(ctx context.Context, draft *port.AgentDraft) er
 	if !validDraftStatus(status) {
 		return fmt.Errorf("invalid agent draft status %q", status)
 	}
-	var model any = persisted.Model
-	if persisted.Kind == "acp" && strings.TrimSpace(persisted.Model) == "" {
-		model = nil
+	persistedKind := persisted.Kind
+	if persistedKind == string(domain.AgentKindAgentCLI) {
+		// The v23 schema stores agent_cli under its retired ACP wire value.
+		// Keep the translation at this adapter boundary until a later schema
+		// program can replace the table safely.
+		persistedKind = "acp"
 	}
 
 	_, err := s.db.ExecContext(ctx, `
@@ -61,8 +65,8 @@ func (s *AgentDraftStore) Create(ctx context.Context, draft *port.AgentDraft) er
 			execution_mode, timeout_seconds, canonical_yaml, status, created_at, expires_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		persisted.DraftID, persisted.TeamID, persisted.ActorID, persisted.ConversationKey, persisted.Name,
-		persisted.Description, persisted.Instruction, model, persisted.DefinitionHash,
-		persisted.CatalogRevision, persisted.Kind, persisted.ExecutionMode, persisted.TimeoutSeconds,
+		persisted.Description, persisted.Instruction, persisted.Model, persisted.DefinitionHash,
+		persisted.CatalogRevision, persistedKind, persisted.ExecutionMode, persisted.TimeoutSeconds,
 		persisted.CanonicalYAML, status, persisted.CreatedAt.UTC().UnixNano(), persisted.ExpiresAt.UTC().UnixNano())
 	if err != nil {
 		return fmt.Errorf("create agent draft: %w", err)
@@ -98,6 +102,7 @@ func (s *AgentDraftStore) Get(ctx context.Context, draftID string) (*port.AgentD
 		return nil, fmt.Errorf("get agent draft: %w", err)
 	}
 	draft.Model = model.String
+	draft.Kind = restoredDraftKind(draft.Kind)
 	draft.Status = port.AgentDraftStatus(status)
 	draft.CreatedAt = time.Unix(0, createdAtNanos).UTC()
 	draft.ExpiresAt = time.Unix(0, expiresAt).UTC()
@@ -142,10 +147,18 @@ func (s *AgentDraftStore) FindByNameAndDefinitionHash(ctx context.Context, name,
 		return nil, fmt.Errorf("find agent draft: %w", err)
 	}
 	draft.Model = model.String
+	draft.Kind = restoredDraftKind(draft.Kind)
 	draft.Status = port.AgentDraftStatus(status)
 	draft.CreatedAt = time.Unix(0, createdAtNanos).UTC()
 	draft.ExpiresAt = time.Unix(0, expiresAt).UTC()
 	return &draft, nil
+}
+
+func restoredDraftKind(kind string) string {
+	if kind == "acp" {
+		return string(domain.AgentKindAgentCLI)
+	}
+	return kind
 }
 
 // MarkPreviewed atomically saves the preview result and transitions from Draft to Previewed.
@@ -283,8 +296,8 @@ func validateDraft(draft port.AgentDraft) error {
 	if draft.CatalogRevision < 0 {
 		return errors.New("agent draft catalog revision must not be negative")
 	}
-	if draft.Kind != "" && draft.Kind != "llm" && draft.Kind != "acp" {
-		return errors.New("agent draft kind must be llm or acp")
+	if draft.Kind != "" && draft.Kind != "llm" && draft.Kind != string(domain.AgentKindAgentCLI) {
+		return errors.New("agent draft kind must be llm or agent_cli")
 	}
 	if draft.ExecutionMode != "" && draft.ExecutionMode != "foreground" && draft.ExecutionMode != "durable_job" {
 		return errors.New("agent draft execution mode must be foreground or durable_job")
@@ -300,9 +313,9 @@ func validateDraft(draft port.AgentDraft) error {
 		if draft.TimeoutSeconds != 0 {
 			return errors.New("agent draft LLM timeout_seconds must be zero")
 		}
-	case "acp":
-		if strings.TrimSpace(draft.Model) != "" {
-			return errors.New("agent draft ACP model must be empty")
+	case string(domain.AgentKindAgentCLI):
+		if strings.TrimSpace(draft.Model) == "" {
+			return errors.New("agent draft agent_cli model must not be empty")
 		}
 	}
 	return nil

@@ -131,7 +131,7 @@ func countActivations(t *testing.T, store *Store, detached bool) int {
 func TestUpgradeV30ToV32ReconcilesPreV32MarkdownEvidence(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 30)
-	markdown := "OpenCode job `upgrade-markdown` completed.\n\nsafe result"
+	markdown := "External-agent job `upgrade-markdown` completed.\n\nsafe result"
 	resultContent := "safe result"
 	resultDigest := contentSHA256Hex(resultContent)
 	insertV30JobRow(t, raw, "upgrade-markdown", "detached", "completed", "", "", resultDigest, int64(len(resultContent)))
@@ -186,7 +186,7 @@ func TestUpgradeV30ToV32ReconcilesPreV32MarkdownEvidence(t *testing.T) {
 func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 	ctx := context.Background()
 	path, raw := createSchemaAtVersion(t, 30)
-	markdown := "OpenCode job `upgrade-file` completed. The complete result was attached."
+	markdown := "External-agent job `upgrade-file` completed. The complete result was attached."
 	resultContent := "file bytes"
 	resultDigest := contentSHA256Hex(resultContent)
 	insertV30JobRow(t, raw, "upgrade-file", "detached", "completed", "", "", resultDigest, int64(len(resultContent)))
@@ -199,7 +199,7 @@ func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 		Metadata: slackapi.SlackMetadata{EventType: "local_agent_external_agent_job", EventPayload: v30EraEvidencePayload("upgrade-file", 1, markdown, resultDigest, "file", "F123")},
 	}
 	server := newSlackHistoryServer(t, evidence)
-	server.fileInfo = `{"ok":true,"file":{"id":"F123","name":"opencode-upgrade-file.md","size":` + fmt.Sprint(len(resultContent)) + `,"user":"B12345678","channels":["D12345678"]}}`
+	server.fileInfo = `{"ok":true,"file":{"id":"F123","name":"external-agent-upgrade-file.md","size":` + fmt.Sprint(len(resultContent)) + `,"user":"B12345678","channels":["D12345678"]}}`
 	fileClient := slackapi.New("xoxb-test", slackapi.OptionAPIURL(server.BaseURL()))
 
 	claimed, err := jobStore.ClaimNextNotification(ctx, time.Now().UTC(), "test-worker", time.Minute)
@@ -240,7 +240,7 @@ func TestUpgradeV30ToV32ReconcilesPreV32FileEvidence(t *testing.T) {
 // reconciles, while a v32 payload with a mismatched notification digest fails
 // closed even when its content_sha256 matches the legacy content identity.
 func TestUpgradeV30ToV32V32EvidenceStillVerifiedStrictly(t *testing.T) {
-	markdown := "OpenCode job `upgrade-strict` completed.\n\nsafe result"
+	markdown := "External-agent job `upgrade-strict` completed.\n\nsafe result"
 	resultContent := "safe result"
 	resultDigest := contentSHA256Hex(resultContent)
 	markdownDigest := contentSHA256Hex(markdown)
