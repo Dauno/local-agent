@@ -224,6 +224,66 @@ func TestEnsureBaseArtifactsSeedsMissingExploreFromPersistedRootModel(t *testing
 	}
 }
 
+func TestApplyConfirmedUpdatesSynchronizesUntouchedSeededRootIdentity(t *testing.T) {
+	service := newRealService(t)
+	root := t.TempDir()
+	snapshot, err := service.EnsureBaseArtifacts(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	access := AccessControl{AllowedUserIDs: []string{"U12345678"}}
+	secrets := Secrets{ModelAPIKey: "key", SlackBotToken: "xoxb-token", SlackAppToken: "xapp-token"}
+	identity := Identity{AgentName: "root_agent", SlackAppName: "App", SlackBotDisplayName: "Configured Bot"}
+	updated, err := service.ApplyConfirmedUpdates(t.Context(), snapshot, identity, access, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRootAgentIdentity(t, updated.Paths.StateDir, "Configured Bot")
+
+	identity.SlackBotDisplayName = "Renamed Bot"
+	updated, err = service.ApplyConfirmedUpdates(t.Context(), updated, identity, access, secrets)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertRootAgentIdentity(t, updated.Paths.StateDir, "Renamed Bot")
+}
+
+func TestApplyConfirmedUpdatesPreservesCustomizedRootAgent(t *testing.T) {
+	service := newRealService(t)
+	root := t.TempDir()
+	snapshot, err := service.EnsureBaseArtifacts(t.Context(), root)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	rootAgentPath := filepath.Join(snapshot.Paths.StateDir, "agents", "root_agent.yaml")
+	original, err := os.ReadFile(rootAgentPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	customized := append(original, []byte("# operator note\n")...)
+	if err := os.WriteFile(rootAgentPath, customized, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(rootAgentPath, 0o640); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = service.ApplyConfirmedUpdates(
+		t.Context(),
+		snapshot,
+		Identity{AgentName: "root_agent", SlackAppName: "App", SlackBotDisplayName: "Renamed Bot"},
+		AccessControl{AllowedUserIDs: []string{"U12345678"}},
+		Secrets{ModelAPIKey: "key", SlackBotToken: "xoxb-token", SlackAppToken: "xapp-token"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	assertFileEquals(t, rootAgentPath, string(customized))
+	assertMode(t, rootAgentPath, 0o640)
+}
+
 func TestApplyConfirmedUpdatesPreservesExtensionsAndUnrelatedFiles(t *testing.T) {
 	service := newRealService(t)
 	root := t.TempDir()
@@ -443,6 +503,22 @@ func newRealService(t *testing.T) *Service {
 		t.Fatal(err)
 	}
 	return service
+}
+
+func assertRootAgentIdentity(t *testing.T, stateDir, botName string) {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(stateDir, "agents", "root_agent.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	rootAgent, err := agentdef.UnmarshalAgentDef(data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "You are " + botName + "."
+	if !strings.Contains(rootAgent.Instruction, want) {
+		t.Fatalf("root agent instruction does not contain %q:\n%s", want, rootAgent.Instruction)
+	}
 }
 
 func assertFileEquals(t *testing.T, path, want string) {

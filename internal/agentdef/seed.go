@@ -1,7 +1,9 @@
 package agentdef
 
 import (
+	"errors"
 	"maps"
+	"strings"
 
 	"gopkg.in/yaml.v3"
 )
@@ -69,7 +71,14 @@ func SeedDeepSeekProvider(cfg SeedModelConfig) Provider {
 	}
 }
 
-func SeedRootAgent(modelRef string) AgentDef {
+func SeedRootAgent(modelRef, botName string) (AgentDef, error) {
+	if strings.TrimSpace(botName) == "" {
+		return AgentDef{}, errors.New("seeded root agent bot name is required")
+	}
+	if strings.ContainsAny(botName, "\r\n\x00") {
+		return AgentDef{}, errors.New("seeded root agent bot name must be a single line")
+	}
+
 	return AgentDef{
 		AgentClass:  "LlmAgent",
 		Name:        "root_agent",
@@ -91,7 +100,7 @@ func SeedRootAgent(modelRef string) AgentDef {
 			"pretending to perform the action. If users paste secrets or sensitive values, " +
 			"avoid repeating them unnecessarily.",
 		Instruction: "" +
-			"You are Dev Agent.\n\n" +
+			"You are " + botName + ".\n\n" +
 			"Answer concisely by default.\n" +
 			"When the current user message is a greeting, include " +
 			"slack.user.display_name in your greeting when it is available.\n" +
@@ -108,7 +117,7 @@ func SeedRootAgent(modelRef string) AgentDef {
 		IncludeContents: "default",
 		DurableSession:  true,
 		ToolScope:       ToolScope{"invocation_scoped"},
-	}
+	}, nil
 }
 
 func SeedExploreAgent(modelRef string) AgentDef {

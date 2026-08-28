@@ -4,6 +4,7 @@
 package bootstrap
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -175,7 +176,10 @@ func (s *Service) EnsureBaseArtifacts(ctx context.Context, projectRoot string) (
 		return Snapshot{}, err
 	}
 
-	rootAgent := agentdef.SeedRootAgent("deepseek/flash-reasoning")
+	rootAgent, err := agentdef.SeedRootAgent("deepseek/flash-reasoning", cfg.Slack.BotDisplayName)
+	if err != nil {
+		return Snapshot{}, fmt.Errorf("prepare seeded root agent: %w", err)
+	}
 	rootData, err := agentdef.MarshalAgentDef(rootAgent)
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("marshal seeded root agent: %w", err)
@@ -319,6 +323,7 @@ func (s *Service) ApplyConfirmedUpdates(
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("parse configuration before confirmed update: %w", err)
 	}
+	oldBotDisplayName := cfg.Slack.BotDisplayName
 
 	cfg.Slack.AppName = identity.SlackAppName
 	cfg.Slack.BotDisplayName = identity.SlackBotDisplayName
@@ -366,6 +371,16 @@ func (s *Service) ApplyConfirmedUpdates(
 	if err != nil {
 		return Snapshot{}, fmt.Errorf("prepare Git ignore update: %w", err)
 	}
+	rootAgentPath := filepath.Join(paths.StateDir, "agents", "root_agent.yaml")
+	rootAgentContent, rootAgentChanged, err := s.prepareSeededRootIdentityUpdate(
+		ctx,
+		rootAgentPath,
+		oldBotDisplayName,
+		identity.SlackBotDisplayName,
+	)
+	if err != nil {
+		return Snapshot{}, err
+	}
 
 	contents := map[string][]byte{
 		paths.ConfigFile:   configContent,
@@ -378,6 +393,10 @@ func (s *Service) ApplyConfirmedUpdates(
 		paths.EnvFile:      0o600,
 	}
 	forceModes := map[string]bool{paths.EnvFile: true}
+	if rootAgentChanged {
+		contents[rootAgentPath] = rootAgentContent
+		modes[rootAgentPath] = 0o644
+	}
 	if gitIgnoreChanged {
 		contents[gitIgnorePath] = gitIgnoreContent
 		modes[gitIgnorePath] = 0o644
@@ -387,6 +406,46 @@ func (s *Service) ApplyConfirmedUpdates(
 	}
 
 	return Snapshot{ProjectRoot: root, Config: cfg, Paths: paths}, nil
+}
+
+func (s *Service) prepareSeededRootIdentityUpdate(
+	ctx context.Context,
+	path string,
+	oldBotName string,
+	newBotName string,
+) ([]byte, bool, error) {
+	if oldBotName == newBotName {
+		return nil, false, nil
+	}
+	current, err := s.files.ReadFile(ctx, path)
+	if err != nil {
+		return nil, false, fmt.Errorf("read root agent before identity update: %w", err)
+	}
+	rootAgent, err := agentdef.UnmarshalAgentDef(current)
+	if err != nil {
+		return nil, false, fmt.Errorf("parse root agent before identity update: %w", err)
+	}
+	oldSeed, err := agentdef.SeedRootAgent(rootAgent.Model, oldBotName)
+	if err != nil {
+		return nil, false, fmt.Errorf("prepare previous root agent template: %w", err)
+	}
+	oldSeedContent, err := agentdef.MarshalAgentDef(oldSeed)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal previous root agent template: %w", err)
+	}
+	if !bytes.Equal(current, oldSeedContent) {
+		return nil, false, nil
+	}
+
+	newSeed, err := agentdef.SeedRootAgent(rootAgent.Model, newBotName)
+	if err != nil {
+		return nil, false, fmt.Errorf("prepare updated root agent template: %w", err)
+	}
+	newSeedContent, err := agentdef.MarshalAgentDef(newSeed)
+	if err != nil {
+		return nil, false, fmt.Errorf("marshal updated root agent template: %w", err)
+	}
+	return newSeedContent, true, nil
 }
 
 func renderEnvExample(apiKeyEnv string) []byte {
