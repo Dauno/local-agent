@@ -302,9 +302,12 @@ func compileConfirmationMessageForMode(renderer *TemplateRenderer, delivery port
 }
 
 func compileConfirmationMessageV1(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
+	expires := delivery.Expiry.UTC().Format("15:04")
 	fallback, blocks, err := renderer.CompileMessageWithFallback(confirmationTemplateV1, TemplateContext{Values: map[string]string{
-		"summary":         fmt.Sprintf(":lock: %s", neutralizeUnsafeControls(delivery.Summary)),
-		"subtitle":        fmt.Sprintf("Call ID: `%s` · Expires %s UTC", delivery.OriginalCallID, delivery.Expiry.UTC().Format("15:04")),
+		"summary": confirmationCardSummary(delivery.Summary),
+		"subtitle": boundedCardText(
+			"Call ID: `", escapeSlackMrkdwn(delivery.OriginalCallID), "` · Expires "+expires+" UTC", maxRendererCardSubtitleLength,
+		),
 		"wrapper_call_id": delivery.WrapperCallID,
 		"fallback_text":   confirmationFallbackTextV1(delivery),
 	}})
@@ -321,9 +324,12 @@ func compileConfirmationMessageV1(renderer *TemplateRenderer, delivery port.Conf
 
 func compileConfirmationMessageV2(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
 	display := buildConfirmationDisplay(delivery)
+	expires := delivery.Expiry.UTC().Format("15:04")
 	fallback, blocks, err := renderer.CompileMessageWithFallback(confirmationTemplateV2, TemplateContext{Values: map[string]string{
-		"title_summary":   confirmationTitleSummary(delivery.Summary),
-		"subtitle":        fmt.Sprintf("*Call ID:*\n`%s` · *Expires:* %s UTC", escapeSlackMrkdwn(delivery.OriginalCallID), delivery.Expiry.UTC().Format("15:04")),
+		"card_summary": confirmationCardSummary(delivery.Summary),
+		"subtitle": boundedCardText(
+			"*Call ID:*\n`", escapeSlackMrkdwn(delivery.OriginalCallID), "` · *Expires:* "+expires+" UTC", maxRendererCardSubtitleLength,
+		),
 		"project":         display.Project,
 		"proposed_task":   display.ProposedTask,
 		"wrapper_call_id": delivery.WrapperCallID,
@@ -467,8 +473,8 @@ func confirmationWorkstreamBlocks(data string) []slackapi.Block {
 	return blocks
 }
 
-func confirmationTitleSummary(summary string) string {
-	return "*Confirmation required*\n" + escapeSlackMrkdwn(summary)
+func confirmationCardSummary(summary string) string {
+	return truncateConfirmationText(neutralizeUnsafeControls(summary), maxRendererCardBodyLength)
 }
 
 func confirmationFallbackTextV2(delivery port.ConfirmationDelivery, display confirmationDisplay) string {
@@ -495,6 +501,14 @@ func truncateConfirmationText(value string, limit int) string {
 	}
 	runes := []rune(value)
 	return string(runes[:limit-utf8.RuneCountInString(marker)]) + marker
+}
+
+func boundedCardText(prefix, value, suffix string, limit int) string {
+	available := limit - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(suffix)
+	if available <= 0 {
+		return truncateConfirmationText(prefix+suffix, limit)
+	}
+	return prefix + truncateConfirmationText(value, available) + suffix
 }
 
 func escapeSlackMrkdwn(value string) string {

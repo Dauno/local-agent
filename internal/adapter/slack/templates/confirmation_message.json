@@ -7,8 +7,9 @@
     "blocks": [
       {
         "type": "card",
-        "title": {"type": "mrkdwn", "text": "{{value.summary}}", "verbatim": false},
-        "subtitle": {"type": "mrkdwn", "text": "{{value.subtitle}}", "verbatim": false}
+        "title": {"type": "plain_text", "text": "Confirmation required", "emoji": false},
+        "subtitle": {"type": "mrkdwn", "text": "{{value.subtitle}}", "verbatim": false},
+        "body": {"type": "plain_text", "text": "{{value.summary}}", "emoji": false}
       },
       {
         "type": "actions",

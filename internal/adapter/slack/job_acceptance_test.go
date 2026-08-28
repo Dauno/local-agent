@@ -86,6 +86,16 @@ func TestCompileJobAcceptedMessageRespectsLimits(t *testing.T) {
 	if len([]rune(fallback)) > maxFallbackText || len(blocks) > maxBlocksPerMessage {
 		t.Fatalf("compiled receipt exceeds limits: fallback=%d blocks=%d", len([]rune(fallback)), len(blocks))
 	}
+	card := blocks[0].(*slackapi.CardBlock)
+	if card.Title == nil || len([]rune(card.Title.Text)) > maxRendererCardTitleLength {
+		t.Fatalf("card title exceeds limit: %#v", card.Title)
+	}
+	if card.Subtitle == nil || len([]rune(card.Subtitle.Text)) > maxRendererCardSubtitleLength {
+		t.Fatalf("card subtitle exceeds limit: %#v", card.Subtitle)
+	}
+	if card.Body == nil || len([]rune(card.Body.Text)) > maxRendererCardBodyLength {
+		t.Fatalf("card body exceeds limit: %#v", card.Body)
+	}
 	for index, block := range blocks {
 		section, ok := block.(*slackapi.SectionBlock)
 		if !ok {

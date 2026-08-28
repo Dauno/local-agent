@@ -1181,6 +1181,34 @@ func TestExpiredConfirmationResumeSharesConversationCoordinatorWithReconciliatio
 	}
 }
 
+func TestStartupExpiredUnpublishedRichConfirmationSkipsSlackUpdate(t *testing.T) {
+	now := time.Unix(1710000000, 0).UTC()
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "expired-unpublished", OriginalCallID: "original",
+		ConversationKey: domain.ConversationKey("slack:T12345678:dm:D12345678"),
+		Actor:           "U12345678", Status: port.ConfirmationPending, RendererMode: "confirmation_v2",
+		Expiry: now.Add(-time.Minute),
+	}
+	confirmations := &expiredConfirmationStore{expired: []port.ConfirmationDelivery{delivery}}
+	runtime := &immediateResumeRuntime{}
+	richPublisher := &fakeConfirmationPublisher{}
+	service := completionService(t, &fakeActivationStore{}, &fakeRuntime{}, &fakePublisher{})
+	service.runtime = runtime
+	service.confirmationStore = confirmations
+	service.confirmationPublisher = richPublisher
+	service.clock = fakeClock{now: now}
+
+	if err := service.ReconcileConfirmations(t.Context(), nil); err != nil {
+		t.Fatal(err)
+	}
+	if runtime.resumes != 1 {
+		t.Fatalf("expired confirmation resume calls = %d", runtime.resumes)
+	}
+	if len(richPublisher.updated) != 0 {
+		t.Fatalf("unpublished confirmation updates = %#v", richPublisher.updated)
+	}
+}
+
 func TestStartupExpiredConfirmationResumeSharesConversationCoordinatorWithReconciliation(t *testing.T) {
 	now := time.Unix(1710000000, 0).UTC()
 	activation := completionActivation(now)

@@ -19,6 +19,11 @@ import (
 
 const (
 	maxRendererBlocksPerModal         = 100
+	maxRendererCardTitleLength        = 150
+	maxRendererCardSubtitleLength     = 150
+	maxRendererCardBodyLength         = 200
+	maxRendererCardSubtextLength      = 200
+	maxRendererCardActions            = 3
 	maxRendererCompositionTextLength  = 3000
 	maxRendererModalTitleLength       = 24
 	maxRendererModalSubmitCloseLength = 24
@@ -744,12 +749,46 @@ func validateCompiledStruct(v reflect.Value, templateName string) error {
 		return validateGenericText(&typed, limit)
 	case slackapi.OptionBlockObject:
 		return validateCompiledOption(&typed)
+	case slackapi.CardBlock:
+		return validateCompiledCard(&typed)
 	case slackapi.ButtonBlockElement:
 		return validateCompiledButton(&typed)
 	case slackapi.SectionBlock:
 		return validateCompiledSection(&typed, templateName)
 	case slackapi.PlainTextInputBlockElement:
 		return validateCompiledPlainTextInput(&typed)
+	}
+	return nil
+}
+
+func validateCompiledCard(card *slackapi.CardBlock) error {
+	if card.Icon != nil && card.SlackIcon != nil {
+		return errors.New("card icon and slack_icon are mutually exclusive")
+	}
+	if card.HeroImage == nil && card.Title == nil && card.Body == nil &&
+		(card.Actions == nil || len(card.Actions.ElementSet) == 0) {
+		return errors.New("card requires a hero image, title, body, or actions")
+	}
+	fields := []struct {
+		name  string
+		text  *slackapi.TextBlockObject
+		limit int
+	}{
+		{name: "title", text: card.Title, limit: maxRendererCardTitleLength},
+		{name: "subtitle", text: card.Subtitle, limit: maxRendererCardSubtitleLength},
+		{name: "body", text: card.Body, limit: maxRendererCardBodyLength},
+		{name: "subtext", text: card.Subtext, limit: maxRendererCardSubtextLength},
+	}
+	for _, field := range fields {
+		if field.text == nil {
+			continue
+		}
+		if err := validateGenericText(field.text, field.limit); err != nil {
+			return fmt.Errorf("card %s: %w", field.name, err)
+		}
+	}
+	if card.Actions != nil && len(card.Actions.ElementSet) > maxRendererCardActions {
+		return fmt.Errorf("card exceeds %d actions", maxRendererCardActions)
 	}
 	return nil
 }

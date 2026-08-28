@@ -415,7 +415,7 @@ func TestTemplateRendererKeepsScalarReplacementAsJSONData(t *testing.T) {
 		t.Fatalf("replacement changed block count to %d", len(blocks))
 	}
 	card, ok := blocks[0].(*slackapi.CardBlock)
-	if !ok || card.Title == nil || card.Title.Text != value {
+	if !ok || card.Title == nil || card.Title.Text != "Confirmation required" || card.Body == nil || card.Body.Text != value {
 		t.Fatalf("hydrated summary = %#v", blocks[0])
 	}
 	actions, ok := blocks[1].(*slackapi.ActionBlock)

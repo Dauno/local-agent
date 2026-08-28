@@ -367,7 +367,7 @@ func externalAgentDelegationConfirmation(
 		"project": args.Project,
 		"task":    task,
 	}
-	hint := fmt.Sprintf("Approve delegating task %q in project %q to an external agent.", task, args.Project)
+	hint := fmt.Sprintf("Approve external-agent delegation for project %q.", args.Project)
 	if completionBindings == nil || actor == "" || key == "" {
 		return hint, payload
 	}
@@ -381,8 +381,8 @@ func externalAgentDelegationConfirmation(
 	if len(binding.RequiredInputs) > 0 {
 		payload["source_result_identities"] = append([]string(nil), binding.RequiredInputs...)
 	}
-	hint = fmt.Sprintf("Approve delegating workstream %q task %q (project %q) to an external agent at revision %d.",
-		binding.WorkstreamID, task, args.Project, binding.AdmissionRevision)
+	hint = fmt.Sprintf("Approve external-agent delegation for workstream %q, task %q, project %q, revision %d.",
+		binding.WorkstreamID, binding.TaskID, args.Project, binding.AdmissionRevision)
 	return hint, payload
 }
 

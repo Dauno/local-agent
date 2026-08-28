@@ -267,7 +267,7 @@ var scalarKeysByTemplate = map[string]map[string]struct{}{
 		"summary": {}, "subtitle": {}, "wrapper_call_id": {}, "fallback_text": {},
 	},
 	"confirmation_message_v2": {
-		"title_summary": {}, "subtitle": {}, "project": {},
+		"card_summary": {}, "subtitle": {}, "project": {},
 		"proposed_task": {}, "wrapper_call_id": {}, "fallback_text": {},
 	},
 	"job_accepted_message": {
@@ -487,7 +487,7 @@ func validateTemplateRepresentative(doc templateDocument) (TemplateInteractiveID
 		}
 	case "confirmation_message_v2":
 		context.Values = map[string]string{
-			"title_summary": "*Confirmation required*\nA confirmation summary", "subtitle": "*Call ID:*\n`call-1` · *Expires:* 00:00 UTC",
+			"card_summary": "A confirmation summary", "subtitle": "*Call ID:*\n`call-1` · *Expires:* 00:00 UTC",
 			"project": "Project: workspace", "proposed_task": "Proposed task:\nInspect the repository",
 			"wrapper_call_id": "wrapper-1", "fallback_text": "Confirmation required: A confirmation summary",
 		}

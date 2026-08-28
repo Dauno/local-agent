@@ -84,7 +84,9 @@ func compileJobAcceptedMessage(renderer *TemplateRenderer, job domain.ExternalAg
 	fallback = truncateConfirmationText(neutralizeUnsafeControls(fallback), maxFallbackText)
 
 	compiledFallback, blocks, err := renderer.CompileMessageWithFallback(jobAcceptedTemplate, TemplateContext{Values: map[string]string{
-		"subtitle":        "*Job ID:* `" + escapeSlackMrkdwn(jobID) + "` · *Status:* `" + escapeSlackMrkdwn(status) + "`",
+		"subtitle": boundedCardText(
+			"*Job ID:* `", escapeSlackMrkdwn(jobID), "` · *Status:* `"+escapeSlackMrkdwn(status)+"`", maxRendererCardSubtitleLength,
+		),
 		"created_at":      "*Created:*\n" + escapeSlackMrkdwn(createdAt),
 		"updated_at":      "*Updated:*\n" + escapeSlackMrkdwn(updatedAt),
 		"status_sentence": statusSentence,

@@ -227,11 +227,14 @@ func TestConfirmationV2RendersOrderedSafeBlocks(t *testing.T) {
 		t.Fatalf("blocks = %d, want card, task, workstream, actions", len(blocks))
 	}
 	card := blocks[0].(*slackapi.CardBlock)
-	if card.Title == nil || card.Title.Type != slackapi.MarkdownType || card.Title.Text != "*Confirmation required*\nWrite &lt;@U12345678&gt; &amp; report" {
+	if card.Title == nil || card.Title.Type != slackapi.PlainTextType || card.Title.Text != "Confirmation required" {
 		t.Fatalf("card title = %#v", card.Title)
 	}
 	if card.Subtitle == nil || card.Subtitle.Type != slackapi.MarkdownType {
 		t.Fatalf("card subtitle = %#v", card.Subtitle)
+	}
+	if card.Body == nil || card.Body.Type != slackapi.PlainTextType || card.Body.Text != confirmationCardSummary(delivery.Summary) {
+		t.Fatalf("card body = %#v", card.Body)
 	}
 	task := blocks[1].(*slackapi.SectionBlock)
 	if task.Text.Type != slackapi.PlainTextType || !strings.Contains(task.Text.Text, "Inspect &lt;@U12345678>") || len(task.Fields) != 1 || task.Fields[0].Type != slackapi.PlainTextType ||
@@ -255,6 +258,30 @@ func TestConfirmationV2RendersOrderedSafeBlocks(t *testing.T) {
 	}
 	if approve.Text.Type != slackapi.PlainTextType || reject.Text.Type != slackapi.PlainTextType || status.Text.Type != slackapi.PlainTextType || status.Text.Text != "Ver estado" {
 		t.Fatalf("button text types = %q, %q, %q", approve.Text.Type, reject.Text.Type, status.Text.Type)
+	}
+}
+
+func TestConfirmationV2BoundsLongSummaryInsideCardBody(t *testing.T) {
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID:  "wrapper-long-summary",
+		OriginalCallID: "call-long-summary",
+		Summary:        strings.Repeat("summary ", 80),
+		Payload:        `{"project":"local-agent","task":"Review the repository README and report all findings."}`,
+		Expiry:         time.Date(2026, 8, 28, 15, 30, 0, 0, time.UTC),
+	}
+	_, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	if err != nil {
+		t.Fatal(err)
+	}
+	card := blocks[0].(*slackapi.CardBlock)
+	if card.Title == nil || utf8.RuneCountInString(card.Title.Text) > maxRendererCardTitleLength {
+		t.Fatalf("card title = %#v", card.Title)
+	}
+	if card.Body == nil || utf8.RuneCountInString(card.Body.Text) != maxRendererCardBodyLength || !strings.HasSuffix(card.Body.Text, "...") {
+		t.Fatalf("card body = %#v", card.Body)
+	}
+	if task := blocks[1].(*slackapi.SectionBlock).Text.Text; !strings.Contains(task, "Review the repository README") {
+		t.Fatalf("proposed task = %q", task)
 	}
 }
 
@@ -284,6 +311,8 @@ func TestConfirmationV2UsesUnicodeAndExactSlackLimits(t *testing.T) {
 		wantAtLimit bool
 	}{
 		{name: "fallback", valueKey: "fallback_text", limit: maxFallbackText, wantAtLimit: true},
+		{name: "card body", valueKey: "card_summary", limit: maxRendererCardBodyLength, wantAtLimit: true},
+		{name: "card subtitle", valueKey: "subtitle", limit: maxRendererCardSubtitleLength, wantAtLimit: true},
 		{name: "section field", valueKey: "project", limit: maxRendererSectionFieldLength, wantAtLimit: true},
 		{name: "section text", valueKey: "proposed_task", limit: maxRendererCompositionTextLength, wantAtLimit: true},
 		{name: "button value", valueKey: "wrapper_call_id", limit: maxRendererOptionValueLength, wantAtLimit: true},
@@ -324,7 +353,7 @@ func TestConfirmationTemplateValidatesButtonTextAndURL(t *testing.T) {
 
 func confirmationV2TemplateContext() TemplateContext {
 	return TemplateContext{Values: map[string]string{
-		"title_summary":   "*Confirmation required*\nSummary",
+		"card_summary":    "Summary",
 		"subtitle":        "*Call ID:*\n`call-1` · *Expires:* 15:04 UTC",
 		"project":         "Project: repo",
 		"proposed_task":   "Proposed task:\nInspect the repository",
@@ -652,11 +681,14 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 		t.Fatalf("confirmation blocks = %d, want 3", len(blocks))
 	}
 	card := blocks[0].(*slackapi.CardBlock)
-	if card.Title == nil || card.Title.Type != slackapi.MarkdownType || card.Title.Text != "*Confirmation required*\nWrite file" {
+	if card.Title == nil || card.Title.Type != slackapi.PlainTextType || card.Title.Text != "Confirmation required" {
 		t.Fatalf("confirmation card title = %#v", card.Title)
 	}
 	if card.Subtitle == nil || card.Subtitle.Text != "*Call ID:*\n`orig-abc` · *Expires:* 15:30 UTC" {
 		t.Fatalf("confirmation card subtitle = %#v", card.Subtitle)
+	}
+	if card.Body == nil || card.Body.Text != "Write file" {
+		t.Fatalf("confirmation card body = %#v", card.Body)
 	}
 	projectTask := blocks[1].(*slackapi.SectionBlock)
 	if projectTask.Text == nil || projectTask.Text.Type != slackapi.PlainTextType || projectTask.Text.Text != "Proposed task: not provided" || len(projectTask.Fields) != 1 ||

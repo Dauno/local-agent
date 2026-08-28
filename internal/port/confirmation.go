@@ -88,8 +88,8 @@ func ConfirmationContentDigestV2(delivery ConfirmationDelivery) string {
 		Expiry         int64  `json:"expiry"`
 	}{
 		RendererMode: "confirmation_v2",
-		Layout: "section:title_summary;section:call_id,expires_at;" +
-			"section:project,proposed_task;section:workstream_data?;actions:approve,reject,status",
+		Layout: "card:title,subtitle,summary;section:project,proposed_task;" +
+			"section:workstream_data?;actions:approve,reject,status",
 		Title: "Confirmation required", CallIDLabel: "Call ID", ExpiryLabel: "Expires",
 		ProjectLabel: "Project", TaskLabel: "Proposed task", Workstream: "Workstream data",
 		WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,

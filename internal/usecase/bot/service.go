@@ -1204,7 +1204,7 @@ func (s *Service) ReconcileConfirmations(ctx context.Context, finder port.Assist
 		}
 		for _, delivery := range expired {
 			first, err := s.expireAndResumeConfirmation(ctx, delivery, func() error {
-				if s.confirmationPublisher == nil || !isRichConfirmationRendererMode(delivery.RendererMode) {
+				if s.confirmationPublisher == nil || !isRichConfirmationRendererMode(delivery.RendererMode) || delivery.SlackMessageTS == "" {
 					return nil
 				}
 				expiredDelivery := delivery
