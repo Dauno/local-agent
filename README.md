@@ -18,7 +18,7 @@ in a project-local SQLite database.
 With Go 1.25+ installed, download and build a pinned release:
 
 ```sh
-VERSION=v0.12.0
+VERSION=v0.13.0
 installer="$(mktemp)"
 trap 'rm -f "$installer"' EXIT
 curl -fsSL --retry 3 --connect-timeout 10 --max-time 120 \
@@ -95,8 +95,8 @@ local-agent run
 
 ### Database Upgrade
 
-Version `v0.7.0` uses schema v42. Before `doctor` or `run`, upgrade an existing
-v33-v41 database with:
+Version `v0.13.0` uses schema v44. Before `doctor` or `run`, upgrade an existing
+v33-v43 database with:
 
 ```sh
 local-agent db upgrade

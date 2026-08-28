@@ -1,5 +1,10 @@
 # Release Notes
 
+## v0.13.0 (2026-08-28)
+
+- Completed the migration from legacy ACP and OpenCode naming to the unified `agent_cli` provider.
+- Fixed bootstrap updates to keep the seeded root agent identity synchronized with the Slack bot name.
+
 ## v0.12.0 (2026-08-27)
 
 - Slack confirmation v2: improved confirmation message and new confirmation_message_v2 template. The approve/reject action IDs (local_agent.confirm.approve / local_agent.confirm.reject) and the WrapperCallID button contract stay unchanged.
