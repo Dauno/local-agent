@@ -1,5 +1,9 @@
 # Release Notes
 
+## v0.14.0 (2026-08-28)
+
+- Expanded declarative Slack templates to support Block Kit types handled by slack-go while preserving placeholder and action validation.
+
 ## v0.13.0 (2026-08-28)
 
 - Completed the migration from legacy ACP and OpenCode naming to the unified `agent_cli` provider.
