@@ -13,11 +13,8 @@ import (
 	"path"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
-	"unicode/utf8"
 
-	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
@@ -49,11 +46,20 @@ var requiredTemplateSet = map[string]struct{}{
 
 // TemplateCatalog is the validated, immutable set of declarative Slack
 // templates. Its contents are intentionally not exposed as mutable JSON.
+//
+// Block Kit content itself is not re-described here: parsing and validating
+// the shape of any block or element is delegated to slack-go's own dynamic
+// JSON decoding (slackapi.Blocks / slackapi.ModalViewRequest), which already
+// supports the entire Block Kit surface. This catalog only owns what is
+// specific to this project: the {{value.x}}/{{options.x}} placeholder
+// language, the $if condition, and the interactive-ID allowlists that decide
+// which actions the bot will honor.
 type TemplateCatalog struct {
-	templates map[string]templateDocument
+	templates      map[string]templateDocument
+	interactiveIDs TemplateInteractiveIDs
 }
 
-// TemplateInfo describes one catalog entry without exposing its layout AST.
+// TemplateInfo describes one catalog entry without exposing its layout.
 type TemplateInfo struct {
 	Name          string
 	SchemaVersion int
@@ -118,29 +124,13 @@ func (c *TemplateCatalog) Info(name string) (TemplateInfo, bool) {
 	return TemplateInfo{Name: doc.Name, SchemaVersion: doc.SchemaVersion, Surface: doc.Surface}, true
 }
 
-// InteractiveIDs extracts the literal IDs from every validated template in a
-// deterministic order. The returned slices are owned by the caller.
+// InteractiveIDs returns the interactive-ID inventory computed once at
+// catalog-load time from a representative compile of every template.
 func (c *TemplateCatalog) InteractiveIDs() TemplateInteractiveIDs {
 	if c == nil {
 		return TemplateInteractiveIDs{}
 	}
-	ids := TemplateInteractiveIDs{}
-	for _, name := range c.Names() {
-		doc := c.templates[name]
-		if doc.Modal != nil {
-			appendTemplateID(&ids.ModalCallbacks, doc.Modal.CallbackID)
-			collectTemplateBlockIDs(&ids, doc.Modal.Blocks, true)
-			continue
-		}
-		if doc.Message != nil {
-			collectTemplateBlockIDs(&ids, doc.Message.Blocks, false)
-		}
-	}
-	sort.Strings(ids.ModalCallbacks)
-	sort.Strings(ids.Actions)
-	sort.Strings(ids.BuilderBlocks)
-	sort.Strings(ids.MessageBlocks)
-	return ids
+	return c.interactiveIDs
 }
 
 // ValidateDispatcher verifies catalog coverage and rejects registered IDs
@@ -192,32 +182,6 @@ func (c *TemplateCatalog) ValidateDispatcher(dispatcher *InteractiveDispatcher) 
 	return nil
 }
 
-func collectTemplateBlockIDs(ids *TemplateInteractiveIDs, blocks []templateBlock, modal bool) {
-	for _, block := range blocks {
-		if block.BlockID != "" {
-			if modal {
-				appendTemplateID(&ids.BuilderBlocks, block.BlockID)
-			} else {
-				appendTemplateID(&ids.MessageBlocks, block.BlockID)
-			}
-		}
-		collectTemplateElementID(ids, block.Accessory, modal)
-		collectTemplateElementID(ids, block.Element, modal)
-		for _, element := range block.Elements {
-			collectTemplateElementID(ids, element, modal)
-		}
-	}
-}
-
-func collectTemplateElementID(ids *TemplateInteractiveIDs, element *templateElement, modal bool) {
-	if element == nil {
-		return
-	}
-	if (modal && allowedInteractiveActionIDs[element.ActionID]) || (!modal && allowedMessageActionIDs[element.ActionID]) {
-		appendTemplateID(&ids.Actions, element.ActionID)
-	}
-}
-
 func appendTemplateID(ids *[]string, value string) {
 	if value != "" && !slices.Contains(*ids, value) {
 		*ids = append(*ids, value)
@@ -226,6 +190,11 @@ func appendTemplateID(ids *[]string, value string) {
 
 var embeddedTemplateCatalog, embeddedTemplateCatalogErr = loadTemplateCatalog(embeddedTemplates)
 
+// templateDocument is the parsed envelope around a template. The "blocks"
+// payload is kept as raw JSON: its shape is not modeled here at all. It is
+// substituted (see substituteTemplateTokens) and handed directly to
+// slackapi.Blocks / slackapi.ModalViewRequest for decoding at compile time,
+// so any Block Kit type slack-go supports works without a Go change.
 type templateDocument struct {
 	Name          string
 	SchemaVersion int
@@ -235,73 +204,17 @@ type templateDocument struct {
 }
 
 type templateModalPayload struct {
-	Title           *templateText
-	Submit          *templateText
-	Close           *templateText
+	Title           json.RawMessage
+	Submit          json.RawMessage
+	Close           json.RawMessage
 	CallbackID      string
 	PrivateMetadata string
-	Blocks          []templateBlock
+	Blocks          json.RawMessage
 }
 
 type templateMessagePayload struct {
 	FallbackText string
-	Blocks       []templateBlock
-}
-
-type templateText struct {
-	Type     string
-	Text     string
-	Emoji    *bool
-	Verbatim bool
-}
-
-type templateOption struct {
-	Text        *templateText
-	Value       string
-	Description *templateText
-	URL         string
-}
-
-type templateDispatchActionConfig struct {
-	TriggerActionsOn []string
-}
-
-type templateElement struct {
-	Type                 string
-	ActionID             string
-	Text                 *templateText
-	Value                string
-	URL                  string
-	Style                string
-	Placeholder          *templateText
-	InitialValue         string
-	InitialValuePresent  bool
-	Multiline            bool
-	MinLength            int
-	MaxLength            int
-	DispatchActionConfig *templateDispatchActionConfig
-	FocusOnLoad          bool
-	Options              []templateOption
-	OptionsToken         string
-	InitialOption        *templateOption
-	InitialOptionToken   string
-	InitialOptionPresent bool
-}
-
-type templateBlock struct {
-	Condition       string
-	CollectionToken string
-	Type            string
-	BlockID         string
-	Text            *templateText
-	Fields          []*templateText
-	Accessory       *templateElement
-	Label           *templateText
-	Hint            *templateText
-	Element         *templateElement
-	Optional        bool
-	DispatchAction  bool
-	Elements        []*templateElement
+	Blocks       json.RawMessage
 }
 
 type rawTemplateDocument struct {
@@ -312,71 +225,24 @@ type rawTemplateDocument struct {
 }
 
 type rawModalPayload struct {
-	Type            string            `json:"type"`
-	Title           json.RawMessage   `json:"title"`
-	Submit          json.RawMessage   `json:"submit"`
-	Close           json.RawMessage   `json:"close"`
-	CallbackID      string            `json:"callback_id"`
-	PrivateMetadata string            `json:"private_metadata"`
-	Blocks          []json.RawMessage `json:"blocks"`
+	Type            string          `json:"type"`
+	Title           json.RawMessage `json:"title"`
+	Submit          json.RawMessage `json:"submit"`
+	Close           json.RawMessage `json:"close"`
+	CallbackID      string          `json:"callback_id"`
+	PrivateMetadata string          `json:"private_metadata"`
+	Blocks          json.RawMessage `json:"blocks"`
 }
 
 type rawMessagePayload struct {
-	FallbackText string            `json:"fallback_text"`
-	Blocks       []json.RawMessage `json:"blocks"`
+	FallbackText string          `json:"fallback_text"`
+	Blocks       json.RawMessage `json:"blocks"`
 }
 
-type rawText struct {
-	Type     string `json:"type"`
-	Text     string `json:"text"`
-	Emoji    *bool  `json:"emoji"`
-	Verbatim bool   `json:"verbatim"`
-}
-
-type rawOption struct {
-	Text        json.RawMessage `json:"text"`
-	Value       string          `json:"value"`
-	Description json.RawMessage `json:"description"`
-	URL         string          `json:"url"`
-}
-
-type rawDispatchActionConfig struct {
-	TriggerActionsOn []string `json:"trigger_actions_on"`
-}
-
-type rawElement struct {
-	Type                 string          `json:"type"`
-	ActionID             string          `json:"action_id"`
-	Text                 json.RawMessage `json:"text"`
-	Value                string          `json:"value"`
-	URL                  string          `json:"url"`
-	Style                string          `json:"style"`
-	Placeholder          json.RawMessage `json:"placeholder"`
-	InitialValue         json.RawMessage `json:"initial_value"`
-	Multiline            bool            `json:"multiline"`
-	MinLength            int             `json:"min_length"`
-	MaxLength            int             `json:"max_length"`
-	DispatchActionConfig json.RawMessage `json:"dispatch_action_config"`
-	FocusOnLoad          bool            `json:"focus_on_load"`
-	Options              json.RawMessage `json:"options"`
-	InitialOption        json.RawMessage `json:"initial_option"`
-}
-
-type rawBlock struct {
-	Condition      string            `json:"$if"`
-	Type           string            `json:"type"`
-	BlockID        string            `json:"block_id"`
-	Text           json.RawMessage   `json:"text"`
-	Fields         []json.RawMessage `json:"fields"`
-	Accessory      json.RawMessage   `json:"accessory"`
-	Label          json.RawMessage   `json:"label"`
-	Hint           json.RawMessage   `json:"hint"`
-	Element        json.RawMessage   `json:"element"`
-	Optional       bool              `json:"optional"`
-	DispatchAction bool              `json:"dispatch_action"`
-	Elements       []json.RawMessage `json:"elements"`
-}
-
+// templateTokenKind distinguishes the two placeholder namespaces this
+// project supports: {{value.x}} (a scalar substituted from TemplateContext)
+// and {{options.x}} (a call-site-specific collection: provider model
+// options, or a dynamic run of message blocks).
 type templateTokenKind uint8
 
 const (
@@ -389,25 +255,27 @@ type templateToken struct {
 	Key  string
 }
 
+// scalarKeysByTemplate is the per-template allowlist of legitimate
+// {{value.x}} keys. It exists to catch a typo'd or cross-template-confused
+// placeholder key; it is not a Block Kit shape check.
 var scalarKeysByTemplate = map[string]map[string]struct{}{
 	"builder_modal": {
 		"name": {}, "description": {}, "instruction": {}, "agent_type": {},
 		"model": {}, "execution_mode": {}, "timeout_seconds": {},
 	},
 	"confirmation_message": {
-		"summary": {}, "original_call_id": {}, "expires_at": {}, "wrapper_call_id": {}, "fallback_text": {},
+		"summary": {}, "subtitle": {}, "wrapper_call_id": {}, "fallback_text": {},
 	},
 	"confirmation_message_v2": {
-		"title_summary": {}, "original_call_id": {}, "expires_at": {}, "project": {},
+		"title_summary": {}, "subtitle": {}, "project": {},
 		"proposed_task": {}, "wrapper_call_id": {}, "fallback_text": {},
 	},
 	"job_accepted_message": {
-		"job_id": {}, "status": {}, "created_at": {}, "updated_at": {},
+		"subtitle": {}, "created_at": {}, "updated_at": {},
 		"status_sentence": {}, "fallback_text": {},
 	},
 	"agent_preview": {
-		"name": {}, "agent_class": {}, "provider_profile": {}, "execution_mode": {},
-		"timeout": {}, "yaml": {}, "sha256": {}, "draft_id": {}, "fallback_text": {},
+		"name": {}, "agent_class": {}, "sha256": {}, "draft_id": {}, "fallback_text": {},
 	},
 	"onboarding_message": {
 		"builder_context": {}, "intro": {}, "describe_prompt": {},
@@ -461,12 +329,35 @@ func loadTemplateCatalog(fsys fs.FS) (*TemplateCatalog, error) {
 			return nil, fmt.Errorf("validate template %q: %w", name, err)
 		}
 	}
+	ids := TemplateInteractiveIDs{}
 	for _, name := range requiredTemplateNames {
-		if err := validateTemplateRepresentatives(catalog.templates[name]); err != nil {
+		representativeIDs, err := validateTemplateRepresentative(catalog.templates[name])
+		if err != nil {
 			return nil, fmt.Errorf("compile template %q representative: %w", name, err)
 		}
+		mergeInteractiveIDs(&ids, representativeIDs)
 	}
+	sort.Strings(ids.ModalCallbacks)
+	sort.Strings(ids.Actions)
+	sort.Strings(ids.BuilderBlocks)
+	sort.Strings(ids.MessageBlocks)
+	catalog.interactiveIDs = ids
 	return catalog, nil
+}
+
+func mergeInteractiveIDs(dst *TemplateInteractiveIDs, src TemplateInteractiveIDs) {
+	for _, id := range src.ModalCallbacks {
+		appendTemplateID(&dst.ModalCallbacks, id)
+	}
+	for _, id := range src.Actions {
+		appendTemplateID(&dst.Actions, id)
+	}
+	for _, id := range src.BuilderBlocks {
+		appendTemplateID(&dst.BuilderBlocks, id)
+	}
+	for _, id := range src.MessageBlocks {
+		appendTemplateID(&dst.MessageBlocks, id)
+	}
 }
 
 func parseTemplateDocument(data []byte) (templateDocument, error) {
@@ -493,508 +384,54 @@ func parseTemplateDocument(data []byte) (templateDocument, error) {
 	doc := templateDocument{Name: raw.Name, SchemaVersion: raw.SchemaVersion, Surface: raw.Surface}
 	switch raw.Surface {
 	case "modal":
-		payload, err := parseModalPayload(raw.Payload, raw.Name)
-		if err != nil {
+		var payload rawModalPayload
+		if err := decodeStrictJSON(raw.Payload, &payload); err != nil {
+			return templateDocument{}, fmt.Errorf("modal payload: %w", err)
+		}
+		if payload.Type != "modal" {
+			return templateDocument{}, fmt.Errorf("modal payload type must be %q", "modal")
+		}
+		if len(payload.Title) == 0 {
+			return templateDocument{}, errors.New("modal title is required")
+		}
+		if err := validateLiteralID(payload.CallbackID, "payload.callback_id"); err != nil {
 			return templateDocument{}, err
 		}
-		doc.Modal = &payload
+		if !allowedModalCallbackIDs[payload.CallbackID] {
+			return templateDocument{}, fmt.Errorf("unregistered modal callback ID %q", payload.CallbackID)
+		}
+		if err := rejectPlaceholder(payload.PrivateMetadata, "payload.private_metadata"); err != nil {
+			return templateDocument{}, err
+		}
+		if len(payload.Blocks) == 0 {
+			return templateDocument{}, errors.New("modal blocks are required")
+		}
+		doc.Modal = &templateModalPayload{
+			Title: payload.Title, Submit: payload.Submit, Close: payload.Close,
+			CallbackID: payload.CallbackID, PrivateMetadata: payload.PrivateMetadata, Blocks: payload.Blocks,
+		}
 	case "message":
-		payload, err := parseMessagePayload(raw.Payload, raw.Name)
-		if err != nil {
+		var payload rawMessagePayload
+		if err := decodeStrictJSON(raw.Payload, &payload); err != nil {
+			return templateDocument{}, fmt.Errorf("message payload: %w", err)
+		}
+		if strings.TrimSpace(payload.FallbackText) == "" {
+			return templateDocument{}, errors.New("message fallback_text is required")
+		}
+		if err := validateTemplateString(raw.Name, "payload.fallback_text", payload.FallbackText, true, false); err != nil {
 			return templateDocument{}, err
 		}
-		doc.Message = &payload
+		if len(payload.Blocks) == 0 {
+			return templateDocument{}, errors.New("message blocks are required")
+		}
+		doc.Message = &templateMessagePayload{FallbackText: payload.FallbackText, Blocks: payload.Blocks}
 	}
 	return doc, nil
-}
-
-func parseModalPayload(data []byte, templateName string) (templateModalPayload, error) {
-	var raw rawModalPayload
-	if err := decodeStrictJSON(data, &raw); err != nil {
-		return templateModalPayload{}, fmt.Errorf("modal payload: %w", err)
-	}
-	if raw.Type != "modal" {
-		return templateModalPayload{}, fmt.Errorf("modal payload type must be %q", "modal")
-	}
-	if len(raw.Title) == 0 {
-		return templateModalPayload{}, errors.New("modal title is required")
-	}
-	title, err := parseText(raw.Title, templateName, "payload.title")
-	if err != nil {
-		return templateModalPayload{}, err
-	}
-	payload := templateModalPayload{
-		Title:           title,
-		CallbackID:      raw.CallbackID,
-		PrivateMetadata: raw.PrivateMetadata,
-	}
-	if err := validateTemplateString(templateName, "payload.private_metadata", raw.PrivateMetadata, false, false); err != nil {
-		return templateModalPayload{}, err
-	}
-	if len(raw.Submit) > 0 {
-		payload.Submit, err = parseText(raw.Submit, templateName, "payload.submit")
-		if err != nil {
-			return templateModalPayload{}, err
-		}
-	}
-	if len(raw.Close) > 0 {
-		payload.Close, err = parseText(raw.Close, templateName, "payload.close")
-		if err != nil {
-			return templateModalPayload{}, err
-		}
-	}
-	if raw.Blocks == nil {
-		return templateModalPayload{}, errors.New("modal blocks are required")
-	}
-	payload.Blocks, err = parseBlocks(raw.Blocks, templateName)
-	if err != nil {
-		return templateModalPayload{}, err
-	}
-	return payload, nil
-}
-
-func parseMessagePayload(data []byte, templateName string) (templateMessagePayload, error) {
-	var raw rawMessagePayload
-	if err := decodeStrictJSON(data, &raw); err != nil {
-		return templateMessagePayload{}, fmt.Errorf("message payload: %w", err)
-	}
-	if raw.Blocks == nil {
-		return templateMessagePayload{}, errors.New("message blocks are required")
-	}
-	if strings.TrimSpace(raw.FallbackText) == "" {
-		return templateMessagePayload{}, errors.New("message fallback_text is required")
-	}
-	if err := validateTemplateString(templateName, "payload.fallback_text", raw.FallbackText, true, false); err != nil {
-		return templateMessagePayload{}, err
-	}
-	blocks, err := parseBlocks(raw.Blocks, templateName)
-	if err != nil {
-		return templateMessagePayload{}, err
-	}
-	return templateMessagePayload{FallbackText: raw.FallbackText, Blocks: blocks}, nil
-}
-
-func parseBlocks(rawBlocks []json.RawMessage, templateName string) ([]templateBlock, error) {
-	blocks := make([]templateBlock, 0, len(rawBlocks))
-	for index, rawBlock := range rawBlocks {
-		var collectionToken string
-		if err := decodeStrictJSON(rawBlock, &collectionToken); err == nil {
-			token, isToken, tokenErr := parseTemplateString(collectionToken)
-			if tokenErr != nil {
-				return nil, fmt.Errorf("payload.blocks[%d]: %w", index, tokenErr)
-			}
-			if !isToken || token.Kind != tokenOptions {
-				return nil, fmt.Errorf("payload.blocks[%d] must be a registered collection token", index)
-			}
-			if !allowedCollectionBlockToken(templateName, token.Key) {
-				return nil, fmt.Errorf("payload.blocks[%d] uses unknown collection placeholder %q", index, token.Key)
-			}
-			blocks = append(blocks, templateBlock{CollectionToken: collectionToken})
-			continue
-		}
-		block, err := parseBlock(rawBlock, templateName, fmt.Sprintf("payload.blocks[%d]", index))
-		if err != nil {
-			return nil, err
-		}
-		blocks = append(blocks, block)
-	}
-	return blocks, nil
-}
-
-func parseBlock(data []byte, templateName, fieldPath string) (templateBlock, error) {
-	keys, err := objectKeys(data)
-	if err != nil {
-		return templateBlock{}, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	var raw rawBlock
-	if err := decodeStrictJSON(data, &raw); err != nil {
-		return templateBlock{}, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	if raw.Type == "" {
-		return templateBlock{}, fmt.Errorf("%s.type is required", fieldPath)
-	}
-	allowed := map[string]struct{}{"$if": {}, "type": {}, "block_id": {}}
-	switch raw.Type {
-	case "section":
-		allowed["text"] = struct{}{}
-		allowed["fields"] = struct{}{}
-		allowed["accessory"] = struct{}{}
-	case "input":
-		allowed["label"] = struct{}{}
-		allowed["hint"] = struct{}{}
-		allowed["element"] = struct{}{}
-		allowed["optional"] = struct{}{}
-		allowed["dispatch_action"] = struct{}{}
-	case "actions":
-		allowed["elements"] = struct{}{}
-	default:
-		return templateBlock{}, fmt.Errorf("%s has unsupported block type %q", fieldPath, raw.Type)
-	}
-	if err := rejectUnknownObjectKeys(keys, allowed); err != nil {
-		return templateBlock{}, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	if raw.Condition != "" && raw.Condition != "is_external_agent" {
-		return templateBlock{}, fmt.Errorf("%s.$if has unknown condition %q", fieldPath, raw.Condition)
-	}
-	if err := validateLiteralString(raw.Type, templateName, fieldPath+".type"); err != nil {
-		return templateBlock{}, err
-	}
-	if raw.BlockID != "" {
-		if err := validateLiteralID(raw.BlockID, fieldPath+".block_id"); err != nil {
-			return templateBlock{}, err
-		}
-	}
-
-	block := templateBlock{Condition: raw.Condition, Type: raw.Type, BlockID: raw.BlockID, Optional: raw.Optional, DispatchAction: raw.DispatchAction}
-	switch raw.Type {
-	case "section":
-		if len(raw.Text) == 0 && len(raw.Fields) == 0 {
-			return templateBlock{}, fmt.Errorf("%s requires text or fields", fieldPath)
-		}
-		if len(raw.Fields) > maxRendererSectionFields {
-			return templateBlock{}, fmt.Errorf("%s.fields exceeds %d items", fieldPath, maxRendererSectionFields)
-		}
-		if len(raw.Text) > 0 {
-			block.Text, err = parseText(raw.Text, templateName, fieldPath+".text")
-			if err != nil {
-				return templateBlock{}, err
-			}
-		}
-		if raw.Fields != nil {
-			block.Fields = make([]*templateText, 0, len(raw.Fields))
-			for index, field := range raw.Fields {
-				text, parseErr := parseText(field, templateName, fmt.Sprintf("%s.fields[%d]", fieldPath, index))
-				if parseErr != nil {
-					return templateBlock{}, parseErr
-				}
-				block.Fields = append(block.Fields, text)
-			}
-		}
-		if len(raw.Accessory) > 0 {
-			block.Accessory, err = parseElement(raw.Accessory, templateName, fieldPath+".accessory")
-			if err != nil {
-				return templateBlock{}, err
-			}
-		}
-	case "input":
-		if raw.BlockID == "" {
-			return templateBlock{}, fmt.Errorf("%s.block_id is required for input blocks", fieldPath)
-		}
-		if len(raw.Label) == 0 || len(raw.Element) == 0 {
-			return templateBlock{}, fmt.Errorf("%s requires label and element", fieldPath)
-		}
-		block.Label, err = parseText(raw.Label, templateName, fieldPath+".label")
-		if err != nil {
-			return templateBlock{}, err
-		}
-		if len(raw.Hint) > 0 {
-			block.Hint, err = parseText(raw.Hint, templateName, fieldPath+".hint")
-			if err != nil {
-				return templateBlock{}, err
-			}
-		}
-		block.Element, err = parseElement(raw.Element, templateName, fieldPath+".element")
-		if err != nil {
-			return templateBlock{}, err
-		}
-	case "actions":
-		if len(raw.Elements) == 0 {
-			return templateBlock{}, fmt.Errorf("%s.elements must not be empty", fieldPath)
-		}
-		if len(raw.Elements) > maxRendererActionElements {
-			return templateBlock{}, fmt.Errorf("%s.elements exceeds %d items", fieldPath, maxRendererActionElements)
-		}
-		block.Elements = make([]*templateElement, 0, len(raw.Elements))
-		for index, element := range raw.Elements {
-			parsed, parseErr := parseElement(element, templateName, fmt.Sprintf("%s.elements[%d]", fieldPath, index))
-			if parseErr != nil {
-				return templateBlock{}, parseErr
-			}
-			block.Elements = append(block.Elements, parsed)
-		}
-	}
-	return block, nil
-}
-
-func parseText(data []byte, templateName, fieldPath string) (*templateText, error) {
-	var raw rawText
-	if err := decodeStrictJSON(data, &raw); err != nil {
-		return nil, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	if raw.Type != "plain_text" && raw.Type != "mrkdwn" {
-		return nil, fmt.Errorf("%s.type must be plain_text or mrkdwn", fieldPath)
-	}
-	if raw.Type == "mrkdwn" && raw.Emoji != nil {
-		return nil, fmt.Errorf("%s.emoji is not valid for mrkdwn", fieldPath)
-	}
-	if raw.Text == "" {
-		return nil, fmt.Errorf("%s.text must not be empty", fieldPath)
-	}
-	if err := validateTemplateString(templateName, fieldPath+".text", raw.Text, true, false); err != nil {
-		return nil, err
-	}
-	return &templateText{Type: raw.Type, Text: raw.Text, Emoji: raw.Emoji, Verbatim: raw.Verbatim}, nil
-}
-
-func parseOption(data []byte, templateName, fieldPath string) (templateOption, error) {
-	keys, err := objectKeys(data)
-	if err != nil {
-		return templateOption{}, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	var raw rawOption
-	if err := decodeStrictJSON(data, &raw); err != nil {
-		return templateOption{}, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	if err := rejectUnknownObjectKeys(keys, map[string]struct{}{"text": {}, "value": {}, "description": {}, "url": {}}); err != nil {
-		return templateOption{}, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	if _, ok := keys["text"]; len(raw.Text) == 0 || !ok {
-		return templateOption{}, fmt.Errorf("%s.text is required", fieldPath)
-	}
-	if _, ok := keys["value"]; !ok {
-		return templateOption{}, fmt.Errorf("%s.value is required", fieldPath)
-	}
-	if raw.Value == "" {
-		if _, isToken, tokenErr := parseTemplateString(raw.Value); tokenErr != nil || !isToken {
-			return templateOption{}, fmt.Errorf("%s.value must not be empty", fieldPath)
-		}
-	}
-	text, err := parseText(raw.Text, templateName, fieldPath+".text")
-	if err != nil {
-		return templateOption{}, err
-	}
-	if err := validateTemplateString(templateName, fieldPath+".value", raw.Value, true, false); err != nil {
-		return templateOption{}, err
-	}
-	option := templateOption{Text: text, Value: raw.Value, URL: raw.URL}
-	if len(raw.Description) > 0 {
-		option.Description, err = parseText(raw.Description, templateName, fieldPath+".description")
-		if err != nil {
-			return templateOption{}, err
-		}
-	}
-	if err := validateTemplateString(templateName, fieldPath+".url", raw.URL, false, false); err != nil {
-		return templateOption{}, err
-	}
-	if err := validateSlackButtonURL(raw.URL, fieldPath+".url"); err != nil {
-		return templateOption{}, err
-	}
-	return option, nil
-}
-
-func parseElement(data []byte, templateName, fieldPath string) (*templateElement, error) {
-	keys, err := objectKeys(data)
-	if err != nil {
-		return nil, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	var raw rawElement
-	if err := decodeStrictJSON(data, &raw); err != nil {
-		return nil, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	if raw.Type == "" {
-		return nil, fmt.Errorf("%s.type is required", fieldPath)
-	}
-	allowed, err := elementAllowedKeys(raw.Type, fieldPath)
-	if err != nil {
-		return nil, err
-	}
-	if err := rejectUnknownObjectKeys(keys, allowed); err != nil {
-		return nil, fmt.Errorf("%s: %w", fieldPath, err)
-	}
-	if err := validateLiteralString(raw.Type, templateName, fieldPath+".type"); err != nil {
-		return nil, err
-	}
-	element := &templateElement{
-		Type:        raw.Type,
-		ActionID:    raw.ActionID,
-		Value:       raw.Value,
-		URL:         raw.URL,
-		Style:       raw.Style,
-		Multiline:   raw.Multiline,
-		MinLength:   raw.MinLength,
-		MaxLength:   raw.MaxLength,
-		FocusOnLoad: raw.FocusOnLoad,
-	}
-	if raw.ActionID != "" {
-		if err := validateLiteralID(raw.ActionID, fieldPath+".action_id"); err != nil {
-			return nil, err
-		}
-	}
-
-	switch raw.Type {
-	case "plain_text_input":
-		if err := parsePlainTextInput(element, raw, templateName, fieldPath); err != nil {
-			return nil, err
-		}
-	case "static_select":
-		if err := parseStaticSelect(element, raw, templateName, fieldPath); err != nil {
-			return nil, err
-		}
-	case "button":
-		if err := parseButton(element, raw, templateName, fieldPath); err != nil {
-			return nil, err
-		}
-	}
-	return element, nil
-}
-
-func elementAllowedKeys(elementType, fieldPath string) (map[string]struct{}, error) {
-	allowed := map[string]struct{}{"type": {}, "action_id": {}}
-	keysByType := map[string][]string{
-		"plain_text_input": {"placeholder", "initial_value", "multiline", "min_length", "max_length", "dispatch_action_config", "focus_on_load"},
-		"static_select":    {"placeholder", "options", "initial_option", "focus_on_load"},
-		"button":           {"text", "value", "url", "style"},
-	}
-	keys, ok := keysByType[elementType]
-	if !ok {
-		return nil, fmt.Errorf("%s has unsupported element type %q", fieldPath, elementType)
-	}
-	for _, key := range keys {
-		allowed[key] = struct{}{}
-	}
-	return allowed, nil
-}
-
-func parsePlainTextInput(element *templateElement, raw rawElement, templateName, fieldPath string) error {
-	if raw.ActionID == "" {
-		return fmt.Errorf("%s.action_id is required", fieldPath)
-	}
-	var err error
-	if len(raw.Placeholder) > 0 {
-		element.Placeholder, err = parseText(raw.Placeholder, templateName, fieldPath+".placeholder")
-		if err != nil {
-			return err
-		}
-	}
-	if len(raw.InitialValue) > 0 {
-		if err := decodeStrictJSON(raw.InitialValue, &element.InitialValue); err != nil {
-			return fmt.Errorf("%s.initial_value: %w", fieldPath, err)
-		}
-		element.InitialValuePresent = true
-		if err := validateTemplateString(templateName, fieldPath+".initial_value", element.InitialValue, true, false); err != nil {
-			return err
-		}
-	}
-	if element.MinLength < 0 || element.MaxLength < 0 {
-		return fmt.Errorf("%s input lengths must not be negative", fieldPath)
-	}
-	if element.MaxLength > maxRendererPlainTextInputLength {
-		return fmt.Errorf("%s.max_length exceeds %d", fieldPath, maxRendererPlainTextInputLength)
-	}
-	if element.MinLength > 0 && element.MaxLength > 0 && element.MinLength > element.MaxLength {
-		return fmt.Errorf("%s.min_length exceeds max_length", fieldPath)
-	}
-	if len(raw.DispatchActionConfig) > 0 {
-		var config rawDispatchActionConfig
-		if err := decodeStrictJSON(raw.DispatchActionConfig, &config); err != nil {
-			return fmt.Errorf("%s.dispatch_action_config: %w", fieldPath, err)
-		}
-		element.DispatchActionConfig = &templateDispatchActionConfig{TriggerActionsOn: slices.Clone(config.TriggerActionsOn)}
-	}
-	return nil
-}
-
-func parseStaticSelect(element *templateElement, raw rawElement, templateName, fieldPath string) error {
-	if raw.ActionID == "" {
-		return fmt.Errorf("%s.action_id is required", fieldPath)
-	}
-	if len(raw.Placeholder) > 0 {
-		placeholder, err := parseText(raw.Placeholder, templateName, fieldPath+".placeholder")
-		if err != nil {
-			return err
-		}
-		element.Placeholder = placeholder
-	}
-	if len(raw.Options) == 0 {
-		return fmt.Errorf("%s.options is required", fieldPath)
-	}
-	var optionsToken string
-	if err := decodeStrictJSON(raw.Options, &optionsToken); err == nil {
-		token, ok, tokenErr := parseTemplateString(optionsToken)
-		if tokenErr != nil {
-			return fmt.Errorf("%s.options: %w", fieldPath, tokenErr)
-		}
-		if !ok || token.Kind != tokenOptions || token.Key != "model" || templateName != "builder_modal" {
-			return fmt.Errorf("%s.options must be the exact registered token {{options.model}}", fieldPath)
-		}
-		element.OptionsToken = optionsToken
-	} else {
-		var rawOptions []json.RawMessage
-		if err := decodeStrictJSON(raw.Options, &rawOptions); err != nil {
-			return fmt.Errorf("%s.options must be an array or {{options.model}}: %w", fieldPath, err)
-		}
-		element.Options = make([]templateOption, 0, len(rawOptions))
-		for index, rawOptionData := range rawOptions {
-			option, parseErr := parseOption(rawOptionData, templateName, fmt.Sprintf("%s.options[%d]", fieldPath, index))
-			if parseErr != nil {
-				return parseErr
-			}
-			element.Options = append(element.Options, option)
-		}
-	}
-	if len(element.Options) > maxRendererStaticSelectOptions {
-		return fmt.Errorf("%s.options exceeds %d items", fieldPath, maxRendererStaticSelectOptions)
-	}
-	if len(raw.InitialOption) == 0 {
-		return nil
-	}
-	element.InitialOptionPresent = true
-	var tokenString string
-	if err := decodeStrictJSON(raw.InitialOption, &tokenString); err == nil {
-		token, ok, tokenErr := parseTemplateString(tokenString)
-		if tokenErr != nil {
-			return fmt.Errorf("%s.initial_option: %w", fieldPath, tokenErr)
-		}
-		if !ok || token.Kind != tokenValue {
-			return fmt.Errorf("%s.initial_option must be an exact scalar token or option object", fieldPath)
-		}
-		if _, allowed := scalarKeysByTemplate[templateName][token.Key]; !allowed {
-			return fmt.Errorf("%s.initial_option uses unknown scalar token %q", fieldPath, token.Key)
-		}
-		element.InitialOptionToken = tokenString
-		return nil
-	}
-	option, err := parseOption(raw.InitialOption, templateName, fieldPath+".initial_option")
-	if err != nil {
-		return err
-	}
-	element.InitialOption = &option
-	return nil
-}
-
-func parseButton(element *templateElement, raw rawElement, templateName, fieldPath string) error {
-	if raw.ActionID == "" {
-		return fmt.Errorf("%s.action_id is required", fieldPath)
-	}
-	if len(raw.Text) == 0 {
-		return fmt.Errorf("%s.text is required", fieldPath)
-	}
-	text, err := parseText(raw.Text, templateName, fieldPath+".text")
-	if err != nil {
-		return err
-	}
-	element.Text = text
-	if err := validateTemplateString(templateName, fieldPath+".value", raw.Value, true, false); err != nil {
-		return err
-	}
-	if err := validateTemplateString(templateName, fieldPath+".url", raw.URL, false, false); err != nil {
-		return err
-	}
-	if err := validateSlackButtonURL(raw.URL, fieldPath+".url"); err != nil {
-		return err
-	}
-	if raw.Style != "" && raw.Style != "primary" && raw.Style != "danger" {
-		return fmt.Errorf("%s.style must be primary or danger", fieldPath)
-	}
-	return nil
 }
 
 func validateTemplateDocument(doc templateDocument) error {
 	if _, ok := requiredTemplateSet[doc.Name]; !ok {
 		return fmt.Errorf("unknown template name %q", doc.Name)
-	}
-	if err := validateScalarPlacements(doc); err != nil {
-		return err
 	}
 	wantSurface := "message"
 	if doc.Name == "builder_modal" {
@@ -1003,583 +440,66 @@ func validateTemplateDocument(doc templateDocument) error {
 	if doc.Surface != wantSurface {
 		return fmt.Errorf("template %q must use %s surface", doc.Name, wantSurface)
 	}
-
-	if doc.Modal != nil {
-		modal := doc.Modal
-		if err := validateModalText(modal.Title, maxRendererModalTitleLength, "title"); err != nil {
-			return err
-		}
-		if modal.Submit != nil {
-			if err := validateModalText(modal.Submit, maxRendererModalSubmitCloseLength, "submit"); err != nil {
-				return err
-			}
-		}
-		if modal.Close != nil {
-			if err := validateModalText(modal.Close, maxRendererModalSubmitCloseLength, "close"); err != nil {
-				return err
-			}
-		}
-		if err := validateLiteralID(modal.CallbackID, "callback_id"); err != nil {
-			return err
-		}
-		if !allowedModalCallbackIDs[modal.CallbackID] {
-			return fmt.Errorf("unregistered modal callback ID %q", modal.CallbackID)
-		}
-		if len(modal.Blocks) > maxRendererBlocksPerModal {
-			return fmt.Errorf("modal exceeds %d block limit", maxRendererBlocksPerModal)
-		}
-		return validateBlocks(doc, modal.Blocks, true)
-	}
-
-	if doc.Message == nil {
+	if doc.Modal == nil && doc.Message == nil {
 		return errors.New("template payload is missing")
 	}
-	if utf8.RuneCountInString(doc.Message.FallbackText) > maxFallbackText {
-		return fmt.Errorf("fallback_text exceeds %d character limit", maxFallbackText)
-	}
-	if len(doc.Message.Blocks) > maxBlocksPerMessage {
-		return fmt.Errorf("message exceeds %d block limit", maxBlocksPerMessage)
-	}
-	return validateBlocks(doc, doc.Message.Blocks, false)
-}
-
-type scalarPlacement string
-
-const (
-	placementFallback      scalarPlacement = "fallback_text"
-	placementSectionText   scalarPlacement = "section.text"
-	placementSectionField  scalarPlacement = "section.fields"
-	placementElementText   scalarPlacement = "element.text"
-	placementElementValue  scalarPlacement = "element.value"
-	placementInitialValue  scalarPlacement = "element.initial_value"
-	placementInitialOption scalarPlacement = "element.initial_option"
-	placementOther         scalarPlacement = "other"
-)
-
-func validateScalarPlacements(doc templateDocument) error {
-	counts := make(map[string]int)
-	validate := func(value string, placement scalarPlacement, actionID string) error {
-		token, isToken, err := parseTemplateString(value)
-		if err != nil || !isToken || token.Kind != tokenValue {
-			return err
-		}
-		if !allowedScalarPlacement(doc.Name, token.Key, placement, actionID) {
-			return fmt.Errorf("scalar placeholder %q is not allowed at %s", token.Key, placement)
-		}
-		counts[token.Key]++
-		return nil
-	}
-	validateText := func(text *templateText, placement scalarPlacement) error {
-		if text == nil {
-			return nil
-		}
-		return validate(text.Text, placement, "")
-	}
-	validateElement := func(element *templateElement) error {
-		if element == nil {
-			return nil
-		}
-		if element.Text != nil {
-			if err := validate(element.Text.Text, placementElementText, element.ActionID); err != nil {
-				return err
-			}
-		}
-		if err := validateText(element.Placeholder, placementOther); err != nil {
-			return err
-		}
-		if err := validate(element.Value, placementElementValue, element.ActionID); err != nil {
-			return err
-		}
-		if element.InitialValuePresent {
-			if err := validate(element.InitialValue, placementInitialValue, element.ActionID); err != nil {
-				return err
-			}
-		}
-		if element.InitialOptionToken != "" {
-			if err := validate(element.InitialOptionToken, placementInitialOption, element.ActionID); err != nil {
-				return err
-			}
-		}
-		if element.InitialOption != nil {
-			if err := validateText(element.InitialOption.Text, placementOther); err != nil {
-				return err
-			}
-			if err := validate(element.InitialOption.Value, placementOther, element.ActionID); err != nil {
-				return err
-			}
-			if err := validateText(element.InitialOption.Description, placementOther); err != nil {
-				return err
-			}
-		}
-		for _, option := range element.Options {
-			if err := validateText(option.Text, placementOther); err != nil {
-				return err
-			}
-			if err := validate(option.Value, placementOther, element.ActionID); err != nil {
-				return err
-			}
-			if err := validateText(option.Description, placementOther); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	validateBlocks := func(blocks []templateBlock) error {
-		for _, block := range blocks {
-			if err := validateText(block.Text, placementSectionText); err != nil {
-				return err
-			}
-			for _, field := range block.Fields {
-				if err := validateText(field, placementSectionField); err != nil {
-					return err
-				}
-			}
-			for _, text := range []*templateText{block.Label, block.Hint} {
-				if err := validateText(text, placementOther); err != nil {
-					return err
-				}
-			}
-			if err := validateElement(block.Accessory); err != nil {
-				return err
-			}
-			if err := validateElement(block.Element); err != nil {
-				return err
-			}
-			for _, element := range block.Elements {
-				if err := validateElement(element); err != nil {
-					return err
-				}
-			}
-		}
-		return nil
-	}
-
-	if doc.Modal != nil {
-		for _, text := range []*templateText{doc.Modal.Title, doc.Modal.Submit, doc.Modal.Close} {
-			if err := validateText(text, placementOther); err != nil {
-				return err
-			}
-		}
-		if err := validateBlocks(doc.Modal.Blocks); err != nil {
-			return err
-		}
-	} else if doc.Message != nil {
-		if err := validate(doc.Message.FallbackText, placementFallback, ""); err != nil {
-			return err
-		}
-		if err := validateBlocks(doc.Message.Blocks); err != nil {
-			return err
-		}
-	}
-	for key, want := range requiredScalarOccurrences[doc.Name] {
-		if counts[key] != want {
-			return fmt.Errorf("scalar placeholder %q must occur %d times, found %d", key, want, counts[key])
-		}
-	}
 	return nil
 }
 
-func allowedScalarPlacement(templateName, key string, placement scalarPlacement, actionID string) bool {
-	switch templateName {
-	case "builder_modal":
-		if key == actionID {
-			return placement == placementInitialValue || placement == placementInitialOption
-		}
-	case "confirmation_message":
-		switch key {
-		case "fallback_text":
-			return placement == placementFallback
-		case "summary":
-			return placement == placementSectionText
-		case "original_call_id", "expires_at":
-			return placement == placementSectionField
-		case "wrapper_call_id":
-			return placement == placementElementValue && (actionID == approveActionID || actionID == rejectActionID)
-		}
-	case "confirmation_message_v2":
-		switch key {
-		case "fallback_text":
-			return placement == placementFallback
-		case "title_summary":
-			return placement == placementSectionText
-		case "original_call_id", "expires_at":
-			return placement == placementSectionField
-		case "project":
-			return placement == placementSectionField
-		case "proposed_task":
-			return placement == placementSectionText
-		case "wrapper_call_id":
-			return placement == placementElementValue && (actionID == approveActionID || actionID == rejectActionID || actionID == statusActionID)
-		}
-	case "job_accepted_message":
-		switch key {
-		case "fallback_text":
-			return placement == placementFallback
-		case "job_id", "status", "created_at", "updated_at":
-			return placement == placementSectionField
-		case "status_sentence":
-			return placement == placementSectionText
-		}
-	case "agent_preview":
-		switch key {
-		case "fallback_text":
-			return placement == placementFallback
-		case "name", "agent_class", "provider_profile", "execution_mode", "timeout", "sha256":
-			return placement == placementSectionText
-		case "draft_id":
-			return placement == placementElementValue && actionID == builderInstallActionID
-		}
-	case "onboarding_message":
-		switch key {
-		case "intro":
-			return placement == placementSectionText
-		case "describe_prompt":
-			return placement == placementElementText && actionID == "local_agent.onboarding.describe"
-		case "builder_context":
-			return placement == placementElementValue && (actionID == "local_agent.builder.open" || actionID == "local_agent.onboarding.describe")
-		}
-	}
-	return false
-}
-
-var requiredScalarOccurrences = map[string]map[string]int{
-	"builder_modal": {
-		"name": 1, "description": 1, "instruction": 1, "agent_type": 1,
-		"model": 1, "execution_mode": 1, "timeout_seconds": 1,
-	},
-	"confirmation_message": {
-		"summary": 1, "original_call_id": 1, "expires_at": 1, "wrapper_call_id": 2, "fallback_text": 1,
-	},
-	"confirmation_message_v2": {
-		"title_summary": 1, "original_call_id": 1, "expires_at": 1, "project": 1,
-		"proposed_task": 1, "wrapper_call_id": 3, "fallback_text": 1,
-	},
-	"job_accepted_message": {
-		"job_id": 1, "status": 1, "created_at": 1, "updated_at": 1,
-		"status_sentence": 1, "fallback_text": 1,
-	},
-	"agent_preview": {
-		"name": 1, "agent_class": 1, "sha256": 1, "draft_id": 1, "fallback_text": 1,
-	},
-	"onboarding_message": {
-		"builder_context": 2, "intro": 1, "describe_prompt": 1,
-	},
-}
-
-func validateModalText(text *templateText, limit int, field string) error {
-	if text == nil {
-		return fmt.Errorf("modal %s is required", field)
-	}
-	if text.Type != "plain_text" {
-		return fmt.Errorf("modal %s must be plain_text", field)
-	}
-	if literal, ok := literalTemplateString(text.Text); ok && utf8.RuneCountInString(literal) > limit {
-		return fmt.Errorf("modal %s exceeds %d character limit", field, limit)
-	}
-	return nil
-}
-
-func validateBlocks(doc templateDocument, blocks []templateBlock, modal bool) error {
-	blockIDs := make(map[string]struct{}, len(blocks))
-	actionIDs := make(map[string]struct{})
-	collectionTokens := make(map[string]struct{})
-	for index, block := range blocks {
-		fieldPath := fmt.Sprintf("blocks[%d]", index)
-		if block.CollectionToken != "" {
-			if modal {
-				return fmt.Errorf("%s collection injection is not valid on modal surface", fieldPath)
-			}
-			token, isToken, err := parseTemplateString(block.CollectionToken)
-			if err != nil || !isToken || token.Kind != tokenOptions || !allowedCollectionBlockToken(doc.Name, token.Key) {
-				return fmt.Errorf("%s uses an invalid collection injection", fieldPath)
-			}
-			if _, exists := collectionTokens[token.Key]; exists {
-				return fmt.Errorf("duplicate collection injection %q", token.Key)
-			}
-			collectionTokens[token.Key] = struct{}{}
-			continue
-		}
-		if block.BlockID != "" {
-			if _, exists := blockIDs[block.BlockID]; exists {
-				return fmt.Errorf("duplicate block ID %q", block.BlockID)
-			}
-			blockIDs[block.BlockID] = struct{}{}
-			if modal {
-				if !allowedBuilderBlockIDs[block.BlockID] {
-					return fmt.Errorf("unregistered builder block ID %q", block.BlockID)
-				}
-			} else if !allowedMessageBlockIDs[block.BlockID] {
-				return fmt.Errorf("unregistered message block ID %q", block.BlockID)
-			}
-		}
-		if block.Condition != "" && block.Condition != "is_external_agent" {
-			return fmt.Errorf("%s has unknown condition %q", fieldPath, block.Condition)
-		}
-		switch block.Type {
-		case "section":
-			if len(block.Fields) > maxRendererSectionFields {
-				return fmt.Errorf("%s.fields exceeds %d items", fieldPath, maxRendererSectionFields)
-			}
-			if block.Text != nil {
-				if err := validateBlockText(doc.Name, block.Text, fieldPath+".text"); err != nil {
-					return err
-				}
-			}
-			for fieldIndex, field := range block.Fields {
-				if err := validateBlockText(doc.Name, field, fmt.Sprintf("%s.fields[%d]", fieldPath, fieldIndex), maxRendererSectionFieldLength); err != nil {
-					return err
-				}
-			}
-			if block.Accessory != nil {
-				if modal && block.Accessory.Type == "plain_text_input" {
-					return fmt.Errorf("%s.accessory cannot be a modal input", fieldPath)
-				}
-				if err := validateElement(doc, block.Accessory, modal, map[string]bool{"button": true, "static_select": true}, &actionIDs, fieldPath+".accessory"); err != nil {
-					return err
-				}
-			}
-		case "input":
-			if !modal {
-				return fmt.Errorf("input blocks are not valid on message surface")
-			}
-			if block.Label == nil || block.Element == nil {
-				return fmt.Errorf("%s requires label and element", fieldPath)
-			}
-			if err := validateTemplateTextLimit(doc.Name, block.Label, fieldPath+".label", maxRendererModalLabelLength); err != nil {
-				return err
-			}
-			if block.Hint != nil {
-				if err := validateTemplateTextLimit(doc.Name, block.Hint, fieldPath+".hint", maxRendererModalHintLength); err != nil {
-					return err
-				}
-			}
-			if err := validateBuilderInputLimit(doc.Name, block); err != nil {
-				return err
-			}
-			if err := validateElement(doc, block.Element, modal, map[string]bool{"plain_text_input": true, "static_select": true}, &actionIDs, fieldPath+".element"); err != nil {
-				return err
-			}
-		case "actions":
-			if modal && len(block.Elements) == 0 {
-				return fmt.Errorf("%s.elements must not be empty", fieldPath)
-			}
-			if len(block.Elements) > maxRendererActionElements {
-				return fmt.Errorf("%s.elements exceeds %d items", fieldPath, maxRendererActionElements)
-			}
-			for elementIndex, element := range block.Elements {
-				if err := validateElement(
-					doc,
-					element,
-					modal,
-					map[string]bool{"button": true, "static_select": true},
-					&actionIDs,
-					fmt.Sprintf("%s.elements[%d]", fieldPath, elementIndex),
-				); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("%s has unsupported block type %q", fieldPath, block.Type)
-		}
-	}
-	return nil
-}
-
-func validateBuilderInputLimit(templateName string, block templateBlock) error {
-	if templateName != "builder_modal" || block.Element == nil || block.Element.Type != "plain_text_input" {
-		return nil
-	}
-	want := 0
-	switch block.BlockID {
-	case "description":
-		want = agentdef.MaxDescriptionLength
-	case "instruction":
-		want = agentdef.MaxInstructionLength
-	case "timeout_seconds":
-		want = len(strconv.Itoa(domain.MaxExternalAgentTimeoutSeconds))
-	}
-	if want > 0 && block.Element.MaxLength != want {
-		return fmt.Errorf("builder %s max_length must be %d", block.BlockID, want)
-	}
-	return nil
-}
-
-func validateBlockText(templateName string, text *templateText, fieldPath string, limit ...int) error {
-	if text == nil {
-		return fmt.Errorf("%s is required", fieldPath)
-	}
-	if text.Type != "plain_text" && text.Type != "mrkdwn" {
-		return fmt.Errorf("%s has invalid text type %q", fieldPath, text.Type)
-	}
-	if literal, ok := literalTemplateString(text.Text); ok {
-		textLimit := maxRendererCompositionTextLength
-		if templateName == "agent_preview" && text.Type == "mrkdwn" {
-			textLimit = builderBlockTextLimit
-		}
-		if len(limit) > 0 {
-			textLimit = limit[0]
-		}
-		if utf8.RuneCountInString(literal) > textLimit {
-			return fmt.Errorf("%s exceeds %d character limit", fieldPath, textLimit)
-		}
-	}
-	return nil
-}
-
-func validateTemplateTextLimit(templateName string, text *templateText, fieldPath string, limit int) error {
-	if err := validateBlockText(templateName, text, fieldPath); err != nil {
-		return err
-	}
-	if literal, ok := literalTemplateString(text.Text); ok && utf8.RuneCountInString(literal) > limit {
-		return fmt.Errorf("%s exceeds %d character limit", fieldPath, limit)
-	}
-	return nil
-}
-
-func validateElement(doc templateDocument, element *templateElement, modal bool, allowedTypes map[string]bool, actionIDs *map[string]struct{}, fieldPath string) error {
-	if element == nil {
-		return fmt.Errorf("%s is required", fieldPath)
-	}
-	if !allowedTypes[element.Type] {
-		return fmt.Errorf("%s element type %q is not valid for its parent block", fieldPath, element.Type)
-	}
-	if element.ActionID == "" {
-		return fmt.Errorf("%s.action_id is required", fieldPath)
-	}
-	if _, exists := (*actionIDs)[element.ActionID]; exists {
-		return fmt.Errorf("duplicate action ID %q", element.ActionID)
-	}
-	(*actionIDs)[element.ActionID] = struct{}{}
-	if modal {
-		if !allowedModalActionID(element.ActionID) {
-			return fmt.Errorf("unregistered modal action ID %q", element.ActionID)
-		}
-	} else if !allowedMessageActionIDs[element.ActionID] {
-		return fmt.Errorf("unregistered message action ID %q", element.ActionID)
-	}
-
-	switch element.Type {
-	case "plain_text_input":
-		if element.Placeholder != nil {
-			if err := validateTemplateTextLimit(doc.Name, element.Placeholder, fieldPath+".placeholder", maxRendererPlaceholderLength); err != nil {
-				return err
-			}
-		}
-		if element.MaxLength > maxRendererPlainTextInputLength {
-			return fmt.Errorf("%s.max_length exceeds %d", fieldPath, maxRendererPlainTextInputLength)
-		}
-		if element.InitialValuePresent {
-			limit := maxRendererPlainTextInputLength
-			if element.MaxLength > 0 {
-				limit = element.MaxLength
-			}
-			if literal, ok := literalTemplateString(element.InitialValue); ok && utf8.RuneCountInString(literal) > limit {
-				return fmt.Errorf("%s.initial_value exceeds input length limit", fieldPath)
-			}
-		}
-	case "static_select":
-		if element.Placeholder != nil {
-			if err := validateTemplateTextLimit(doc.Name, element.Placeholder, fieldPath+".placeholder", maxRendererPlaceholderLength); err != nil {
-				return err
-			}
-		}
-		for index, option := range element.Options {
-			if err := validateOption(option, fmt.Sprintf("%s.options[%d]", fieldPath, index)); err != nil {
-				return err
-			}
-		}
-		if element.InitialOption != nil {
-			if err := validateOption(*element.InitialOption, fieldPath+".initial_option"); err != nil {
-				return err
-			}
-		}
-	case "button":
-		if element.Text == nil {
-			return fmt.Errorf("%s.text is required", fieldPath)
-		}
-		if element.Text.Type != "plain_text" {
-			return fmt.Errorf("%s.text must be plain_text", fieldPath)
-		}
-		if err := validateTemplateTextLimit(doc.Name, element.Text, fieldPath+".text", maxRendererButtonTextLength); err != nil {
-			return err
-		}
-		if literal, ok := literalTemplateString(element.Value); ok && utf8.RuneCountInString(literal) > maxRendererOptionValueLength {
-			return fmt.Errorf("%s.value exceeds %d character limit", fieldPath, maxRendererOptionValueLength)
-		}
-	default:
-		return fmt.Errorf("%s has unsupported element type %q", fieldPath, element.Type)
-	}
-	return nil
-}
-
-func validateOption(option templateOption, fieldPath string) error {
-	if option.Text == nil {
-		return fmt.Errorf("%s.text is required", fieldPath)
-	}
-	if literal, ok := literalTemplateString(option.Value); ok && literal == "" {
-		return fmt.Errorf("%s.value must not be empty", fieldPath)
-	}
-	if literal, ok := literalTemplateString(option.Value); ok && utf8.RuneCountInString(literal) > maxRendererOptionValueLength {
-		return fmt.Errorf("%s.value exceeds %d character limit", fieldPath, maxRendererOptionValueLength)
-	}
-	if literal, ok := literalTemplateString(option.Text.Text); ok && utf8.RuneCountInString(literal) > maxRendererOptionTextLength {
-		return fmt.Errorf("%s.text exceeds %d character limit", fieldPath, maxRendererOptionTextLength)
-	}
-	if option.Description != nil {
-		if literal, ok := literalTemplateString(option.Description.Text); ok && utf8.RuneCountInString(literal) > maxRendererOptionTextLength {
-			return fmt.Errorf("%s.description exceeds %d character limit", fieldPath, maxRendererOptionTextLength)
-		}
-	}
-	return nil
-}
-
-func validateTemplateRepresentatives(doc templateDocument) error {
+// validateTemplateRepresentative smoke-compiles a template with synthetic
+// values at catalog-load time, so a broken template fails at process start
+// rather than at first real use, and returns the interactive IDs it declares.
+func validateTemplateRepresentative(doc templateDocument) (TemplateInteractiveIDs, error) {
 	if doc.Name == "builder_modal" {
 		profiles := []BuilderProviderProfile{
-			{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible},
-			{Reference: "codex/default", ProviderType: agentdef.ProviderTypeAgentCLI},
+			{Reference: "openai/fast", ProviderType: "openai_compatible"},
+			{Reference: "codex/default", ProviderType: "agent_cli"},
 		}
+		ids := TemplateInteractiveIDs{}
 		for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindAgentCLI} {
 			ctx := TemplateContext{
 				Kind:     kind,
 				Profiles: profiles,
 				Values: map[string]string{
 					"name": "incident_analyst", "description": "A bounded description", "instruction": "Inspect the incident and report findings.",
-					"agent_type": string(kind), "model": "", "execution_mode": domain.ExecutionModeForeground,
+					"agent_type": string(kind), "model": "", "execution_mode": "foreground",
 					"timeout_seconds": "7200",
 				},
 			}
-			if _, err := compileModalTemplate(doc, ctx); err != nil {
-				return err
+			view, err := compileModalTemplate(doc, ctx)
+			if err != nil {
+				return TemplateInteractiveIDs{}, err
 			}
+			representativeIDs, err := collectInteractiveIDs(doc.Name, view.CallbackID, view.Blocks.BlockSet, true)
+			if err != nil {
+				return TemplateInteractiveIDs{}, err
+			}
+			mergeInteractiveIDs(&ids, representativeIDs)
 		}
-		return nil
+		return ids, nil
 	}
 	context := TemplateContext{Values: map[string]string{}}
 	switch doc.Name {
 	case "confirmation_message":
 		context.Values = map[string]string{
-			"summary": "A confirmation summary", "original_call_id": "call-1",
-			"expires_at": "2030-01-01T00:00:00Z", "wrapper_call_id": "wrapper-1",
-			"fallback_text": "Confirmation required: A confirmation summary",
+			"summary": "A confirmation summary", "subtitle": "Call ID: call-1 · Expires 00:00 UTC",
+			"wrapper_call_id": "wrapper-1", "fallback_text": "Confirmation required: A confirmation summary",
 		}
 	case "confirmation_message_v2":
 		context.Values = map[string]string{
-			"title_summary": "*Confirmation required*\nA confirmation summary", "original_call_id": "*Call ID:*\n`call-1`",
-			"expires_at": "*Expires:*\n15:04 UTC", "project": "Project: workspace",
-			"proposed_task": "Proposed task:\nInspect the repository", "wrapper_call_id": "wrapper-1",
-			"fallback_text": "Confirmation required: A confirmation summary",
+			"title_summary": "*Confirmation required*\nA confirmation summary", "subtitle": "*Call ID:*\n`call-1` · *Expires:* 00:00 UTC",
+			"project": "Project: workspace", "proposed_task": "Proposed task:\nInspect the repository",
+			"wrapper_call_id": "wrapper-1", "fallback_text": "Confirmation required: A confirmation summary",
 		}
 	case "job_accepted_message":
 		context.Values = map[string]string{
-			"job_id": "job-1", "status": "queued", "created_at": "2030-01-01T00:00:00Z",
-			"updated_at": "2030-01-01T00:00:00Z", "status_sentence": "The host accepted the job.",
+			"subtitle": "*Job ID:* `job-1` · *Status:* `queued`", "created_at": "*Created:*\n2030-01-01T00:00:00Z",
+			"updated_at": "*Updated:*\n2030-01-01T00:00:00Z", "status_sentence": "The host accepted the job.",
 			"fallback_text": "Job accepted / running: job-1 (queued)",
 		}
 	case "agent_preview":
 		context.Values = map[string]string{
-			"name": "incident_analyst", "agent_class": "LlmAgent", "provider_profile": "openai/fast",
-			"execution_mode": domain.ExecutionModeForeground, "timeout": "no aplica",
+			"name": "incident_analyst", "agent_class": "LlmAgent",
 			"sha256": "digest", "draft_id": "draft-1", "fallback_text": "Agent preview",
 		}
 		context.PreviewYAMLParts = []string{"```yaml\nname: incident_analyst\n```"}
@@ -1590,12 +510,15 @@ func validateTemplateRepresentatives(doc templateDocument) error {
 		}
 		context.SuggestedPrompts = []string{"Ask one thing"}
 	}
-	_, _, err := compileMessageTemplate(doc, context)
-	return err
+	_, blocks, err := compileMessageTemplate(doc, context)
+	if err != nil {
+		return TemplateInteractiveIDs{}, err
+	}
+	return collectInteractiveIDs(doc.Name, "", blocks, false)
 }
 
-func allowedModalActionID(id string) bool {
-	return allowedInteractiveActionIDs[id] || allowedBuilderBlockIDs[id]
+var allowedModalCallbackIDs = map[string]bool{
+	"local_agent.builder.submit": true,
 }
 
 var allowedInteractiveActionIDs = map[string]bool{
@@ -1606,10 +529,6 @@ var allowedInteractiveActionIDs = map[string]bool{
 	"local_agent.confirm.reject":          true,
 	statusActionID:                        true,
 	"local_agent.onboarding.describe":     true,
-}
-
-var allowedModalCallbackIDs = map[string]bool{
-	"local_agent.builder.submit": true,
 }
 
 var allowedBuilderBlockIDs = map[string]bool{
@@ -1638,22 +557,32 @@ var allowedMessageActionIDs = map[string]bool{
 	"local_agent.onboarding.describe":     true,
 }
 
+// validateLiteralID checks the small set of strings that must always be a
+// fixed, developer-chosen identifier and must never be substituted from a
+// placeholder: action_id, block_id, callback_id.
 func validateLiteralID(value, fieldPath string) error {
 	if value == "" {
 		return fmt.Errorf("%s must not be empty", fieldPath)
 	}
-	if _, isToken, err := parseTemplateString(value); err != nil {
-		return fmt.Errorf("%s may not contain a placeholder or script: %w", fieldPath, err)
-	} else if isToken {
-		return fmt.Errorf("%s may not contain a placeholder", fieldPath)
+	if err := rejectPlaceholder(value, fieldPath); err != nil {
+		return err
 	}
-	if utf8.RuneCountInString(value) > maxRendererIDLength {
+	if len([]rune(value)) > maxRendererIDLength {
 		return fmt.Errorf("%s exceeds %d character limit", fieldPath, maxRendererIDLength)
 	}
 	for _, r := range value {
 		if r < 0x21 || r > 0x7e {
 			return fmt.Errorf("%s must contain printable ASCII only", fieldPath)
 		}
+	}
+	return nil
+}
+
+func rejectPlaceholder(value, fieldPath string) error {
+	if _, isToken, err := parseTemplateString(value); err != nil {
+		return fmt.Errorf("%s may not contain a placeholder or script: %w", fieldPath, err)
+	} else if isToken {
+		return fmt.Errorf("%s may not contain a placeholder", fieldPath)
 	}
 	return nil
 }
@@ -1670,10 +599,6 @@ func validateSlackButtonURL(value, fieldPath string) error {
 		return fmt.Errorf("%s must not contain line breaks", fieldPath)
 	}
 	return nil
-}
-
-func validateLiteralString(value, templateName, fieldPath string) error {
-	return validateTemplateString(templateName, fieldPath, value, false, false)
 }
 
 func validateTemplateString(templateName, fieldPath, value string, allowScalar, allowOptions bool) error {
@@ -1696,21 +621,7 @@ func validateTemplateString(templateName, fieldPath, value string, allowScalar, 
 	if !allowOptions {
 		return fmt.Errorf("%s does not allow collection placeholders", fieldPath)
 	}
-	if templateName != "builder_modal" || token.Key != "model" {
-		return fmt.Errorf("%s uses unknown collection placeholder %q", fieldPath, token.Key)
-	}
 	return nil
-}
-
-func allowedCollectionBlockToken(templateName, key string) bool {
-	switch templateName {
-	case "agent_preview":
-		return key == "preview_yaml_parts"
-	case "onboarding_message":
-		return key == "suggested_prompts"
-	default:
-		return false
-	}
 }
 
 func parseTemplateString(value string) (templateToken, bool, error) {
@@ -1753,40 +664,6 @@ func validTokenKey(value string) bool {
 		}
 	}
 	return true
-}
-
-func literalTemplateString(value string) (string, bool) {
-	_, ok, err := parseTemplateString(value)
-	return value, !ok && err == nil
-}
-
-func objectKeys(data []byte) (map[string]struct{}, error) {
-	var object map[string]json.RawMessage
-	if err := decodeStrictJSON(data, &object); err != nil {
-		return nil, err
-	}
-	if object == nil {
-		return nil, errors.New("expected JSON object")
-	}
-	keys := make(map[string]struct{}, len(object))
-	for key := range object {
-		keys[key] = struct{}{}
-	}
-	return keys, nil
-}
-
-func rejectUnknownObjectKeys(keys map[string]struct{}, allowed map[string]struct{}) error {
-	unknown := make([]string, 0)
-	for key := range keys {
-		if _, ok := allowed[key]; !ok {
-			unknown = append(unknown, key)
-		}
-	}
-	if len(unknown) == 0 {
-		return nil
-	}
-	sort.Strings(unknown)
-	return fmt.Errorf("unknown field %q", unknown[0])
 }
 
 func decodeStrictJSON(data []byte, target any) error {

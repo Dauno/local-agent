@@ -31,24 +31,29 @@ func TestCompileJobAcceptedMessageIncludesHostReceiptFields(t *testing.T) {
 	if !strings.Contains(fallback, "2026-07-21T20:30:00Z") || !strings.Contains(fallback, "2026-07-21T20:31:00Z") {
 		t.Fatalf("fallback timestamps = %q", fallback)
 	}
-	if len(blocks) != 4 {
-		t.Fatalf("blocks = %d, want 4", len(blocks))
+	if len(blocks) != 2 {
+		t.Fatalf("blocks = %d, want 2", len(blocks))
 	}
 	for _, block := range blocks {
 		if _, ok := block.(*slackapi.ActionBlock); ok {
 			t.Fatal("accepted receipt must not contain interactive elements")
 		}
 	}
-	status := blocks[1].(*slackapi.SectionBlock)
-	if !strings.Contains(status.Fields[0].Text, "job_123") || !strings.Contains(status.Fields[1].Text, "queued") {
-		t.Fatalf("status fields = %#v", status.Fields)
+	card := blocks[0].(*slackapi.CardBlock)
+	if !strings.Contains(card.Subtitle.Text, "job_123") || !strings.Contains(card.Subtitle.Text, "queued") {
+		t.Fatalf("card subtitle = %#v", card.Subtitle)
 	}
-	createdUpdated := blocks[2].(*slackapi.SectionBlock)
-	if !strings.Contains(createdUpdated.Fields[0].Text, "2026-07-21T20:30:00Z") || !strings.Contains(createdUpdated.Fields[1].Text, "2026-07-21T20:31:00Z") {
-		t.Fatalf("timestamp fields = %#v", createdUpdated.Fields)
+	if card.Body == nil || card.Body.Text != jobAcceptedStatusSentence {
+		t.Fatalf("card body = %#v", card.Body)
 	}
-	if got := blocks[3].(*slackapi.SectionBlock).Text.Text; got != jobAcceptedStatusSentence {
-		t.Fatalf("status sentence = %q", got)
+	context := blocks[1].(*slackapi.ContextBlock)
+	if len(context.ContextElements.Elements) != 2 {
+		t.Fatalf("context elements = %#v", context.ContextElements.Elements)
+	}
+	created := context.ContextElements.Elements[0].(*slackapi.TextBlockObject)
+	updated := context.ContextElements.Elements[1].(*slackapi.TextBlockObject)
+	if !strings.Contains(created.Text, "2026-07-21T20:30:00Z") || !strings.Contains(updated.Text, "2026-07-21T20:31:00Z") {
+		t.Fatalf("timestamp elements = %#v, %#v", created, updated)
 	}
 	if err := validateJobAcceptedMessageLimits(fallback, blocks); err != nil {
 		t.Fatalf("validateJobAcceptedMessageLimits() error = %v", err)
@@ -62,7 +67,7 @@ func TestCompileJobAcceptedMessageNeutralizesAndEscapesJobID(t *testing.T) {
 	if err != nil {
 		t.Fatalf("compileJobAcceptedMessage() error = %v", err)
 	}
-	text := blocks[1].(*slackapi.SectionBlock).Fields[0].Text
+	text := blocks[0].(*slackapi.CardBlock).Subtitle.Text
 	if strings.Contains(text, "<!channel>") || strings.Contains(text, "<@U12345678>") {
 		t.Fatalf("unsafe Slack controls remain in %q", text)
 	}

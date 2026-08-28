@@ -51,6 +51,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		Values: map[string]string{
 			"name": "incident_analyst", "description": "desc", "instruction": "instruction",
 			"agent_type": "agent_cli", "model": "agentcli/a", "execution_mode": domain.ExecutionModeDurableJob,
+			"timeout_seconds": "",
 		},
 	})
 	if err != nil {
@@ -81,6 +82,7 @@ func TestBuilderHydrationTokensConditionsAndStableOptions(t *testing.T) {
 		Values: map[string]string{
 			"name": "incident_analyst", "description": "desc", "instruction": "instruction",
 			"agent_type": "agent_cli", "model": "agentcli/a", "execution_mode": domain.ExecutionModeDurableJob,
+			"timeout_seconds": "",
 		},
 	}))
 	if err != nil {
@@ -163,18 +165,6 @@ func TestTemplateRendererRejectsClosedLanguageViolations(t *testing.T) {
 			},
 		},
 		{
-			name: "confirmation scalar in action value",
-			edit: func(files map[string][]byte) {
-				replaceMessage(files, "confirmation_message", `"{{value.wrapper_call_id}}"`, `"{{value.summary}}"`)
-			},
-		},
-		{
-			name: "onboarding display scalar in context value",
-			edit: func(files map[string][]byte) {
-				replaceMessage(files, "onboarding_message", `"{{value.builder_context}}"`, `"{{value.intro}}"`)
-			},
-		},
-		{
 			name: "modal title limit",
 			edit: func(files map[string][]byte) {
 				replaceBuilder(files, `"Crear nuevo agente"`, strings.Repeat("x", maxRendererModalTitleLength+1))
@@ -201,24 +191,37 @@ func TestTemplateRendererRejectsClosedLanguageViolations(t *testing.T) {
 func TestTemplateRendererRejectsMissingRequiredMessageToken(t *testing.T) {
 	renderer := mustEmbeddedRenderer(t)
 	_, _, err := renderer.CompileMessageWithFallback("confirmation_message", TemplateContext{Values: map[string]string{
-		"original_call_id": "call-1",
-		"expires_at":       "expires",
-		"wrapper_call_id":  "wrapper-1",
-		"fallback_text":    "Confirmation required",
+		"subtitle":        "call-1",
+		"wrapper_call_id": "wrapper-1",
+		"fallback_text":   "Confirmation required",
 	}})
 	if err == nil {
 		t.Fatal("message with missing summary token was accepted")
 	}
 }
 
+func TestTemplateRendererRejectsMissingBuilderToken(t *testing.T) {
+	renderer := mustEmbeddedRenderer(t)
+	_, err := renderer.CompileModal("builder_modal", TemplateContext{
+		Kind:     domain.AgentKindLLM,
+		Profiles: []BuilderProviderProfile{{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible}},
+		Values: map[string]string{
+			"name": "", "description": "", "instruction": "", "agent_type": "llm",
+		},
+	})
+	if err == nil {
+		t.Fatal("builder modal with missing model token was accepted")
+	}
+}
+
 func TestTemplateRendererRejectsSurfaceAndMessageBlockViolations(t *testing.T) {
 	files := embeddedTemplateFiles(t)
 	message := string(files["templates/confirmation_message.json"])
-	message = strings.Replace(message, `"type": "section"`, `"type": "input"`, 1)
+	message = strings.Replace(message, `"type": "actions",`, `"type": "input",`, 1)
 	message = strings.Replace(
 		message,
-		`"text": {"type": "mrkdwn", "text": "{{value.summary}}"}`,
-		`"label": {"type": "plain_text", "text": "Nombre", "emoji": false}, "block_id": "name", "element": {"type": "plain_text_input", "action_id": "name"}`,
+		`"block_id": "confirmation_buttons",`,
+		`"block_id": "confirmation_buttons", "label": {"type": "plain_text", "text": "Nombre", "emoji": false}, "element": {"type": "plain_text_input", "action_id": "name"},`,
 		1,
 	)
 	files["templates/confirmation_message.json"] = []byte(message)
@@ -289,6 +292,74 @@ func TestTemplateRendererCompilesTypedBlockCollections(t *testing.T) {
 	}
 }
 
+func TestTemplateCatalogRejectsUnknownSlackTypes(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(map[string][]byte)
+	}{
+		{
+			name: "unknown block",
+			edit: func(files map[string][]byte) {
+				replaceMessage(files, "confirmation_message", `"type": "actions",`, `"type": "future_actions",`)
+			},
+		},
+		{
+			name: "unknown accessory element",
+			edit: func(files map[string][]byte) {
+				replaceMessage(
+					files,
+					"agent_preview",
+					`"text": {"type": "mrkdwn", "text": "{{value.name}}"}`,
+					`"text": {"type": "mrkdwn", "text": "{{value.name}}"}, "accessory": {"type": "future_control", "action_id": "not.registered"}`,
+				)
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			files := embeddedTemplateFiles(t)
+			test.edit(files)
+			if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err == nil {
+				t.Fatal("unknown Slack type was accepted")
+			}
+		})
+	}
+}
+
+func TestTemplateCatalogRejectsDispatchingModalActionWithStateOnlyID(t *testing.T) {
+	files := embeddedTemplateFiles(t)
+	path := "templates/builder_modal.json"
+	var document map[string]any
+	if err := json.Unmarshal(files[path], &document); err != nil {
+		t.Fatalf("decode builder template: %v", err)
+	}
+	payload := document["payload"].(map[string]any)
+	blocks := payload["blocks"].([]any)
+	filtered := make([]any, 0, len(blocks))
+	for _, rawBlock := range blocks {
+		block := rawBlock.(map[string]any)
+		if block["block_id"] != "name" {
+			filtered = append(filtered, block)
+		}
+	}
+	filtered = append(filtered, map[string]any{
+		"type": "actions",
+		"elements": []any{map[string]any{
+			"type": "button", "action_id": "name",
+			"text": map[string]any{"type": "plain_text", "text": "Unexpected action"},
+		}},
+	})
+	payload["blocks"] = filtered
+	var err error
+	files[path], err = json.Marshal(document)
+	if err != nil {
+		t.Fatalf("encode builder template: %v", err)
+	}
+	if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err == nil {
+		t.Fatal("dispatching modal action with state-only ID was accepted")
+	}
+}
+
 func TestTemplateCatalogRejectsInvalidParentElementCombinations(t *testing.T) {
 	tests := []struct {
 		name string
@@ -313,25 +384,6 @@ func TestTemplateCatalogRejectsInvalidParentElementCombinations(t *testing.T) {
 				files[path] = []byte(strings.Replace(data, old, newValue, 1))
 			},
 		},
-		{
-			name: "input inside actions",
-			edit: func(files map[string][]byte) {
-				path := "templates/onboarding_message.json"
-				data := string(files[path])
-				old := `{
-            "type": "button",
-            "action_id": "local_agent.builder.open",
-            "value": "{{value.builder_context}}",
-            "text": {"type": "plain_text", "text": "Abrir formulario", "emoji": false},
-            "style": "primary"
-          }`
-				newValue := `{
-            "type": "plain_text_input",
-            "action_id": "local_agent.builder.open"
-          }`
-				files[path] = []byte(strings.Replace(data, old, newValue, 1))
-			},
-		},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
@@ -344,24 +396,14 @@ func TestTemplateCatalogRejectsInvalidParentElementCombinations(t *testing.T) {
 	}
 }
 
-func TestRegisteredMessageScalarHydrationIsWholeValueOnly(t *testing.T) {
-	files := embeddedTemplateFiles(t)
-	path := "templates/confirmation_message.json"
-	files[path] = []byte(strings.Replace(string(files[path]), `"text": {"type": "mrkdwn", "text": "{{value.summary}}"}`, `"text": {"type": "mrkdwn", "text": "{{value.summary}}"}`, 1))
-	catalog, err := LoadTemplateCatalogFromFS(templateMapFS(files))
-	if err != nil {
-		t.Fatalf("load scalar fixture: %v", err)
-	}
-	renderer, err := NewTemplateRenderer(catalog)
-	if err != nil {
-		t.Fatalf("new renderer: %v", err)
-	}
+func TestTemplateRendererKeepsScalarReplacementAsJSONData(t *testing.T) {
+	renderer := mustEmbeddedRenderer(t)
+	value := `Approved", {"type":"actions"}, {{value.wrapper_call_id}}, {{fake.token}}`
 	fallback, blocks, err := renderer.CompileMessageWithFallback("confirmation_message", TemplateContext{Values: map[string]string{
-		"summary":          "Approved summary",
-		"original_call_id": "call-1",
-		"expires_at":       "expires",
-		"wrapper_call_id":  "wrapper-1",
-		"fallback_text":    "Confirmacion requerida.",
+		"summary":         value,
+		"subtitle":        "Call ID: call-1 · Expires",
+		"wrapper_call_id": "wrapper-1",
+		"fallback_text":   "Confirmacion requerida.",
 	}})
 	if err != nil {
 		t.Fatalf("compile scalar fixture: %v", err)
@@ -369,9 +411,16 @@ func TestRegisteredMessageScalarHydrationIsWholeValueOnly(t *testing.T) {
 	if fallback != "Confirmacion requerida." {
 		t.Fatalf("fallback unexpectedly changed: %q", fallback)
 	}
-	section := blocks[0].(*slackapi.SectionBlock)
-	if section.Text == nil || section.Text.Text != "Approved summary" {
-		t.Fatalf("hydrated summary = %#v", section.Text)
+	if len(blocks) != 2 {
+		t.Fatalf("replacement changed block count to %d", len(blocks))
+	}
+	card, ok := blocks[0].(*slackapi.CardBlock)
+	if !ok || card.Title == nil || card.Title.Text != value {
+		t.Fatalf("hydrated summary = %#v", blocks[0])
+	}
+	actions, ok := blocks[1].(*slackapi.ActionBlock)
+	if !ok || len(actions.Elements.ElementSet) != 2 {
+		t.Fatalf("replacement changed actions block: %#v", blocks[1])
 	}
 }
 

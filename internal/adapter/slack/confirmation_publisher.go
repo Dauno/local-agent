@@ -303,11 +303,10 @@ func compileConfirmationMessageForMode(renderer *TemplateRenderer, delivery port
 
 func compileConfirmationMessageV1(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
 	fallback, blocks, err := renderer.CompileMessageWithFallback(confirmationTemplateV1, TemplateContext{Values: map[string]string{
-		"summary":          fmt.Sprintf(":lock: %s", neutralizeUnsafeControls(delivery.Summary)),
-		"original_call_id": fmt.Sprintf("*Call ID:*\n`%s`", delivery.OriginalCallID),
-		"expires_at":       fmt.Sprintf("*Expires:*\n%s UTC", delivery.Expiry.UTC().Format("15:04")),
-		"wrapper_call_id":  delivery.WrapperCallID,
-		"fallback_text":    confirmationFallbackTextV1(delivery),
+		"summary":         fmt.Sprintf(":lock: %s", neutralizeUnsafeControls(delivery.Summary)),
+		"subtitle":        fmt.Sprintf("Call ID: `%s` · Expires %s UTC", delivery.OriginalCallID, delivery.Expiry.UTC().Format("15:04")),
+		"wrapper_call_id": delivery.WrapperCallID,
+		"fallback_text":   confirmationFallbackTextV1(delivery),
 	}})
 	if err != nil || strings.TrimSpace(delivery.Payload) == "" {
 		return fallback, blocks, err
@@ -323,13 +322,12 @@ func compileConfirmationMessageV1(renderer *TemplateRenderer, delivery port.Conf
 func compileConfirmationMessageV2(renderer *TemplateRenderer, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
 	display := buildConfirmationDisplay(delivery)
 	fallback, blocks, err := renderer.CompileMessageWithFallback(confirmationTemplateV2, TemplateContext{Values: map[string]string{
-		"title_summary":    confirmationTitleSummary(delivery.Summary),
-		"original_call_id": fmt.Sprintf("*Call ID:*\n`%s`", escapeSlackMrkdwn(delivery.OriginalCallID)),
-		"expires_at":       fmt.Sprintf("*Expires:*\n%s UTC", delivery.Expiry.UTC().Format("15:04")),
-		"project":          display.Project,
-		"proposed_task":    display.ProposedTask,
-		"wrapper_call_id":  delivery.WrapperCallID,
-		"fallback_text":    confirmationFallbackTextV2(delivery, display),
+		"title_summary":   confirmationTitleSummary(delivery.Summary),
+		"subtitle":        fmt.Sprintf("*Call ID:*\n`%s` · *Expires:* %s UTC", escapeSlackMrkdwn(delivery.OriginalCallID), delivery.Expiry.UTC().Format("15:04")),
+		"project":         display.Project,
+		"proposed_task":   display.ProposedTask,
+		"wrapper_call_id": delivery.WrapperCallID,
+		"fallback_text":   confirmationFallbackTextV2(delivery, display),
 	}})
 	if err != nil {
 		return fallback, blocks, err

@@ -27,7 +27,9 @@ func NewBuilderModalPresenterWithProviders(profiles []BuilderProviderProfile) *B
 			if kind == domain.AgentKindAgentCLI && len(builderProfilesForKind(kind, profiles)) == 0 {
 				continue
 			}
-			_, err = renderer.CompileModal("builder_modal", TemplateContext{Kind: kind, Profiles: profiles})
+			_, err = renderer.CompileModal("builder_modal", TemplateContext{
+				Kind: kind, Profiles: profiles, Values: completeBuilderTemplateValues(nil),
+			})
 			if err != nil {
 				err = fmt.Errorf("validate %s builder provider profiles: %w", kind, err)
 				break
@@ -130,11 +132,19 @@ func (p *BuilderModalPresenter) BuildViewForKindResult(kind domain.AgentKind, va
 	}
 	view, err := p.renderer.CompileModal("builder_modal", TemplateContext{
 		Kind:     kind,
-		Values:   values,
+		Values:   completeBuilderTemplateValues(values),
 		Profiles: p.profiles,
 	})
 	if err != nil {
 		return slackapi.ModalViewRequest{}, err
 	}
 	return view, nil
+}
+
+func completeBuilderTemplateValues(values map[string]string) map[string]string {
+	complete := make(map[string]string, len(scalarKeysByTemplate["builder_modal"]))
+	for key := range scalarKeysByTemplate["builder_modal"] {
+		complete[key] = values[key]
+	}
+	return complete
 }

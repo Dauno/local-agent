@@ -6,26 +6,17 @@
     "fallback_text": "{{value.fallback_text}}",
     "blocks": [
       {
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "*Job accepted / running*"}
+        "type": "card",
+        "title": {"type": "mrkdwn", "text": "*Job accepted / running*", "verbatim": false},
+        "subtitle": {"type": "mrkdwn", "text": "{{value.subtitle}}", "verbatim": false},
+        "body": {"type": "mrkdwn", "text": "{{value.status_sentence}}", "verbatim": false}
       },
       {
-        "type": "section",
-        "fields": [
-          {"type": "mrkdwn", "text": "{{value.job_id}}"},
-          {"type": "mrkdwn", "text": "{{value.status}}"}
-        ]
-      },
-      {
-        "type": "section",
-        "fields": [
+        "type": "context",
+        "elements": [
           {"type": "mrkdwn", "text": "{{value.created_at}}"},
           {"type": "mrkdwn", "text": "{{value.updated_at}}"}
         ]
-      },
-      {
-        "type": "section",
-        "text": {"type": "plain_text", "text": "{{value.status_sentence}}", "emoji": false}
       }
     ]
   }

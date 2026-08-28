@@ -298,7 +298,9 @@ func TestBuilderModalTemplateCopyAndOrderChangesDriveRenderer(t *testing.T) {
 	view, err := renderer.CompileModal("builder_modal", TemplateContext{
 		Kind:     domain.AgentKindLLM,
 		Profiles: []BuilderProviderProfile{{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible}},
-		Values:   map[string]string{"agent_type": "llm", "model": "openai/fast"},
+		Values: map[string]string{
+			"name": "", "description": "", "instruction": "", "agent_type": "llm", "model": "openai/fast",
+		},
 	})
 	if err != nil {
 		t.Fatalf("compile edited builder template: %v", err)

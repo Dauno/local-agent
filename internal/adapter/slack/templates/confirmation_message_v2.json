@@ -6,15 +6,9 @@
     "fallback_text": "{{value.fallback_text}}",
     "blocks": [
       {
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": "{{value.title_summary}}"}
-      },
-      {
-        "type": "section",
-        "fields": [
-          {"type": "mrkdwn", "text": "{{value.original_call_id}}"},
-          {"type": "mrkdwn", "text": "{{value.expires_at}}"}
-        ]
+        "type": "card",
+        "title": {"type": "mrkdwn", "text": "{{value.title_summary}}", "verbatim": false},
+        "subtitle": {"type": "mrkdwn", "text": "{{value.subtitle}}", "verbatim": false}
       },
       {
         "type": "section",

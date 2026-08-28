@@ -2,8 +2,10 @@ package slack
 
 import (
 	"cmp"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strconv"
 	"strings"
@@ -20,18 +22,13 @@ const (
 	maxRendererCompositionTextLength  = 3000
 	maxRendererModalTitleLength       = 24
 	maxRendererModalSubmitCloseLength = 24
-	maxRendererModalLabelLength       = 200
-	maxRendererModalHintLength        = 200
-	maxRendererPlaceholderLength      = 150
-	maxRendererButtonTextLength       = 75
+	maxRendererPlainTextInputLength   = 3000
 	maxRendererSectionFields          = 10
 	maxRendererSectionFieldLength     = 2000
-	maxRendererActionElements         = 25
-	maxRendererIDLength               = 255
-	maxRendererPlainTextInputLength   = 3000
-	maxRendererStaticSelectOptions    = 100
+	maxRendererButtonTextLength       = 75
 	maxRendererOptionTextLength       = 75
 	maxRendererOptionValueLength      = 2000
+	maxRendererIDLength               = 255
 )
 
 // TemplateContext contains trusted values prepared by the owning Slack
@@ -129,82 +126,6 @@ type renderEnvironment struct {
 	suggestedPrompts []string
 }
 
-func compileModalTemplate(doc templateDocument, context TemplateContext) (slackapi.ModalViewRequest, error) {
-	env, err := newRenderEnvironment(doc.Name, context)
-	if err != nil {
-		return slackapi.ModalViewRequest{}, err
-	}
-	if doc.Modal == nil {
-		return slackapi.ModalViewRequest{}, errors.New("template payload is missing")
-	}
-	modal := doc.Modal
-	blocks, err := compileBlocks(doc.Name, modal.Blocks, env)
-	if err != nil {
-		return slackapi.ModalViewRequest{}, err
-	}
-	if len(blocks) > maxRendererBlocksPerModal {
-		return slackapi.ModalViewRequest{}, fmt.Errorf("modal exceeds %d block limit", maxRendererBlocksPerModal)
-	}
-	title, err := compileText(modal.Title, env, false, maxRendererModalTitleLength)
-	if err != nil {
-		return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal title: %w", err)
-	}
-	view := slackapi.ModalViewRequest{
-		Type:            slackapi.VTModal,
-		Title:           title,
-		CallbackID:      modal.CallbackID,
-		PrivateMetadata: modal.PrivateMetadata,
-		Blocks:          slackapi.Blocks{BlockSet: blocks},
-	}
-	if modal.Submit != nil {
-		view.Submit, err = compileText(modal.Submit, env, false, maxRendererModalSubmitCloseLength)
-		if err != nil {
-			return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal submit: %w", err)
-		}
-	}
-	if modal.Close != nil {
-		view.Close, err = compileText(modal.Close, env, false, maxRendererModalSubmitCloseLength)
-		if err != nil {
-			return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal close: %w", err)
-		}
-	}
-	if err := validateCompiledView(doc.Name, view); err != nil {
-		return slackapi.ModalViewRequest{}, err
-	}
-	return view, nil
-}
-
-func compileMessageTemplate(doc templateDocument, context TemplateContext) (string, []slackapi.Block, error) {
-	env, err := newRenderEnvironment(doc.Name, context)
-	if err != nil {
-		return "", nil, err
-	}
-	if doc.Message == nil {
-		return "", nil, errors.New("template payload is missing")
-	}
-	fallback, err := resolveString(doc.Message.FallbackText, env, false)
-	if err != nil {
-		return "", nil, fmt.Errorf("compile fallback_text: %w", err)
-	}
-	if strings.TrimSpace(fallback) == "" {
-		return "", nil, errors.New("compiled fallback_text must not be empty")
-	}
-	if utf8.RuneCountInString(fallback) > maxFallbackText {
-		return "", nil, fmt.Errorf("fallback_text exceeds %d character limit", maxFallbackText)
-	}
-	blocks, err := compileBlocks(doc.Name, doc.Message.Blocks, env)
-	if err != nil {
-		return "", nil, err
-	}
-	if len(blocks) > maxBlocksPerMessage {
-		return "", nil, fmt.Errorf("message exceeds %d block limit", maxBlocksPerMessage)
-	}
-	if err := validateCompiledBlocks(doc.Name, blocks, false); err != nil {
-		return "", nil, err
-	}
-	return fallback, blocks, nil
-}
-
 func newRenderEnvironment(templateName string, context TemplateContext) (renderEnvironment, error) {
 	kind := context.Kind
 	if kind == "" {
@@ -224,338 +145,262 @@ func newRenderEnvironment(templateName string, context TemplateContext) (renderE
 	}, nil
 }
 
-func compileBlocks(templateName string, source []templateBlock, env renderEnvironment) ([]slackapi.Block, error) {
-	blocks := make([]slackapi.Block, 0, len(source))
-	for index, sourceBlock := range source {
-		if sourceBlock.CollectionToken != "" {
-			collection, err := compileCollectionBlocks(sourceBlock.CollectionToken, env, fmt.Sprintf("blocks[%d]", index))
-			if err != nil {
-				return nil, err
-			}
-			blocks = append(blocks, collection...)
-			continue
-		}
-		if sourceBlock.Condition == "is_external_agent" && !env.isExternalAgent {
-			continue
-		}
-		block, err := compileBlock(sourceBlock, env, fmt.Sprintf("blocks[%d]", index))
-		if err != nil {
-			return nil, err
-		}
-		blocks = append(blocks, block)
-	}
-	return blocks, nil
-}
-
-func compileCollectionBlocks(token string, env renderEnvironment, fieldPath string) ([]slackapi.Block, error) {
-	parsed, isToken, err := parseTemplateString(token)
-	if err != nil || !isToken || parsed.Kind != tokenOptions {
-		return nil, fmt.Errorf("%s has an invalid collection token", fieldPath)
-	}
-	var values []string
-	limit := maxRendererCompositionTextLength
-	switch parsed.Key {
-	case "preview_yaml_parts":
-		if env.templateName != "agent_preview" {
-			return nil, fmt.Errorf("%s uses preview_yaml_parts outside agent_preview", fieldPath)
-		}
-		values = env.previewYAMLParts
-		limit = builderBlockTextLimit
-	case "suggested_prompts":
-		if env.templateName != "onboarding_message" {
-			return nil, fmt.Errorf("%s uses suggested_prompts outside onboarding_message", fieldPath)
-		}
-		if len(env.suggestedPrompts) > 5 {
-			return nil, fmt.Errorf("%s exceeds five suggested prompts", fieldPath)
-		}
-		values = env.suggestedPrompts
-	default:
-		return nil, fmt.Errorf("%s uses unknown collection placeholder %q", fieldPath, parsed.Key)
-	}
-	blocks := make([]slackapi.Block, 0, len(values))
-	for index, value := range values {
-		if strings.TrimSpace(value) == "" {
-			return nil, fmt.Errorf("%s[%d] must not be empty", fieldPath, index)
-		}
-		if parsed.Key == "suggested_prompts" && (utf8.RuneCountInString(value) > 200 || strings.ContainsAny(value, "\r\n\x00")) {
-			return nil, fmt.Errorf("%s[%d] is not a valid suggested prompt", fieldPath, index)
-		}
-		if utf8.RuneCountInString(value) > limit {
-			return nil, fmt.Errorf("%s[%d] exceeds %d character limit", fieldPath, index, limit)
-		}
-		text := value
-		if parsed.Key == "suggested_prompts" {
-			text = "- " + value
-			if utf8.RuneCountInString(text) > maxRendererCompositionTextLength {
-				return nil, fmt.Errorf("%s[%d] exceeds %d character limit", fieldPath, index, maxRendererCompositionTextLength)
-			}
-		}
-		blocks = append(blocks, slackapi.NewSectionBlock(slackapi.NewTextBlockObject("mrkdwn", text, false, false), nil, nil))
-	}
-	return blocks, nil
-}
-
-func compileBlock(source templateBlock, env renderEnvironment, fieldPath string) (slackapi.Block, error) {
-	switch source.Type {
-	case "section":
-		var text *slackapi.TextBlockObject
-		var err error
-		if source.Text != nil {
-			text, err = compileText(source.Text, env, false, maxRendererCompositionTextLength)
-			if err != nil {
-				return nil, fmt.Errorf("%s.text: %w", fieldPath, err)
-			}
-		}
-		var fields []*slackapi.TextBlockObject
-		if len(source.Fields) > 0 {
-			fields = make([]*slackapi.TextBlockObject, 0, len(source.Fields))
-			for index, field := range source.Fields {
-				compiled, err := compileText(field, env, false, maxRendererCompositionTextLength)
-				if err != nil {
-					return nil, fmt.Errorf("%s.fields[%d]: %w", fieldPath, index, err)
-				}
-				fields = append(fields, compiled)
-			}
-		}
-		var accessory *slackapi.Accessory
-		if source.Accessory != nil {
-			compiled, err := compileElement(source.Accessory, env, fieldPath+".accessory")
-			if err != nil {
-				return nil, err
-			}
-			accessory = slackapi.NewAccessory(compiled)
-		}
-		block := slackapi.NewSectionBlock(text, fields, accessory)
-		block.BlockID = source.BlockID
-		return block, nil
-	case "input":
-		label, err := compileText(source.Label, env, false, maxRendererModalLabelLength)
-		if err != nil {
-			return nil, fmt.Errorf("%s.label: %w", fieldPath, err)
-		}
-		var hint *slackapi.TextBlockObject
-		if source.Hint != nil {
-			hint, err = compileText(source.Hint, env, false, maxRendererModalHintLength)
-			if err != nil {
-				return nil, fmt.Errorf("%s.hint: %w", fieldPath, err)
-			}
-		}
-		element, err := compileElement(source.Element, env, fieldPath+".element")
-		if err != nil {
-			return nil, err
-		}
-		block := slackapi.NewInputBlock(source.BlockID, label, hint, element)
-		block.WithOptional(source.Optional).WithDispatchAction(source.DispatchAction)
-		return block, nil
-	case "actions":
-		elements := make([]slackapi.BlockElement, 0, len(source.Elements))
-		for index, element := range source.Elements {
-			compiled, err := compileElement(element, env, fmt.Sprintf("%s.elements[%d]", fieldPath, index))
-			if err != nil {
-				return nil, err
-			}
-			elements = append(elements, compiled)
-		}
-		block := slackapi.NewActionBlock(source.BlockID, elements...)
-		return block, nil
-	default:
-		return nil, fmt.Errorf("%s has unsupported block type %q", fieldPath, source.Type)
-	}
-}
-
-func compileElement(source *templateElement, env renderEnvironment, fieldPath string) (slackapi.BlockElement, error) {
-	if source == nil {
-		return nil, fmt.Errorf("%s is required", fieldPath)
-	}
-	switch source.Type {
-	case "plain_text_input":
-		var placeholder *slackapi.TextBlockObject
-		var err error
-		if source.Placeholder != nil {
-			placeholder, err = compileText(source.Placeholder, env, false, maxRendererPlaceholderLength)
-			if err != nil {
-				return nil, fmt.Errorf("%s.placeholder: %w", fieldPath, err)
-			}
-		}
-		element := slackapi.NewPlainTextInputBlockElement(placeholder, source.ActionID)
-		element.Multiline = source.Multiline
-		element.MinLength = source.MinLength
-		element.MaxLength = source.MaxLength
-		element.FocusOnLoad = source.FocusOnLoad
-		if source.InitialValuePresent {
-			value, err := resolveString(source.InitialValue, env, true)
-			if err != nil {
-				return nil, fmt.Errorf("%s.initial_value: %w", fieldPath, err)
-			}
-			element.InitialValue = value
-		}
-		if source.DispatchActionConfig != nil {
-			element.DispatchActionConfig = &slackapi.DispatchActionConfig{TriggerActionsOn: append([]string(nil), source.DispatchActionConfig.TriggerActionsOn...)}
-		}
-		return element, nil
-	case "static_select":
-		options, err := compileOptions(source, env, fieldPath)
-		if err != nil {
-			return nil, err
-		}
-		var placeholder *slackapi.TextBlockObject
-		if source.Placeholder != nil {
-			placeholder, err = compileText(source.Placeholder, env, false, maxRendererPlaceholderLength)
-			if err != nil {
-				return nil, fmt.Errorf("%s.placeholder: %w", fieldPath, err)
-			}
-		}
-		element := slackapi.NewOptionsSelectBlockElement(slackapi.OptTypeStatic, placeholder, source.ActionID, options...)
-		element.FocusOnLoad = source.FocusOnLoad
-		if source.InitialOptionPresent {
-			selected, err := compileInitialOption(source, options, env, fieldPath)
-			if err != nil {
-				return nil, err
-			}
-			element.InitialOption = selected
-		}
-		return element, nil
-	case "button":
-		text, err := compileText(source.Text, env, false, maxRendererButtonTextLength)
-		if err != nil {
-			return nil, fmt.Errorf("%s.text: %w", fieldPath, err)
-		}
-		value, err := resolveString(source.Value, env, false)
-		if err != nil {
-			return nil, fmt.Errorf("%s.value: %w", fieldPath, err)
-		}
-		element := slackapi.NewButtonBlockElement(source.ActionID, value, text)
-		element.Style = slackapi.Style(source.Style)
-		element.URL = source.URL
-		return element, nil
-	default:
-		return nil, fmt.Errorf("%s has unsupported element type %q", fieldPath, source.Type)
-	}
-}
-
-func compileOptions(source *templateElement, env renderEnvironment, fieldPath string) ([]*slackapi.OptionBlockObject, error) {
-	var options []*slackapi.OptionBlockObject
-	if source.OptionsToken != "" {
-		if source.OptionsToken != "{{options.model}}" {
-			return nil, fmt.Errorf("%s.options has unsupported collection token", fieldPath)
-		}
-		for _, profile := range builderProfilesForKind(env.kind, env.profiles) {
-			if strings.TrimSpace(profile.Reference) == "" {
-				return nil, errors.New("provider profile reference must not be empty")
-			}
-			options = append(options, slackapi.NewOptionBlockObject(
-				profile.Reference,
-				slackapi.NewTextBlockObject("plain_text", profile.Reference, false, false),
-				nil,
-			))
-		}
-		if len(options) == 0 {
-			return nil, fmt.Errorf("%s.options has no compatible provider profiles", fieldPath)
-		}
-		return options, nil
-	}
-	for index, option := range source.Options {
-		compiled, err := compileOption(option, env, fmt.Sprintf("%s.options[%d]", fieldPath, index))
-		if err != nil {
-			return nil, err
-		}
-		options = append(options, compiled)
-	}
-	return options, nil
-}
-
-func compileInitialOption(source *templateElement, options []*slackapi.OptionBlockObject, env renderEnvironment, fieldPath string) (*slackapi.OptionBlockObject, error) {
-	if source.InitialOptionToken != "" {
-		value, err := resolveString(source.InitialOptionToken, env, true)
-		if err != nil {
-			return nil, fmt.Errorf("%s.initial_option: %w", fieldPath, err)
-		}
-		if value == "" {
-			return firstOption(options), nil
-		}
-		for _, option := range options {
-			if option.Value == value {
-				return option, nil
-			}
-		}
-		// The imperative builder keeps its first option when a preserved
-		// selection is no longer present in the trusted provider catalog.
-		return firstOption(options), nil
-	}
-	if source.InitialOption != nil {
-		return compileOption(*source.InitialOption, env, fieldPath+".initial_option")
-	}
-	return nil, nil
-}
-
-func firstOption(options []*slackapi.OptionBlockObject) *slackapi.OptionBlockObject {
-	if len(options) == 0 {
-		return nil
-	}
-	return options[0]
-}
-
-func compileOption(source templateOption, env renderEnvironment, fieldPath string) (*slackapi.OptionBlockObject, error) {
-	text, err := compileText(source.Text, env, false, maxRendererOptionTextLength)
+func compileModalTemplate(doc templateDocument, context TemplateContext) (slackapi.ModalViewRequest, error) {
+	env, err := newRenderEnvironment(doc.Name, context)
 	if err != nil {
-		return nil, fmt.Errorf("%s.text: %w", fieldPath, err)
+		return slackapi.ModalViewRequest{}, err
 	}
-	value, err := resolveString(source.Value, env, false)
+	if doc.Modal == nil {
+		return slackapi.ModalViewRequest{}, errors.New("template payload is missing")
+	}
+	modal := doc.Modal
+
+	title, err := compileRawText(modal.Title, env, maxRendererModalTitleLength)
 	if err != nil {
-		return nil, fmt.Errorf("%s.value: %w", fieldPath, err)
+		return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal title: %w", err)
 	}
-	option := slackapi.NewOptionBlockObject(value, text, nil)
-	if source.Description != nil {
-		description, err := compileText(source.Description, env, false, maxRendererOptionTextLength)
+
+	blocks, err := substituteAndDecodeBlocks(modal.Blocks, env)
+	if err != nil {
+		return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal blocks: %w", err)
+	}
+
+	view := slackapi.ModalViewRequest{
+		Type:            slackapi.VTModal,
+		Title:           title,
+		CallbackID:      modal.CallbackID,
+		PrivateMetadata: modal.PrivateMetadata,
+		Blocks:          slackapi.Blocks{BlockSet: blocks},
+	}
+	if len(modal.Submit) > 0 {
+		view.Submit, err = compileRawText(modal.Submit, env, maxRendererModalSubmitCloseLength)
 		if err != nil {
-			return nil, fmt.Errorf("%s.description: %w", fieldPath, err)
+			return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal submit: %w", err)
 		}
-		option.Description = description
 	}
-	option.URL = source.URL
-	return option, nil
+	if len(modal.Close) > 0 {
+		view.Close, err = compileRawText(modal.Close, env, maxRendererModalSubmitCloseLength)
+		if err != nil {
+			return slackapi.ModalViewRequest{}, fmt.Errorf("compile modal close: %w", err)
+		}
+	}
+	if err := validateCompiledBlocks(doc.Name, view.Blocks.BlockSet, true); err != nil {
+		return slackapi.ModalViewRequest{}, err
+	}
+	return view, nil
 }
 
-func compileText(source *templateText, env renderEnvironment, optional bool, limit int) (*slackapi.TextBlockObject, error) {
-	if source == nil {
-		return nil, errors.New("text object is required")
+func compileMessageTemplate(doc templateDocument, context TemplateContext) (string, []slackapi.Block, error) {
+	env, err := newRenderEnvironment(doc.Name, context)
+	if err != nil {
+		return "", nil, err
 	}
-	text, err := resolveString(source.Text, env, optional)
+	if doc.Message == nil {
+		return "", nil, errors.New("template payload is missing")
+	}
+	fallback, err := substituteTopLevelString(doc.Message.FallbackText, env)
+	if err != nil {
+		return "", nil, fmt.Errorf("compile fallback_text: %w", err)
+	}
+	if strings.TrimSpace(fallback) == "" {
+		return "", nil, errors.New("compiled fallback_text must not be empty")
+	}
+	if utf8.RuneCountInString(fallback) > maxFallbackText {
+		return "", nil, fmt.Errorf("fallback_text exceeds %d character limit", maxFallbackText)
+	}
+	blocks, err := substituteAndDecodeBlocks(doc.Message.Blocks, env)
+	if err != nil {
+		return "", nil, err
+	}
+	if err := validateCompiledBlocks(doc.Name, blocks, false); err != nil {
+		return "", nil, err
+	}
+	return fallback, blocks, nil
+}
+
+func substituteAndDecodeBlocks(raw json.RawMessage, env renderEnvironment) ([]slackapi.Block, error) {
+	substituted, err := substituteTemplateTokens(raw, env)
 	if err != nil {
 		return nil, err
 	}
-	if text == "" && optional {
-		return nil, nil
+	var blocks slackapi.Blocks
+	if err := json.Unmarshal(substituted, &blocks); err != nil {
+		return nil, fmt.Errorf("decode blocks: %w", err)
 	}
-	if text == "" {
-		return nil, errors.New("text must not be empty")
-	}
-	if utf8.RuneCountInString(text) > limit {
-		return nil, fmt.Errorf("text exceeds %d character limit", limit)
-	}
-	if source.Type == "mrkdwn" {
-		return &slackapi.TextBlockObject{Type: source.Type, Text: text, Verbatim: source.Verbatim}, nil
-	}
-	return &slackapi.TextBlockObject{Type: source.Type, Text: text, Emoji: source.Emoji, Verbatim: source.Verbatim}, nil
+	return blocks.BlockSet, nil
 }
 
-func resolveString(source string, env renderEnvironment, optional bool) (string, error) {
-	token, isToken, err := parseTemplateString(source)
+func compileRawText(raw json.RawMessage, env renderEnvironment, limit int) (*slackapi.TextBlockObject, error) {
+	substituted, err := substituteTemplateTokens(raw, env)
 	if err != nil {
-		return "", err
+		return nil, err
+	}
+	var text slackapi.TextBlockObject
+	if err := json.Unmarshal(substituted, &text); err != nil {
+		return nil, fmt.Errorf("decode text: %w", err)
+	}
+	if err := validateGenericText(&text, limit); err != nil {
+		return nil, err
+	}
+	return &text, nil
+}
+
+// substituteTemplateTokens walks the template's JSON as a generic tree and
+// resolves every {{value.x}}/{{options.x}} placeholder it finds, then
+// re-marshals the tree. Because a replacement value is inserted into the
+// parsed tree and re-serialized by encoding/json (never spliced into raw
+// text), a value containing '"', '{', or '}' can never break out of its
+// JSON string context and alter block structure.
+func substituteTemplateTokens(raw json.RawMessage, env renderEnvironment) (json.RawMessage, error) {
+	var tree any
+	if err := json.Unmarshal(raw, &tree); err != nil {
+		return nil, err
+	}
+	substituted, err := substituteNode(tree, env)
+	if err != nil {
+		return nil, err
+	}
+	return json.Marshal(substituted)
+}
+
+// literalOnlyKeys names the JSON object keys that must always be a fixed,
+// developer-chosen literal and must never be substituted from a placeholder:
+// they either drive slack-go's own type dispatch ("type") or this project's
+// action-routing allowlist ("action_id", "block_id", "callback_id").
+var literalOnlyKeys = map[string]bool{
+	"type":        true,
+	"action_id":   true,
+	"block_id":    true,
+	"callback_id": true,
+}
+
+func substituteNode(node any, env renderEnvironment) (any, error) {
+	switch v := node.(type) {
+	case string:
+		return substituteStringLeaf(v, env)
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		var initialOptionRaw any
+		hasInitialOption := false
+		for key, val := range v {
+			if key == "$if" {
+				continue
+			}
+			if key == "initial_option" {
+				initialOptionRaw = val
+				hasInitialOption = true
+				continue
+			}
+			if literalOnlyKeys[key] {
+				literal, ok := val.(string)
+				if !ok {
+					return nil, fmt.Errorf("%q must be a string", key)
+				}
+				if err := rejectPlaceholder(literal, key); err != nil {
+					return nil, err
+				}
+				out[key] = literal
+				continue
+			}
+			resolved, err := substituteNode(val, env)
+			if err != nil {
+				return nil, err
+			}
+			out[key] = resolved
+		}
+		if hasInitialOption {
+			resolved, err := resolveInitialOption(initialOptionRaw, out["options"], env)
+			if err != nil {
+				return nil, err
+			}
+			if resolved != nil {
+				out["initial_option"] = resolved
+			}
+		}
+		return out, nil
+	case []any:
+		out := make([]any, 0, len(v))
+		for _, item := range v {
+			if obj, ok := item.(map[string]any); ok {
+				if condRaw, present := obj["$if"]; present {
+					cond, ok := condRaw.(string)
+					if !ok || cond != "is_external_agent" {
+						return nil, fmt.Errorf("block has unknown condition %v", condRaw)
+					}
+					if !env.isExternalAgent {
+						continue
+					}
+				}
+			}
+			if s, ok := item.(string); ok && isCollectionToken(s) {
+				value, flatten, err := resolveCollectionToken(s, env)
+				if err != nil {
+					return nil, err
+				}
+				if flatten {
+					out = append(out, value.([]any)...)
+					continue
+				}
+				out = append(out, value)
+				continue
+			}
+			resolved, err := substituteNode(item, env)
+			if err != nil {
+				return nil, err
+			}
+			out = append(out, resolved)
+		}
+		return out, nil
+	default:
+		return v, nil
+	}
+}
+
+func substituteStringLeaf(s string, env renderEnvironment) (any, error) {
+	token, isToken, err := parseTemplateString(s)
+	if err != nil {
+		return nil, err
 	}
 	if !isToken {
-		return source, nil
+		return s, nil
 	}
-	if token.Kind != tokenValue {
-		return "", errors.New("collection token is only valid at a registered collection position")
+	switch token.Kind {
+	case tokenValue:
+		return resolveScalar(token.Key, env)
+	case tokenOptions:
+		value, flatten, err := resolveCollectionToken(s, env)
+		if err != nil {
+			return nil, err
+		}
+		if flatten {
+			return nil, fmt.Errorf("collection %q must be a direct blocks array element", token.Key)
+		}
+		return value, nil
+	default:
+		return nil, fmt.Errorf("unknown placeholder kind for %q", s)
 	}
-	if _, ok := scalarKeysByTemplate[env.templateName][token.Key]; !ok {
-		return "", fmt.Errorf("unknown scalar placeholder %q", token.Key)
+}
+
+func isCollectionToken(s string) bool {
+	token, isToken, err := parseTemplateString(s)
+	return err == nil && isToken && token.Kind == tokenOptions
+}
+
+// resolveScalar resolves a {{value.KEY}} placeholder. builder_modal's
+// scalars are the imperative-builder's preserved-draft values and may
+// legitimately be empty (first-open, no prior draft); every other
+// template's scalars back displayed text or interactive payloads and must
+// resolve to a non-empty value.
+func resolveScalar(key string, env renderEnvironment) (string, error) {
+	if _, ok := scalarKeysByTemplate[env.templateName][key]; !ok {
+		return "", fmt.Errorf("unknown scalar placeholder %q", key)
 	}
-	value := env.values[token.Key]
+	value, supplied := env.values[key]
+	if !supplied {
+		return "", fmt.Errorf("scalar placeholder %q has no supplied value", key)
+	}
 	if env.templateName == "builder_modal" {
-		switch token.Key {
+		switch key {
 		case "agent_type":
 			if value == "" {
 				value = string(env.kind)
@@ -569,11 +414,175 @@ func resolveString(source string, env renderEnvironment, optional bool) (string,
 				value = strconv.Itoa(domain.DefaultExternalAgentTimeoutSeconds)
 			}
 		}
+		return value, nil
 	}
-	if value == "" && !optional {
-		return "", fmt.Errorf("scalar placeholder %q resolved to an empty value", token.Key)
+	if value == "" {
+		return "", fmt.Errorf("scalar placeholder %q resolved to an empty value", key)
 	}
 	return value, nil
+}
+
+func substituteTopLevelString(s string, env renderEnvironment) (string, error) {
+	token, isToken, err := parseTemplateString(s)
+	if err != nil {
+		return "", err
+	}
+	if !isToken {
+		return s, nil
+	}
+	if token.Kind != tokenValue {
+		return "", fmt.Errorf("placeholder %q is not valid here", s)
+	}
+	return resolveScalar(token.Key, env)
+}
+
+// resolveInitialOption resolves a select-like element's "initial_option"
+// field. It is a {{value.KEY}} placeholder naming a scalar; the resolved
+// value is looked up by "value" among the element's own (already resolved)
+// "options" array, falling back to the first option when absent, matching
+// the imperative builder's preserved-draft behavior.
+func resolveInitialOption(raw any, options any, env renderEnvironment) (any, error) {
+	s, isString := raw.(string)
+	if !isString {
+		return substituteNode(raw, env)
+	}
+	token, isToken, err := parseTemplateString(s)
+	if err != nil {
+		return nil, err
+	}
+	if !isToken {
+		return s, nil
+	}
+	if token.Kind != tokenValue {
+		return nil, fmt.Errorf("initial_option must use a value placeholder, got %q", s)
+	}
+	value, err := resolveScalar(token.Key, env)
+	if err != nil {
+		return nil, err
+	}
+	if value == "" {
+		return nil, nil
+	}
+	optionList, _ := options.([]any)
+	for _, item := range optionList {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		if obj["value"] == value {
+			return obj, nil
+		}
+	}
+	if len(optionList) > 0 {
+		return optionList[0], nil
+	}
+	return nil, nil
+}
+
+// resolveCollectionToken resolves a {{options.KEY}} placeholder. This
+// remains a small, explicit, named set: each key is a call-site-specific
+// data shape (provider model choices, a dynamic run of YAML preview
+// sections, a dynamic run of suggested prompts), not a generic mechanism.
+// flatten reports whether value is a []any of blocks meant to replace a
+// single blocks-array slot with multiple blocks.
+func resolveCollectionToken(s string, env renderEnvironment) (value any, flatten bool, err error) {
+	token, isToken, err := parseTemplateString(s)
+	if err != nil {
+		return nil, false, err
+	}
+	if !isToken || token.Kind != tokenOptions {
+		return nil, false, fmt.Errorf("%q is not a collection token", s)
+	}
+	switch token.Key {
+	case "model":
+		if env.templateName != "builder_modal" {
+			return nil, false, fmt.Errorf("collection %q is not valid outside builder_modal", token.Key)
+		}
+		options, err := buildModelOptions(env)
+		if err != nil {
+			return nil, false, err
+		}
+		return options, false, nil
+	case "preview_yaml_parts":
+		if env.templateName != "agent_preview" {
+			return nil, false, fmt.Errorf("collection %q is not valid outside agent_preview", token.Key)
+		}
+		blocks, err := buildYAMLPreviewBlocks(env)
+		if err != nil {
+			return nil, false, err
+		}
+		return blocks, true, nil
+	case "suggested_prompts":
+		if env.templateName != "onboarding_message" {
+			return nil, false, fmt.Errorf("collection %q is not valid outside onboarding_message", token.Key)
+		}
+		blocks, err := buildSuggestedPromptBlocks(env)
+		if err != nil {
+			return nil, false, err
+		}
+		return blocks, true, nil
+	default:
+		return nil, false, fmt.Errorf("unknown collection placeholder %q", token.Key)
+	}
+}
+
+func buildModelOptions(env renderEnvironment) ([]any, error) {
+	profiles := builderProfilesForKind(env.kind, env.profiles)
+	options := make([]any, 0, len(profiles))
+	for _, profile := range profiles {
+		if strings.TrimSpace(profile.Reference) == "" {
+			return nil, errors.New("provider profile reference must not be empty")
+		}
+		options = append(options, map[string]any{
+			"text":  map[string]any{"type": "plain_text", "text": profile.Reference, "emoji": false},
+			"value": profile.Reference,
+		})
+	}
+	if len(options) == 0 {
+		return nil, errors.New("options.model has no compatible provider profiles")
+	}
+	return options, nil
+}
+
+func buildYAMLPreviewBlocks(env renderEnvironment) ([]any, error) {
+	blocks := make([]any, 0, len(env.previewYAMLParts))
+	for index, value := range env.previewYAMLParts {
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("preview_yaml_parts[%d] must not be empty", index)
+		}
+		if utf8.RuneCountInString(value) > builderBlockTextLimit {
+			return nil, fmt.Errorf("preview_yaml_parts[%d] exceeds %d character limit", index, builderBlockTextLimit)
+		}
+		blocks = append(blocks, map[string]any{
+			"type": "section",
+			"text": map[string]any{"type": "mrkdwn", "text": value},
+		})
+	}
+	return blocks, nil
+}
+
+func buildSuggestedPromptBlocks(env renderEnvironment) ([]any, error) {
+	if len(env.suggestedPrompts) > 5 {
+		return nil, errors.New("suggested_prompts exceeds five items")
+	}
+	blocks := make([]any, 0, len(env.suggestedPrompts))
+	for index, value := range env.suggestedPrompts {
+		if strings.TrimSpace(value) == "" {
+			return nil, fmt.Errorf("suggested_prompts[%d] must not be empty", index)
+		}
+		if utf8.RuneCountInString(value) > 200 || strings.ContainsAny(value, "\r\n\x00") {
+			return nil, fmt.Errorf("suggested_prompts[%d] is not a valid suggested prompt", index)
+		}
+		text := "- " + value
+		if utf8.RuneCountInString(text) > maxRendererCompositionTextLength {
+			return nil, fmt.Errorf("suggested_prompts[%d] exceeds %d character limit", index, maxRendererCompositionTextLength)
+		}
+		blocks = append(blocks, map[string]any{
+			"type": "section",
+			"text": map[string]any{"type": "mrkdwn", "text": text},
+		})
+	}
+	return blocks, nil
 }
 
 func builderProfilesForKind(kind domain.AgentKind, profiles []BuilderProviderProfile) []BuilderProviderProfile {
@@ -590,32 +599,53 @@ func builderProfilesForKind(kind domain.AgentKind, profiles []BuilderProviderPro
 	return filtered
 }
 
-func validateCompiledView(templateName string, view slackapi.ModalViewRequest) error {
-	if view.Type != slackapi.VTModal || view.Title == nil {
-		return errors.New("compiled modal root is invalid")
+// validateGenericText applies this project's default text-length ceiling. It
+// is not an attempt to re-implement Slack's exact per-field limits (Slack's
+// API is authoritative there); it is a cheap defense-in-depth cap shared by
+// every text-bearing Block Kit type, known and future.
+func validateGenericText(text *slackapi.TextBlockObject, limit int) error {
+	if text == nil {
+		return errors.New("text object is required")
 	}
-	if err := validateCompiledText(view.Title, maxRendererModalTitleLength, "title"); err != nil {
-		return err
+	if text.Type != "plain_text" && text.Type != "mrkdwn" {
+		return fmt.Errorf("text has invalid type %q", text.Type)
 	}
-	if view.Submit != nil {
-		if err := validateCompiledText(view.Submit, maxRendererModalSubmitCloseLength, "submit"); err != nil {
-			return err
-		}
+	if text.Text == "" {
+		return errors.New("text must not be empty")
 	}
-	if view.Close != nil {
-		if err := validateCompiledText(view.Close, maxRendererModalSubmitCloseLength, "close"); err != nil {
-			return err
-		}
+	if utf8.RuneCountInString(text.Text) > limit {
+		return fmt.Errorf("text exceeds %d character limit", limit)
 	}
-	return validateCompiledBlocks(templateName, view.Blocks.BlockSet, true)
+	return nil
 }
 
+// validateCompiledBlocks is the small, mostly type-agnostic validation pass
+// that runs after slack-go has decoded a template's substituted JSON. It
+// enforces what is specific to this project's security posture (duplicate
+// or unregistered block/action IDs, the message-surface input restriction,
+// block-count limits) via a generic reflection walk (validateCompiledNode)
+// that works for any block or element slack-go knows how to decode -
+// including ones this file never names. A few historically load-bearing,
+// already-tested exact limits (section text/fields, button text/value,
+// option text/value) are kept as explicit cases so existing behavior does
+// not regress; everything else relies on slack-go's decode plus Slack's own
+// API to catch a malformed field.
 func validateCompiledBlocks(templateName string, blocks []slackapi.Block, modal bool) error {
+	limit := maxBlocksPerMessage
+	if modal {
+		limit = maxRendererBlocksPerModal
+	}
+	if len(blocks) > limit {
+		return fmt.Errorf("blocks exceed %d limit", limit)
+	}
 	blockIDs := make(map[string]struct{}, len(blocks))
 	actionIDs := make(map[string]struct{})
 	for index, block := range blocks {
 		if block == nil {
 			return fmt.Errorf("compiled block %d is nil", index)
+		}
+		if !modal && block.BlockType() == slackapi.MBTInput {
+			return errors.New("input blocks are not valid on message surface")
 		}
 		blockID := block.ID()
 		if blockID != "" {
@@ -626,164 +656,179 @@ func validateCompiledBlocks(templateName string, blocks []slackapi.Block, modal 
 				return fmt.Errorf("duplicate compiled block ID %q", blockID)
 			}
 			blockIDs[blockID] = struct{}{}
+			allowed := allowedMessageBlockIDs
+			if modal {
+				allowed = allowedBuilderBlockIDs
+			}
+			if !allowed[blockID] {
+				return fmt.Errorf("unregistered compiled block ID %q", blockID)
+			}
 		}
-		if modal {
-			if blockID != "" && !allowedBuilderBlockIDs[blockID] {
-				return fmt.Errorf("unregistered compiled modal block ID %q", blockID)
-			}
-		} else if blockID != "" && !allowedMessageBlockIDs[blockID] {
-			return fmt.Errorf("unregistered compiled message block ID %q", blockID)
-		}
-
-		switch typed := block.(type) {
-		case *slackapi.SectionBlock:
-			if len(typed.Fields) > maxRendererSectionFields {
-				return fmt.Errorf("section exceeds %d fields", maxRendererSectionFields)
-			}
-			if typed.Text != nil {
-				limit := maxRendererCompositionTextLength
-				if templateName == "agent_preview" && typed.Text.Type == "mrkdwn" {
-					limit = builderBlockTextLimit
-				}
-				if err := validateCompiledText(typed.Text, limit, "section.text"); err != nil {
-					return err
-				}
-			}
-			for _, field := range typed.Fields {
-				if err := validateCompiledText(field, maxRendererSectionFieldLength, "section.fields"); err != nil {
-					return err
-				}
-			}
-			if typed.Accessory != nil {
-				if err := validateCompiledAccessory(templateName, typed.Accessory, modal, &actionIDs); err != nil {
-					return err
-				}
-			}
-		case *slackapi.InputBlock:
-			if !modal {
-				return errors.New("input blocks are not valid on message surface")
-			}
-			if err := validateCompiledText(typed.Label, maxRendererCompositionTextLength, "input.label"); err != nil {
-				return err
-			}
-			if typed.Hint != nil {
-				if err := validateCompiledText(typed.Hint, maxRendererCompositionTextLength, "input.hint"); err != nil {
-					return err
-				}
-			}
-			switch typed.Element.(type) {
-			case *slackapi.PlainTextInputBlockElement, *slackapi.SelectBlockElement:
-			default:
-				return errors.New("input block element type is not supported by its parent")
-			}
-			if err := validateCompiledElement(typed.Element, modal, &actionIDs); err != nil {
-				return err
-			}
-		case *slackapi.ActionBlock:
-			if typed.Elements == nil || len(typed.Elements.ElementSet) == 0 {
-				return errors.New("compiled action block has no elements")
-			}
-			if len(typed.Elements.ElementSet) > maxRendererActionElements {
-				return fmt.Errorf("action block exceeds %d elements", maxRendererActionElements)
-			}
-			for _, element := range typed.Elements.ElementSet {
-				switch element.(type) {
-				case *slackapi.ButtonBlockElement, *slackapi.SelectBlockElement:
-				default:
-					return errors.New("action block element type is not supported by its parent")
-				}
-				if err := validateCompiledElement(element, modal, &actionIDs); err != nil {
-					return err
-				}
-			}
-		default:
-			return fmt.Errorf("compiled block type %T is not allowed", block)
+		if err := validateCompiledNode(reflect.ValueOf(block), templateName, modal, false, &actionIDs); err != nil {
+			return fmt.Errorf("blocks[%d]: %w", index, err)
 		}
 	}
 	return nil
 }
 
-func validateCompiledAccessory(templateName string, accessory *slackapi.Accessory, modal bool, actionIDs *map[string]struct{}) error {
-	if accessory == nil {
+func validateCompiledNode(
+	v reflect.Value,
+	templateName string,
+	modal bool,
+	allowBuilderStateActionID bool,
+	actionIDs *map[string]struct{},
+) error {
+	if !v.IsValid() {
 		return nil
 	}
-	if accessory.ButtonElement != nil {
-		return validateCompiledElement(accessory.ButtonElement, modal, actionIDs)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			return nil
+		}
+		return validateCompiledNode(v.Elem(), templateName, modal, allowBuilderStateActionID, actionIDs)
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			if err := validateCompiledNode(v.Index(i), templateName, modal, false, actionIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Map:
+		for _, key := range v.MapKeys() {
+			if err := validateCompiledNode(v.MapIndex(key), templateName, modal, false, actionIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Struct:
+		if err := validateCompiledStruct(v, templateName); err != nil {
+			return err
+		}
+		if _, ok := v.Interface().(slackapi.InputBlock); ok && !modal {
+			return errors.New("input blocks are not valid on message surface")
+		}
+		if field := v.FieldByName("ActionID"); field.IsValid() && field.Kind() == reflect.String {
+			if err := validateCompiledActionID(field.String(), modal, allowBuilderStateActionID, actionIDs); err != nil {
+				return err
+			}
+		}
+		input, isInput := v.Interface().(slackapi.InputBlock)
+		for i := 0; i < v.NumField(); i++ {
+			fieldType := v.Type().Field(i)
+			if !fieldType.IsExported() {
+				continue
+			}
+			allowStateActionID := isInput && fieldType.Name == "Element" && !inputElementDispatches(input)
+			if err := validateCompiledNode(v.Field(i), templateName, modal, allowStateActionID, actionIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return nil
 	}
-	if accessory.SelectElement != nil {
-		return validateCompiledElement(accessory.SelectElement, modal, actionIDs)
-	}
-	if accessory.PlainTextInputElement != nil {
-		return errors.New("plain text input is not valid as a section accessory")
-	}
-	return fmt.Errorf("compiled accessory for %s is not allowed", templateName)
 }
 
-func validateCompiledElement(element slackapi.BlockElement, modal bool, actionIDs *map[string]struct{}) error {
-	if element == nil {
-		return errors.New("compiled element is nil")
+func validateCompiledStruct(v reflect.Value, templateName string) error {
+	switch typed := v.Interface().(type) {
+	case slackapi.UnknownBlock:
+		return fmt.Errorf("unsupported block type %q", typed.Type)
+	case slackapi.UnknownBlockElement:
+		return fmt.Errorf("unsupported block element type %q", typed.Type)
+	case slackapi.TextBlockObject:
+		limit := maxRendererCompositionTextLength
+		if templateName == "agent_preview" && typed.Type == "mrkdwn" {
+			limit = builderBlockTextLimit
+		}
+		return validateGenericText(&typed, limit)
+	case slackapi.OptionBlockObject:
+		return validateCompiledOption(&typed)
+	case slackapi.ButtonBlockElement:
+		return validateCompiledButton(&typed)
+	case slackapi.SectionBlock:
+		return validateCompiledSection(&typed, templateName)
+	case slackapi.PlainTextInputBlockElement:
+		return validateCompiledPlainTextInput(&typed)
 	}
-	var actionID string
-	switch typed := element.(type) {
-	case *slackapi.PlainTextInputBlockElement:
-		if !modal {
-			return errors.New("input elements are not valid on message surface")
+	return nil
+}
+
+func validateCompiledSection(section *slackapi.SectionBlock, templateName string) error {
+	if len(section.Fields) > maxRendererSectionFields {
+		return fmt.Errorf("section exceeds %d fields", maxRendererSectionFields)
+	}
+	if section.Text != nil {
+		limit := maxRendererCompositionTextLength
+		if templateName == "agent_preview" && section.Text.Type == "mrkdwn" {
+			limit = builderBlockTextLimit
 		}
-		actionID = typed.ActionID
-		if typed.MaxLength > maxRendererPlainTextInputLength {
-			return fmt.Errorf("input max_length exceeds %d", maxRendererPlainTextInputLength)
-		}
-		if typed.MaxLength > 0 && utf8.RuneCountInString(typed.InitialValue) > typed.MaxLength {
-			return errors.New("input initial value exceeds max_length")
-		}
-		if typed.Placeholder != nil {
-			if err := validateCompiledText(typed.Placeholder, maxRendererCompositionTextLength, "input.placeholder"); err != nil {
-				return err
-			}
-		}
-	case *slackapi.SelectBlockElement:
-		actionID = typed.ActionID
-		if typed.Type != slackapi.OptTypeStatic {
-			return fmt.Errorf("select element type %q is not allowed", typed.Type)
-		}
-		if len(typed.Options) > maxRendererStaticSelectOptions {
-			return fmt.Errorf("select exceeds %d options", maxRendererStaticSelectOptions)
-		}
-		for _, option := range typed.Options {
-			if err := validateCompiledOption(option); err != nil {
-				return err
-			}
-		}
-		if typed.InitialOption != nil {
-			if err := validateCompiledOption(typed.InitialOption); err != nil {
-				return err
-			}
-		}
-		if typed.Placeholder != nil {
-			if err := validateCompiledText(typed.Placeholder, maxRendererCompositionTextLength, "select.placeholder"); err != nil {
-				return err
-			}
-		}
-	case *slackapi.ButtonBlockElement:
-		actionID = typed.ActionID
-		if typed.Text == nil {
-			return errors.New("button text is required")
-		}
-		if typed.Text.Type != "plain_text" {
-			return errors.New("button text must be plain_text")
-		}
-		if err := validateCompiledText(typed.Text, maxRendererButtonTextLength, "button.text"); err != nil {
+		if err := validateGenericText(section.Text, limit); err != nil {
 			return err
 		}
-		if utf8.RuneCountInString(typed.Value) > maxRendererOptionValueLength {
-			return fmt.Errorf("button value exceeds %d character limit", maxRendererOptionValueLength)
-		}
-		if err := validateSlackButtonURL(typed.URL, "button.url"); err != nil {
+	}
+	for _, field := range section.Fields {
+		if err := validateGenericText(field, maxRendererSectionFieldLength); err != nil {
 			return err
 		}
-	default:
-		return fmt.Errorf("compiled element type %T is not allowed", element)
 	}
+	return nil
+}
+
+func validateCompiledButton(button *slackapi.ButtonBlockElement) error {
+	if err := validateGenericText(button.Text, maxRendererButtonTextLength); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(button.Value) > maxRendererOptionValueLength {
+		return fmt.Errorf("button value exceeds %d character limit", maxRendererOptionValueLength)
+	}
+	return validateSlackButtonURL(button.URL, "button.url")
+}
+
+func validateCompiledOption(option *slackapi.OptionBlockObject) error {
+	if err := validateGenericText(option.Text, maxRendererOptionTextLength); err != nil {
+		return err
+	}
+	if utf8.RuneCountInString(option.Value) > maxRendererOptionValueLength {
+		return fmt.Errorf("option value exceeds %d character limit", maxRendererOptionValueLength)
+	}
+	if option.Description != nil {
+		if err := validateGenericText(option.Description, maxRendererOptionTextLength); err != nil {
+			return err
+		}
+	}
+	return validateSlackButtonURL(option.URL, "option.url")
+}
+
+func validateCompiledPlainTextInput(element *slackapi.PlainTextInputBlockElement) error {
+	if element.MaxLength > maxRendererPlainTextInputLength {
+		return fmt.Errorf("input max_length exceeds %d", maxRendererPlainTextInputLength)
+	}
+	if element.MaxLength > 0 && utf8.RuneCountInString(element.InitialValue) > element.MaxLength {
+		return errors.New("input initial value exceeds max_length")
+	}
+	return nil
+}
+
+func inputElementDispatches(input slackapi.InputBlock) bool {
+	if input.DispatchAction || input.Element == nil {
+		return input.DispatchAction
+	}
+	element := reflect.ValueOf(input.Element)
+	if element.Kind() == reflect.Pointer {
+		if element.IsNil() {
+			return false
+		}
+		element = element.Elem()
+	}
+	if element.Kind() != reflect.Struct {
+		return false
+	}
+	config := element.FieldByName("DispatchActionConfig")
+	return config.IsValid() && config.Kind() == reflect.Pointer && !config.IsNil()
+}
+
+func validateCompiledActionID(actionID string, modal, allowBuilderStateActionID bool, actionIDs *map[string]struct{}) error {
 	if err := validateLiteralID(actionID, "action_id"); err != nil {
 		return err
 	}
@@ -791,8 +836,12 @@ func validateCompiledElement(element slackapi.BlockElement, modal bool, actionID
 		return fmt.Errorf("duplicate compiled action ID %q", actionID)
 	}
 	(*actionIDs)[actionID] = struct{}{}
-	if modal {
-		if !allowedModalActionID(actionID) {
+	if modal && allowBuilderStateActionID {
+		if !allowedBuilderBlockIDs[actionID] {
+			return fmt.Errorf("unregistered compiled modal state action ID %q", actionID)
+		}
+	} else if modal {
+		if !allowedInteractiveActionIDs[actionID] {
 			return fmt.Errorf("unregistered compiled modal action ID %q", actionID)
 		}
 	} else if !allowedMessageActionIDs[actionID] {
@@ -801,39 +850,79 @@ func validateCompiledElement(element slackapi.BlockElement, modal bool, actionID
 	return nil
 }
 
-func validateCompiledOption(option *slackapi.OptionBlockObject) error {
-	if option == nil || option.Text == nil {
-		return errors.New("compiled option text is required")
+// collectInteractiveIDs extracts the callback ID, block IDs, and action IDs
+// from an already-compiled, already-validated block set via the same
+// generic reflection walk used by validateCompiledNode, so the catalog's ID
+// inventory (used by ValidateDispatcher) automatically covers any block or
+// element type without a dedicated collector per type.
+func collectInteractiveIDs(templateName, callbackID string, blocks []slackapi.Block, modal bool) (TemplateInteractiveIDs, error) {
+	ids := TemplateInteractiveIDs{}
+	if callbackID != "" {
+		appendTemplateID(&ids.ModalCallbacks, callbackID)
 	}
-	if err := validateCompiledText(option.Text, maxRendererOptionTextLength, "option.text"); err != nil {
-		return err
-	}
-	if utf8.RuneCountInString(option.Value) > maxRendererOptionValueLength {
-		return fmt.Errorf("option value exceeds %d character limit", maxRendererOptionValueLength)
-	}
-	if option.Description != nil {
-		if err := validateCompiledText(option.Description, maxRendererOptionTextLength, "option.description"); err != nil {
-			return err
+	actionIDs := map[string]struct{}{}
+	for _, block := range blocks {
+		if block == nil {
+			continue
+		}
+		if blockID := block.ID(); blockID != "" {
+			if modal {
+				appendTemplateID(&ids.BuilderBlocks, blockID)
+			} else {
+				appendTemplateID(&ids.MessageBlocks, blockID)
+			}
+		}
+		if err := collectActionIDs(reflect.ValueOf(block), modal, false, &actionIDs); err != nil {
+			return TemplateInteractiveIDs{}, err
 		}
 	}
-	if err := validateSlackButtonURL(option.URL, "option.url"); err != nil {
-		return err
+	for actionID := range actionIDs {
+		appendTemplateID(&ids.Actions, actionID)
 	}
-	return nil
+	return ids, nil
 }
 
-func validateCompiledText(text *slackapi.TextBlockObject, limit int, fieldPath string) error {
-	if text == nil {
-		return fmt.Errorf("%s is required", fieldPath)
+func collectActionIDs(v reflect.Value, modal, allowBuilderStateActionID bool, actionIDs *map[string]struct{}) error {
+	if !v.IsValid() {
+		return nil
 	}
-	if text.Type != "plain_text" && text.Type != "mrkdwn" {
-		return fmt.Errorf("%s has invalid type %q", fieldPath, text.Type)
+	switch v.Kind() {
+	case reflect.Pointer, reflect.Interface:
+		if v.IsNil() {
+			return nil
+		}
+		return collectActionIDs(v.Elem(), modal, allowBuilderStateActionID, actionIDs)
+	case reflect.Slice, reflect.Array:
+		for i := 0; i < v.Len(); i++ {
+			if err := collectActionIDs(v.Index(i), modal, false, actionIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Map:
+		for _, key := range v.MapKeys() {
+			if err := collectActionIDs(v.MapIndex(key), modal, false, actionIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	case reflect.Struct:
+		if field := v.FieldByName("ActionID"); field.IsValid() && field.Kind() == reflect.String && field.String() != "" && !allowBuilderStateActionID {
+			(*actionIDs)[field.String()] = struct{}{}
+		}
+		input, isInput := v.Interface().(slackapi.InputBlock)
+		for i := 0; i < v.NumField(); i++ {
+			fieldType := v.Type().Field(i)
+			if !fieldType.IsExported() {
+				continue
+			}
+			allowStateActionID := isInput && fieldType.Name == "Element" && !inputElementDispatches(input)
+			if err := collectActionIDs(v.Field(i), modal, allowStateActionID, actionIDs); err != nil {
+				return err
+			}
+		}
+		return nil
+	default:
+		return nil
 	}
-	if text.Text == "" {
-		return fmt.Errorf("%s must not be empty", fieldPath)
-	}
-	if utf8.RuneCountInString(text.Text) > limit {
-		return fmt.Errorf("%s exceeds %d character limit", fieldPath, limit)
-	}
-	return nil
 }

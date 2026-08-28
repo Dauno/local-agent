@@ -86,12 +86,6 @@ func TestTemplateCatalogRejectsInvalidDocuments(t *testing.T) {
 				files["templates/builder_modal.json"] = []byte(strings.Replace(string(files["templates/builder_modal.json"]), `"name": "builder_modal"`, `"name": "agent_preview"`, 1))
 			},
 		},
-		{
-			name: "unknown nested field",
-			edit: func(files map[string][]byte) {
-				files["templates/builder_modal.json"] = []byte(strings.Replace(string(files["templates/builder_modal.json"]), `"emoji": false`, `"emoji": false, "unexpected": true`, 1))
-			},
-		},
 	}
 
 	for _, test := range tests {

@@ -205,8 +205,8 @@ func TestRenderConfirmationBlocks(t *testing.T) {
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
 	blocks := renderConfirmationBlocks(delivery)
-	if len(blocks) != 4 {
-		t.Fatalf("renderConfirmationBlocks returned %d blocks, want 4", len(blocks))
+	if len(blocks) != 3 {
+		t.Fatalf("renderConfirmationBlocks returned %d blocks, want 3", len(blocks))
 	}
 }
 
@@ -223,27 +223,26 @@ func TestConfirmationV2RendersOrderedSafeBlocks(t *testing.T) {
 	if utf8.RuneCountInString(fallback) > maxFallbackText || strings.Contains(fallback, "<@U12345678>") {
 		t.Fatalf("fallback = %q", fallback)
 	}
-	if len(blocks) != 5 {
-		t.Fatalf("blocks = %d, want title, metadata, task, workstream, actions", len(blocks))
+	if len(blocks) != 4 {
+		t.Fatalf("blocks = %d, want card, task, workstream, actions", len(blocks))
 	}
-	title := blocks[0].(*slackapi.SectionBlock)
-	if title.Text.Type != slackapi.MarkdownType || title.Text.Text != "*Confirmation required*\nWrite &lt;@U12345678&gt; &amp; report" {
-		t.Fatalf("title block = %#v", title.Text)
+	card := blocks[0].(*slackapi.CardBlock)
+	if card.Title == nil || card.Title.Type != slackapi.MarkdownType || card.Title.Text != "*Confirmation required*\nWrite &lt;@U12345678&gt; &amp; report" {
+		t.Fatalf("card title = %#v", card.Title)
 	}
-	metadata := blocks[1].(*slackapi.SectionBlock)
-	if len(metadata.Fields) != 2 || metadata.Fields[0].Type != slackapi.MarkdownType || metadata.Fields[1].Type != slackapi.MarkdownType {
-		t.Fatalf("metadata block = %#v", metadata)
+	if card.Subtitle == nil || card.Subtitle.Type != slackapi.MarkdownType {
+		t.Fatalf("card subtitle = %#v", card.Subtitle)
 	}
-	task := blocks[2].(*slackapi.SectionBlock)
+	task := blocks[1].(*slackapi.SectionBlock)
 	if task.Text.Type != slackapi.PlainTextType || !strings.Contains(task.Text.Text, "Inspect &lt;@U12345678>") || len(task.Fields) != 1 || task.Fields[0].Type != slackapi.PlainTextType ||
 		task.Fields[0].Text != "Project: repo" {
 		t.Fatalf("task block = %#v", task)
 	}
-	workstream := blocks[3].(*slackapi.SectionBlock)
+	workstream := blocks[2].(*slackapi.SectionBlock)
 	if workstream.Text.Type != slackapi.PlainTextType || !strings.Contains(workstream.Text.Text, "Workstream data:") || !strings.Contains(workstream.Text.Text, "Workstream ID: ws-1") {
 		t.Fatalf("workstream block = %#v", workstream)
 	}
-	actions := blocks[4].(*slackapi.ActionBlock)
+	actions := blocks[3].(*slackapi.ActionBlock)
 	if len(actions.Elements.ElementSet) != 3 {
 		t.Fatalf("confirmation buttons = %d, want 3", len(actions.Elements.ElementSet))
 	}
@@ -270,7 +269,7 @@ func TestConfirmationV2RendersStructStyleTaskDescription(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := blocks[2].(*slackapi.SectionBlock)
+	task := blocks[1].(*slackapi.SectionBlock)
 	if task.Text.Text != "Proposed task:\nInspect the repository" {
 		t.Fatalf("task text = %q", task.Text.Text)
 	}
@@ -325,13 +324,12 @@ func TestConfirmationTemplateValidatesButtonTextAndURL(t *testing.T) {
 
 func confirmationV2TemplateContext() TemplateContext {
 	return TemplateContext{Values: map[string]string{
-		"title_summary":    "*Confirmation required*\nSummary",
-		"original_call_id": "*Call ID:*\n`call-1`",
-		"expires_at":       "*Expires:*\n15:04 UTC",
-		"project":          "Project: repo",
-		"proposed_task":    "Proposed task:\nInspect the repository",
-		"wrapper_call_id":  "wrapper-1",
-		"fallback_text":    "Confirmation required: Summary",
+		"title_summary":   "*Confirmation required*\nSummary",
+		"subtitle":        "*Call ID:*\n`call-1` · *Expires:* 15:04 UTC",
+		"project":         "Project: repo",
+		"proposed_task":   "Proposed task:\nInspect the repository",
+		"wrapper_call_id": "wrapper-1",
+		"fallback_text":   "Confirmation required: Summary",
 	}}
 }
 
@@ -421,7 +419,7 @@ func TestConfirmationPayloadPrecedesActionsAndAppearsInFallback(t *testing.T) {
 	if !strings.Contains(fallback, "complete proposed payload is shown") {
 		t.Fatalf("oversized fallback did not identify complete payload blocks: %q", fallback)
 	}
-	if len(blocks) != 5 {
+	if len(blocks) != 4 {
 		t.Fatalf("blocks = %d, want two payload blocks plus confirmation blocks", len(blocks))
 	}
 	for index := range 2 {
@@ -650,24 +648,23 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 		t.Fatalf("posted metadata payload = %#v", client.postedMetadata[0].EventPayload)
 	}
 	blocks := client.postedBlocks[0]
-	if len(blocks) != 4 {
-		t.Fatalf("confirmation blocks = %d, want 4", len(blocks))
+	if len(blocks) != 3 {
+		t.Fatalf("confirmation blocks = %d, want 3", len(blocks))
 	}
-	header := blocks[0].(*slackapi.SectionBlock)
-	if header.Text == nil || header.Text.Type != slackapi.MarkdownType || header.Text.Text != "*Confirmation required*\nWrite file" {
-		t.Fatalf("confirmation header = %#v", header.Text)
+	card := blocks[0].(*slackapi.CardBlock)
+	if card.Title == nil || card.Title.Type != slackapi.MarkdownType || card.Title.Text != "*Confirmation required*\nWrite file" {
+		t.Fatalf("confirmation card title = %#v", card.Title)
 	}
-	details := blocks[1].(*slackapi.SectionBlock)
-	if len(details.Fields) != 2 || details.Fields[0].Text != "*Call ID:*\n`orig-abc`" || details.Fields[1].Text != "*Expires:*\n15:30 UTC" {
-		t.Fatalf("confirmation details = %#v", details.Fields)
+	if card.Subtitle == nil || card.Subtitle.Text != "*Call ID:*\n`orig-abc` · *Expires:* 15:30 UTC" {
+		t.Fatalf("confirmation card subtitle = %#v", card.Subtitle)
 	}
-	projectTask := blocks[2].(*slackapi.SectionBlock)
+	projectTask := blocks[1].(*slackapi.SectionBlock)
 	if projectTask.Text == nil || projectTask.Text.Type != slackapi.PlainTextType || projectTask.Text.Text != "Proposed task: not provided" || len(projectTask.Fields) != 1 ||
 		projectTask.Fields[0].Type != slackapi.PlainTextType ||
 		projectTask.Fields[0].Text != "Project: not provided" {
 		t.Fatalf("confirmation project and task = %#v", projectTask)
 	}
-	actions := blocks[3].(*slackapi.ActionBlock)
+	actions := blocks[2].(*slackapi.ActionBlock)
 	if actions.BlockID != "confirmation_buttons" || len(actions.Elements.ElementSet) != 3 {
 		t.Fatalf("confirmation actions = %#v", actions)
 	}
@@ -794,7 +791,7 @@ func TestConfirmationPublisherRecoversPendingV1Prompt(t *testing.T) {
 		t.Fatalf("RecoverConfirmation(v1) = %#v, %t, %v", result, found, err)
 	}
 	_, blocks, err := compileConfirmationMessageForMode(mustEmbeddedRenderer(t), delivery, confirmationRenderModeV1)
-	if err != nil || len(blocks) != 3 {
+	if err != nil || len(blocks) != 2 {
 		t.Fatalf("v1 renderer compatibility = blocks:%d err:%v", len(blocks), err)
 	}
 }
