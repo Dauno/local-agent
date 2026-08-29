@@ -1,0 +1,12 @@
+{
+  "schema_version": 2,
+  "surface": "modal",
+  "title": {"type": "plain_text", "text": "Settings"},
+  "submit": "Save",
+  "close": {"type": "plain_text", "text": "Cancel"},
+  "callback_id": "local_agent.settings.submit",
+  "contract": {"inputs": {}, "actions": {}},
+  "layout": [
+    {"type": "section", "text": {"type": "plain_text", "text": "Choose a setting"}}
+  ]
+}

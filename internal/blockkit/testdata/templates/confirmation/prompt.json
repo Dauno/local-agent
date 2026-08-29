@@ -1,0 +1,43 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "contract": {
+    "inputs": {
+      "summary": {"type": "text", "required": true, "max": 200},
+      "call_id": {"type": "id", "required": true},
+      "expires_at": {"type": "timestamp", "required": true},
+      "project": {"type": "text", "default": "no informado"},
+      "details": {"type": "list<pair>"},
+      "payload": {"type": "longtext", "chunk": 20},
+      "advanced": {"type": "bool"},
+      "source_code": {"type": "code"},
+      "count": {"type": "number"},
+      "kind": {"type": "enum", "one_of": ["safe", "urgent"]}
+    },
+    "actions": {
+      "approve": {"id": "local_agent.confirm.approve", "text": "Aprobar", "style": "primary", "carries": "call_id"},
+      "reject": {"id": "local_agent.confirm.reject", "text": "Rechazar", "style": "danger", "carries": "call_id"}
+    }
+  },
+  "layout": [
+    {"type": "section", "text": {"type": "mrkdwn", "text": "{{summary}}"}},
+    {"type": "section", "fields": [
+      {"type": "mrkdwn", "text": "*Call ID:*\n{{call_id:code}}"},
+      {"type": "mrkdwn", "text": "*Expira:*\n{{expires_at:hhmm}} UTC"},
+      {"type": "plain_text", "text": "{{project}}"},
+      {"type": "plain_text", "text": "{{count}}"},
+      {"type": "mrkdwn", "text": "{{kind}}"},
+      {"type": "plain_text", "text": "{{source_code}}"},
+      {"type": "mrkdwn", "text": "{{summary:bold}}"},
+      {"type": "plain_text", "text": "{{expires_at:rfc3339}}"},
+      {"type": "mrkdwn", "text": "{{kind:upper}}"},
+      {"type": "plain_text", "text": "{{source_code:lower}}"}
+    ]},
+    {"region": "details", "each": {"type": "section", "text": {"type": "mrkdwn", "text": "*{{item.label}}*\n{{item.value}}"}}},
+    {"region": "payload", "each": {"type": "section", "text": {"type": "mrkdwn", "text": "{{item:code}}"}}},
+    {"type": "container", "title": {"type": "plain_text", "text": "Advanced"}, "child_blocks": [
+      {"region": "advanced", "when": "advanced", "block": {"type": "divider"}}
+    ]},
+    {"actions": ["approve", "reject"]}
+  ]
+}
