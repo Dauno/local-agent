@@ -152,7 +152,7 @@ func compileJobStatusErrorResponse(message string) (string, []slackapi.Block, er
 	if err != nil {
 		return "", nil, err
 	}
-	safe := truncateConfirmationText(message, maxRendererCompositionTextLength)
+	safe := truncateConfirmationText(message, maxContextText)
 	view, err := engine.Message(jobStatusErrorView{Message: safe})
 	if err != nil {
 		return "", nil, err

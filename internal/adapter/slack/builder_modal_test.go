@@ -353,3 +353,21 @@ func builderInputBlock(t *testing.T, view slackapi.ModalViewRequest, blockID str
 	t.Fatalf("input block %q not found", blockID)
 	return nil
 }
+
+func blockIDs(blocks []slackapi.Block) []string {
+	ids := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.ID() != "" {
+			ids = append(ids, block.ID())
+		}
+	}
+	return ids
+}
+
+func optionValues(options []*slackapi.OptionBlockObject) []string {
+	values := make([]string, 0, len(options))
+	for _, option := range options {
+		values = append(values, option.Value)
+	}
+	return values
+}

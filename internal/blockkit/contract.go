@@ -249,7 +249,7 @@ func (e *Engine) LayoutSHA256(name string) (string, bool) {
 	return doc.LayoutSHA256, true
 }
 
-// ActionIDs returns every action ID the catalog declares, deduplicated and sorted.
+// ActionIDs returns every action ID the templates declare, deduplicated and sorted.
 func (e *Engine) ActionIDs() []string {
 	if e == nil {
 		return nil
@@ -258,6 +258,25 @@ func (e *Engine) ActionIDs() []string {
 	for _, doc := range e.templates {
 		for _, action := range doc.Actions {
 			seen[action.ID] = struct{}{}
+		}
+	}
+	ids := make([]string, 0, len(seen))
+	for id := range seen {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return ids
+}
+
+// CallbackIDs returns every modal callback ID the templates declare, deduplicated and sorted.
+func (e *Engine) CallbackIDs() []string {
+	if e == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	for _, doc := range e.templates {
+		if doc.CallbackID != "" {
+			seen[doc.CallbackID] = struct{}{}
 		}
 	}
 	ids := make([]string, 0, len(seen))

@@ -277,7 +277,7 @@ func TestJobStatusResponseRespectsBlockKitLimits(t *testing.T) {
 	if !blockkit.Reachable(message, "界") {
 		t.Fatal("long job ID did not reach the rendered view")
 	}
-	tooLong, _, err := compileJobStatusErrorResponse(strings.Repeat("x", maxRendererCompositionTextLength*2))
+	tooLong, _, err := compileJobStatusErrorResponse(strings.Repeat("x", maxContextText*2))
 	if err != nil {
 		t.Fatalf("compileJobStatusErrorResponse() error = %v", err)
 	}

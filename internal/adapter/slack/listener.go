@@ -11,6 +11,7 @@ import (
 	"github.com/slack-go/slack/slackevents"
 	"github.com/slack-go/slack/socketmode"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -159,11 +160,11 @@ func (l *Listener) BuildInteractiveDispatcher() (*InteractiveDispatcher, error) 
 	return newListenerDispatcher(l)
 }
 
-// ValidateTemplateCatalog checks startup coverage from the old catalog and
-// additional view engines before Listener.Run receives Socket Mode events.
-func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog, additionalActionIDs ...string) error {
+// ValidateViewEngine checks that the dispatcher and declarative views cover
+// exactly the same interactive IDs before Socket Mode receives events.
+func (l *Listener) ValidateViewEngine(engine *blockkit.Engine) error {
 	if l == nil {
-		return errors.New("slack listener is required for template validation")
+		return errors.New("slack listener is required for view validation")
 	}
 	if l.dispatcherErr != nil {
 		return fmt.Errorf("initialize Slack interactive dispatcher: %w", l.dispatcherErr)
@@ -171,7 +172,36 @@ func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog, additionalA
 	if l.dispatcher == nil {
 		return errors.New("slack interactive dispatcher is required")
 	}
-	return catalog.ValidateDispatcher(l.dispatcher, additionalActionIDs...)
+	if engine == nil {
+		return errors.New("slack view engine is required")
+	}
+
+	declaredCallbacks := make(map[string]struct{})
+	for _, callbackID := range engine.CallbackIDs() {
+		declaredCallbacks[callbackID] = struct{}{}
+		if !l.dispatcher.HasView(callbackID) {
+			return fmt.Errorf("template callback ID %q has no registered view handler", callbackID)
+		}
+	}
+	for _, callbackID := range l.dispatcher.RegisteredViewIDs() {
+		if _, ok := declaredCallbacks[callbackID]; !ok {
+			return fmt.Errorf("registered callback ID %q is not declared by a template", callbackID)
+		}
+	}
+
+	declaredActions := make(map[string]struct{})
+	for _, actionID := range engine.ActionIDs() {
+		declaredActions[actionID] = struct{}{}
+		if !l.dispatcher.HasAction(actionID) {
+			return fmt.Errorf("template action ID %q has no registered block-action handler", actionID)
+		}
+	}
+	for _, actionID := range l.dispatcher.RegisteredActionIDs() {
+		if _, ok := declaredActions[actionID]; !ok {
+			return fmt.Errorf("registered action ID %q is not declared by a template", actionID)
+		}
+	}
+	return nil
 }
 
 // Run blocks until the context is canceled or the Socket Mode client stops.
@@ -501,7 +531,7 @@ func boundedInteractiveID(id string) string {
 	if id == "" {
 		return "<empty>"
 	}
-	if len(id) > maxRendererIDLength {
+	if len(id) > maxInteractiveIDLength {
 		return "<oversized>"
 	}
 	for _, r := range id {

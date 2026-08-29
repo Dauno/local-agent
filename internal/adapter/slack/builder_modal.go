@@ -1,10 +1,13 @@
 package slack
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
 	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
@@ -178,4 +181,18 @@ func containsBuilderProfile(profiles []BuilderProviderProfile, reference string)
 		}
 	}
 	return false
+}
+
+func builderProfilesForKind(kind domain.AgentKind, profiles []BuilderProviderProfile) []BuilderProviderProfile {
+	filtered := make([]BuilderProviderProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		if kind == domain.AgentKindLLM && profile.ProviderType == agentdef.ProviderTypeOpenAICompatible {
+			filtered = append(filtered, profile)
+		}
+		if kind == domain.AgentKindAgentCLI && profile.ProviderType == agentdef.ProviderTypeAgentCLI {
+			filtered = append(filtered, profile)
+		}
+	}
+	slices.SortFunc(filtered, func(a, b BuilderProviderProfile) int { return cmp.Compare(a.Reference, b.Reference) })
+	return filtered
 }

@@ -1246,11 +1246,11 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 		return models.redactor.Error(fmt.Errorf("initialize Slack interactive dispatcher: %w", dispatcherErr))
 	}
 	listener = listener.WithDispatcher(dispatcher)
-	catalog, catalogErr := slackadapter.EmbeddedTemplateCatalog()
-	if catalogErr != nil {
-		return models.redactor.Error(fmt.Errorf("validate embedded Slack UI templates: %w", catalogErr))
+	viewEngine, viewEngineErr := slackadapter.NewViewEngine()
+	if viewEngineErr != nil {
+		return models.redactor.Error(fmt.Errorf("validate embedded Slack UI templates: %w", viewEngineErr))
 	}
-	if err := listener.ValidateTemplateCatalog(catalog, infra.confirmationPublisher.ActionIDs()...); err != nil {
+	if err := listener.ValidateViewEngine(viewEngine); err != nil {
 		return models.redactor.Error(fmt.Errorf("validate Slack interactive dispatcher: %w", err))
 	}
 	modelName := models.rootModelName

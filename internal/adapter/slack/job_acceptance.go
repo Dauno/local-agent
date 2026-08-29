@@ -66,7 +66,7 @@ func compileJobAcceptedMessage(engine *blockkit.Engine, job domain.ExternalAgent
 		return "", nil, errors.New("job acceptance requires created and updated timestamps")
 	}
 
-	jobIDLimit := maxRendererCardSubtitleLength - utf8.RuneCountInString("*Job ID:* `") -
+	jobIDLimit := jobAcceptedSubtitleLimit - utf8.RuneCountInString("*Job ID:* `") -
 		utf8.RuneCountInString("` · *Status:* `"+status+"`")
 	message, err := engine.Message(jobAcceptedView{
 		JobID: truncateConfirmationText(job.ID, jobIDLimit), Status: status,

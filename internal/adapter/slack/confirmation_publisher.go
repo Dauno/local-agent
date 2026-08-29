@@ -122,14 +122,6 @@ func (p *ConfirmationPublisher) InitializationError() error {
 	return p.renderErr
 }
 
-// ActionIDs returns the action IDs declared by the confirmation view engine.
-func (p *ConfirmationPublisher) ActionIDs() []string {
-	if p == nil || p.engine == nil {
-		return nil
-	}
-	return p.engine.ActionIDs()
-}
-
 func (p *ConfirmationPublisher) PublishConfirmation(ctx context.Context, delivery port.ConfirmationDelivery) (port.ConfirmationPublishedResult, error) {
 	if p == nil || p.client == nil {
 		return port.ConfirmationPublishedResult{}, errors.New("slack posting client is required for confirmation publishing")
@@ -340,7 +332,7 @@ func buildConfirmationDisplay(delivery port.ConfirmationDelivery) confirmationDi
 		display.ProposedTask = confirmationPayloadString(payload, "objective")
 	}
 	display.ProposedTask = truncateConfirmationText(
-		display.ProposedTask, maxRendererCompositionTextLength-utf8.RuneCountInString("Proposed task:\n"),
+		display.ProposedTask, maxContextText-utf8.RuneCountInString("Proposed task:\n"),
 	)
 	return display
 }
@@ -486,7 +478,7 @@ func normalizeJobStatusAction(callback *slackapi.InteractionCallback) (domain.Co
 }
 
 func normalizeConfirmationActionContext(callback *slackapi.InteractionCallback, wrapperCallID string) (domain.ConfirmationInteractiveAction, bool) {
-	if wrapperCallID == "" || utf8.RuneCountInString(wrapperCallID) > maxRendererOptionValueLength {
+	if wrapperCallID == "" || utf8.RuneCountInString(wrapperCallID) > maxInteractiveValueLength {
 		return domain.ConfirmationInteractiveAction{}, false
 	}
 
