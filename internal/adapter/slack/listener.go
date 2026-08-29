@@ -159,9 +159,9 @@ func (l *Listener) BuildInteractiveDispatcher() (*InteractiveDispatcher, error) 
 	return newListenerDispatcher(l)
 }
 
-// ValidateTemplateCatalog checks startup coverage before Listener.Run starts
-// receiving Socket Mode events.
-func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog) error {
+// ValidateTemplateCatalog checks startup coverage from the old catalog and
+// additional view engines before Listener.Run receives Socket Mode events.
+func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog, additionalActionIDs ...string) error {
 	if l == nil {
 		return errors.New("slack listener is required for template validation")
 	}
@@ -171,7 +171,7 @@ func (l *Listener) ValidateTemplateCatalog(catalog *TemplateCatalog) error {
 	if l.dispatcher == nil {
 		return errors.New("slack interactive dispatcher is required")
 	}
-	return catalog.ValidateDispatcher(l.dispatcher)
+	return catalog.ValidateDispatcher(l.dispatcher, additionalActionIDs...)
 }
 
 // Run blocks until the context is canceled or the Socket Mode client stops.

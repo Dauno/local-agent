@@ -11,7 +11,7 @@ func TestEmbeddedTemplateCatalogLoadsExactlyRequiredNames(t *testing.T) {
 	if err != nil {
 		t.Fatalf("load catalog: %v", err)
 	}
-	want := []string{"agent_preview", "builder_modal", "confirmation_message_v2", "job_accepted_message", "onboarding_message"}
+	want := []string{"agent_preview", "builder_modal", "job_accepted_message", "onboarding_message"}
 	got := catalog.Names()
 	if strings.Join(got, "\x00") != strings.Join(want, "\x00") {
 		t.Fatalf("catalog names = %v, want %v", got, want)

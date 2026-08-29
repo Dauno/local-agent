@@ -458,6 +458,9 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 	history := slackadapter.NewHistoryReader(api, auth.UserID, slackTimeout, models.logger, cfg.Slack.PartLabels)
 	fileLoader := slackadapter.NewFileLoader(api, models.botToken, slackTimeout)
 	confirmationPublisher := slackadapter.NewConfirmationPublisher(api, auth.UserID, slackTimeout, models.logger)
+	if err := confirmationPublisher.InitializationError(); err != nil {
+		return nil, models.redactor.Error(fmt.Errorf("initialize confirmation view engine: %w", err))
+	}
 	blockPublisher := slackadapter.NewBlockPublisher(api, slackTimeout, models.logger)
 	standardPublisher := slackadapter.NewStandardPublisher(api, auth.UserID, slackTimeout, slackadapter.ResolveProgressLabels(cfg.Slack.StandardAgent.ProgressLabels))
 	artifactSvc := artifact.InMemoryService()
@@ -1247,7 +1250,7 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 	if catalogErr != nil {
 		return models.redactor.Error(fmt.Errorf("validate embedded Slack UI templates: %w", catalogErr))
 	}
-	if err := listener.ValidateTemplateCatalog(catalog); err != nil {
+	if err := listener.ValidateTemplateCatalog(catalog, infra.confirmationPublisher.ActionIDs()...); err != nil {
 		return models.redactor.Error(fmt.Errorf("validate Slack interactive dispatcher: %w", err))
 	}
 	modelName := models.rootModelName

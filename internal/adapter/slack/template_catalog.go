@@ -29,17 +29,15 @@ const templateSchemaVersion = 1
 var requiredTemplateNames = []string{
 	"agent_preview",
 	"builder_modal",
-	"confirmation_message_v2",
 	"job_accepted_message",
 	"onboarding_message",
 }
 
 var requiredTemplateSet = map[string]struct{}{
-	"agent_preview":           {},
-	"builder_modal":           {},
-	"confirmation_message_v2": {},
-	"job_accepted_message":    {},
-	"onboarding_message":      {},
+	"agent_preview":        {},
+	"builder_modal":        {},
+	"job_accepted_message": {},
+	"onboarding_message":   {},
 }
 
 // TemplateCatalog is the validated, immutable set of declarative Slack
@@ -131,9 +129,10 @@ func (c *TemplateCatalog) InteractiveIDs() TemplateInteractiveIDs {
 	return c.interactiveIDs
 }
 
-// ValidateDispatcher verifies catalog coverage and rejects registered IDs
-// outside the allowlist before Socket Mode starts.
-func (c *TemplateCatalog) ValidateDispatcher(dispatcher *InteractiveDispatcher) error {
+// ValidateDispatcher verifies catalog coverage and action IDs from additional
+// view engines before Socket Mode starts. It rejects registered IDs outside
+// the allowlists.
+func (c *TemplateCatalog) ValidateDispatcher(dispatcher *InteractiveDispatcher, additionalActionIDs ...string) error {
 	if c == nil {
 		return errors.New("template catalog is required for dispatcher validation")
 	}
@@ -149,12 +148,23 @@ func (c *TemplateCatalog) ValidateDispatcher(dispatcher *InteractiveDispatcher) 
 			return fmt.Errorf("template callback ID %q has no registered view handler", callbackID)
 		}
 	}
-	for _, actionID := range ids.Actions {
+	validateActionID := func(actionID, source string) error {
 		if !allowedInteractiveActionIDs[actionID] && !allowedMessageActionIDs[actionID] {
-			return fmt.Errorf("template action ID %q is not in the allowlist", actionID)
+			return fmt.Errorf("%s action ID %q is not in the allowlist", source, actionID)
 		}
 		if !dispatcher.HasAction(actionID) {
-			return fmt.Errorf("template action ID %q has no registered block-action handler", actionID)
+			return fmt.Errorf("%s action ID %q has no registered block-action handler", source, actionID)
+		}
+		return nil
+	}
+	for _, actionID := range ids.Actions {
+		if err := validateActionID(actionID, "template"); err != nil {
+			return err
+		}
+	}
+	for _, actionID := range additionalActionIDs {
+		if err := validateActionID(actionID, "engine"); err != nil {
+			return err
 		}
 	}
 	for _, blockID := range ids.BuilderBlocks {
@@ -173,7 +183,7 @@ func (c *TemplateCatalog) ValidateDispatcher(dispatcher *InteractiveDispatcher) 
 		}
 	}
 	for _, actionID := range dispatcher.RegisteredActionIDs() {
-		if !allowedInteractiveActionIDs[actionID] {
+		if !allowedInteractiveActionIDs[actionID] && !allowedMessageActionIDs[actionID] {
 			return fmt.Errorf("registered action ID %q is not in the allowlist", actionID)
 		}
 	}
@@ -260,10 +270,6 @@ var scalarKeysByTemplate = map[string]map[string]struct{}{
 	"builder_modal": {
 		"name": {}, "description": {}, "instruction": {}, "agent_type": {},
 		"model": {}, "execution_mode": {}, "timeout_seconds": {},
-	},
-	"confirmation_message_v2": {
-		"card_summary": {}, "subtitle": {}, "project": {},
-		"proposed_task": {}, "wrapper_call_id": {}, "fallback_text": {},
 	},
 	"job_accepted_message": {
 		"subtitle": {}, "created_at": {}, "updated_at": {},
@@ -475,12 +481,6 @@ func validateTemplateRepresentative(doc templateDocument) (TemplateInteractiveID
 	}
 	context := TemplateContext{Values: map[string]string{}}
 	switch doc.Name {
-	case "confirmation_message_v2":
-		context.Values = map[string]string{
-			"card_summary": "A confirmation summary", "subtitle": "*Call ID:*\n`call-1` · *Expires:* 00:00 UTC",
-			"project": "Project: workspace", "proposed_task": "Proposed task:\nInspect the repository",
-			"wrapper_call_id": "wrapper-1", "fallback_text": "Confirmation required: A confirmation summary",
-		}
 	case "job_accepted_message":
 		context.Values = map[string]string{
 			"subtitle": "*Job ID:* `job-1` · *Status:* `queued`", "created_at": "*Created:*\n2030-01-01T00:00:00Z",
@@ -532,7 +532,6 @@ var allowedBuilderBlockIDs = map[string]bool{
 }
 
 var allowedMessageBlockIDs = map[string]bool{
-	"confirmation_buttons":    true,
 	"builder_preview_actions": true,
 	"builder_launcher":        true,
 	"onboarding_actions":      true,

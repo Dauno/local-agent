@@ -148,19 +148,43 @@ func TestTemplateCatalogExtractsIDsAndValidatesDispatcherCoverage(t *testing.T) 
 	if !reflect.DeepEqual(ids.ModalCallbacks, []string{builderSubmitCallbackID}) {
 		t.Fatalf("modal callbacks = %v", ids.ModalCallbacks)
 	}
-	if !reflect.DeepEqual(ids.Actions, []string{"agent_type", "local_agent.builder.open", builderInstallActionID, approveActionID, rejectActionID, statusActionID, "local_agent.onboarding.describe"}) {
+	if !reflect.DeepEqual(ids.Actions, []string{"agent_type", "local_agent.builder.open", builderInstallActionID, "local_agent.onboarding.describe"}) {
 		t.Fatalf("actions = %v", ids.Actions)
 	}
 	if !reflect.DeepEqual(ids.BuilderBlocks, []string{"agent_type", "description", "execution_mode", "instruction", "model", "name", "timeout_seconds"}) {
 		t.Fatalf("builder blocks = %v", ids.BuilderBlocks)
 	}
-	if !reflect.DeepEqual(ids.MessageBlocks, []string{"builder_preview_actions", "confirmation_buttons", "onboarding_actions"}) {
+	if !reflect.DeepEqual(ids.MessageBlocks, []string{"builder_preview_actions", "onboarding_actions"}) {
 		t.Fatalf("message blocks = %v", ids.MessageBlocks)
 	}
 
 	listener := newListener(nil, NewRouter(testBot), nil)
-	if err := listener.ValidateTemplateCatalog(catalog); err != nil {
+	if err := listener.ValidateTemplateCatalog(catalog, approveActionID, rejectActionID, statusActionID); err != nil {
 		t.Fatalf("default listener dispatcher failed catalog validation: %v", err)
+	}
+
+	catalogRegistrations := []InteractiveRegistration{{
+		ID:        builderSubmitCallbackID,
+		EventType: InteractiveEventViewSubmission,
+		ViewHandler: func(context.Context, slackapi.InteractionCallback) (ViewDispatchResult, error) {
+			return ViewDispatchResult{}, nil
+		},
+	}}
+	for _, actionID := range ids.Actions {
+		catalogRegistrations = append(catalogRegistrations, InteractiveRegistration{
+			ID: actionID, EventType: InteractiveEventBlockActions,
+			ActionHandler: func(context.Context, slackapi.InteractionCallback) error { return nil },
+		})
+	}
+	catalogDispatcher, err := NewInteractiveDispatcher(catalogRegistrations)
+	if err != nil {
+		t.Fatalf("construct catalog-only dispatcher: %v", err)
+	}
+	if err := catalog.ValidateDispatcher(catalogDispatcher); err != nil {
+		t.Fatalf("catalog-only dispatcher failed validation: %v", err)
+	}
+	if err := catalog.ValidateDispatcher(catalogDispatcher, approveActionID); err == nil {
+		t.Fatal("dispatcher validation ignored an action declared only by the block kit engine")
 	}
 
 	missingView, err := NewInteractiveDispatcher([]InteractiveRegistration{

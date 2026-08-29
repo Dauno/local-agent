@@ -1,0 +1,35 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "contract": {
+    "inputs": {
+      "status": {"type": "enum", "required": true, "one_of": ["approved", "consumed", "rejected", "expired", "failed"]},
+      "summary": {"type": "text", "required": true},
+      "call_id": {"type": "id", "required": true},
+      "updated_at": {"type": "timestamp", "required": true},
+      "result": {"type": "longtext", "chunk": 2800}
+    },
+    "actions": {}
+  },
+  "layout": [
+    {
+      "type": "section",
+      "text": {"type": "mrkdwn", "text": "*Confirmation {{status}}*\n{{summary}}"}
+    },
+    {
+      "type": "section",
+      "fields": [
+        {"type": "mrkdwn", "text": "*Call ID:*\n{{call_id:code}}"},
+        {"type": "mrkdwn", "text": "*Status:*\n{{status}}"},
+        {"type": "mrkdwn", "text": "*Updated:*\n{{updated_at:hhmm}} UTC"}
+      ]
+    },
+    {
+      "region": "result",
+      "each": {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "Confirmation result:\n{{item}}"}
+      }
+    }
+  ]
+}
