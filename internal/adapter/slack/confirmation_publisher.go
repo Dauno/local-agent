@@ -292,7 +292,7 @@ func compileConfirmationMessageV2(engine *blockkit.Engine, delivery port.Confirm
 	message, err := engine.Message(confirmationPromptView{
 		Summary: delivery.Summary, CallID: delivery.OriginalCallID, WrapperCallID: delivery.WrapperCallID,
 		ExpiresAt: delivery.Expiry, Project: display.Project, Task: display.ProposedTask,
-		Workstream: display.WorkstreamData, Payload: delivery.Payload,
+		Workstream: display.WorkstreamData, Payload: display.Payload,
 	})
 	if err != nil {
 		return "", nil, err
@@ -325,6 +325,7 @@ type confirmationDisplay struct {
 	Project        string
 	ProposedTask   string
 	WorkstreamData []blockkit.Pair
+	Payload        string
 }
 
 func buildConfirmationDisplay(delivery port.ConfirmationDelivery) confirmationDisplay {
@@ -334,7 +335,7 @@ func buildConfirmationDisplay(delivery port.ConfirmationDelivery) confirmationDi
 
 	var payload map[string]jsontext.Value
 	if err := json.Unmarshal([]byte(delivery.Payload), &payload); err != nil {
-		return confirmationDisplay{ProposedTask: delivery.Payload}
+		return confirmationDisplay{Payload: delivery.Payload}
 	}
 	display := confirmationDisplay{
 		Project:        confirmationPayloadString(payload, "project"),
@@ -349,6 +350,9 @@ func buildConfirmationDisplay(delivery port.ConfirmationDelivery) confirmationDi
 	if display.ProposedTask == "" {
 		display.ProposedTask = confirmationPayloadString(payload, "objective")
 	}
+	display.ProposedTask = truncateConfirmationText(
+		display.ProposedTask, maxRendererCompositionTextLength-utf8.RuneCountInString("Proposed task:\n"),
+	)
 	return display
 }
 

@@ -231,6 +231,9 @@ func TestConfirmationPromptRendersSemanticValues(t *testing.T) {
 	if strings.Count(text, `"value":"wrapper-abc"`) != 3 {
 		t.Fatalf("confirmation action values = %s", text)
 	}
+	if strings.Contains(text, "Payload:") || strings.Contains(text, "workstream_id") {
+		t.Fatalf("JSON payload was rendered as raw confirmation content: %s", text)
+	}
 	if fallback == "" || strings.ContainsAny(fallback, "*`") || strings.Contains(fallback, "<@U12345678>") {
 		t.Fatalf("fallback = %q", fallback)
 	}
@@ -258,6 +261,21 @@ func TestConfirmationPromptUsesDefaultsAndOptionalRegions(t *testing.T) {
 	}
 }
 
+func TestConfirmationPromptRendersLongUnparsedPayload(t *testing.T) {
+	payload := strings.Repeat("abcdefghij_", 900)
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary", Payload: payload,
+		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	if !blockkit.Reachable(message, payload[:100]) || !blockkit.Reachable(message, payload[len(payload)-100:]) {
+		t.Fatal("long unparsed payload did not reach the rendered tree")
+	}
+}
+
 func TestConfirmationPromptChunksPayload(t *testing.T) {
 	payload := strings.Repeat("x", 2801)
 	_, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
@@ -276,6 +294,26 @@ func TestConfirmationPromptChunksPayload(t *testing.T) {
 	}
 	if got := strings.Count(string(encoded), `"type":"section"`); got < 4 {
 		t.Fatalf("payload render did not include both chunks: %s", encoded)
+	}
+}
+
+func TestConfirmationPromptTruncatesLongJSONTask(t *testing.T) {
+	longTask := strings.Repeat("task_", 700)
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary",
+		Payload: `{"project":"repo","task":"` + longTask + `"}`,
+		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	data, err := json.Marshal(message.Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "...") || strings.Contains(string(data), longTask) {
+		t.Fatalf("long JSON task was not bounded: %s", data)
 	}
 }
 
