@@ -2,12 +2,10 @@ package slack
 
 import (
 	"context"
-	"embed"
 	"encoding/json/jsontext"
 	"encoding/json/v2"
 	"errors"
 	"fmt"
-	"io/fs"
 	"regexp"
 	"strings"
 	"time"
@@ -102,15 +100,8 @@ func NewConfirmationPublisher(client *slackapi.Client, botUserID string, timeout
 	return newConfirmationPublisher(poster, botUserID, timeout, logger)
 }
 
-//go:embed views
-var confirmationViewsFS embed.FS
-
 func newConfirmationViewEngine() (*blockkit.Engine, error) {
-	rooted, err := fs.Sub(confirmationViewsFS, "views")
-	if err != nil {
-		return nil, err
-	}
-	return blockkit.New(rooted)
+	return newViewEngine()
 }
 
 func newConfirmationPublisher(client confirmationBlockClient, botUserID string, timeout time.Duration, logger port.Logger) *ConfirmationPublisher {

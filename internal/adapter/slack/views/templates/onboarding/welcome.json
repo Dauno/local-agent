@@ -1,0 +1,53 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "fallback": "Local Agent puede analizar proyectos, revisar errores, resumir contexto y ayudarte a crear agentes. Puedes abrir el formulario o describir una necesidad.",
+  "contract": {
+    "inputs": {
+      "builder_context": {"type": "code", "required": true},
+      "intro": {"type": "text", "required": true},
+      "describe_prompt": {"type": "text", "required": true},
+      "suggested_prompts": {"type": "list<pair>"}
+    },
+    "actions": {
+      "open": {"id": "local_agent.builder.open", "text": "Abrir formulario", "style": "primary", "carries": "builder_context"},
+      "describe": {"id": "local_agent.onboarding.describe", "text": "Describe lo que necesitas en un mensaje y trabajamos sobre ello.", "carries": "builder_context"}
+    }
+  },
+  "layout": [
+    {
+      "type": "section",
+      "text": {"type": "mrkdwn", "text": "{{intro}}"}
+    },
+    {
+      "type": "actions",
+      "block_id": "onboarding_actions",
+      "elements": [
+        {
+          "type": "button",
+          "action_id": "local_agent.builder.open",
+          "value": "{{builder_context}}",
+          "text": {"type": "plain_text", "text": "Abrir formulario", "emoji": false},
+          "style": "primary"
+        },
+        {
+          "type": "button",
+          "action_id": "local_agent.onboarding.describe",
+          "value": "{{builder_context}}",
+          "text": {"type": "plain_text", "text": "{{describe_prompt}}", "emoji": false}
+        }
+      ]
+    },
+    {
+      "type": "section",
+      "text": {"type": "mrkdwn", "text": "*Acciones comunes:*\n• Analiza un error o un proyecto.\n• Resume contexto y decisiones.\n• Prepara un plan verificable."}
+    },
+    {
+      "region": "suggested_prompts",
+      "each": {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "- {{item.value}}"}
+      }
+    }
+  ]
+}

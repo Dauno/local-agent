@@ -1,0 +1,41 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "contract": {
+    "inputs": {
+      "name": {"type": "text", "required": true},
+      "agent_class": {"type": "text", "required": true},
+      "provider_profile": {"type": "text", "required": true},
+      "execution_mode": {"type": "text", "required": true},
+      "timeout": {"type": "text", "required": true},
+      "sha256": {"type": "text", "required": true},
+      "draft_id": {"type": "id", "required": true},
+      "preview_yaml_parts": {"type": "longtext", "required": true, "chunk": 2900}
+    },
+    "actions": {
+      "request_install": {"id": "local_agent.builder.request_install", "text": "Solicitar instalación", "carries": "draft_id"}
+    }
+  },
+  "layout": [
+    {
+      "type": "section",
+      "text": {"type": "mrkdwn", "text": "*Previsualizacion del agente {{name:code}}*"}
+    },
+    {
+      "type": "section",
+      "text": {"type": "mrkdwn", "text": "*Clase:* {{agent_class:code}}\n*Runtime/perfil:* {{provider_profile:code}}\n*Ejecucion:* {{execution_mode:code}}\n*Timeout:* {{timeout:code}}"}
+    },
+    {
+      "region": "preview_yaml_parts",
+      "each": {
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": "```yaml\n{{item}}\n```"}
+      }
+    },
+    {
+      "type": "section",
+      "text": {"type": "mrkdwn", "text": "*SHA-256:* {{sha256:code}}"}
+    },
+    {"actions": ["request_install"]}
+  ]
+}

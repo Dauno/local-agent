@@ -14,6 +14,7 @@ import (
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -143,11 +144,11 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 		}
 		return nil
 	}
-	renderer, err := NewEmbeddedTemplateRenderer()
+	engine, err := newAgentPreviewEngine()
 	if err != nil {
-		return fmt.Errorf("initialize agent preview template renderer: %w", err)
+		return fmt.Errorf("initialize agent preview view engine: %w", err)
 	}
-	text, _, err := compileBuilderPreviewMessage(renderer, draftInput, preview.AgentDef, preview.YAML, preview.SHA256, draftID)
+	text, _, err := compileAgentPreviewMessage(engine, draftInput, preview.AgentDef, preview.YAML, preview.SHA256, draftID)
 	if err != nil {
 		return fmt.Errorf("render agent preview template: %w", err)
 	}
@@ -465,11 +466,13 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 	if p == nil || p.client == nil {
 		return errors.New("slack posting client is required")
 	}
-	renderer, err := NewEmbeddedTemplateRenderer()
-	if err != nil {
-		return fmt.Errorf("initialize agent preview template renderer: %w", err)
+	if p.previewEngineErr != nil || p.previewEngine == nil {
+		if p.previewEngineErr != nil {
+			return fmt.Errorf("initialize agent preview view engine: %w", p.previewEngineErr)
+		}
+		return errors.New("agent preview view engine is required")
 	}
-	fallbackText, blocks, err := compileBuilderPreviewMessage(renderer, draft, definition, yaml, sha256, draftID)
+	fallbackText, blocks, err := compileAgentPreviewMessage(p.previewEngine, draft, definition, yaml, sha256, draftID)
 	if err != nil {
 		return fmt.Errorf("render agent preview template: %w", err)
 	}
@@ -488,6 +491,22 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 		return errors.New("slack published agent preview without a message timestamp")
 	}
 	return nil
+}
+
+func compileAgentPreviewMessage(engine *blockkit.Engine, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) (string, []slackapi.Block, error) {
+	profile := draft.ProviderProfile
+	if profile == "" {
+		profile = draft.Model
+	}
+	message, err := engine.Message(agentPreviewView{
+		Name: draft.Name, AgentClass: definition.AgentClass, ProviderProfile: profile,
+		ExecutionMode: definition.ExecutionMode, Timeout: previewTimeout(definition.TimeoutSec),
+		SHA256: sha256, DraftID: draftID, PreviewYAML: yaml,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return message.FallbackText, message.Blocks, nil
 }
 
 func compileBuilderPreviewMessage(renderer *TemplateRenderer, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) (string, []slackapi.Block, error) {

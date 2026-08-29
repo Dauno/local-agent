@@ -333,8 +333,11 @@ func (c *fakeOnboardingBlockClient) PostBlocks(_ context.Context, channelID, _ s
 
 func TestOnboardingPublisherUsesTypedTemplateAndRecoveryMetadata(t *testing.T) {
 	client := &fakeOnboardingBlockClient{}
-	renderer := mustEmbeddedRenderer(t)
-	publisher := &StandardPublisher{client: client, blockClient: client, botUserID: "U00000001", renderer: renderer}
+	engine, err := newOnboardingEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	publisher := &StandardPublisher{client: client, blockClient: client, botUserID: "U00000001", onboardingEngine: engine}
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1700000000.000001")
 	request := port.OnboardingPublishRequest{
 		DeliveryID: "standard_onboarding:T12345678:U00000001", Actor: "U00000001", ConversationKey: key,

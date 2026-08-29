@@ -10,6 +10,7 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -70,13 +71,13 @@ func (c sdkStandardMessageClient) StandardMessages(ctx context.Context, channelI
 }
 
 type StandardPublisher struct {
-	client         standardMessageClient
-	blockClient    blockPostClient
-	botUserID      string
-	timeout        time.Duration
-	renderer       *TemplateRenderer
-	renderErr      error
-	progressLabels map[domain.ProgressState]string
+	client           standardMessageClient
+	blockClient      blockPostClient
+	botUserID        string
+	timeout          time.Duration
+	onboardingEngine *blockkit.Engine
+	renderErr        error
+	progressLabels   map[domain.ProgressState]string
 }
 
 func NewStandardPublisher(client *slackapi.Client, botUserID string, timeout time.Duration, progressLabels map[domain.ProgressState]string) *StandardPublisher {
@@ -86,8 +87,8 @@ func NewStandardPublisher(client *slackapi.Client, botUserID string, timeout tim
 		standard = sdkStandardMessageClient{client: client}
 		blocks = sdkPostClient{client: client}
 	}
-	renderer, renderErr := NewEmbeddedTemplateRenderer()
-	return &StandardPublisher{client: standard, blockClient: blocks, botUserID: botUserID, timeout: timeout, renderer: renderer, renderErr: renderErr, progressLabels: progressLabels}
+	engine, renderErr := newOnboardingEngine()
+	return &StandardPublisher{client: standard, blockClient: blocks, botUserID: botUserID, timeout: timeout, onboardingEngine: engine, renderErr: renderErr, progressLabels: progressLabels}
 }
 
 func (p *StandardPublisher) PublishProgress(ctx context.Context, target domain.ReplyTarget, operation domain.ProgressOperation) (port.PublishedResponse, error) {
@@ -193,21 +194,17 @@ func (p *StandardPublisher) PublishOnboarding(ctx context.Context, target domain
 	if err := validateOnboardingPrompts(request.SuggestedPrompts); err != nil {
 		return port.PublishedResponse{}, err
 	}
-	if p.renderErr != nil || p.renderer == nil {
+	if p.renderErr != nil || p.onboardingEngine == nil {
 		if p.renderErr != nil {
-			return port.PublishedResponse{}, fmt.Errorf("initialize onboarding template renderer: %w", p.renderErr)
+			return port.PublishedResponse{}, fmt.Errorf("initialize onboarding view engine: %w", p.renderErr)
 		}
-		return port.PublishedResponse{}, errors.New("onboarding template renderer is required")
+		return port.PublishedResponse{}, errors.New("onboarding view engine is required")
 	}
 	builderContext, err := encodeBuilderInteractionContext(request.Actor, request.ConversationKey)
 	if err != nil {
 		return port.PublishedResponse{}, fmt.Errorf("encode onboarding interaction context: %w", err)
 	}
-	prompts := make([]string, len(request.SuggestedPrompts))
-	for index, prompt := range request.SuggestedPrompts {
-		prompts[index] = neutralizeUnsafeControls(prompt)
-	}
-	fallback, blocks, err := compileOnboardingMessage(p.renderer, builderContext, prompts)
+	fallback, blocks, err := compileOnboardingViewMessage(p.onboardingEngine, builderContext, request.SuggestedPrompts)
 	if err != nil {
 		return port.PublishedResponse{}, fmt.Errorf("render onboarding message: %w", err)
 	}

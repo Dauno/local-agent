@@ -11,6 +11,7 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/secure"
@@ -77,14 +78,16 @@ type sleepFunc func(context.Context, time.Duration) error
 
 // Publisher implements port.ResponsePublisher using Slack chat.postMessage.
 type Publisher struct {
-	client     postClient
-	timeout    time.Duration
-	pace       time.Duration
-	sleep      sleepFunc
-	now        func() time.Time
-	logger     port.Logger
-	partLabels bool
-	channels   sync.Map
+	client           postClient
+	timeout          time.Duration
+	pace             time.Duration
+	sleep            sleepFunc
+	now              func() time.Time
+	logger           port.Logger
+	partLabels       bool
+	previewEngine    *blockkit.Engine
+	previewEngineErr error
+	channels         sync.Map
 }
 
 type channelPace struct {
@@ -101,10 +104,11 @@ func NewPublisher(client *slackapi.Client, timeout time.Duration, logger port.Lo
 }
 
 func newPublisher(client postClient, timeout time.Duration, logger port.Logger, partLabels bool) *Publisher {
+	engine, engineErr := newAgentPreviewEngine()
 	return &Publisher{
 		client: client, timeout: timeout, pace: defaultPace,
 		sleep: sleepContext, now: time.Now, logger: loggerOrDiscard(logger),
-		partLabels: partLabels,
+		partLabels: partLabels, previewEngine: engine, previewEngineErr: engineErr,
 	}
 }
 
