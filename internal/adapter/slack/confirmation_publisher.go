@@ -87,7 +87,6 @@ type ConfirmationPublisher struct {
 	botUserID string
 	timeout   time.Duration
 	logger    port.Logger
-	renderer  *TemplateRenderer
 	engine    *blockkit.Engine
 	renderErr error
 }
@@ -105,14 +104,13 @@ func newConfirmationViewEngine() (*blockkit.Engine, error) {
 }
 
 func newConfirmationPublisher(client confirmationBlockClient, botUserID string, timeout time.Duration, logger port.Logger) *ConfirmationPublisher {
-	renderer, rendererErr := NewEmbeddedTemplateRenderer()
 	engine, engineErr := newConfirmationViewEngine()
 	if engineErr == nil {
-		engineErr = engine.Register(confirmationPromptView{}, confirmationResolvedView{})
+		engineErr = engine.Register(confirmationPromptView{}, confirmationResolvedView{}, jobAcceptedView{})
 	}
 	return &ConfirmationPublisher{
 		client: client, botUserID: botUserID, timeout: timeout, logger: loggerOrDiscard(logger),
-		renderer: renderer, engine: engine, renderErr: errors.Join(rendererErr, engineErr),
+		engine: engine, renderErr: engineErr,
 	}
 }
 
@@ -420,18 +418,6 @@ func truncateConfirmationText(value string, limit int) string {
 	}
 	runes := []rune(value)
 	return string(runes[:limit-utf8.RuneCountInString(marker)]) + marker
-}
-
-func boundedCardText(prefix, value, suffix string, limit int) string {
-	available := limit - utf8.RuneCountInString(prefix) - utf8.RuneCountInString(suffix)
-	if available <= 0 {
-		return truncateConfirmationText(prefix+suffix, limit)
-	}
-	return prefix + truncateConfirmationText(value, available) + suffix
-}
-
-func escapeSlackMrkdwn(value string) string {
-	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(value)
 }
 
 func confirmationContentDigest(delivery port.ConfirmationDelivery) string {

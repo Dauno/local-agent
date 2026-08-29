@@ -3,6 +3,7 @@ package slack
 import (
 	"embed"
 	"io/fs"
+	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/blockkit"
 )
@@ -40,6 +41,17 @@ func newOnboardingEngine() (*blockkit.Engine, error) {
 	return engine, nil
 }
 
+func newJobEngine() (*blockkit.Engine, error) {
+	engine, err := newViewEngine()
+	if err != nil {
+		return nil, err
+	}
+	if err := engine.Register(jobAcceptedView{}, jobStatusView{}, jobStatusErrorView{}); err != nil {
+		return nil, err
+	}
+	return engine, nil
+}
+
 type agentPreviewView struct {
 	Name            string `bk:"name"`
 	AgentClass      string `bk:"agent_class"`
@@ -61,3 +73,29 @@ type onboardingWelcomeView struct {
 }
 
 func (onboardingWelcomeView) Template() string { return "onboarding.welcome" }
+
+type jobAcceptedView struct {
+	JobID          string    `bk:"job_id"`
+	Status         string    `bk:"status"`
+	CreatedAt      time.Time `bk:"created_at"`
+	UpdatedAt      time.Time `bk:"updated_at"`
+	StatusSentence string    `bk:"status_sentence"`
+}
+
+func (jobAcceptedView) Template() string { return "job.accepted" }
+
+type jobStatusView struct {
+	JobID      string `bk:"job_id"`
+	Status     string `bk:"status"`
+	CreatedAt  string `bk:"created_at"`
+	UpdatedAt  string `bk:"updated_at"`
+	HostStatus string `bk:"host_status"`
+}
+
+func (jobStatusView) Template() string { return "job.status" }
+
+type jobStatusErrorView struct {
+	Message string `bk:"message"`
+}
+
+func (jobStatusErrorView) Template() string { return "job.status_error" }

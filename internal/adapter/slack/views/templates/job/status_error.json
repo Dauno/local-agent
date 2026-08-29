@@ -1,0 +1,16 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "contract": {
+    "inputs": {
+      "message": {"type": "text", "required": true, "max": 3000}
+    },
+    "actions": {}
+  },
+  "layout": [
+    {
+      "type": "section",
+      "text": {"type": "plain_text", "text": "{{message}}"}
+    }
+  ]
+}

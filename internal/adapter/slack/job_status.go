@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -149,54 +148,33 @@ func (h *JobStatusHandler) publish(ctx context.Context, action domain.Confirmati
 }
 
 func compileJobStatusErrorResponse(message string) (string, []slackapi.Block, error) {
-	safe := truncateConfirmationText(neutralizeUnsafeControls(message), maxRendererCompositionTextLength)
-	blocks := []slackapi.Block{
-		slackapi.NewSectionBlock(slackapi.NewTextBlockObject(slackapi.PlainTextType, safe, false, false), nil, nil),
-	}
-	if err := validateCompiledBlocks("job_status", blocks, false); err != nil {
+	engine, err := newJobEngine()
+	if err != nil {
 		return "", nil, err
 	}
-	return truncateConfirmationText(safe, maxFallbackText), blocks, nil
+	safe := truncateConfirmationText(message, maxRendererCompositionTextLength)
+	view, err := engine.Message(jobStatusErrorView{Message: safe})
+	if err != nil {
+		return "", nil, err
+	}
+	return view.FallbackText, view.Blocks, nil
 }
 
 func compileJobStatusResponse(job domain.ExternalAgentJob) (string, []slackapi.Block, error) {
-	state := jobStatusLabel(job.Status)
-	jobID := truncateConfirmationText(neutralizeUnsafeControls(job.ID), 256)
-	created := formatJobStatusTime(job.CreatedAt)
-	updated := formatJobStatusTime(job.UpdatedAt)
-	hostText := jobHostStatusText(job.Status)
-
-	blocks := []slackapi.Block{
-		slackapi.NewSectionBlock(
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Estado del trabajo*\n"+escapeSlackMrkdwn(state), false, false),
-			nil,
-			nil,
-		),
-		slackapi.NewSectionBlock(nil, []*slackapi.TextBlockObject{
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Estado:*\n`"+escapeSlackMrkdwn(state)+"`", false, false),
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*ID del trabajo:*\n`"+escapeSlackMrkdwn(jobID)+"`", false, false),
-		}, nil),
-		slackapi.NewSectionBlock(nil, []*slackapi.TextBlockObject{
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Creado:*\n"+created, false, false),
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Actualizado:*\n"+updated, false, false),
-		}, nil),
-		slackapi.NewSectionBlock(
-			slackapi.NewTextBlockObject(slackapi.PlainTextType, hostText, false, false),
-			nil,
-			nil,
-		),
-	}
-	if err := validateCompiledBlocks("job_status", blocks, false); err != nil {
+	engine, err := newJobEngine()
+	if err != nil {
 		return "", nil, err
 	}
-	fallback := strings.Join([]string{
-		"Estado del trabajo: " + state,
-		"ID del trabajo: " + jobID,
-		"Creado: " + created,
-		"Actualizado: " + updated,
-		"Estado del host: " + hostText,
-	}, "\n")
-	return truncateConfirmationText(neutralizeUnsafeControls(fallback), maxFallbackText), blocks, nil
+	state := jobStatusLabel(job.Status)
+	view, err := engine.Message(jobStatusView{
+		JobID: truncateConfirmationText(job.ID, 255), Status: state,
+		CreatedAt: formatJobStatusTime(job.CreatedAt), UpdatedAt: formatJobStatusTime(job.UpdatedAt),
+		HostStatus: jobHostStatusText(job.Status),
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return view.FallbackText, view.Blocks, nil
 }
 
 func formatJobStatusTime(value time.Time) string {

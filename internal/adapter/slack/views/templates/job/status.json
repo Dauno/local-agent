@@ -1,0 +1,39 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "fallback": "Estado del trabajo: {{status}}\nID del trabajo: {{job_id}}\nCreado: {{created_at}}\nActualizado: {{updated_at}}\nEstado del host: {{host_status}}",
+  "contract": {
+    "inputs": {
+      "job_id": {"type": "id", "required": true, "max": 255},
+      "status": {"type": "enum", "required": true, "one_of": ["queued", "running", "cancel_requested", "interrupted_safe", "completion_unknown", "reconciling", "completed", "failed", "cancelled", "abandoned"]},
+      "created_at": {"type": "text", "required": true},
+      "updated_at": {"type": "text", "required": true},
+      "host_status": {"type": "text", "required": true}
+    },
+    "actions": {}
+  },
+  "layout": [
+    {
+      "type": "section",
+      "text": {"type": "mrkdwn", "text": "*Estado del trabajo*\n{{status}}"}
+    },
+    {
+      "type": "section",
+      "fields": [
+        {"type": "mrkdwn", "text": "*Estado:*\n{{status:code}}"},
+        {"type": "mrkdwn", "text": "*ID del trabajo:*\n{{job_id:code}}"}
+      ]
+    },
+    {
+      "type": "section",
+      "fields": [
+        {"type": "mrkdwn", "text": "*Creado:*\n{{created_at}}"},
+        {"type": "mrkdwn", "text": "*Actualizado:*\n{{updated_at}}"}
+      ]
+    },
+    {
+      "type": "section",
+      "text": {"type": "plain_text", "text": "{{host_status}}"}
+    }
+  ]
+}

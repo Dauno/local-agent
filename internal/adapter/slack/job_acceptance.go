@@ -5,20 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 	"unicode/utf8"
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/secure"
 )
 
-const (
-	jobAcceptedTemplate       = "job_accepted_message"
-	jobAcceptedStatusSentence = "The host accepted the job. It is queued or running."
-)
+const jobAcceptedStatusSentence = "The host accepted the job. It is queued or running."
 
 var _ port.JobAcceptancePublisher = (*ConfirmationPublisher)(nil)
 
@@ -32,7 +29,7 @@ func (p *ConfirmationPublisher) PublishJobAccepted(ctx context.Context, job doma
 	if err != nil {
 		return fmt.Errorf("resolve job acceptance target: %w", err)
 	}
-	fallbackText, blocks, err := compileJobAcceptedMessage(p.renderer, job)
+	fallbackText, blocks, err := compileJobAcceptedMessage(p.engine, job)
 	if err != nil {
 		if p.renderErr != nil {
 			err = p.renderErr
@@ -57,7 +54,7 @@ func (p *ConfirmationPublisher) PublishJobAccepted(ctx context.Context, job doma
 	return nil
 }
 
-func compileJobAcceptedMessage(renderer *TemplateRenderer, job domain.ExternalAgentJob) (string, []slackapi.Block, error) {
+func compileJobAcceptedMessage(engine *blockkit.Engine, job domain.ExternalAgentJob) (string, []slackapi.Block, error) {
 	if strings.TrimSpace(job.ID) == "" {
 		return "", nil, errors.New("job acceptance requires a job ID")
 	}
@@ -69,36 +66,17 @@ func compileJobAcceptedMessage(renderer *TemplateRenderer, job domain.ExternalAg
 		return "", nil, errors.New("job acceptance requires created and updated timestamps")
 	}
 
-	jobID := truncateConfirmationText(neutralizeUnsafeControls(job.ID), maxRendererIDLength)
-	createdAt := job.CreatedAt.UTC().Format(time.RFC3339)
-	updatedAt := job.UpdatedAt.UTC().Format(time.RFC3339)
-	statusSentence := neutralizeUnsafeControls(jobAcceptedStatusSentence)
-	fallback := strings.Join([]string{
-		"Job accepted / running",
-		"Job ID: " + jobID,
-		"Status: " + status,
-		"Created: " + createdAt,
-		"Updated: " + updatedAt,
-		statusSentence,
-	}, "\n")
-	fallback = truncateConfirmationText(neutralizeUnsafeControls(fallback), maxFallbackText)
-
-	compiledFallback, blocks, err := renderer.CompileMessageWithFallback(jobAcceptedTemplate, TemplateContext{Values: map[string]string{
-		"subtitle": boundedCardText(
-			"*Job ID:* `", escapeSlackMrkdwn(jobID), "` · *Status:* `"+escapeSlackMrkdwn(status)+"`", maxRendererCardSubtitleLength,
-		),
-		"created_at":      "*Created:*\n" + escapeSlackMrkdwn(createdAt),
-		"updated_at":      "*Updated:*\n" + escapeSlackMrkdwn(updatedAt),
-		"status_sentence": statusSentence,
-		"fallback_text":   fallback,
-	}})
+	jobIDLimit := maxRendererCardSubtitleLength - utf8.RuneCountInString("*Job ID:* `") -
+		utf8.RuneCountInString("` · *Status:* `"+status+"`")
+	message, err := engine.Message(jobAcceptedView{
+		JobID: truncateConfirmationText(job.ID, jobIDLimit), Status: status,
+		CreatedAt: job.CreatedAt.UTC(), UpdatedAt: job.UpdatedAt.UTC(),
+		StatusSentence: jobAcceptedStatusSentence,
+	})
 	if err != nil {
-		return compiledFallback, blocks, err
-	}
-	if err := validateJobAcceptedMessageLimits(compiledFallback, blocks); err != nil {
 		return "", nil, err
 	}
-	return compiledFallback, blocks, nil
+	return message.FallbackText, message.Blocks, nil
 }
 
 func validateJobAcceptedMessageLimits(fallback string, blocks []slackapi.Block) error {
@@ -108,5 +86,5 @@ func validateJobAcceptedMessageLimits(fallback string, blocks []slackapi.Block) 
 	if len(blocks) > maxBlocksPerMessage {
 		return fmt.Errorf("job acceptance exceeds %d block limit", maxBlocksPerMessage)
 	}
-	return validateCompiledBlocks(jobAcceptedTemplate, blocks, false)
+	return nil
 }

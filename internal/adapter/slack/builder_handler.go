@@ -424,27 +424,6 @@ func newBuilderDraftID() (string, error) {
 	return "draft_" + hex.EncodeToString(data), nil
 }
 
-func builderPreviewMarkdown(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256 string) string {
-	profile := draft.ProviderProfile
-	if profile == "" {
-		profile = draft.Model
-	}
-	timeout := "no aplica"
-	if definition.TimeoutSec > 0 {
-		timeout = strconv.Itoa(definition.TimeoutSec) + " segundos"
-	}
-	return fmt.Sprintf(
-		"*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\n```yaml\n%s\n```\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
-		neutralizeUnsafeControls(draft.Name),
-		definition.AgentClass,
-		neutralizeUnsafeControls(profile),
-		definition.ExecutionMode,
-		timeout,
-		neutralizeUnsafeControls(yaml),
-		sha256,
-	)
-}
-
 func (c sdkPostClient) PostBlocks(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
 	options := []slackapi.MsgOption{
 		slackapi.MsgOptionText(fallbackText, false),
@@ -509,74 +488,9 @@ func compileAgentPreviewMessage(engine *blockkit.Engine, draft domain.AgentDraft
 	return message.FallbackText, message.Blocks, nil
 }
 
-func compileBuilderPreviewMessage(renderer *TemplateRenderer, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) (string, []slackapi.Block, error) {
-	code := "```yaml\n" + neutralizeUnsafeControls(yaml) + "\n```"
-	values := builderPreviewTemplateValues(draft, definition, yaml, sha256, draftID)
-	parts := splitBuilderBlockText(code, builderBlockTextLimit)
-	return compileMessageWithParts(renderer, "agent_preview", values, parts)
-}
-
-func compileMessageWithParts(renderer *TemplateRenderer, templateName string, values map[string]string, parts []string) (string, []slackapi.Block, error) {
-	return renderer.CompileMessageWithFallback(templateName, TemplateContext{Values: values, PreviewYAMLParts: parts})
-}
-
-func builderPreviewTemplateValues(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) map[string]string {
-	metadata := fmt.Sprintf(
-		"*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`",
-		definition.AgentClass,
-		neutralizeUnsafeControls(draft.ProviderProfile),
-		definition.ExecutionMode,
-		previewTimeout(definition.TimeoutSec),
-	)
-	return map[string]string{
-		"name":             fmt.Sprintf("*Previsualizacion del agente `%s`*", neutralizeUnsafeControls(draft.Name)),
-		"agent_class":      metadata,
-		"provider_profile": neutralizeUnsafeControls(draft.ProviderProfile),
-		"execution_mode":   definition.ExecutionMode,
-		"timeout":          previewTimeout(definition.TimeoutSec),
-		"sha256":           fmt.Sprintf("*SHA-256:* `%s`", sha256),
-		"draft_id":         draftID,
-		"fallback_text":    builderPreviewFallbackText(draft, definition, yaml, sha256),
-	}
-}
-
-func builderPreviewFallbackText(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256 string) string {
-	full := builderPreviewMarkdown(draft, definition, yaml, sha256)
-	if utf8.RuneCountInString(full) <= maxFallbackText {
-		return full
-	}
-	profile := draft.ProviderProfile
-	if profile == "" {
-		profile = draft.Model
-	}
-	return fmt.Sprintf(
-		"*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\nEl YAML completo se muestra en los bloques del mensaje.\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
-		neutralizeUnsafeControls(draft.Name),
-		definition.AgentClass,
-		neutralizeUnsafeControls(profile),
-		definition.ExecutionMode,
-		previewTimeout(definition.TimeoutSec),
-		sha256,
-	)
-}
-
 func previewTimeout(seconds int) string {
 	if seconds <= 0 {
 		return "no aplica"
 	}
 	return strconv.Itoa(seconds) + " segundos"
-}
-
-func splitBuilderBlockText(text string, maxRunes int) []string {
-	if maxRunes <= 0 || utf8.RuneCountInString(text) <= maxRunes {
-		return []string{text}
-	}
-	runes := []rune(text)
-	parts := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
-	for len(runes) > 0 {
-		n := min(len(runes), maxRunes)
-		parts = append(parts, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return parts
 }

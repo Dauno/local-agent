@@ -180,15 +180,4 @@ func compileOnboardingViewMessage(engine *blockkit.Engine, builderContext string
 	return message.FallbackText, message.Blocks, nil
 }
 
-func compileOnboardingMessage(renderer *TemplateRenderer, builderContext string, prompts []string) (string, []slackapi.Block, error) {
-	return renderer.CompileMessageWithFallback("onboarding_message", TemplateContext{
-		Values: map[string]string{
-			"builder_context": builderContext,
-			"intro":           onboardingIntroText,
-			"describe_prompt": onboardingDescribePrompt,
-		},
-		SuggestedPrompts: prompts,
-	})
-}
-
 var _ port.BuilderLauncherPublisher = (*builderLauncherPublisher)(nil)
