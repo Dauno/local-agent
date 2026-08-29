@@ -325,7 +325,7 @@ func validateInput(input Input) error {
 func representativeValues(inputs map[string]Input, includeOptional bool) (renderValues, error) {
 	values := make(renderValues, len(inputs))
 	for name, input := range inputs {
-		if !includeOptional && !input.Required {
+		if !includeOptional && !input.Required && input.Default == "" {
 			values[name] = inputValue{input: input}
 			continue
 		}

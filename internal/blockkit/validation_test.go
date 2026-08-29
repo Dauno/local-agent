@@ -8,6 +8,27 @@ import (
 	"testing"
 )
 
+func TestNewMinimalVariantAppliesInputDefaults(t *testing.T) {
+	body := makeDocument(
+		`{"inputs":{"req":{"type":"text","required":true},"opt":{"type":"text","default":"FALLBACK_DEFAULT"}},"actions":{}}`,
+		`[{"type":"section","text":{"type":"mrkdwn","text":"{{req}}"}},{"type":"section","text":{"type":"mrkdwn","text":"{{opt}}"}}]`,
+	)
+	if _, err := newSingleTemplateEngine(t, body); err != nil {
+		t.Fatalf("New() rejected a defaulted optional input: %v", err)
+	}
+}
+
+func TestNewRejectsOptionalInputWithoutDefaultInMinimalVariant(t *testing.T) {
+	body := makeDocument(
+		`{"inputs":{"req":{"type":"text","required":true},"opt":{"type":"text"}},"actions":{}}`,
+		`[{"type":"section","text":{"type":"mrkdwn","text":"{{req}}"}},{"type":"section","text":{"type":"mrkdwn","text":"{{opt}}"}}]`,
+	)
+	_, err := newSingleTemplateEngine(t, body)
+	if err == nil || !strings.Contains(err.Error(), "minimal variant") || !strings.Contains(err.Error(), "bad.json") {
+		t.Fatalf("New() error = %v, want minimal variant error with source path", err)
+	}
+}
+
 func TestNewRejectsOverlongModalMetadata(t *testing.T) {
 	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"1234567890123456789012345"},"callback_id":"settings","contract":{"inputs":{},"actions":{}},"layout":[{"type":"divider"}]}`
 	_, err := newSingleTemplateEngine(t, body)
