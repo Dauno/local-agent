@@ -36,7 +36,7 @@ func validateLayoutContract(doc templateDocument) error {
 
 func inspectNode(node any, doc templateDocument, context renderContext, used map[string]struct{}, field string) error {
 	switch typed := node.(type) {
-	case nil:
+	case nil, bool, float64:
 		return nil
 	case string:
 		return inspectString(typed, doc, context, used, field, "plain_text")
@@ -47,6 +47,7 @@ func inspectNode(node any, doc templateDocument, context renderContext, used map
 			}
 		}
 	case map[string]any:
+		markInputStateActionID(typed, doc, used)
 		if region, ok := typed["region"]; ok {
 			return inspectRegion(typed, region, doc, context, used, field)
 		}
@@ -84,6 +85,22 @@ func inspectNode(node any, doc templateDocument, context renderContext, used map
 		return fmt.Errorf("%s contains unsupported JSON value %T", field, node)
 	}
 	return nil
+}
+
+func markInputStateActionID(node map[string]any, doc templateDocument, used map[string]struct{}) {
+	if node["type"] != "input" {
+		return
+	}
+	element, ok := node["element"].(map[string]any)
+	if !ok {
+		return
+	}
+	actionID, ok := element["action_id"].(string)
+	if ok {
+		if _, exists := doc.Inputs[actionID]; exists {
+			used[actionID] = struct{}{}
+		}
+	}
 }
 
 func inspectStringValue(value any, doc templateDocument, context renderContext, used map[string]struct{}, field, slot string) error {

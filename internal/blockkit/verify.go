@@ -38,7 +38,7 @@ func verifyCompiled(doc templateDocument, blocks []slackapi.Block) error {
 		if block == nil {
 			return fmt.Errorf("blocks[%d] is nil", index)
 		}
-		if err := walkSlackValue(reflect.ValueOf(block), fmt.Sprintf("blocks[%d]", index), &state, maxTextLength); err != nil {
+		if err := walkSlackValue(reflect.ValueOf(block), fmt.Sprintf("blocks[%d]", index), &state, maxTextLength, false); err != nil {
 			return err
 		}
 	}
@@ -52,7 +52,7 @@ func verifyCompiled(doc templateDocument, blocks []slackapi.Block) error {
 	return nil
 }
 
-func walkSlackValue(value reflect.Value, field string, state *verificationState, textLimit int) error {
+func walkSlackValue(value reflect.Value, field string, state *verificationState, textLimit int, allowStateActionID bool) error {
 	if !value.IsValid() {
 		return nil
 	}
@@ -60,7 +60,7 @@ func walkSlackValue(value reflect.Value, field string, state *verificationState,
 		if value.IsNil() {
 			return nil
 		}
-		return walkSlackValue(value.Elem(), field, state, textLimit)
+		return walkSlackValue(value.Elem(), field, state, textLimit, allowStateActionID)
 	}
 	if value.CanInterface() {
 		if unknown, ok := value.Interface().(slackapi.UnknownBlock); ok {
@@ -100,6 +100,7 @@ func walkSlackValue(value reflect.Value, field string, state *verificationState,
 	}
 	switch value.Kind() {
 	case reflect.Struct:
+		input, isInput := value.Interface().(slackapi.InputBlock)
 		for index := 0; index < value.NumField(); index++ {
 			fieldType := value.Type().Field(index)
 			if !fieldType.IsExported() {
@@ -108,24 +109,25 @@ func walkSlackValue(value reflect.Value, field string, state *verificationState,
 			childLimit := textLimitForField(value, fieldType.Name, textLimit)
 			child := value.Field(index)
 			if fieldType.Name == "ActionID" && child.Kind() == reflect.String && child.String() != "" {
-				if err := verifyActionID(child.String(), field+"."+fieldType.Name, state); err != nil {
+				if err := verifyActionID(child.String(), field+"."+fieldType.Name, state, allowStateActionID); err != nil {
 					return err
 				}
 			}
-			if err := walkSlackValue(child, field+"."+fieldType.Name, state, childLimit); err != nil {
+			childAllowStateActionID := isInput && fieldType.Name == "Element" && !inputElementDispatches(input)
+			if err := walkSlackValue(child, field+"."+fieldType.Name, state, childLimit, childAllowStateActionID); err != nil {
 				return err
 			}
 		}
 	case reflect.Slice, reflect.Array:
 		for index := 0; index < value.Len(); index++ {
-			if err := walkSlackValue(value.Index(index), fmt.Sprintf("%s[%d]", field, index), state, textLimit); err != nil {
+			if err := walkSlackValue(value.Index(index), fmt.Sprintf("%s[%d]", field, index), state, textLimit, false); err != nil {
 				return err
 			}
 		}
 	case reflect.Map:
 		keys := value.MapKeys()
 		for _, key := range keys {
-			if err := walkSlackValue(value.MapIndex(key), field+"[map]", state, textLimit); err != nil {
+			if err := walkSlackValue(value.MapIndex(key), field+"[map]", state, textLimit, false); err != nil {
 				return err
 			}
 		}
@@ -161,7 +163,7 @@ func verifyBlock(block slackapi.Block, field string, state *verificationState) e
 	return nil
 }
 
-func verifyActionID(actionID, field string, state *verificationState) error {
+func verifyActionID(actionID, field string, state *verificationState, allowStateActionID bool) error {
 	if err := validateIdentifier(actionID, field); err != nil {
 		return err
 	}
@@ -176,10 +178,28 @@ func verifyActionID(actionID, field string, state *verificationState) error {
 			break
 		}
 	}
-	if !declared {
+	if !declared && !allowStateActionID {
 		return fmt.Errorf("%s %q is not declared in contract.actions", field, actionID)
 	}
 	return nil
+}
+
+func inputElementDispatches(input slackapi.InputBlock) bool {
+	if input.DispatchAction || input.Element == nil {
+		return input.DispatchAction
+	}
+	element := reflect.ValueOf(input.Element)
+	if element.Kind() == reflect.Pointer {
+		if element.IsNil() {
+			return false
+		}
+		element = element.Elem()
+	}
+	if element.Kind() != reflect.Struct {
+		return false
+	}
+	config := element.FieldByName("DispatchActionConfig")
+	return config.IsValid() && config.Kind() == reflect.Pointer && !config.IsNil()
 }
 
 func validateSlackFieldLimits(value any, field string) error {
