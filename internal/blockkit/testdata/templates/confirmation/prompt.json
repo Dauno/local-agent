@@ -24,18 +24,19 @@
     {"type": "section", "fields": [
       {"type": "mrkdwn", "text": "*Call ID:*\n{{call_id:code}}"},
       {"type": "mrkdwn", "text": "*Expira:*\n{{expires_at:hhmm}} UTC"},
-      {"type": "plain_text", "text": "{{project}}"},
-      {"type": "plain_text", "text": "{{count}}"},
-      {"type": "mrkdwn", "text": "{{kind}}"},
-      {"type": "plain_text", "text": "{{source_code}}"},
-      {"type": "mrkdwn", "text": "{{summary:bold}}"},
-      {"type": "plain_text", "text": "{{expires_at:rfc3339}}"},
-      {"type": "mrkdwn", "text": "{{kind:upper}}"},
-      {"type": "plain_text", "text": "{{source_code:lower}}"}
+      {"type": "plain_text", "text": "Project: {{project}}"},
+      {"type": "plain_text", "text": "Count: {{count}}"},
+      {"type": "mrkdwn", "text": "Kind: {{kind}}"},
+      {"type": "plain_text", "text": "Source: {{source_code}}"},
+      {"type": "mrkdwn", "text": "Summary: {{summary:bold}}"},
+      {"type": "plain_text", "text": "Expires: {{expires_at:rfc3339}}"},
+      {"type": "mrkdwn", "text": "Upper: {{kind:upper}}"},
+      {"type": "plain_text", "text": "Lower: {{source_code:lower}}"}
     ]},
     {"region": "details", "each": {"type": "section", "text": {"type": "mrkdwn", "text": "*{{item.label}}*\n{{item.value}}"}}},
     {"region": "payload", "each": {"type": "section", "text": {"type": "mrkdwn", "text": "{{item:code}}"}}},
     {"type": "container", "title": {"type": "plain_text", "text": "Advanced"}, "child_blocks": [
+      {"type": "divider"},
       {"region": "advanced", "when": "advanced", "block": {"type": "divider"}}
     ]},
     {"actions": ["approve", "reject"]}

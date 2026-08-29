@@ -1,0 +1,19 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "contract": {
+    "inputs": {
+      "show": {"type": "bool"}
+    },
+    "actions": {}
+  },
+  "layout": [
+    {
+      "type": "container",
+      "title": {"type": "plain_text", "text": "Conditional"},
+      "child_blocks": [
+        {"region": "show", "when": "show", "block": {"type": "divider"}}
+      ]
+    }
+  ]
+}

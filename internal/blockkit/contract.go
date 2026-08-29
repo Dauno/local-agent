@@ -156,24 +156,35 @@ func New(fsys fs.FS) (*Engine, error) {
 		if err := validateLayoutContract(loaded); err != nil {
 			return nil, fmt.Errorf("template %q: %w", loaded.fileName, err)
 		}
-		values, err := representativeValues(loaded.Inputs)
-		if err != nil {
-			return nil, fmt.Errorf("template %q representative: %w", loaded.fileName, err)
+		variants := []struct {
+			name            string
+			includeOptional bool
+		}{
+			{name: "minimal", includeOptional: false},
+			{name: "maximal", includeOptional: true},
 		}
-		if err := validateInputValues(values); err != nil {
-			return nil, fmt.Errorf("template %q representative: %w", loaded.fileName, err)
+		for _, variant := range variants {
+			values, err := representativeValues(loaded.Inputs, variant.includeOptional)
+			if err != nil {
+				return nil, fmt.Errorf("template %q %s variant: %w", loaded.fileName, variant.name, err)
+			}
+			if err := validateInputValues(values); err != nil {
+				return nil, fmt.Errorf("template %q %s variant: %w", loaded.fileName, variant.name, err)
+			}
+			compiled, err := renderCompiled(loaded, values)
+			if err != nil {
+				return nil, fmt.Errorf("template %q %s variant: %w", loaded.fileName, variant.name, err)
+			}
+			if err := verifyCompiled(loaded, compiled.blocks); err != nil {
+				return nil, fmt.Errorf("template %q %s variant: %w", loaded.fileName, variant.name, err)
+			}
+			if err := validateRepresentativeMetadata(loaded, values); err != nil {
+				return nil, fmt.Errorf("template %q %s variant: %w", loaded.fileName, variant.name, err)
+			}
+			if variant.includeOptional {
+				loaded.LayoutSHA256 = compiled.layoutSHA256
+			}
 		}
-		compiled, err := renderCompiled(loaded, values)
-		if err != nil {
-			return nil, fmt.Errorf("template %q representative: %w", loaded.fileName, err)
-		}
-		if err := verifyCompiled(loaded, compiled.blocks); err != nil {
-			return nil, fmt.Errorf("template %q representative: %w", loaded.fileName, err)
-		}
-		if err := validateRepresentativeMetadata(loaded, values); err != nil {
-			return nil, fmt.Errorf("template %q representative: %w", loaded.fileName, err)
-		}
-		loaded.LayoutSHA256 = compiled.layoutSHA256
 		engine.templates[loaded.Name] = loaded
 	}
 	return engine, nil

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -44,6 +45,9 @@ func TestEngineLoadsAndRendersTemplates(t *testing.T) {
 	if err := engine.Register(confirmationView{}, settingsView{}, explicitFallbackView{}); err != nil {
 		t.Fatalf("Register() error = %v", err)
 	}
+	if got, want := engine.Names(), []string{"confirmation.prompt", "explicit.fallback", "modal.settings"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("Names() = %#v, want %#v", got, want)
+	}
 	view := confirmationView{
 		Summary:    "Write <@U123> & report",
 		CallID:     "call-1",
@@ -83,6 +87,17 @@ func TestEngineLoadsAndRendersTemplates(t *testing.T) {
 	if digest, ok := engine.LayoutSHA256("confirmation.prompt"); !ok || digest != message.LayoutSHA256 || len(digest) != 64 {
 		t.Fatalf("layout digest = %q, %t", digest, ok)
 	}
+	minimal, err := engine.Message(confirmationView{
+		Summary: "Summary", CallID: "call-2",
+		ExpiresAt: time.Date(2030, time.January, 2, 15, 4, 5, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("minimal message error = %v", err)
+	}
+	container, ok := minimal.Blocks[2].(*slackapi.ContainerBlock)
+	if !ok || len(container.ChildBlocks.BlockSet) != 1 {
+		t.Fatalf("minimal container = %#v", minimal.Blocks[2])
+	}
 	if got := engine.ActionIDs(); len(got) != 2 || got[0] != "local_agent.confirm.approve" || got[1] != "local_agent.confirm.reject" {
 		t.Fatalf("ActionIDs() = %#v", got)
 	}
@@ -98,6 +113,74 @@ func TestEngineLoadsAndRendersTemplates(t *testing.T) {
 	}
 	if modal.Type != slackapi.VTModal || modal.Title == nil || modal.Title.Text != "Settings" {
 		t.Fatalf("modal = %#v", modal)
+	}
+}
+
+func TestRenderTreatsInputAsInertData(t *testing.T) {
+	engine, err := New(os.DirFS("testdata"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Register(confirmationView{}); err != nil {
+		t.Fatal(err)
+	}
+	base := confirmationView{
+		Summary: "safe", CallID: "call-1",
+		ExpiresAt: time.Date(2030, time.January, 2, 15, 4, 5, 0, time.UTC),
+	}
+	baseline, err := engine.Message(base)
+	if err != nil {
+		t.Fatalf("baseline Message() error = %v", err)
+	}
+	base.Summary = `x", {"type":"actions","block_id":"pwn"}, {"type":"section","text":{"type":"mrkdwn","text":"y`
+	injected, err := engine.Message(base)
+	if err != nil {
+		t.Fatalf("injected Message() error = %v", err)
+	}
+	if len(injected.Blocks) != len(baseline.Blocks) {
+		t.Fatalf("injected block count = %d, baseline = %d", len(injected.Blocks), len(baseline.Blocks))
+	}
+	encoded, err := json.Marshal(injected.Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"block_id":"pwn"`) {
+		t.Fatalf("injected structure appeared in JSON: %s", encoded)
+	}
+}
+
+func TestNewRejectsModalTemplatesWithoutRequiredMetadata(t *testing.T) {
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{
+			"title",
+			`{"schema_version":2,"surface":"modal","contract":{"inputs":{},"actions":{}},"layout":[{"type":"divider"}]}`,
+			"title is required",
+		},
+		{
+			"callback id",
+			`{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"Title"},"contract":{"inputs":{},"actions":{}},"layout":[{"type":"divider"}]}`,
+			"callback_id is required",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := newSingleTemplateEngine(t, test.body)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("New() error = %v, want %q", err, test.want)
+			}
+		})
+	}
+}
+
+func TestNewRejectsEmptyConditionalContainerInMinimalVariant(t *testing.T) {
+	_, err := New(os.DirFS("testdata-invalid"))
+	if err == nil || !strings.Contains(err.Error(), "conditional_container.json") ||
+		!strings.Contains(err.Error(), "minimal variant") || !strings.Contains(err.Error(), "child_blocks") {
+		t.Fatalf("New() error = %v, want minimal variant and child_blocks", err)
 	}
 }
 
