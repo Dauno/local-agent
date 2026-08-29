@@ -34,16 +34,30 @@
     },
     {
       "region": "workstream",
+      "block": {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "Workstream data:"}
+      }
+    },
+    {
+      "region": "workstream",
       "each": {
         "type": "section",
-        "text": {"type": "plain_text", "text": "Workstream data:\n{{item.label}}: {{item.value}}"}
+        "text": {"type": "plain_text", "text": "{{item.label}}: {{item.value}}"}
+      }
+    },
+    {
+      "region": "payload",
+      "block": {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "Payload:"}
       }
     },
     {
       "region": "payload",
       "each": {
         "type": "section",
-        "text": {"type": "plain_text", "text": "Payload:\n{{item}}"}
+        "text": {"type": "plain_text", "text": "{{item}}"}
       }
     },
     {"actions": ["approve", "reject", "status"]}

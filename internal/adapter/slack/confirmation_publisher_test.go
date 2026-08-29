@@ -271,8 +271,11 @@ func TestConfirmationPromptChunksPayload(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got := strings.Count(string(encoded), "Payload:\\n"); got != 2 {
-		t.Fatalf("payload block count = %d, want 2", got)
+	if got := strings.Count(string(encoded), "Payload:"); got != 1 {
+		t.Fatalf("payload header count = %d, want 1", got)
+	}
+	if got := strings.Count(string(encoded), `"type":"section"`); got < 4 {
+		t.Fatalf("payload render did not include both chunks: %s", encoded)
 	}
 }
 
@@ -310,7 +313,11 @@ func TestConfirmationResolvedRendersWithAndWithoutResult(t *testing.T) {
 					t.Fatal(err)
 				}
 				message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
-				for _, value := range []string{string(status), "Write <@U12345678> & report", "orig-abc", "15:30"} {
+				wantStatus := string(status)
+				if status == port.ConfirmationConsumed {
+					wantStatus = string(port.ConfirmationApproved)
+				}
+				for _, value := range []string{wantStatus, "Write <@U12345678> & report", "orig-abc", "15:30"} {
 					if !blockkit.Reachable(message, value) {
 						t.Fatalf("value %q did not reach the resolved tree", value)
 					}
@@ -639,7 +646,7 @@ func TestConfirmationPublisherUpdate(t *testing.T) {
 		t.Errorf("updated timestamp = %q", client.updatedTS[0])
 	}
 	message := blockkit.Message{FallbackText: client.updatedFallbacks[0], Blocks: client.updatedBlocks[0]}
-	for _, value := range []string{"Write file", "orig-abc", "consumed", "done"} {
+	for _, value := range []string{"Write file", "orig-abc", "approved", "done"} {
 		if !blockkit.Reachable(message, value) {
 			t.Fatalf("updated value %q did not reach the rendered tree", value)
 		}

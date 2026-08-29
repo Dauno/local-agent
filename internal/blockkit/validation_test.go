@@ -8,6 +8,14 @@ import (
 	"testing"
 )
 
+func TestNewRejectsOverlongModalMetadata(t *testing.T) {
+	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"1234567890123456789012345"},"callback_id":"settings","contract":{"inputs":{},"actions":{}},"layout":[{"type":"divider"}]}`
+	_, err := newSingleTemplateEngine(t, body)
+	if err == nil || !strings.Contains(err.Error(), "title") {
+		t.Fatalf("New() error = %v, want title length error", err)
+	}
+}
+
 func TestNewRejectsLayoutAndSlackValidationErrors(t *testing.T) {
 	manyBlocks := make([]string, 51)
 	for index := range manyBlocks {

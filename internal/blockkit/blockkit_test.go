@@ -37,6 +37,14 @@ type explicitFallbackView struct {
 
 func (explicitFallbackView) Template() string { return "explicit.fallback" }
 
+type fallbackProbeView struct {
+	Text     string `bk:"text"`
+	CallID   string `bk:"call_id"`
+	Asterisk string `bk:"asterisk"`
+}
+
+func (fallbackProbeView) Template() string { return "bad" }
+
 func TestEngineLoadsAndRendersTemplates(t *testing.T) {
 	engine, err := New(os.DirFS("testdata"))
 	if err != nil {
@@ -113,6 +121,29 @@ func TestEngineLoadsAndRendersTemplates(t *testing.T) {
 	}
 	if modal.Type != slackapi.VTModal || modal.Title == nil || modal.Title.Text != "Settings" {
 		t.Fatalf("modal = %#v", modal)
+	}
+}
+
+func TestDerivedFallbackPreservesValuesAndCleansOnlyLayoutMarkup(t *testing.T) {
+	engine, err := newSingleTemplateEngine(t, makeDocument(
+		`{"inputs":{"text":{"type":"text","required":true},"call_id":{"type":"id","required":true},"asterisk":{"type":"text","required":true}},"actions":{}}`,
+		`[{"type":"section","text":{"type":"mrkdwn","text":"*Bold label:* {{text}}"}},{"type":"section","text":{"type":"plain_text","text":"Call ID: {{call_id}}"}},{"type":"section","text":{"type":"plain_text","text":"Literal: {{asterisk}}"}},{"type":"section","text":{"type":"plain_text","text":"# Header\n- Bullet"}}]`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Register(fallbackProbeView{}); err != nil {
+		t.Fatal(err)
+	}
+	message, err := engine.Message(fallbackProbeView{
+		Text: "snake_case_value", CallID: "call_00_ABC_def", Asterisk: "a *literal* asterisk",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "Bold label: snake_case_value\nCall ID: call_00_ABC_def\nLiteral: a *literal* asterisk\nHeader\nBullet"
+	if message.FallbackText != want {
+		t.Fatalf("derived fallback = %q, want %q", message.FallbackText, want)
 	}
 }
 

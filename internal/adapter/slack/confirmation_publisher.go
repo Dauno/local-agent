@@ -305,13 +305,20 @@ func compileConfirmationResolvedMessage(engine *blockkit.Engine, delivery port.C
 		terminalText = ""
 	}
 	message, err := engine.Message(confirmationResolvedView{
-		Status: string(delivery.Status), Summary: delivery.Summary, CallID: delivery.OriginalCallID,
+		Status: confirmationResolvedStatus(delivery.Status), Summary: delivery.Summary, CallID: delivery.OriginalCallID,
 		UpdatedAt: updatedAt, Result: terminalText,
 	})
 	if err != nil {
 		return "", nil, err
 	}
 	return message.FallbackText, message.Blocks, nil
+}
+
+func confirmationResolvedStatus(status port.ConfirmationDeliveryStatus) string {
+	if status == port.ConfirmationConsumed {
+		return string(port.ConfirmationApproved)
+	}
+	return string(status)
 }
 
 type confirmationDisplay struct {

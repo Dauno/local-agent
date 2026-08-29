@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"regexp"
 	"sort"
 	"strings"
@@ -132,7 +131,7 @@ func renderCompiled(doc templateDocument, values renderValues) (compiledTemplate
 	if err := json.Unmarshal(layoutJSON, &blocks); err != nil {
 		return compiledTemplate{}, fmt.Errorf("decode compiled layout: %w", err)
 	}
-	fallback, err := renderFallback(doc, layout, values)
+	fallback, err := renderFallback(doc, values)
 	if err != nil {
 		return compiledTemplate{}, err
 	}
@@ -172,7 +171,7 @@ func validateRepresentativeMetadata(doc templateDocument, values renderValues) e
 	return nil
 }
 
-func renderFallback(doc templateDocument, layout []any, values renderValues) (string, error) {
+func renderFallback(doc templateDocument, values renderValues) (string, error) {
 	if doc.Fallback != nil {
 		fallback, err := renderString(*doc.Fallback, values, renderContext{}, "plain_text")
 		if err != nil {
@@ -181,30 +180,120 @@ func renderFallback(doc templateDocument, layout []any, values renderValues) (st
 		return truncateCodePoints(fallback, 3000), nil
 	}
 	var texts []string
-	collectFallbackText(layout, &texts)
-	fallback := strings.Join(texts, "\n")
-	fallback = stripSlackMarkup(fallback)
-	fallback = neutralizeUnsafeControls(html.UnescapeString(fallback))
-	return truncateCodePoints(fallback, 3000), nil
+	if err := collectFallbackText(doc.Layout, doc, values, renderContext{}, &texts); err != nil {
+		return "", fmt.Errorf("render fallback: %w", err)
+	}
+	return truncateCodePoints(strings.Join(texts, "\n"), 3000), nil
 }
 
-func collectFallbackText(node any, texts *[]string) {
+func collectFallbackText(node any, doc templateDocument, values renderValues, context renderContext, texts *[]string) error {
 	switch typed := node.(type) {
 	case []any:
 		for _, child := range typed {
-			collectFallbackText(child, texts)
+			if err := collectFallbackText(child, doc, values, context, texts); err != nil {
+				return err
+			}
 		}
 	case map[string]any:
+		if _, ok := typed["region"]; ok {
+			return collectFallbackRegion(typed, doc, values, context, texts)
+		}
+		if _, ok := typed["actions"]; ok {
+			rendered, err := renderActions(typed, doc, values)
+			if err != nil {
+				return err
+			}
+			return collectFallbackText(rendered, doc, values, context, texts)
+		}
 		if typeName, ok := typed["type"].(string); ok && (typeName == "plain_text" || typeName == "mrkdwn") {
 			if text, ok := typed["text"].(string); ok {
-				*texts = append(*texts, text)
+				rendered, err := renderFallbackString(text, values, context)
+				if err != nil {
+					return err
+				}
+				*texts = append(*texts, rendered)
 			}
-			return
+			return nil
 		}
 		for _, key := range orderedObjectKeys(typed) {
-			collectFallbackText(typed[key], texts)
+			if err := collectFallbackText(typed[key], doc, values, context, texts); err != nil {
+				return err
+			}
 		}
 	}
+	return nil
+}
+
+func collectFallbackRegion(object map[string]any, doc templateDocument, values renderValues, context renderContext, texts *[]string) error {
+	regionName, _ := object["region"].(string)
+	region, ok := values[regionName]
+	if !ok {
+		return fmt.Errorf("region input %q is unavailable", regionName)
+	}
+	if whenName, hasWhen := object["when"].(string); hasWhen {
+		when, ok := values[whenName]
+		if !ok || !isPresent(when.value) {
+			return nil
+		}
+	}
+	if !isPresent(region.value) {
+		return nil
+	}
+	if each, ok := object["each"]; ok {
+		items, err := regionItems(region)
+		if err != nil {
+			return err
+		}
+		for _, item := range items {
+			if err := collectFallbackText(each, doc, values, renderContext{
+				item: item, itemType: region.input.Type, itemInput: regionName, hasItem: true,
+			}, texts); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	block, ok := object["block"]
+	if !ok {
+		return errors.New("region block is unavailable")
+	}
+	return collectFallbackText(block, doc, values, context, texts)
+}
+
+func renderFallbackString(value string, values renderValues, context renderContext) (string, error) {
+	placeholders, err := parsePlaceholders(value)
+	if err != nil {
+		return "", err
+	}
+	if len(placeholders) == 0 {
+		return cleanFallbackLiteral(value), nil
+	}
+	var result strings.Builder
+	position := 0
+	for _, token := range placeholders {
+		open := strings.Index(value[position:], "{{") + position
+		close := strings.Index(value[open+2:], "}}") + open + 2
+		result.WriteString(cleanFallbackLiteral(value[position:open]))
+		replacement, err := renderFallbackPlaceholder(token, values, context)
+		if err != nil {
+			return "", err
+		}
+		result.WriteString(replacement)
+		position = close + 2
+	}
+	result.WriteString(cleanFallbackLiteral(value[position:]))
+	return result.String(), nil
+}
+
+func renderFallbackPlaceholder(token placeholder, values renderValues, context renderContext) (string, error) {
+	if token.modifier == "code" || token.modifier == "bold" {
+		token.modifier = ""
+	}
+	return renderPlaceholder(token, values, context, "plain_text")
+}
+
+func cleanFallbackLiteral(value string) string {
+	return neutralizeUnsafeControls(stripSlackMarkup(value))
 }
 
 func orderedObjectKeys(object map[string]any) []string {
@@ -231,13 +320,17 @@ func orderedObjectKeys(object map[string]any) []string {
 }
 
 var (
-	fallbackLinkPattern = regexp.MustCompile(`<[^>|]+\|([^>]+)>`)
-	fallbackTagPattern  = regexp.MustCompile(`<[^>]+>`)
+	fallbackLinkPattern    = regexp.MustCompile(`<[^>|]+\|([^>]+)>`)
+	fallbackTagPattern     = regexp.MustCompile(`<[^>]+>`)
+	fallbackHeadingPattern = regexp.MustCompile(`(?m)^[ \t]{0,3}#{1,6}[ \t]+`)
+	fallbackBulletPattern  = regexp.MustCompile(`(?m)^[ \t]{0,3}[-+•][ \t]+`)
 )
 
 func stripSlackMarkup(value string) string {
 	value = fallbackLinkPattern.ReplaceAllString(value, "$1")
 	value = fallbackTagPattern.ReplaceAllString(value, "")
+	value = fallbackHeadingPattern.ReplaceAllString(value, "")
+	value = fallbackBulletPattern.ReplaceAllString(value, "")
 	value = strings.ReplaceAll(value, "```", "")
 	value = strings.ReplaceAll(value, "`", "")
 	value = strings.ReplaceAll(value, "*", "")
