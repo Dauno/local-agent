@@ -5,18 +5,35 @@ import (
 	"fmt"
 )
 
+type stringRenderer func(string, renderValues, renderContext, string) (string, error)
+
 func renderNode(node any, doc templateDocument, values renderValues, context renderContext) (any, error) {
+	return renderNodeWith(node, doc, values, context, renderString)
+}
+
+func renderNodeWith(node any, doc templateDocument, values renderValues, context renderContext, renderText stringRenderer) (any, error) {
 	switch typed := node.(type) {
-	case nil, bool, float64, string:
-		if text, ok := typed.(string); ok {
-			return renderString(text, values, context, "plain_text")
-		}
+	case nil, bool, float64:
 		return typed, nil
+	case string:
+		return renderText(typed, values, context, "plain_text")
 	case []any:
-		return renderArray(typed, doc, values, context)
+		result := make([]any, 0, len(typed))
+		for _, child := range typed {
+			rendered, err := renderNodeWith(child, doc, values, context, renderText)
+			if err != nil {
+				return nil, err
+			}
+			if expanded, ok := rendered.([]any); ok && isExpansionNode(child) {
+				result = append(result, expanded...)
+				continue
+			}
+			result = append(result, rendered)
+		}
+		return result, nil
 	case map[string]any:
 		if _, ok := typed["region"]; ok {
-			return renderRegion(typed, doc, values, context)
+			return renderRegion(typed, doc, values, context, renderText)
 		}
 		if _, ok := typed["actions"]; ok {
 			for key := range typed {
@@ -24,28 +41,43 @@ func renderNode(node any, doc templateDocument, values renderValues, context ren
 					return nil, fmt.Errorf("actions pseudo-block has unknown key %q", key)
 				}
 			}
-			return renderActions(typed, doc, values)
+			rendered, err := renderActions(typed, doc, values)
+			if err != nil {
+				return nil, err
+			}
+			return renderNodeWith(rendered, doc, values, context, renderText)
 		}
-		return renderObject(typed, doc, values, context)
+		result := make(map[string]any, len(typed))
+		slot := textSlot(typed)
+		for key, child := range typed {
+			if isFixedTemplateKey(key) {
+				result[key] = child
+				continue
+			}
+			if text, ok := child.(string); ok {
+				// Only values inside a text object inherit its declared slot. Other
+				// strings still use plain_text escaping for semantic inputs.
+				childSlot := "plain_text"
+				if key == "text" {
+					childSlot = slot
+				}
+				rendered, err := renderText(text, values, context, childSlot)
+				if err != nil {
+					return nil, fmt.Errorf("%s: %w", key, err)
+				}
+				result[key] = rendered
+				continue
+			}
+			rendered, err := renderNodeWith(child, doc, values, context, renderText)
+			if err != nil {
+				return nil, err
+			}
+			result[key] = rendered
+		}
+		return result, nil
 	default:
 		return nil, fmt.Errorf("unsupported JSON value %T", node)
 	}
-}
-
-func renderArray(nodes []any, doc templateDocument, values renderValues, context renderContext) ([]any, error) {
-	result := make([]any, 0, len(nodes))
-	for _, node := range nodes {
-		rendered, err := renderNode(node, doc, values, context)
-		if err != nil {
-			return nil, err
-		}
-		if expanded, ok := rendered.([]any); ok && isExpansionNode(node) {
-			result = append(result, expanded...)
-			continue
-		}
-		result = append(result, rendered)
-	}
-	return result, nil
 }
 
 func isExpansionNode(node any) bool {
@@ -57,38 +89,7 @@ func isExpansionNode(node any) bool {
 	return region
 }
 
-func renderObject(object map[string]any, doc templateDocument, values renderValues, context renderContext) (map[string]any, error) {
-	result := make(map[string]any, len(object))
-	slot := textSlot(object)
-	for key, child := range object {
-		if isFixedTemplateKey(key) {
-			result[key] = child
-			continue
-		}
-		if text, ok := child.(string); ok {
-			// Only values inside a text object inherit its declared slot. Other
-			// strings still use plain_text escaping for semantic inputs.
-			childSlot := "plain_text"
-			if key == "text" {
-				childSlot = slot
-			}
-			rendered, err := renderString(text, values, context, childSlot)
-			if err != nil {
-				return nil, fmt.Errorf("%s: %w", key, err)
-			}
-			result[key] = rendered
-			continue
-		}
-		rendered, err := renderNode(child, doc, values, context)
-		if err != nil {
-			return nil, err
-		}
-		result[key] = rendered
-	}
-	return result, nil
-}
-
-func renderRegion(object map[string]any, doc templateDocument, values renderValues, context renderContext) ([]any, error) {
+func renderRegion(object map[string]any, doc templateDocument, values renderValues, context renderContext, renderText stringRenderer) ([]any, error) {
 	regionName, _ := object["region"].(string)
 	region, ok := values[regionName]
 	if !ok {
@@ -110,9 +111,9 @@ func renderRegion(object map[string]any, doc templateDocument, values renderValu
 		}
 		result := make([]any, 0, len(items))
 		for _, item := range items {
-			rendered, err := renderNode(each, doc, values, renderContext{
+			rendered, err := renderNodeWith(each, doc, values, renderContext{
 				item: item, itemType: region.input.Type, itemInput: regionName, hasItem: true,
-			})
+			}, renderText)
 			if err != nil {
 				return nil, err
 			}
@@ -121,7 +122,7 @@ func renderRegion(object map[string]any, doc templateDocument, values renderValu
 		return result, nil
 	}
 	block := object["block"]
-	rendered, err := renderNode(block, doc, values, context)
+	rendered, err := renderNodeWith(block, doc, values, context, renderText)
 	if err != nil {
 		return nil, err
 	}

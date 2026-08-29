@@ -115,11 +115,11 @@ func (e *Engine) Modal(view View) (slackapi.ModalViewRequest, error) {
 }
 
 func renderCompiled(doc templateDocument, values renderValues) (compiledTemplate, error) {
-	expanded, err := renderNode(doc.Layout, doc, values, renderContext{})
+	rendered, err := renderNode(doc.Layout, doc, values, renderContext{})
 	if err != nil {
 		return compiledTemplate{}, fmt.Errorf("render layout: %w", err)
 	}
-	layout, ok := expanded.([]any)
+	layout, ok := rendered.([]any)
 	if !ok {
 		return compiledTemplate{}, errors.New("rendered layout is not an array")
 	}
@@ -179,85 +179,40 @@ func renderFallback(doc templateDocument, values renderValues) (string, error) {
 		}
 		return truncateCodePoints(fallback, 3000), nil
 	}
-	var texts []string
-	if err := collectFallbackText(doc.Layout, doc, values, renderContext{}, &texts); err != nil {
+	resolved, err := renderNodeWith(doc.Layout, doc, values, renderContext{}, renderFallbackStringForSlot)
+	if err != nil {
 		return "", fmt.Errorf("render fallback: %w", err)
 	}
+	layout, ok := resolved.([]any)
+	if !ok {
+		return "", errors.New("rendered fallback layout is not an array")
+	}
+	var texts []string
+	collectFallbackText(layout, &texts)
 	return truncateCodePoints(strings.Join(texts, "\n"), 3000), nil
 }
 
-func collectFallbackText(node any, doc templateDocument, values renderValues, context renderContext, texts *[]string) error {
+func renderFallbackStringForSlot(value string, values renderValues, context renderContext, _ string) (string, error) {
+	return renderFallbackString(value, values, context)
+}
+
+func collectFallbackText(node any, texts *[]string) {
 	switch typed := node.(type) {
 	case []any:
 		for _, child := range typed {
-			if err := collectFallbackText(child, doc, values, context, texts); err != nil {
-				return err
-			}
+			collectFallbackText(child, texts)
 		}
 	case map[string]any:
-		if _, ok := typed["region"]; ok {
-			return collectFallbackRegion(typed, doc, values, context, texts)
-		}
-		if _, ok := typed["actions"]; ok {
-			rendered, err := renderActions(typed, doc, values)
-			if err != nil {
-				return err
-			}
-			return collectFallbackText(rendered, doc, values, context, texts)
-		}
 		if typeName, ok := typed["type"].(string); ok && (typeName == "plain_text" || typeName == "mrkdwn") {
 			if text, ok := typed["text"].(string); ok {
-				rendered, err := renderFallbackString(text, values, context)
-				if err != nil {
-					return err
-				}
-				*texts = append(*texts, rendered)
+				*texts = append(*texts, text)
 			}
-			return nil
+			return
 		}
 		for _, key := range orderedObjectKeys(typed) {
-			if err := collectFallbackText(typed[key], doc, values, context, texts); err != nil {
-				return err
-			}
+			collectFallbackText(typed[key], texts)
 		}
 	}
-	return nil
-}
-
-func collectFallbackRegion(object map[string]any, doc templateDocument, values renderValues, context renderContext, texts *[]string) error {
-	regionName, _ := object["region"].(string)
-	region, ok := values[regionName]
-	if !ok {
-		return fmt.Errorf("region input %q is unavailable", regionName)
-	}
-	if whenName, hasWhen := object["when"].(string); hasWhen {
-		when, ok := values[whenName]
-		if !ok || !isPresent(when.value) {
-			return nil
-		}
-	}
-	if !isPresent(region.value) {
-		return nil
-	}
-	if each, ok := object["each"]; ok {
-		items, err := regionItems(region)
-		if err != nil {
-			return err
-		}
-		for _, item := range items {
-			if err := collectFallbackText(each, doc, values, renderContext{
-				item: item, itemType: region.input.Type, itemInput: regionName, hasItem: true,
-			}, texts); err != nil {
-				return err
-			}
-		}
-		return nil
-	}
-	block, ok := object["block"]
-	if !ok {
-		return errors.New("region block is unavailable")
-	}
-	return collectFallbackText(block, doc, values, context, texts)
 }
 
 func renderFallbackString(value string, values renderValues, context renderContext) (string, error) {

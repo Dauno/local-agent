@@ -45,6 +45,15 @@ type fallbackProbeView struct {
 
 func (fallbackProbeView) Template() string { return "bad" }
 
+type expansionProbeView struct {
+	Summary string `bk:"summary"`
+	Items   []Pair `bk:"items,omitempty"`
+	Extra   []Pair `bk:"extra,omitempty"`
+	Show    bool   `bk:"show,omitempty"`
+}
+
+func (expansionProbeView) Template() string { return "bad" }
+
 func TestEngineLoadsAndRendersTemplates(t *testing.T) {
 	engine, err := New(os.DirFS("testdata"))
 	if err != nil {
@@ -144,6 +153,72 @@ func TestDerivedFallbackPreservesValuesAndCleansOnlyLayoutMarkup(t *testing.T) {
 	want := "Bold label: snake_case_value\nCall ID: call_00_ABC_def\nLiteral: a *literal* asterisk\nHeader\nBullet"
 	if message.FallbackText != want {
 		t.Fatalf("derived fallback = %q, want %q", message.FallbackText, want)
+	}
+}
+
+func TestBlockAndFallbackShareRegionExpansion(t *testing.T) {
+	engine, err := newSingleTemplateEngine(t, makeDocument(
+		`{"inputs":{"summary":{"type":"text","required":true},"items":{"type":"list<pair>"},"extra":{"type":"list<pair>"},"show":{"type":"bool"}},"actions":{}}`,
+		`[{"type":"section","text":{"type":"plain_text","text":"{{summary}}"}},{"region":"items","block":{"type":"section","text":{"type":"plain_text","text":"Items"}}},{"region":"items","each":{"type":"section","text":{"type":"plain_text","text":"{{item.label}}: {{item.value}}"}}},{"region":"extra","when":"show","each":{"type":"section","text":{"type":"plain_text","text":"Extra {{item.label}}: {{item.value}}"}}}]`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := engine.Register(expansionProbeView{}); err != nil {
+		t.Fatal(err)
+	}
+	for _, test := range []struct {
+		name string
+		show bool
+		want string
+	}{
+		{name: "when false", show: false, want: "Summary\nItems\nFirst: one"},
+		{name: "when true", show: true, want: "Summary\nItems\nFirst: one\nExtra Second: two"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			message, err := engine.Message(expansionProbeView{
+				Summary: "Summary", Items: []Pair{{Label: "First", Value: "one"}},
+				Extra: []Pair{{Label: "Second", Value: "two"}}, Show: test.show,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			data, err := json.Marshal(message.Blocks)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var tree any
+			if err := json.Unmarshal(data, &tree); err != nil {
+				t.Fatal(err)
+			}
+			var blockText []string
+			collectTextObjects(tree, &blockText)
+			if got := strings.Join(blockText, "\n"); got != test.want {
+				t.Fatalf("block text = %q, want %q", got, test.want)
+			}
+			if message.FallbackText != test.want {
+				t.Fatalf("fallback = %q, want %q", message.FallbackText, test.want)
+			}
+		})
+	}
+}
+
+func collectTextObjects(node any, texts *[]string) {
+	switch typed := node.(type) {
+	case []any:
+		for _, child := range typed {
+			collectTextObjects(child, texts)
+		}
+	case map[string]any:
+		if typeName, ok := typed["type"].(string); ok && (typeName == "plain_text" || typeName == "mrkdwn") {
+			if text, ok := typed["text"].(string); ok {
+				*texts = append(*texts, text)
+			}
+			return
+		}
+		for _, child := range typed {
+			collectTextObjects(child, texts)
+		}
 	}
 }
 
