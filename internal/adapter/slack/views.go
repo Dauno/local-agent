@@ -11,6 +11,10 @@ import (
 //go:embed views
 var viewsFS embed.FS
 
+func NewViewEngine() (*blockkit.Engine, error) {
+	return newViewEngine()
+}
+
 func newViewEngine() (*blockkit.Engine, error) {
 	rooted, err := fs.Sub(viewsFS, "views")
 	if err != nil {
@@ -51,6 +55,37 @@ func newJobEngine() (*blockkit.Engine, error) {
 	}
 	return engine, nil
 }
+
+const (
+	maxInteractiveIDLength    = 255
+	maxInteractiveValueLength = 2000
+	jobAcceptedSubtitleLimit  = 150
+)
+
+func newBuilderModalEngine() (*blockkit.Engine, error) {
+	engine, err := newViewEngine()
+	if err != nil {
+		return nil, err
+	}
+	if err := engine.Register(builderModalView{}); err != nil {
+		return nil, err
+	}
+	return engine, nil
+}
+
+type builderModalView struct {
+	Name            string          `bk:"name,omitempty"`
+	AgentType       string          `bk:"agent_type"`
+	Description     string          `bk:"description,omitempty"`
+	Instruction     string          `bk:"instruction,omitempty"`
+	Models          []blockkit.Pair `bk:"models"`
+	Model           string          `bk:"model"`
+	IsExternalAgent bool            `bk:"is_external_agent"`
+	ExecutionMode   string          `bk:"execution_mode,omitempty"`
+	TimeoutSeconds  string          `bk:"timeout_seconds,omitempty"`
+}
+
+func (builderModalView) Template() string { return "agent.builder" }
 
 type agentPreviewView struct {
 	Name            string `bk:"name"`

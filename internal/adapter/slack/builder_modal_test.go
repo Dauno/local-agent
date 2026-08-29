@@ -76,6 +76,20 @@ func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 	assertStaticSelect(t, model, "model", []string{"openai/a", "openai/z"}, "openai/z")
 }
 
+func TestBuilderModalPresenterUsesFirstProfileWhenModelIsMissing(t *testing.T) {
+	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
+		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
+		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
+	})
+	view := presenter.BuildViewForKind(domain.AgentKindLLM, map[string]string{
+		"name": "incident_analyst", "agent_type": string(domain.AgentKindLLM),
+	})
+	model := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement)
+	if model.InitialOption == nil || model.InitialOption.Value != "openai/a" {
+		t.Fatalf("default model = %#v, want first compatible profile", model.InitialOption)
+	}
+}
+
 func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
 	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
 		{Reference: "agentcli/z", ProviderType: agentdef.ProviderTypeAgentCLI},
@@ -268,48 +282,6 @@ func TestBuilderModalUpdateRejectsUnavailableKindBeforeSlack(t *testing.T) {
 	case update := <-client.updates:
 		t.Fatalf("partial builder view reached Slack: %#v", update)
 	default:
-	}
-}
-
-func TestBuilderModalTemplateCopyAndOrderChangesDriveRenderer(t *testing.T) {
-	files := embeddedTemplateFiles(t)
-	path := "templates/builder_modal.json"
-	var document map[string]any
-	if err := json.Unmarshal(files[path], &document); err != nil {
-		t.Fatalf("decode builder template: %v", err)
-	}
-	payload := document["payload"].(map[string]any)
-	blocks := payload["blocks"].([]any)
-	section := blocks[0].(map[string]any)
-	sectionText := section["text"].(map[string]any)
-	sectionText["text"] = "Plantilla personalizada."
-	blocks[0], blocks[1] = blocks[1], blocks[0]
-	payload["blocks"] = blocks
-	files[path], _ = json.Marshal(document)
-
-	catalog, err := LoadTemplateCatalogFromFS(templateMapFS(files))
-	if err != nil {
-		t.Fatalf("load edited catalog: %v", err)
-	}
-	renderer, err := NewTemplateRenderer(catalog)
-	if err != nil {
-		t.Fatalf("new renderer: %v", err)
-	}
-	view, err := renderer.CompileModal("builder_modal", TemplateContext{
-		Kind:     domain.AgentKindLLM,
-		Profiles: []BuilderProviderProfile{{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible}},
-		Values: map[string]string{
-			"name": "", "description": "", "instruction": "", "agent_type": "llm", "model": "openai/fast",
-		},
-	})
-	if err != nil {
-		t.Fatalf("compile edited builder template: %v", err)
-	}
-	if got, ok := view.Blocks.BlockSet[0].(*slackapi.InputBlock); !ok || got.BlockID != "name" {
-		t.Fatalf("edited first block = %#v, want name input", view.Blocks.BlockSet[0])
-	}
-	if got, ok := view.Blocks.BlockSet[1].(*slackapi.SectionBlock); !ok || got.Text == nil || got.Text.Text != "Plantilla personalizada." {
-		t.Fatalf("edited second block = %#v", view.Blocks.BlockSet[1])
 	}
 }
 
