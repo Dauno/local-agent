@@ -116,7 +116,7 @@ func statusConfirmationMatches(delivery *port.ConfirmationDelivery, action domai
 		return true
 	}
 	return action.RendererMode == delivery.RendererMode && action.CorrelationID == delivery.CorrelationID &&
-		action.ContentSHA256 == confirmationContentDigestForMode(*delivery, delivery.RendererMode)
+		action.ContentSHA256 == confirmationContentDigest(*delivery)
 }
 
 func statusJobMatches(job *domain.ExternalAgentJob, action domain.ConfirmationInteractiveAction) bool {

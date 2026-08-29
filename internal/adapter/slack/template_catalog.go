@@ -29,7 +29,6 @@ const templateSchemaVersion = 1
 var requiredTemplateNames = []string{
 	"agent_preview",
 	"builder_modal",
-	"confirmation_message",
 	"confirmation_message_v2",
 	"job_accepted_message",
 	"onboarding_message",
@@ -38,7 +37,6 @@ var requiredTemplateNames = []string{
 var requiredTemplateSet = map[string]struct{}{
 	"agent_preview":           {},
 	"builder_modal":           {},
-	"confirmation_message":    {},
 	"confirmation_message_v2": {},
 	"job_accepted_message":    {},
 	"onboarding_message":      {},
@@ -263,9 +261,6 @@ var scalarKeysByTemplate = map[string]map[string]struct{}{
 		"name": {}, "description": {}, "instruction": {}, "agent_type": {},
 		"model": {}, "execution_mode": {}, "timeout_seconds": {},
 	},
-	"confirmation_message": {
-		"summary": {}, "subtitle": {}, "wrapper_call_id": {}, "fallback_text": {},
-	},
 	"confirmation_message_v2": {
 		"card_summary": {}, "subtitle": {}, "project": {},
 		"proposed_task": {}, "wrapper_call_id": {}, "fallback_text": {},
@@ -480,11 +475,6 @@ func validateTemplateRepresentative(doc templateDocument) (TemplateInteractiveID
 	}
 	context := TemplateContext{Values: map[string]string{}}
 	switch doc.Name {
-	case "confirmation_message":
-		context.Values = map[string]string{
-			"summary": "A confirmation summary", "subtitle": "Call ID: call-1 · Expires 00:00 UTC",
-			"wrapper_call_id": "wrapper-1", "fallback_text": "Confirmation required: A confirmation summary",
-		}
 	case "confirmation_message_v2":
 		context.Values = map[string]string{
 			"card_summary": "A confirmation summary", "subtitle": "*Call ID:*\n`call-1` · *Expires:* 00:00 UTC",

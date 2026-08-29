@@ -178,12 +178,12 @@ func TestNormalizeInteractiveActionAcceptsDocumentedPayloadWithoutMetadata(t *te
 	}
 }
 
-func TestNormalizeInteractiveActionAcceptsPendingV1Metadata(t *testing.T) {
+func TestNormalizeInteractiveActionRejectsRetiredV1Metadata(t *testing.T) {
 	t.Parallel()
 	callback := newTestCallback(approveActionID, "wrapper-v1", "T12345678", "U12345678", "C12345678", "1720000001.000001", "")
-	callback.Message.Metadata.EventPayload["render_mode"] = confirmationRenderModeV1
-	if _, ok := normalizeInteractiveAction(&callback); !ok {
-		t.Fatal("normalizeInteractiveAction rejected a pending v1 confirmation")
+	callback.Message.Metadata.EventPayload["render_mode"] = "confirmation_v1"
+	if _, ok := normalizeInteractiveAction(&callback); ok {
+		t.Fatal("normalizeInteractiveAction accepted retired v1 confirmation metadata")
 	}
 }
 
@@ -197,26 +197,13 @@ func TestNormalizeInteractiveActionRejectsConflictingContainer(t *testing.T) {
 	}
 }
 
-func TestRenderConfirmationBlocks(t *testing.T) {
-	t.Parallel()
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc",
-		Summary: "Write file", CorrelationID: "confirmation:wrapper-abc",
-		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	blocks := renderConfirmationBlocks(delivery)
-	if len(blocks) != 3 {
-		t.Fatalf("renderConfirmationBlocks returned %d blocks, want 3", len(blocks))
-	}
-}
-
 func TestConfirmationV2RendersOrderedSafeBlocks(t *testing.T) {
 	delivery := port.ConfirmationDelivery{
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Write <@U12345678> & report",
 		Payload: `{"project":"repo","task":"Inspect <@U12345678> and report","workstream_id":"ws-1","expected_revision":4,"action":"propose_task","task_id":"task-1","current_phase":"plan"}`,
 		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	fallback, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	fallback, blocks, err := compileConfirmationMessageV2(mustEmbeddedRenderer(t), delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -269,7 +256,7 @@ func TestConfirmationV2BoundsLongSummaryInsideCardBody(t *testing.T) {
 		Payload:        `{"project":"local-agent","task":"Review the repository README and report all findings."}`,
 		Expiry:         time.Date(2026, 8, 28, 15, 30, 0, 0, time.UTC),
 	}
-	_, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	_, blocks, err := compileConfirmationMessageV2(mustEmbeddedRenderer(t), delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -292,7 +279,7 @@ func TestConfirmationV2RendersStructStyleTaskDescription(t *testing.T) {
 		Payload:       `{"project":"repo","task":{"ID":"task-1","Project":"repo","Description":"Inspect the repository"}}`,
 		Expiry:        time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	_, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	_, blocks, err := compileConfirmationMessageV2(mustEmbeddedRenderer(t), delivery)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -391,78 +378,18 @@ func TestConfirmationContentDigestDeterministic(t *testing.T) {
 	}
 }
 
-func TestConfirmationContentDigestPreservesLegacyV1(t *testing.T) {
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Actor: "U12345678",
-		TeamID: "T12345678", ChannelID: "D12345678", ThreadTS: "1710000000.000000",
-		Summary: "Write file", ParameterHash: "abc123",
-		RendererMode: confirmationRenderModeV1,
-		Expiry:       time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	const legacyV1 = "2f36fd991b846946e691510ec93c1356e769b5088f7f97731c25d5102d39c2b7"
-	if got := confirmationContentDigest(delivery); got != legacyV1 {
-		t.Fatalf("legacy digest = %q, want %q", got, legacyV1)
-	}
-	delivery.Payload = `{"action":"cancel_workstream"}`
-	if got := confirmationContentDigest(delivery); got == legacyV1 {
-		t.Fatal("payload-bearing confirmation reused legacy digest")
-	}
-}
-
-func TestConfirmationContentDigestV2BindsPresentationContract(t *testing.T) {
+func TestConfirmationContentDigestBindsPresentationContract(t *testing.T) {
 	delivery := port.ConfirmationDelivery{
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Actor: "U12345678",
 		TeamID: "T12345678", ChannelID: "D12345678", ThreadTS: "1710000000.000000",
 		Summary: "Write file", ParameterHash: "abc123", RendererMode: confirmationRenderModeV2,
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	v2Digest := port.ConfirmationContentDigestV2(delivery)
-	if v2Digest != port.ConfirmationContentDigest(delivery) {
-		t.Fatalf("v2 digest dispatch = %q, want %q", port.ConfirmationContentDigest(delivery), v2Digest)
-	}
-	v1 := delivery
-	v1.RendererMode = confirmationRenderModeV1
-	if v2Digest == port.ConfirmationContentDigest(v1) {
-		t.Fatal("v2 digest reused the v1 digest")
-	}
+	digest := port.ConfirmationContentDigest(delivery)
 	withPayload := delivery
 	withPayload.Payload = `{"project":"repo","task":"Inspect the repository"}`
-	if v2Digest == port.ConfirmationContentDigestV2(withPayload) {
-		t.Fatal("v2 digest omitted display payload data")
-	}
-}
-
-func TestConfirmationPayloadPrecedesActionsAndAppearsInFallback(t *testing.T) {
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Cancel workstream",
-		Payload: strings.Repeat("x", 3000), Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	renderer, err := NewEmbeddedTemplateRenderer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	fallback, blocks, err := compileConfirmationMessageV1(renderer, delivery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(fallback, "complete proposed payload is shown") {
-		t.Fatalf("oversized fallback did not identify complete payload blocks: %q", fallback)
-	}
-	if len(blocks) != 4 {
-		t.Fatalf("blocks = %d, want two payload blocks plus confirmation blocks", len(blocks))
-	}
-	for index := range 2 {
-		section, ok := blocks[index].(*slackapi.SectionBlock)
-		if !ok || section.Text == nil || section.Text.Type != slackapi.PlainTextType || !strings.HasPrefix(section.Text.Text, "Proposed payload:\n") {
-			t.Fatalf("payload block %d = %#v", index, blocks[index])
-		}
-	}
-	if _, ok := blocks[len(blocks)-1].(*slackapi.ActionBlock); !ok {
-		t.Fatalf("last block = %#v, want actions after payload", blocks[len(blocks)-1])
-	}
-	delivery.Payload = `{"action":"cancel_workstream"}`
-	if fallback := confirmationFallbackTextV1(delivery); !strings.Contains(fallback, delivery.Payload) {
-		t.Fatal("bounded accessible fallback omitted confirmation payload")
+	if digest == port.ConfirmationContentDigest(withPayload) {
+		t.Fatal("digest omitted display payload data")
 	}
 }
 
@@ -662,7 +589,7 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 	if len(client.postedChans) != 1 || client.postedChans[0] != "C12345678" {
 		t.Errorf("posted channel = %v, want [C12345678]", client.postedChans)
 	}
-	if len(client.fallbackTexts) != 1 || client.fallbackTexts[0] != confirmationFallbackText(delivery) {
+	if len(client.fallbackTexts) != 1 || client.fallbackTexts[0] != confirmationFallbackTextV2(delivery, buildConfirmationDisplay(delivery)) {
 		t.Fatalf("accessible fallback = %q", client.fallbackTexts)
 	}
 	if client.postedThreads[0] != delivery.ThreadTS {
@@ -803,28 +730,6 @@ func TestConfirmationPublisherRecoversMatchingPrompt(t *testing.T) {
 	result, found, err := pub.RecoverConfirmation(t.Context(), delivery)
 	if err != nil || !found || result.SlackMessageTS != "1720000001.000001" {
 		t.Fatalf("RecoverConfirmation() = %#v, %t, %v", result, found, err)
-	}
-}
-
-func TestConfirmationPublisherRecoversPendingV1Prompt(t *testing.T) {
-	t.Parallel()
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-v1", OriginalCallID: "orig-v1", Actor: "U12345678",
-		TeamID: "T12345678", ChannelID: "C12345678", ThreadTS: "1720000000.000000",
-		Summary: "Write file", ParameterHash: "abc123", CorrelationID: "confirmation:wrapper-v1",
-		RendererMode: confirmationRenderModeV1, Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
-	}}}
-	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
-	result, found, err := pub.RecoverConfirmation(t.Context(), delivery)
-	if err != nil || !found || result.SlackMessageTS != "1720000001.000001" {
-		t.Fatalf("RecoverConfirmation(v1) = %#v, %t, %v", result, found, err)
-	}
-	_, blocks, err := compileConfirmationMessageForMode(mustEmbeddedRenderer(t), delivery, confirmationRenderModeV1)
-	if err != nil || len(blocks) != 2 {
-		t.Fatalf("v1 renderer compatibility = blocks:%d err:%v", len(blocks), err)
 	}
 }
 

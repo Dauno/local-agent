@@ -33,40 +33,10 @@ type ConfirmationDelivery struct {
 	Expiry          time.Time
 }
 
-// ConfirmationContentDigest binds a rendered confirmation to its durable
-// identity and presentation without exposing tool parameters.
+// ConfirmationContentDigest binds the confirmation layout and its display
+// contract to the durable confirmation identity. The layout marker makes a
+// presentation change visible even when the delivery data is equal.
 func ConfirmationContentDigest(delivery ConfirmationDelivery) string {
-	if delivery.RendererMode == "confirmation_v2" {
-		return ConfirmationContentDigestV2(delivery)
-	}
-	if delivery.Payload == "" {
-		return confirmationContentDigestV1(delivery)
-	}
-	canonical, _ := json.Marshal(struct {
-		WrapperCallID  string `json:"wrapper_call_id"`
-		OriginalCallID string `json:"original_call_id"`
-		Actor          string `json:"actor"`
-		TeamID         string `json:"team_id"`
-		ChannelID      string `json:"channel_id"`
-		ThreadTS       string `json:"thread_ts"`
-		Summary        string `json:"summary"`
-		Payload        string `json:"payload"`
-		ParameterHash  string `json:"parameter_hash"`
-		Expiry         int64  `json:"expiry"`
-	}{
-		WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
-		Actor: delivery.Actor, TeamID: delivery.TeamID, ChannelID: delivery.ChannelID,
-		ThreadTS: delivery.ThreadTS, Summary: delivery.Summary, Payload: delivery.Payload,
-		ParameterHash: delivery.ParameterHash, Expiry: delivery.Expiry.Unix(),
-	})
-	digest := sha256.Sum256(canonical)
-	return fmt.Sprintf("%x", digest)
-}
-
-// ConfirmationContentDigestV2 binds the v2 confirmation layout and its
-// display contract to the durable confirmation identity. The layout marker
-// makes a presentation change visible even when the delivery data is equal.
-func ConfirmationContentDigestV2(delivery ConfirmationDelivery) string {
 	canonical, _ := json.Marshal(struct {
 		RendererMode   string `json:"renderer_mode"`
 		Layout         string `json:"layout"`
@@ -97,22 +67,6 @@ func ConfirmationContentDigestV2(delivery ConfirmationDelivery) string {
 		ThreadTS: delivery.ThreadTS, Summary: delivery.Summary, Payload: delivery.Payload,
 		ParameterHash: delivery.ParameterHash, Expiry: delivery.Expiry.Unix(),
 	})
-	digest := sha256.Sum256(canonical)
-	return fmt.Sprintf("%x", digest)
-}
-
-func confirmationContentDigestV1(delivery ConfirmationDelivery) string {
-	canonical, _ := json.Marshal(struct {
-		WrapperCallID  string `json:"wrapper_call_id"`
-		OriginalCallID string `json:"original_call_id"`
-		Actor          string `json:"actor"`
-		TeamID         string `json:"team_id"`
-		ChannelID      string `json:"channel_id"`
-		ThreadTS       string `json:"thread_ts"`
-		Summary        string `json:"summary"`
-		ParameterHash  string `json:"parameter_hash"`
-		Expiry         int64  `json:"expiry"`
-	}{delivery.WrapperCallID, delivery.OriginalCallID, delivery.Actor, delivery.TeamID, delivery.ChannelID, delivery.ThreadTS, delivery.Summary, delivery.ParameterHash, delivery.Expiry.Unix()})
 	digest := sha256.Sum256(canonical)
 	return fmt.Sprintf("%x", digest)
 }

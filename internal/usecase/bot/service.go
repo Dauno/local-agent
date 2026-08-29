@@ -18,7 +18,6 @@ import (
 
 const (
 	DefaultDedupeTTL            = 7 * 24 * time.Hour
-	confirmationRendererModeV1  = "confirmation_v1"
 	confirmationRendererModeV2  = "confirmation_v2"
 	confirmationRendererMode    = confirmationRendererModeV2
 	knowledgeDisabledMessage    = "Knowledge commands are disabled in this installation."
@@ -1508,13 +1507,10 @@ func (s *Service) validConfirmationInteraction(delivery port.ConfirmationDeliver
 }
 
 func isRichConfirmationRendererMode(renderMode string) bool {
-	return renderMode == confirmationRendererModeV1 || renderMode == confirmationRendererModeV2
+	return renderMode == confirmationRendererModeV2
 }
 
 func confirmationDeliveryDigest(delivery port.ConfirmationDelivery) string {
-	if delivery.RendererMode == confirmationRendererModeV2 {
-		return port.ConfirmationContentDigestV2(delivery)
-	}
 	return port.ConfirmationContentDigest(delivery)
 }
 
