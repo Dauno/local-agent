@@ -137,6 +137,7 @@ func newKnowledgeBotService(
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 2,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store: store, Runtime: runtime, Publisher: publisher,
 		Coordinator: coordinator, Knowledge: knowledgeService, KnowledgeBindings: bindings,

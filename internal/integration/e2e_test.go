@@ -289,6 +289,7 @@ func TestE2E_BusyMessage(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 1,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store:             store,
 		Runtime:           blockingRuntime,
@@ -394,6 +395,7 @@ func TestE2E_ContextSurvivesRestart(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store:     store,
 		Runtime:   runtime,
@@ -455,6 +457,7 @@ func TestE2E_ContextSurvivesRestart(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store:     reopened,
 		Runtime:   runtime2,

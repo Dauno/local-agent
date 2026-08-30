@@ -62,6 +62,9 @@ type Config struct {
 	// normal turn: TRD 05's resolution kept it active only "until TRD 06
 	// implements scope-first retrieval," and TRD 06 is verified.
 	KnowledgeGateEnabled bool
+	// ConfirmationLayoutSHA256 is the current fingerprint of the rendered
+	// confirmation prompt. It is required to validate interactive metadata.
+	ConfirmationLayoutSHA256 string
 }
 
 type Dependencies struct {
@@ -199,6 +202,9 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 	if cfg.ContextLimits.MaxMessages <= 0 || cfg.ContextLimits.MaxChars <= 0 {
 		return nil, errors.New("context limits must be positive")
 	}
+	if err := validateConfirmationLayoutSHA256(cfg.ConfirmationLayoutSHA256); err != nil {
+		return nil, err
+	}
 	if cfg.RetainMessages <= 0 {
 		return nil, errors.New("message retention must be positive")
 	}
@@ -295,6 +301,18 @@ func New(cfg Config, deps Dependencies) (*Service, error) {
 		workstreams: deps.Workstreams, knowledge: deps.Knowledge, knowledgeBindings: deps.KnowledgeBindings,
 		knowledgeRetriever: deps.KnowledgeRetriever, retrievalBindings: deps.KnowledgeRetrievalBindings,
 	}, nil
+}
+
+func validateConfirmationLayoutSHA256(value string) error {
+	if len(value) != 64 {
+		return errors.New("confirmation layout SHA-256 must contain 64 lowercase hexadecimal characters")
+	}
+	for _, char := range value {
+		if (char < '0' || char > '9') && (char < 'a' || char > 'f') {
+			return errors.New("confirmation layout SHA-256 must contain 64 lowercase hexadecimal characters")
+		}
+	}
+	return nil
 }
 
 func (s *Service) Handle(ctx context.Context, invocation domain.Invocation) (Outcome, error) {
@@ -1483,7 +1501,7 @@ func (s *Service) handleConfirmationCore(ctx context.Context, invocation domain.
 }
 
 func (s *Service) validConfirmationInteraction(delivery port.ConfirmationDelivery, interactive domain.ConfirmationInteractiveAction, wrapperCallID string) (Outcome, bool) {
-	expectedDigest := confirmationDeliveryDigest(delivery)
+	expectedDigest := s.confirmationDeliveryDigest(delivery)
 	if !isRichConfirmationRendererMode(delivery.RendererMode) || delivery.TeamID != interactive.TeamID || delivery.ChannelID != interactive.ChannelID ||
 		delivery.ThreadTS != interactive.ThreadTS || delivery.SlackMessageTS == "" || delivery.SlackMessageTS != interactive.MessageTS {
 		s.logger.Warn("confirmation interaction identity mismatch", "wrapper_call_id", wrapperCallID)
@@ -1510,8 +1528,8 @@ func isRichConfirmationRendererMode(renderMode string) bool {
 	return renderMode == confirmationRendererModeV2
 }
 
-func confirmationDeliveryDigest(delivery port.ConfirmationDelivery) string {
-	return port.ConfirmationContentDigest(delivery)
+func (s *Service) confirmationDeliveryDigest(delivery port.ConfirmationDelivery) string {
+	return port.ConfirmationContentDigest(delivery, s.cfg.ConfirmationLayoutSHA256)
 }
 
 func (s *Service) handleExpiredConfirmation(

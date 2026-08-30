@@ -34,18 +34,12 @@ type ConfirmationDelivery struct {
 }
 
 // ConfirmationContentDigest binds the confirmation layout and its display
-// contract to the durable confirmation identity. The layout marker makes a
-// presentation change visible even when the delivery data is equal.
-func ConfirmationContentDigest(delivery ConfirmationDelivery) string {
+// contract to the durable confirmation identity. The layout fingerprint makes
+// a presentation change visible even when the delivery data is equal.
+func ConfirmationContentDigest(delivery ConfirmationDelivery, layoutSHA256 string) string {
 	canonical, _ := json.Marshal(struct {
 		RendererMode   string `json:"renderer_mode"`
-		Layout         string `json:"layout"`
-		Title          string `json:"title"`
-		CallIDLabel    string `json:"call_id_label"`
-		ExpiryLabel    string `json:"expiry_label"`
-		ProjectLabel   string `json:"project_label"`
-		TaskLabel      string `json:"task_label"`
-		Workstream     string `json:"workstream_label"`
+		LayoutSHA256   string `json:"layout_sha256"`
 		WrapperCallID  string `json:"wrapper_call_id"`
 		OriginalCallID string `json:"original_call_id"`
 		Actor          string `json:"actor"`
@@ -57,11 +51,7 @@ func ConfirmationContentDigest(delivery ConfirmationDelivery) string {
 		ParameterHash  string `json:"parameter_hash"`
 		Expiry         int64  `json:"expiry"`
 	}{
-		RendererMode: "confirmation_v2",
-		Layout: "card:title,subtitle,summary;section:project,proposed_task;" +
-			"section:workstream_data?;actions:approve,reject,status",
-		Title: "Confirmation required", CallIDLabel: "Call ID", ExpiryLabel: "Expires",
-		ProjectLabel: "Project", TaskLabel: "Proposed task", Workstream: "Workstream data",
+		RendererMode: "confirmation_v2", LayoutSHA256: layoutSHA256,
 		WrapperCallID: delivery.WrapperCallID, OriginalCallID: delivery.OriginalCallID,
 		Actor: delivery.Actor, TeamID: delivery.TeamID, ChannelID: delivery.ChannelID,
 		ThreadTS: delivery.ThreadTS, Summary: delivery.Summary, Payload: delivery.Payload,

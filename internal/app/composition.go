@@ -763,6 +763,10 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}
 	confirmationStore := adaptersqlite.NewConfirmationStore(infra.store)
+	confirmationLayoutSHA256, err := infra.confirmationPublisher.ConfirmationPromptLayoutSHA256()
+	if err != nil {
+		return nil, models.redactor.Error(fmt.Errorf("resolve confirmation prompt layout fingerprint: %w", err))
+	}
 	// One coordinator instance is shared by root turns, activations,
 	// confirmations, workstream commands, and knowledge commands so a busy
 	// conversation never mutates knowledge state while another operation
@@ -871,6 +875,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		StreamingCarryRunes:      models.redactor.StreamingCarryRunes(),
 		ResultHandlesEnabled:     cfg.Orchestration.ResultHandles.Enabled,
 		MaxDirectInlineBytes:     models.rootDirectInlineBytes,
+		ConfirmationLayoutSHA256: confirmationLayoutSHA256,
 		KnowledgeRetrievalLimits: knowledgeRetrievalLimits,
 		WorkstreamsEnabled:       cfg.Orchestration.Workstreams.Enabled,
 		KnowledgeGateEnabled:     cfg.Orchestration.Knowledge.Enabled,
@@ -1206,6 +1211,9 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 			adaptersqlite.NewConfirmationStore(infra.store),
 			composition.externalJobService,
 		)
+		if err := statusHandler.InitializationError(); err != nil {
+			return models.redactor.Error(fmt.Errorf("initialize job status view engine: %w", err))
+		}
 		listener = listener.WithJobStatusHandler(statusHandler)
 	}
 	if composition != nil && composition.agentBuilderSvc != nil && setup.defs != nil && infra.publisher != nil && infra.store != nil {

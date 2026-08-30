@@ -47,6 +47,8 @@ type JobStatusHandler struct {
 	confirmations port.ConfirmationDeliveryStore
 	jobs          port.ExternalAgentJobWrapperReader
 	timeout       time.Duration
+	layoutSHA256  string
+	renderErr     error
 }
 
 // NewJobStatusHandler creates the Slack handler for authorized job status
@@ -70,7 +72,23 @@ func newJobStatusHandler(
 	confirmations port.ConfirmationDeliveryStore,
 	jobs port.ExternalAgentJobWrapperReader,
 ) *JobStatusHandler {
-	return &JobStatusHandler{client: client, confirmations: confirmations, jobs: jobs, timeout: timeout}
+	engine, renderErr := newViewEngine()
+	layoutSHA256 := ""
+	if renderErr == nil {
+		layoutSHA256, renderErr = confirmationPromptLayoutSHA256(engine)
+	}
+	return &JobStatusHandler{
+		client: client, confirmations: confirmations, jobs: jobs, timeout: timeout,
+		layoutSHA256: layoutSHA256, renderErr: renderErr,
+	}
+}
+
+// InitializationError exposes template setup failures to the composition root.
+func (h *JobStatusHandler) InitializationError() error {
+	if h == nil {
+		return errors.New("job status handler is required")
+	}
+	return h.renderErr
 }
 
 // Handle validates the Slack callback, confirmation identity, and durable job
@@ -78,6 +96,9 @@ func newJobStatusHandler(
 func (h *JobStatusHandler) Handle(ctx context.Context, callback slackapi.InteractionCallback) error {
 	if h == nil {
 		return errors.New("job status handler is not configured")
+	}
+	if h.renderErr != nil {
+		return fmt.Errorf("initialize confirmation view engine: %w", h.renderErr)
 	}
 	action, ok := normalizeJobStatusAction(&callback)
 	if !ok {
@@ -88,7 +109,7 @@ func (h *JobStatusHandler) Handle(ctx context.Context, callback slackapi.Interac
 	}
 
 	delivery, err := h.confirmations.GetByWrapperCallID(ctx, action.WrapperCallID)
-	if err != nil || !statusConfirmationMatches(delivery, action) {
+	if err != nil || !statusConfirmationMatches(delivery, action, h.layoutSHA256) {
 		return h.publishError(ctx, action, jobStatusUnauthorizedMessage)
 	}
 	job, err := h.jobs.StatusByWrapperCallID(ctx, action.WrapperCallID, action.Actor, action.ConversationKey)
@@ -103,7 +124,7 @@ func (h *JobStatusHandler) Handle(ctx context.Context, callback slackapi.Interac
 	return h.publish(ctx, action, fallbackText, blocks)
 }
 
-func statusConfirmationMatches(delivery *port.ConfirmationDelivery, action domain.ConfirmationInteractiveAction) bool {
+func statusConfirmationMatches(delivery *port.ConfirmationDelivery, action domain.ConfirmationInteractiveAction, layoutSHA256 string) bool {
 	if delivery == nil || delivery.RendererMode != confirmationRenderModeV2 ||
 		delivery.WrapperCallID != action.WrapperCallID || delivery.Actor != action.Actor ||
 		delivery.TeamID != action.TeamID || delivery.ChannelID != action.ChannelID ||
@@ -115,7 +136,7 @@ func statusConfirmationMatches(delivery *port.ConfirmationDelivery, action domai
 		return true
 	}
 	return action.RendererMode == delivery.RendererMode && action.CorrelationID == delivery.CorrelationID &&
-		action.ContentSHA256 == confirmationContentDigest(*delivery)
+		action.ContentSHA256 == confirmationContentDigest(*delivery, layoutSHA256)
 }
 
 func statusJobMatches(job *domain.ExternalAgentJob, action domain.ConfirmationInteractiveAction) bool {

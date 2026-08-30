@@ -204,7 +204,7 @@ func TestConfirmationPromptRendersSemanticValues(t *testing.T) {
 		Payload: `{"project":"repo","task":"Inspect <@U12345678> and report","workstream_id":"ws-1","expected_revision":4,"action":"propose_task","task_id":"task-1","current_phase":"plan"}`,
 		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), delivery)
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), delivery, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -242,7 +242,7 @@ func TestConfirmationPromptRendersSemanticValues(t *testing.T) {
 func TestConfirmationPromptUsesDefaultsAndOptionalRegions(t *testing.T) {
 	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
 		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary", Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	})
+	}, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,7 +266,7 @@ func TestConfirmationPromptRendersLongUnparsedPayload(t *testing.T) {
 	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
 		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary", Payload: payload,
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	})
+	}, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -281,7 +281,7 @@ func TestConfirmationPromptChunksPayload(t *testing.T) {
 	_, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
 		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary", Payload: payload,
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	})
+	}, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -303,7 +303,7 @@ func TestConfirmationPromptTruncatesLongJSONTask(t *testing.T) {
 		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary",
 		Payload: `{"project":"repo","task":"` + longTask + `"}`,
 		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	})
+	}, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -322,7 +322,7 @@ func TestConfirmationPromptExtractsStructTaskDescription(t *testing.T) {
 		WrapperCallID: "wrapper-1", Summary: "Approve task", OriginalCallID: "call-1",
 		Payload: `{"project":"repo","task":{"ID":"task-1","Project":"repo","Description":"Inspect the repository"}}`,
 		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	})
+	}, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -390,6 +390,16 @@ func mustConfirmationEngine(t *testing.T) *blockkit.Engine {
 	return engine
 }
 
+func mustConfirmationLayoutSHA256(t *testing.T) string {
+	t.Helper()
+	engine := mustConfirmationEngine(t)
+	layoutSHA256, ok := engine.LayoutSHA256(confirmationPromptTemplateName)
+	if !ok || layoutSHA256 == "" {
+		t.Fatalf("confirmation prompt layout fingerprint = %q, %t", layoutSHA256, ok)
+	}
+	return layoutSHA256
+}
+
 func TestConfirmationMetadata(t *testing.T) {
 	t.Parallel()
 	delivery := port.ConfirmationDelivery{
@@ -397,7 +407,7 @@ func TestConfirmationMetadata(t *testing.T) {
 		Summary: "Write file", CorrelationID: "confirmation:wrapper-abc",
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	metadata := confirmationMetadata(delivery)
+	metadata := confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t))
 	if metadata.EventType != confirmationMetadataEventType {
 		t.Errorf("metadata EventType = %q, want %q", metadata.EventType, confirmationMetadataEventType)
 	}
@@ -409,13 +419,53 @@ func TestConfirmationContentDigestDeterministic(t *testing.T) {
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc",
 		Summary: "Write file", Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	d1 := confirmationContentDigest(delivery)
-	d2 := confirmationContentDigest(delivery)
+	layoutSHA256 := mustConfirmationLayoutSHA256(t)
+	d1 := confirmationContentDigest(delivery, layoutSHA256)
+	d2 := confirmationContentDigest(delivery, layoutSHA256)
 	if d1 != d2 {
 		t.Errorf("digest not deterministic: %q vs %q", d1, d2)
 	}
 	if d1 == "" {
 		t.Error("digest is empty")
+	}
+}
+
+func TestConfirmationPublisherResolvesPromptLayoutFingerprint(t *testing.T) {
+	t.Parallel()
+	publisher := newConfirmationPublisher(nil, "U99999999", 5*time.Second, nil)
+	got, err := publisher.ConfirmationPromptLayoutSHA256()
+	if err != nil {
+		t.Fatalf("ConfirmationPromptLayoutSHA256() error = %v", err)
+	}
+	engine := mustConfirmationEngine(t)
+	want, ok := engine.LayoutSHA256(confirmationPromptTemplateName)
+	if !ok || got != want {
+		t.Fatalf("prompt layout fingerprint = %q, want %q", got, want)
+	}
+}
+
+func TestConfirmationPromptCompileRejectsFingerprintMismatch(t *testing.T) {
+	t.Parallel()
+	_, _, err := compileConfirmationMessageV2(
+		mustConfirmationEngine(t),
+		port.ConfirmationDelivery{WrapperCallID: "wrapper", OriginalCallID: "call", Summary: "summary", Expiry: time.Now().Add(time.Hour)},
+		strings.Repeat("0", 64),
+	)
+	if err == nil {
+		t.Fatal("compileConfirmationMessageV2 accepted a mismatched layout fingerprint")
+	}
+}
+
+func TestConfirmationContentDigestChangesWithLayoutFingerprint(t *testing.T) {
+	t.Parallel()
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Write file",
+		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	left := port.ConfirmationContentDigest(delivery, strings.Repeat("a", 64))
+	right := port.ConfirmationContentDigest(delivery, strings.Repeat("b", 64))
+	if left == right {
+		t.Fatal("confirmation digest ignored the layout fingerprint")
 	}
 }
 
@@ -426,10 +476,11 @@ func TestConfirmationContentDigestBindsPresentationContract(t *testing.T) {
 		Summary: "Write file", ParameterHash: "abc123", RendererMode: confirmationRenderModeV2,
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	digest := port.ConfirmationContentDigest(delivery)
+	layoutSHA256 := mustConfirmationLayoutSHA256(t)
+	digest := port.ConfirmationContentDigest(delivery, layoutSHA256)
 	withPayload := delivery
 	withPayload.Payload = `{"project":"repo","task":"Inspect the repository"}`
-	if digest == port.ConfirmationContentDigest(withPayload) {
+	if digest == port.ConfirmationContentDigest(withPayload, layoutSHA256) {
 		t.Fatal("digest omitted display payload data")
 	}
 }
@@ -643,7 +694,7 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 	}
 	if client.postedMetadata[0].EventPayload["correlation_id"] != delivery.CorrelationID ||
 		client.postedMetadata[0].EventPayload["render_mode"] != confirmationRenderMode ||
-		client.postedMetadata[0].EventPayload["content_sha256"] != confirmationContentDigest(delivery) {
+		client.postedMetadata[0].EventPayload["content_sha256"] != confirmationContentDigest(delivery, pub.layoutSHA256) {
 		t.Fatalf("posted metadata payload = %#v", client.postedMetadata[0].EventPayload)
 	}
 	message := blockkit.Message{FallbackText: client.fallbackTexts[0], Blocks: client.postedBlocks[0]}
@@ -746,7 +797,7 @@ func TestConfirmationPublisherRecoversMatchingPrompt(t *testing.T) {
 		RendererMode: confirmationRenderMode, Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
 	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t)),
 	}}}
 	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
 
@@ -764,7 +815,7 @@ func TestConfirmationPublisherRecoveryFailsClosed(t *testing.T) {
 		CorrelationID: "confirmation:wrapper-abc", RendererMode: confirmationRenderMode,
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	metadata := confirmationMetadata(delivery)
+	metadata := confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t))
 	metadata.EventPayload["content_sha256"] = strings.Repeat("0", 64)
 	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
 		User: "U99999999", Timestamp: "1720000001.000001", Metadata: metadata,
@@ -782,7 +833,7 @@ func TestConfirmationPublisherRecoveryFailsClosed(t *testing.T) {
 	}
 
 	client.messages = []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t)),
 	}}
 	if _, _, err := pub.RecoverConfirmation(t.Context(), delivery); err == nil {
 		t.Fatal("RecoverConfirmation accepted a match from incomplete history")

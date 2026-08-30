@@ -83,12 +83,13 @@ func (c sdkConfirmationBlockClient) UpdateBlocks(ctx context.Context, channelID,
 }
 
 type ConfirmationPublisher struct {
-	client    confirmationBlockClient
-	botUserID string
-	timeout   time.Duration
-	logger    port.Logger
-	engine    *blockkit.Engine
-	renderErr error
+	client       confirmationBlockClient
+	botUserID    string
+	timeout      time.Duration
+	logger       port.Logger
+	engine       *blockkit.Engine
+	renderErr    error
+	layoutSHA256 string
 }
 
 func NewConfirmationPublisher(client *slackapi.Client, botUserID string, timeout time.Duration, logger port.Logger) *ConfirmationPublisher {
@@ -108,9 +109,13 @@ func newConfirmationPublisher(client confirmationBlockClient, botUserID string, 
 	if engineErr == nil {
 		engineErr = engine.Register(confirmationPromptView{}, confirmationResolvedView{}, jobAcceptedView{})
 	}
+	layoutSHA256 := ""
+	if engineErr == nil {
+		layoutSHA256, engineErr = confirmationPromptLayoutSHA256(engine)
+	}
 	return &ConfirmationPublisher{
 		client: client, botUserID: botUserID, timeout: timeout, logger: loggerOrDiscard(logger),
-		engine: engine, renderErr: engineErr,
+		engine: engine, renderErr: engineErr, layoutSHA256: layoutSHA256,
 	}
 }
 
@@ -120,6 +125,21 @@ func (p *ConfirmationPublisher) InitializationError() error {
 		return errors.New("confirmation publisher is required")
 	}
 	return p.renderErr
+}
+
+// ConfirmationPromptLayoutSHA256 returns the current prompt layout fingerprint
+// used by this publisher and its confirmation metadata.
+func (p *ConfirmationPublisher) ConfirmationPromptLayoutSHA256() (string, error) {
+	if p == nil {
+		return "", errors.New("confirmation publisher is required")
+	}
+	if p.renderErr != nil {
+		return "", p.renderErr
+	}
+	if p.layoutSHA256 == "" {
+		return "", errors.New("confirmation prompt layout fingerprint is empty")
+	}
+	return p.layoutSHA256, nil
 }
 
 func (p *ConfirmationPublisher) PublishConfirmation(ctx context.Context, delivery port.ConfirmationDelivery) (port.ConfirmationPublishedResult, error) {
@@ -134,14 +154,14 @@ func (p *ConfirmationPublisher) PublishConfirmation(ctx context.Context, deliver
 	if renderMode == "" {
 		return port.ConfirmationPublishedResult{}, errors.New("unsupported confirmation renderer mode")
 	}
-	fallbackText, blocks, err := compileConfirmationMessageV2(p.engine, delivery)
+	fallbackText, blocks, err := compileConfirmationMessageV2(p.engine, delivery, p.layoutSHA256)
 	if err != nil {
 		if p.renderErr != nil {
 			err = p.renderErr
 		}
 		return port.ConfirmationPublishedResult{}, fmt.Errorf("render confirmation template: %w", err)
 	}
-	metadata := confirmationMetadata(delivery)
+	metadata := confirmationMetadata(delivery, p.layoutSHA256)
 
 	callCtx := ctx
 	cancel := func() {}
@@ -184,7 +204,7 @@ func (p *ConfirmationPublisher) RecoverConfirmation(ctx context.Context, deliver
 	if renderMode == "" {
 		return port.ConfirmationPublishedResult{}, false, errors.New("unsupported confirmation renderer mode")
 	}
-	expectedDigest := confirmationContentDigest(delivery)
+	expectedDigest := confirmationContentDigest(delivery, p.layoutSHA256)
 	var timestamp string
 	for _, message := range messages {
 		if message.Metadata.EventType != confirmationMetadataEventType {
@@ -256,7 +276,7 @@ type confirmationPromptView struct {
 	Payload       string          `bk:"payload,omitempty"`
 }
 
-func (confirmationPromptView) Template() string { return "confirmation.prompt" }
+func (confirmationPromptView) Template() string { return confirmationPromptTemplateName }
 
 type confirmationResolvedView struct {
 	Status    string    `bk:"status"`
@@ -268,7 +288,7 @@ type confirmationResolvedView struct {
 
 func (confirmationResolvedView) Template() string { return "confirmation.resolved" }
 
-func compileConfirmationMessageV2(engine *blockkit.Engine, delivery port.ConfirmationDelivery) (string, []slackapi.Block, error) {
+func compileConfirmationMessageV2(engine *blockkit.Engine, delivery port.ConfirmationDelivery, expectedLayoutSHA256 string) (string, []slackapi.Block, error) {
 	display := buildConfirmationDisplay(delivery)
 	message, err := engine.Message(confirmationPromptView{
 		Summary: delivery.Summary, CallID: delivery.OriginalCallID, WrapperCallID: delivery.WrapperCallID,
@@ -277,6 +297,9 @@ func compileConfirmationMessageV2(engine *blockkit.Engine, delivery port.Confirm
 	})
 	if err != nil {
 		return "", nil, err
+	}
+	if message.LayoutSHA256 != expectedLayoutSHA256 {
+		return "", nil, fmt.Errorf("confirmation prompt layout fingerprint mismatch")
 	}
 	return message.FallbackText, message.Blocks, nil
 }
@@ -412,8 +435,8 @@ func truncateConfirmationText(value string, limit int) string {
 	return string(runes[:limit-utf8.RuneCountInString(marker)]) + marker
 }
 
-func confirmationContentDigest(delivery port.ConfirmationDelivery) string {
-	return port.ConfirmationContentDigest(delivery)
+func confirmationContentDigest(delivery port.ConfirmationDelivery, layoutSHA256 string) string {
+	return port.ConfirmationContentDigest(delivery, layoutSHA256)
 }
 
 func confirmationRenderModeForDelivery(delivery port.ConfirmationDelivery) string {
@@ -429,14 +452,14 @@ func isConfirmationRendererMode(renderMode string) bool {
 	return renderMode == confirmationRenderModeV2
 }
 
-func confirmationMetadata(delivery port.ConfirmationDelivery) slackapi.SlackMetadata {
+func confirmationMetadata(delivery port.ConfirmationDelivery, layoutSHA256 string) slackapi.SlackMetadata {
 	renderMode := confirmationRenderModeForDelivery(delivery)
 	return slackapi.SlackMetadata{
 		EventType: confirmationMetadataEventType,
 		EventPayload: map[string]any{
 			"correlation_id": delivery.CorrelationID,
 			"render_mode":    renderMode,
-			"content_sha256": confirmationContentDigest(delivery),
+			"content_sha256": confirmationContentDigest(delivery, layoutSHA256),
 		},
 	}
 }

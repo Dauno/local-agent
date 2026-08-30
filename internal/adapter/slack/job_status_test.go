@@ -120,15 +120,15 @@ func statusTestJob(delivery port.ConfirmationDelivery) *domain.ExternalAgentJob 
 	}
 }
 
-func statusTestCallback(delivery port.ConfirmationDelivery, userID, channelID, threadTS string) slackapi.InteractionCallback {
+func statusTestCallback(delivery port.ConfirmationDelivery, userID, channelID, threadTS, layoutSHA256 string) slackapi.InteractionCallback {
 	callback := newTestCallback(statusActionID, delivery.WrapperCallID, delivery.TeamID, userID, channelID, delivery.SlackMessageTS, threadTS)
-	callback.Message.Metadata = confirmationMetadata(delivery)
+	callback.Message.Metadata = confirmationMetadata(delivery, layoutSHA256)
 	return callback
 }
 
 func TestNormalizeJobStatusActionPreservesWrapperCallID(t *testing.T) {
 	delivery := statusTestDelivery()
-	callback := statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS)
+	callback := statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))
 	action, ok := normalizeJobStatusAction(&callback)
 	if !ok {
 		t.Fatal("normalizeJobStatusAction rejected a valid status action")
@@ -141,13 +141,25 @@ func TestNormalizeJobStatusActionPreservesWrapperCallID(t *testing.T) {
 	}
 }
 
+func TestJobStatusHandlerResolvesPromptLayoutFingerprint(t *testing.T) {
+	t.Parallel()
+	handler := newJobStatusHandler(nil, time.Second, nil, nil)
+	if err := handler.InitializationError(); err != nil {
+		t.Fatalf("InitializationError() = %v", err)
+	}
+	want := mustConfirmationLayoutSHA256(t)
+	if handler.layoutSHA256 != want {
+		t.Fatalf("prompt layout fingerprint = %q, want %q", handler.layoutSHA256, want)
+	}
+}
+
 func TestJobStatusHandlerPublishesAuthorizedEphemeralStatus(t *testing.T) {
 	delivery := statusTestDelivery()
 	client := &fakeJobStatusEphemeralClient{}
 	reader := &fakeJobStatusReader{job: statusTestJob(delivery)}
 	handler := newJobStatusHandler(client, time.Second, &fakeJobStatusConfirmationStore{delivery: &delivery}, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	if len(client.calls) != 1 {
@@ -188,7 +200,7 @@ func TestJobStatusHandlerRejectsUnauthorizedUserWithoutReadingJob(t *testing.T) 
 	reader := &fakeJobStatusReader{job: statusTestJob(delivery)}
 	handler := newJobStatusHandler(client, time.Second, store, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, "U87654321", delivery.ChannelID, delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, "U87654321", delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	assertStatusAuthorizationFailure(t, client)
@@ -204,7 +216,7 @@ func TestJobStatusHandlerRejectsWrongConversationWithoutReadingJob(t *testing.T)
 	reader := &fakeJobStatusReader{job: statusTestJob(delivery)}
 	handler := newJobStatusHandler(client, time.Second, store, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, "C87654321", delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, "C87654321", delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	assertStatusAuthorizationFailure(t, client)
@@ -219,7 +231,7 @@ func TestJobStatusHandlerRejectsUnknownJobWithoutSideEffects(t *testing.T) {
 	reader := &fakeJobStatusReader{err: errors.New("not found")}
 	handler := newJobStatusHandler(client, time.Second, &fakeJobStatusConfirmationStore{delivery: &delivery}, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	assertStatusAuthorizationFailure(t, client)

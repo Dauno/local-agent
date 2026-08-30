@@ -206,6 +206,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 20, MaxChars: 20_000},
 		RetainMessages: 50, MaxConcurrentCalls: 1, ModelTimeout: time.Minute,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store: store, Runtime: runtime, ActivationStore: jobs, CompletionReader: jobService, Publisher: responsePublisher,
 		Logger: integrationLogger{}, Exchange: store, ModelCalls: modelcalllimiter.New(1),
@@ -472,6 +473,7 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 20, MaxChars: 20_000},
 		RetainMessages: 50, MaxConcurrentCalls: 1, ModelTimeout: time.Minute,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store: store, Runtime: runtime, ActivationStore: jobs, CompletionReader: jobService, Publisher: responsePublisher,
 		Logger: integrationLogger{}, Exchange: store, ModelCalls: modelcalllimiter.New(1),
@@ -697,6 +699,7 @@ func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 20, MaxChars: 20_000},
 		RetainMessages: 50, MaxConcurrentCalls: 1, ModelTimeout: time.Minute,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store: store, Runtime: runtime, ActivationStore: jobs, CompletionReader: jobService, Publisher: responsePublisher,
 		Logger: integrationLogger{}, Exchange: store, ModelCalls: modelcalllimiter.New(1),
@@ -844,6 +847,7 @@ func TestForegroundJobSingleRootResponseEndToEnd(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 20, MaxChars: 20_000},
 		RetainMessages: 50, MaxConcurrentCalls: 1, ModelTimeout: time.Minute,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store: store, Runtime: runtime, ActivationStore: jobs, Publisher: responsePublisher,
 		Logger: integrationLogger{}, Exchange: store, ModelCalls: modelcalllimiter.New(1),

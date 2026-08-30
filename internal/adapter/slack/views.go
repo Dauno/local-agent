@@ -2,6 +2,8 @@ package slack
 
 import (
 	"embed"
+	"errors"
+	"fmt"
 	"io/fs"
 	"time"
 
@@ -10,6 +12,8 @@ import (
 
 //go:embed views
 var viewsFS embed.FS
+
+const confirmationPromptTemplateName = "confirmation.prompt"
 
 func NewViewEngine() (*blockkit.Engine, error) {
 	return newViewEngine()
@@ -21,6 +25,20 @@ func newViewEngine() (*blockkit.Engine, error) {
 		return nil, err
 	}
 	return blockkit.New(rooted)
+}
+
+func confirmationPromptLayoutSHA256(engine *blockkit.Engine) (string, error) {
+	if engine == nil {
+		return "", errors.New("slack view engine is required")
+	}
+	layoutSHA256, ok := engine.LayoutSHA256(confirmationPromptTemplateName)
+	if !ok {
+		return "", fmt.Errorf("view template %q is not registered", confirmationPromptTemplateName)
+	}
+	if layoutSHA256 == "" {
+		return "", fmt.Errorf("view template %q has an empty layout fingerprint", confirmationPromptTemplateName)
+	}
+	return layoutSHA256, nil
 }
 
 func newAgentPreviewEngine() (*blockkit.Engine, error) {
