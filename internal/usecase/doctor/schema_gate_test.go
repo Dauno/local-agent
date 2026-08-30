@@ -157,8 +157,8 @@ func TestMinimumSchemaTableSkipsBelowFloorAndRunsAtFloor(t *testing.T) {
 }
 
 // TestJobStoreMinimumsBoundary proves the corrected jobs floor (30, not 18),
-// the activations floor (29), and the identity floor (32): at v29 only the
-// activations check runs; at v30 jobs joins it; identity joins at v32.
+// the v45 completion-policy contract requires the job and activation checks
+// at v45. Older schemas skip those checks; identity checks still start at v32.
 func TestJobStoreMinimumsBoundary(t *testing.T) {
 	for _, tc := range []struct {
 		detected            int
@@ -166,8 +166,8 @@ func TestJobStoreMinimumsBoundary(t *testing.T) {
 		wantIdentitySkipped bool
 	}{
 		{detected: 29, wantJobsSkipped: true, wantIdentitySkipped: true},
-		{detected: 30, wantJobsSkipped: false, wantIdentitySkipped: true},
-		{detected: 32, wantJobsSkipped: false, wantIdentitySkipped: false},
+		{detected: 30, wantJobsSkipped: true, wantIdentitySkipped: true},
+		{detected: 32, wantJobsSkipped: true, wantIdentitySkipped: false},
 	} {
 		t.Run(fmt.Sprintf("detected=%d", tc.detected), func(t *testing.T) {
 			deps, _, _ := validDependencies()
@@ -190,7 +190,11 @@ func TestJobStoreMinimumsBoundary(t *testing.T) {
 				t.Fatalf("jobs checker calls = %d, want 1", jobs.jobsCalls)
 			}
 			activations := resultByName(t, report, "external-agent activations")
-			if activations.Status != StatusPass || jobs.activationCalls != 1 {
+			if activations.Status == StatusSkipped {
+				if jobs.activationCalls != 0 || !tc.wantJobsSkipped {
+					t.Fatalf("activations = %#v calls=%d", activations, jobs.activationCalls)
+				}
+			} else if activations.Status != StatusPass || jobs.activationCalls != 1 {
 				t.Fatalf("activations = %#v calls=%d", activations, jobs.activationCalls)
 			}
 			identity := resultByName(t, report, "external-agent result identity")
@@ -270,7 +274,7 @@ func TestConnectionModelPreUpgradeIsInformational(t *testing.T) {
 	}
 	for _, want := range []string{
 		"schema v33",
-		"current binary requires v44",
+		"current binary requires v45",
 		"run local-agent db upgrade",
 		"journal_mode=delete",
 	} {
@@ -290,7 +294,7 @@ func TestConnectionModelFutureSchemaOrReadFailureIsFatal(t *testing.T) {
 		name    string
 		runtime *fakeSQLiteRuntimeChecker
 	}{
-		{name: "future schema", runtime: runtimeWithSchema(45)},
+		{name: "future schema", runtime: runtimeWithSchema(46)},
 		{name: "unreadable schema", runtime: &fakeSQLiteRuntimeChecker{err: errors.New("read schema version: I/O error")}},
 	}
 	for _, tc := range cases {
@@ -405,7 +409,7 @@ func TestConnectionModelV0Boundary(t *testing.T) {
 func TestSkipNeverChangesExitCode(t *testing.T) {
 	report := Report{Results: []Result{
 		{Name: "a", Status: StatusPass},
-		{Name: "b", Status: StatusSkipped, Detail: "requires schema v44, database is v33"},
+		{Name: "b", Status: StatusSkipped, Detail: "requires schema v45, database is v33"},
 	}}
 	if code := report.ExitCode(); code != 0 {
 		t.Fatalf("exit code = %d, want 0", code)

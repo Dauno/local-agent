@@ -18,7 +18,7 @@ import (
 
 const activationTerminalStates = `('completed', 'failed', 'completion_unknown')`
 
-const activationColumns = `a.job_id, a.status_revision, a.kind, a.activation_id, a.terminal_status,
+const activationColumns = `a.job_id, a.status_revision, a.kind, a.activation_id, a.activation_scope, a.terminal_status,
 	a.notification_sha256, a.result_sha256, a.actor, a.team_id, a.conversation_key, a.workstream_id, a.task_id,
 	a.execution_identity, a.admission_revision, a.original_call_id,
 	a.delivery_mode, a.content_bytes, a.slack_message_ts, a.published_at, a.state,
@@ -95,12 +95,19 @@ func (s *ExternalAgentJobStore) ActivationHealth(ctx context.Context, now time.T
 		return health, fmt.Errorf("close external-agent activation state counts: %w", err)
 	}
 	health.Processed = health.Completed + health.Failed
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_activations
+		WHERE activation_scope = ? AND state NOT IN (?, ?, ?)`,
+		domain.ExternalAgentActivationLegacy, domain.ActivationCompleted, domain.ActivationCompletionUnknown, domain.ActivationFailed,
+	).Scan(&health.LegacyNonTerminal); err != nil {
+		return health, fmt.Errorf("count legacy external-agent activations: %w", err)
+	}
 	cutoff := now.Add(-stuckThreshold).UnixNano()
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM external_agent_job_activations
-		WHERE state NOT IN (?, ?, ?) AND last_error_code != ? AND (
+		WHERE activation_scope != ? AND state NOT IN (?, ?, ?) AND last_error_code != ? AND (
 			(state = ? AND next_attempt_at > 0 AND next_attempt_at <= ?) OR
 			(state IN (?, ?, ?) AND lease_expiry > 0 AND lease_expiry <= ?)
 		)`,
+		domain.ExternalAgentActivationLegacy,
 		domain.ActivationCompleted, domain.ActivationCompletionUnknown, domain.ActivationFailed,
 		domain.ActivationForegroundRetiredCode,
 		domain.ActivationPending, cutoff,
@@ -163,9 +170,11 @@ func (s *ExternalAgentJobStore) claimActivation(
 	candidateWhere := `(
 		(a.state = ? AND a.next_attempt_at <= ?) OR
 		(a.state IN (?, ?, ?) AND a.lease_expiry > 0 AND a.lease_expiry <= ?)
-	) AND NOT EXISTS (
+	) AND a.activation_scope != 'legacy' AND a.terminal_status = 'completed' AND NOT EXISTS (
 		SELECT 1 FROM external_agent_job_activations prior
 		WHERE prior.conversation_key = a.conversation_key
+			AND prior.activation_scope != 'legacy'
+			AND prior.terminal_status = 'completed'
 			AND prior.state NOT IN ` + activationTerminalStates + `
 			AND (
 				prior.published_at < a.published_at OR
@@ -380,7 +389,7 @@ func sameActivationIdentity(left, right *domain.ExternalAgentJobActivation) bool
 		return false
 	}
 	return left.ActivationID == right.ActivationID && left.JobID == right.JobID &&
-		left.StatusRevision == right.StatusRevision && left.Kind == right.Kind &&
+		left.ActivationScope == right.ActivationScope && left.StatusRevision == right.StatusRevision && left.Kind == right.Kind &&
 		left.TerminalStatus == right.TerminalStatus && left.NotificationSHA256 == right.NotificationSHA256 && left.ResultSHA256 == right.ResultSHA256 &&
 		left.Actor == right.Actor && left.TeamID == right.TeamID && left.ConversationKey == right.ConversationKey &&
 		left.WorkstreamID == right.WorkstreamID && left.TaskID == right.TaskID && left.ExecutionIdentity == right.ExecutionIdentity && left.AdmissionRevision == right.AdmissionRevision &&
@@ -507,7 +516,7 @@ func (s *ExternalAgentJobStore) ClaimNextActivationFallback(ctx context.Context,
 		return nil, fmt.Errorf("begin external-agent activation fallback claim: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	where := `(a.state IN (?, ?) AND a.fallback_required = 1 AND a.fallback_slack_ts = ''
+	where := `(a.state IN (?, ?) AND a.activation_scope != 'legacy' AND a.terminal_status = 'completed' AND a.fallback_required = 1 AND a.fallback_slack_ts = ''
 		AND (a.lease_expiry = 0 OR a.lease_expiry <= ?))`
 	query := `SELECT a.job_id, a.status_revision, a.kind
 		FROM external_agent_job_activations a
@@ -807,7 +816,7 @@ func loadActivation(ctx context.Context, queryer queryRower, where string, args 
 	var fallbackRequired int
 	row := queryer.QueryRowContext(ctx, `SELECT `+activationColumns+` FROM external_agent_job_activations a `+where, args...)
 	err := row.Scan(
-		&activation.JobID, &activation.StatusRevision, &activation.Kind, &activation.ActivationID, &terminalStatus,
+		&activation.JobID, &activation.StatusRevision, &activation.Kind, &activation.ActivationID, &activation.ActivationScope, &terminalStatus,
 		&activation.NotificationSHA256, &activation.ResultSHA256, &activation.Actor, &activation.TeamID, &conversation, &activation.WorkstreamID, &activation.TaskID,
 		&activation.ExecutionIdentity, &activation.AdmissionRevision, &activation.OriginalCallID,
 		&deliveryMode, &activation.ContentBytes, &activation.SlackMessageTS, &publishedAt, &state, &activation.Attempt,

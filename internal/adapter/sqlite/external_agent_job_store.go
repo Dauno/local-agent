@@ -65,6 +65,9 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 	if s == nil || s.db == nil {
 		return false, nil, errors.New("external-agent job store is not configured")
 	}
+	if job.CompletionPolicy == "" {
+		job.CompletionPolicy = job.EffectiveCompletionPolicy()
+	}
 	if err := job.Validate(); err != nil {
 		return false, nil, err
 	}
@@ -88,22 +91,21 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 		return false, nil, fmt.Errorf("begin external-agent job admission: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
-		if err := validateCompletionBindingAdmission(ctx, tx, job); err != nil {
-			return false, nil, err
-		}
-	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO external_agent_jobs (
-		job_id, mode, provider, profile, primary_project, additional_projects,
+		job_id, mode, completion_policy, provider, profile, primary_project, additional_projects,
 		registry_revision, task, request_sha256, wrapper_call_id, original_call_id,
 		actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
 		status, attempt, acp_session_id, transcript_path,
 		side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at,
 		result_summary, result_artifact, result_sha256, result_bytes, error_code,
 		status_revision, created_at, started_at, finished_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
-		job.ID, job.Mode, job.Provider, job.Profile, job.PrimaryProject, string(projects),
+		job.ID, job.Mode, job.CompletionPolicy, job.Provider, job.Profile, job.PrimaryProject, string(projects),
 		job.RegistryRevision, job.Task, job.RequestSHA256, job.WrapperCallID, job.OriginalCallID,
 		job.Actor, job.TeamID, string(job.ConversationKey), job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision,
 		job.Status, job.Attempt, job.ExternalAgentSessionID, job.TranscriptPath,
@@ -137,26 +139,6 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 		return false, nil, nil
 	}
 	return false, &existing, nil
-}
-
-func validateCompletionBindingAdmission(ctx context.Context, queryer queryRower, job domain.ExternalAgentJob) error {
-	var eligible int
-	err := queryer.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM workstreams w
-		JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
-		WHERE w.workstream_id = ? AND w.conversation_key = ? AND w.owner_actor = ?
-			AND w.project = ? AND w.status = 'active' AND w.revision >= ?
-			AND t.task_id = ? AND t.project = ? AND t.description = ?
-			AND t.status = 'running' AND t.execution_identity = ?`,
-		job.WorkstreamID, string(job.ConversationKey), job.Actor, job.PrimaryProject,
-		job.AdmissionRevision, job.TaskID, job.PrimaryProject, job.Task, job.ExecutionIdentity).Scan(&eligible)
-	if err != nil {
-		return fmt.Errorf("check external-agent completion binding: %w", err)
-	}
-	if eligible != 1 {
-		return errors.New("external-agent completion binding is not admitted")
-	}
-	return nil
 }
 
 func (s *ExternalAgentJobStore) GetJob(ctx context.Context, jobID string) (*domain.ExternalAgentJob, error) {
@@ -1174,6 +1156,13 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 		return fmt.Errorf("begin notification publication: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var jobActor, jobConversation string
+	if err := tx.QueryRowContext(ctx, `SELECT actor, conversation_key FROM external_agent_jobs WHERE job_id = ?`, notification.JobID).Scan(&jobActor, &jobConversation); err != nil {
+		return fmt.Errorf("read notification job binding: %w", err)
+	}
+	if notification.Actor == "" || notification.ConversationKey == "" || notification.Actor != jobActor || string(notification.ConversationKey) != jobConversation {
+		return errors.New("notification job binding is not authorized")
+	}
 	result, err := tx.ExecContext(
 		ctx,
 		`UPDATE external_agent_job_notifications SET
@@ -1217,13 +1206,24 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 	}
 	activationID := domain.ExternalAgentJobActivationID(notification.JobID, notification.StatusRevision, notification.Kind)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO external_agent_job_activations (
-		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
+		job_id, status_revision, kind, activation_id, activation_scope, terminal_status, notification_sha256,
 		result_sha256, actor, team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
 		original_call_id, delivery_mode, content_bytes,
 		slack_message_ts, published_at, state, attempt, lease_owner, lease_expiry,
 		next_attempt_at, last_error_code, response_body, response_sha256, exchange_intent_id,
 		correlation_id, response_slack_ts, created_at, updated_at)
-		SELECT n.job_id, n.status_revision, n.kind, ?, n.terminal_status, n.notification_sha256,
+		SELECT n.job_id, n.status_revision, n.kind, ?,
+			CASE WHEN EXISTS (
+				SELECT 1 FROM workstreams w
+				JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
+				WHERE w.workstream_id = j.workstream_id AND w.conversation_key = j.conversation_key
+					AND w.owner_actor = j.actor AND w.project = j.primary_project
+					AND w.status = 'active' AND w.revision >= j.admission_revision
+					AND t.task_id = j.task_id AND t.project = j.primary_project
+					AND t.description = j.task AND t.status = 'running'
+					AND t.execution_identity = j.execution_identity
+			) THEN 'workstream' ELSE 'conversation' END,
+			n.terminal_status, n.notification_sha256,
 			n.result_sha256, j.actor, j.slack_team_id, j.conversation_key, j.workstream_id, j.task_id, j.execution_identity, j.admission_revision,
 			j.original_call_id, n.delivery_mode,
 			n.result_bytes,
@@ -1233,17 +1233,17 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 		JOIN external_agent_jobs j ON j.job_id = n.job_id
 		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ? AND n.terminal_status = 'completed'
 			AND n.root_activation_required = 1 AND j.mode = 'detached'
-			AND length(j.workstream_id) > 0 AND length(j.task_id) > 0 AND length(j.execution_identity) > 0
-			AND EXISTS (
-				SELECT 1 FROM workstreams w
-				JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
-				WHERE w.workstream_id = j.workstream_id AND w.conversation_key = j.conversation_key
-					AND w.owner_actor = j.actor AND w.project = j.primary_project
-					AND w.status = 'active' AND w.revision >= j.admission_revision
-					AND t.task_id = j.task_id AND t.project = j.primary_project
-					AND t.description = j.task AND t.status = 'running'
-					AND t.execution_identity = j.execution_identity
-			)
+			AND (j.completion_policy = 'automatic_root' OR
+				(j.completion_policy = 'workstream_only' AND EXISTS (
+					SELECT 1 FROM workstreams w
+					JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
+					WHERE w.workstream_id = j.workstream_id AND w.conversation_key = j.conversation_key
+						AND w.owner_actor = j.actor AND w.project = j.primary_project
+						AND w.status = 'active' AND w.revision >= j.admission_revision
+						AND t.task_id = j.task_id AND t.project = j.primary_project
+						AND t.description = j.task AND t.status = 'running'
+						AND t.execution_identity = j.execution_identity
+				)))
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 		activationID, notification.JobID, notification.StatusRevision, notification.Kind); err != nil {
 		return fmt.Errorf("insert external-agent activation: %w", err)
@@ -1617,7 +1617,7 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 	return n, nil
 }
 
-const jobColumns = `job_id, mode, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision, status, attempt, acp_session_id, transcript_path, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
+const jobColumns = `job_id, mode, completion_policy, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision, status, attempt, acp_session_id, transcript_path, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
 
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -1632,7 +1632,7 @@ func (s *ExternalAgentJobStore) load(ctx context.Context, queryer queryRower, wh
 func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 	var (
 		job                                                                  domain.ExternalAgentJob
-		mode, projects, status, conversation                                 string
+		mode, completionPolicy, projects, status, conversation               string
 		additionalProjects                                                   []string
 		leaseExpiry, heartbeat, timeout, created, started, finished, updated int64
 		sideEffects                                                          int
@@ -1640,6 +1640,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 	err := row.Scan(
 		&job.ID,
 		&mode,
+		&completionPolicy,
 		&job.Provider,
 		&job.Profile,
 		&job.PrimaryProject,
@@ -1686,6 +1687,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 		return domain.ExternalAgentJob{}, errors.New("external-agent job contains unsupported additional projects")
 	}
 	job.Mode = domain.ExternalAgentJobMode(mode)
+	job.CompletionPolicy = domain.ExternalAgentCompletionPolicy(completionPolicy)
 	job.Status = domain.ExternalAgentJobStatus(status)
 	job.ConversationKey = domain.ConversationKey(conversation)
 	job.SideEffectsPossible = sideEffects != 0

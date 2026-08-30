@@ -5,7 +5,7 @@ import "time"
 // Schema versions of the TRD 09 rollout contract: db upgrade accepts sources
 // in [MinSourceVersion, MaxSourceVersion] and drives them to TargetVersion.
 const (
-	TargetVersion    = 44
+	TargetVersion    = 45
 	MinSourceVersion = 33
 	MaxSourceVersion = 44
 )
@@ -14,16 +14,16 @@ const (
 // written only by Create's adoption transaction; its read belongs to
 // checkpoint 5.
 const (
-	KeyBaseline            = "v44_upgrade_baseline"
-	KeyCutoff              = "v44_rollout_cutoff_unix_nanos"
-	KeyPostflightStatus    = "v44_postflight_status"
-	KeyPostflightDetail    = "v44_postflight_detail"
-	KeyBackupPath          = "v44_upgrade_backup_path"
-	KeyBackupBytes         = "v44_upgrade_backup_bytes"
-	KeyBackupSHA256        = "v44_upgrade_backup_sha256"
-	KeyBackupSourceVersion = "v44_upgrade_backup_source_version"
-	KeyBackupVerifiedAt    = "v44_upgrade_backup_verified_at"
-	KeyBackupNotRequiredAt = "v44_upgrade_backup_not_required_at"
+	KeyBaseline            = "v45_upgrade_baseline"
+	KeyCutoff              = "v45_rollout_cutoff_unix_nanos"
+	KeyPostflightStatus    = "v45_postflight_status"
+	KeyPostflightDetail    = "v45_postflight_detail"
+	KeyBackupPath          = "v45_upgrade_backup_path"
+	KeyBackupBytes         = "v45_upgrade_backup_bytes"
+	KeyBackupSHA256        = "v45_upgrade_backup_sha256"
+	KeyBackupSourceVersion = "v45_upgrade_backup_source_version"
+	KeyBackupVerifiedAt    = "v45_upgrade_backup_verified_at"
+	KeyBackupNotRequiredAt = "v45_upgrade_backup_not_required_at"
 	KeyLegacyQuarantineAt  = "legacy_identity_quarantine_applied_at"
 )
 
@@ -101,7 +101,7 @@ type UpgradeReport struct {
 	PostActivationsWithoutContent     int
 }
 
-// BackupIdentity mirrors either the five durable v44_upgrade_backup_* keys
+// BackupIdentity mirrors either the five durable v45_upgrade_backup_* keys
 // or the single mutually exclusive not-required marker.
 type BackupIdentity struct {
 	Path          string

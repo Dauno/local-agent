@@ -65,7 +65,7 @@ func TestDetachedJobCompletionPublishesDurableSlackDelivery(t *testing.T) {
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	now := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	job := domain.ExternalAgentJob{
-		ID: "job_integration_1", Mode: domain.JobDetached, Provider: "agentcli", Profile: "build",
+		ID: "job_integration_1", Mode: domain.JobDetached, CompletionPolicy: domain.ExternalAgentCompletionDeliveryOnly, Provider: "agentcli", Profile: "build",
 		PrimaryProject: "workspace", RegistryRevision: "r1", Task: "task stays out of delivery logs",
 		Actor: "U12345678", TeamID: "T12345678", ConversationKey: "slack:T12345678:dm:D12345678:thread:1710000000.000001",
 		Status: domain.JobQueued, TimeoutAt: now.Add(time.Hour), CreatedAt: now, UpdatedAt: now,
@@ -595,6 +595,7 @@ func integrationDetachedJob(id string, now time.Time) domain.ExternalAgentJob {
 	return domain.ExternalAgentJob{
 		ID:               id,
 		Mode:             domain.JobDetached,
+		CompletionPolicy: domain.ExternalAgentCompletionDeliveryOnly,
 		Provider:         "agentcli",
 		Profile:          "build",
 		PrimaryProject:   "workspace",

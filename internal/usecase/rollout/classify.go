@@ -54,9 +54,10 @@ func ParseSHA256Hex(raw string) (string, bool) {
 }
 
 // ParseBackupSourceVersion requires a schema version this binary can read.
+// A verified backup may describe the target schema after an adoption run.
 func ParseBackupSourceVersion(raw string) (int, bool) {
 	value, err := strconv.Atoi(raw)
-	if err != nil || value < 1 || value > MaxSourceVersion {
+	if err != nil || value < 1 || value > TargetVersion {
 		return 0, false
 	}
 	return value, true

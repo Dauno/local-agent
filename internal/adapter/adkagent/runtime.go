@@ -472,29 +472,13 @@ func reserveResultCallTokens(budget domain.RequestBudget, reserve int) (domain.R
 
 func (r *Runtime) toolsForInvocation(origin port.AgentTurnOrigin, key domain.ConversationKey, activation *domain.ExternalAgentJobActivation) ([]tool.Tool, error) {
 	if origin.Kind == port.AgentTurnOriginJobCompletion {
-		if r.toolFactory == nil {
-			return nil, nil
-		}
-		if activation == nil || activation.ActivationID != origin.ActivationID || activation.Actor != origin.Actor || activation.ConversationKey != key {
+		if activation != nil && (activation.ActivationID != origin.ActivationID || activation.Actor != origin.Actor || activation.ConversationKey != key) {
 			return nil, errors.New("job-completion activation binding is incomplete")
 		}
-		factory, ok := r.toolFactory.(port.ActivationAgentToolFactory)
-		if !ok {
-			return nil, errors.New("job-completion host-only tool factory is unavailable")
-		}
-		rawTools, err := factory.ToolsForActivation(origin.Actor, key, *activation)
-		if err != nil {
-			return nil, err
-		}
-		tools := make([]tool.Tool, 0, len(rawTools))
-		for index, raw := range rawTools {
-			candidate, ok := raw.(tool.Tool)
-			if !ok || candidate == nil {
-				return nil, fmt.Errorf("activation tool %d is not an ADK tool: %T", index, raw)
-			}
-			tools = append(tools, candidate)
-		}
-		return tools, nil
+		// Completion turns never receive ADK tools. The host verifies the
+		// result before model contact, and activation data cannot authorize
+		// reads, confirmations, delegation, or mutation.
+		return nil, nil
 	}
 
 	tools := append([]tool.Tool(nil), r.staticTools...)

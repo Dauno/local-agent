@@ -23,11 +23,11 @@ const (
 	defaultAuxiliaryModelTimeoutSeconds = 120
 )
 
-// This release's v44 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
+// This release's v45 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
 // checkpoint 6). A database or connection outside this contract fails
 // doctor with actionable remediation rather than being silently accepted.
 const (
-	expectedSQLiteSchemaVersion      = 44
+	expectedSQLiteSchemaVersion      = 45
 	expectedSQLiteJournalMode        = "wal"
 	expectedSQLiteSynchronous        = 2 // PRAGMA synchronous FULL
 	expectedSQLiteBusyTimeoutMillis  = 5000
@@ -40,8 +40,8 @@ const (
 const (
 	minimumSchemaConnectionModel = 1
 	minimumSchemaDatabaseFile    = 1
-	minimumSchemaJobs            = 30
-	minimumSchemaActivations     = 29
+	minimumSchemaJobs            = 45
+	minimumSchemaActivations     = 45
 	minimumSchemaResultIdentity  = 32
 	minimumSchemaRecoverableRefs = 41
 	minimumSchemaResultRetention = 34
@@ -793,17 +793,18 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 					report.fail(
 						"external-agent activations",
 						fmt.Sprintf(
-							"activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d)",
+							"activation outbox has %d stuck activations (pending=%d, processed=%d, completion_unknown=%d, legacy_non_terminal=%d)",
 							health.Stuck,
 							health.Pending,
 							health.Processed,
 							health.CompletionUnknown,
+							health.LegacyNonTerminal,
 						),
 						"Inspect the activation worker and let expired leases become reclaimable.",
 						false,
 					)
 				} else {
-					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d", health.Pending, health.Processed, health.CompletionUnknown))
+					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d, legacy_non_terminal=%d (not claimable)", health.Pending, health.Processed, health.CompletionUnknown, health.LegacyNonTerminal))
 				}
 			}
 		})
@@ -1205,7 +1206,7 @@ func validateConnectionPragmas(health domain.SQLiteRuntimeHealth) []string {
 }
 
 // validateSQLiteRuntimeContract compares an observed connection model
-// against this release's full v44 contract and returns one problem string
+// against this release's full v45 contract and returns one problem string
 // per mismatch, or nil when the connection model is healthy.
 func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
 	var problems []string

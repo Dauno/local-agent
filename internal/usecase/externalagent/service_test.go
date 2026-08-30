@@ -18,6 +18,64 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
+func TestStartAssignsHostCompletionPolicyByMode(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "policy.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 1},
+		Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: &fakeJobRuntime{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	foreground, err := service.Start(t.Context(), testRequest(domain.JobForeground))
+	if err != nil {
+		t.Fatal(err)
+	}
+	detachedRequest := testRequest(domain.JobDetached)
+	detachedRequest.WrapperCallID, detachedRequest.OriginalCallID = "wrapper-detached", "original-detached"
+	detached, err := service.Start(t.Context(), detachedRequest)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if foreground.CompletionPolicy != domain.ExternalAgentCompletionDeliveryOnly || detached.CompletionPolicy != domain.ExternalAgentCompletionAutomaticRoot {
+		t.Fatalf("completion policies = foreground:%q detached:%q", foreground.CompletionPolicy, detached.CompletionPolicy)
+	}
+	for _, job := range []*domain.ExternalAgentJob{foreground, detached} {
+		stored, err := sqlite.NewExternalAgentJobStore(store).GetJob(t.Context(), job.ID)
+		if err != nil || stored == nil || stored.CompletionPolicy != job.CompletionPolicy {
+			t.Fatalf("stored job = %#v, err = %v", stored, err)
+		}
+	}
+}
+
+func TestStartDropsPartialWorkstreamBindingToConversationRoute(t *testing.T) {
+	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "partial-binding.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = store.Close() }()
+	service, err := New(
+		Config{DefaultTimeout: time.Second, MaxTimeout: time.Minute, LeaseTTL: time.Second, PollInterval: time.Second, Concurrency: 1, MaxAttempts: 1},
+		Dependencies{Store: sqlite.NewExternalAgentJobStore(store), Runtime: &fakeJobRuntime{}},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request := testRequest(domain.JobDetached)
+	request.WorkstreamID = "untrusted-partial-binding"
+	job, err := service.Start(t.Context(), request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if job.CompletionPolicy != domain.ExternalAgentCompletionAutomaticRoot || job.WorkstreamID != "" || job.TaskID != "" || job.ExecutionIdentity != "" || job.AdmissionRevision != 0 {
+		t.Fatalf("partial binding admission = %#v", job)
+	}
+}
+
 func TestDetachedJobIsPersistedBeforeWorkerCompletesIt(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "jobs.db"))
 	if err != nil {

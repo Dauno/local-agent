@@ -96,12 +96,12 @@ func insertIdentityActivationRowWithTerminalStatus(t *testing.T, db *sql.DB, job
 func insertIdentityActivationRowWithTerminalStatusAndSHA(t *testing.T, db *sql.DB, jobID, state string, contentBytes int64, errorCode, terminalStatus, notificationSHA string) {
 	t.Helper()
 	if _, err := db.ExecContext(context.Background(), `INSERT INTO external_agent_job_activations (
-		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
+		job_id, status_revision, kind, activation_id, activation_scope, terminal_status, notification_sha256,
 		actor, team_id, conversation_key, original_call_id, delivery_mode, content_bytes,
 		slack_message_ts, published_at, state, attempt, lease_owner, lease_expiry, next_attempt_at,
 		last_error_code, response_body, response_sha256, exchange_intent_id, correlation_id,
 		response_slack_ts, created_at, updated_at)
-		VALUES (?, 1, 'terminal', ?, ?, ?, 'U12345678', 'T12345678',
+		VALUES (?, 1, 'terminal', ?, 'conversation', ?, ?, 'U12345678', 'T12345678',
 		'slack:T12345678:dm:D12345678', ?, 'markdown', ?, '1710000000.000002', 1, ?, 1, '', 0, 0,
 		?, '', '', '', '', '', 1, 1)`,
 		jobID, "activation_"+jobID, terminalStatus, notificationSHA, jobID+"-call", contentBytes, state, errorCode); err != nil {

@@ -48,7 +48,7 @@ func newTerminalSchemaError(sentinel error, found int) *versionRangeError {
 		sentinel: typed,
 		message: fmt.Sprintf(
 			"database schema v%d is outside the range local-agent db upgrade accepts ([%d, %d]); this file cannot be upgraded or opened by this binary",
-			found, rollout.MinSourceVersion, rollout.TargetVersion),
+			found, rollout.MinSourceVersion, rollout.MaxSourceVersion),
 	}
 }
 
@@ -425,6 +425,7 @@ func (a *Application) createVerifiedBackup(ctx context.Context, backupper rollou
 		_ = os.Remove(destination)
 		return rollout.BackupIdentity{}, err
 	}
+	identity.SourceVersion = sourceVersion
 	return identity, nil
 }
 

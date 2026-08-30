@@ -52,6 +52,7 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1710000000.000001")
 	job := integrationDetachedJob("job_activation_e2e", now)
+	job.CompletionPolicy = domain.ExternalAgentCompletionAutomaticRoot
 	job.ConversationKey = key
 	job.OriginalCallID = "original-call-e2e"
 	job.WorkstreamID = "ws-activation-e2e"
@@ -334,6 +335,7 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1710000000.000001")
 	job := integrationDetachedJob("job_proposal_e2e", now)
+	job.CompletionPolicy = domain.ExternalAgentCompletionAutomaticRoot
 	job.ConversationKey = key
 	job.OriginalCallID = "original-call-proposal-e2e"
 	job.WorkstreamID = "ws-proposal-e2e"
@@ -578,6 +580,7 @@ func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 	now := time.Now().UTC().Add(-time.Minute)
 	key := domain.ConversationKey("slack:T12345678:dm:D12345678:thread:1710000000.000001")
 	job := integrationDetachedJob("job_fallback_e2e", now)
+	job.CompletionPolicy = domain.ExternalAgentCompletionAutomaticRoot
 	job.ConversationKey = key
 	job.OriginalCallID = "original-call-fallback-e2e"
 	job.WorkstreamID = "ws-fallback-e2e"

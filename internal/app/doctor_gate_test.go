@@ -141,7 +141,7 @@ func TestDoctorV33JournalDeleteRunsGatedChecksAndLeavesBytesUnchanged(t *testing
 	if connectionModel.Status != doctor.StatusPass || connectionModel.Fatal {
 		t.Fatalf("connection model = %#v", connectionModel)
 	}
-	for _, want := range []string{"schema v33", "current binary requires v44", "run local-agent db upgrade", "journal_mode=delete"} {
+	for _, want := range []string{"schema v33", "current binary requires v45", "run local-agent db upgrade", "journal_mode=delete"} {
 		if !strings.Contains(connectionModel.Detail, want) {
 			t.Fatalf("detail %q missing %q", connectionModel.Detail, want)
 		}
@@ -162,21 +162,24 @@ func TestDoctorV33JournalDeleteRunsGatedChecksAndLeavesBytesUnchanged(t *testing
 			t.Fatalf("%s = %#v, want skip %q", name, result, detail)
 		}
 	}
-	for _, ran := range []string{"external-agent jobs", "external-agent activations", "external-agent result identity"} {
-		if result := findGateResult(t, report, ran); result.Status != doctor.StatusPass {
-			t.Fatalf("%s = %#v (%s)", ran, result, result.Detail)
+	for _, skipped := range []string{"external-agent jobs", "external-agent activations"} {
+		if result := findGateResult(t, report, skipped); result.Status != doctor.StatusSkipped {
+			t.Fatalf("%s = %#v (%s)", skipped, result, result.Detail)
 		}
+	}
+	if result := findGateResult(t, report, "external-agent result identity"); result.Status != doctor.StatusPass {
+		t.Fatalf("external-agent result identity = %#v (%s)", result, result.Detail)
 	}
 	if code := report.ExitCode(); code != 0 {
 		t.Fatalf("exit code = %d, want 0: %#v", code, report.Results)
 	}
 }
 
-// TestDoctorV44RunsEverythingWithoutSkips proves no regression at the
+// TestDoctorV45RunsEverythingWithoutSkips proves no regression at the
 // current release version: every check runs, none skips, WAL is enforced,
 // and the run exits clean.
-func TestDoctorV44RunsEverythingWithoutSkips(t *testing.T) {
-	dbPath := writeDoctorGateFixture(t, 44, false)
+func TestDoctorV45RunsEverythingWithoutSkips(t *testing.T) {
+	dbPath := writeDoctorGateFixture(t, 45, false)
 	before := sha256File(t, dbPath)
 
 	service, err := doctor.New(doctorGateDependencies(dbPath, nil))
@@ -187,7 +190,7 @@ func TestDoctorV44RunsEverythingWithoutSkips(t *testing.T) {
 
 	connectionModel := findGateResult(t, report, "SQLite connection model")
 	if connectionModel.Status != doctor.StatusPass ||
-		!strings.Contains(connectionModel.Detail, "schema_version=44") ||
+		!strings.Contains(connectionModel.Detail, "schema_version=45") ||
 		!strings.Contains(connectionModel.Detail, "journal_mode=wal") {
 		t.Fatalf("connection model = %#v", connectionModel)
 	}
@@ -202,10 +205,10 @@ func TestDoctorV44RunsEverythingWithoutSkips(t *testing.T) {
 			if result.Name == "model API key" {
 				continue
 			}
-			t.Fatalf("unexpected skip at v44: %#v", result)
+			t.Fatalf("unexpected skip at v45: %#v", result)
 		}
 		if result.Status == doctor.StatusFail {
-			t.Fatalf("unexpected failure at v44: %#v (%s)", result, result.Detail)
+			t.Fatalf("unexpected failure at v45: %#v (%s)", result, result.Detail)
 		}
 	}
 	if code := report.ExitCode(); code != 0 {
@@ -222,16 +225,16 @@ func (failingRuntimeChecker) CheckSQLiteRuntime(context.Context, string) (domain
 	return domain.SQLiteRuntimeHealth{}, errors.New("connection probe refused")
 }
 
-// TestDoctorFutureSchemaIsFatalWithNoLaterChecks proves the detected > 44
+// TestDoctorFutureSchemaIsFatalWithNoLaterChecks proves the detected > 45
 // branch fails the connection-model check fatally, stops every later check,
 // and drives exit code 2.
 func TestDoctorFutureSchemaIsFatalWithNoLaterChecks(t *testing.T) {
-	dbPath := writeDoctorGateFixture(t, 45, false)
+	dbPath := writeDoctorGateFixture(t, 46, false)
 	service, err := doctor.New(doctorGateDependencies(dbPath, nil))
 	if err != nil {
 		t.Fatal(err)
 	}
-	assertFatalStop(t, service.Run(context.Background(), false), "user_version=45")
+	assertFatalStop(t, service.Run(context.Background(), false), "user_version=46")
 }
 
 // TestDoctorUnreadableSchemaIsFatalWithNoLaterChecks proves a failed schema

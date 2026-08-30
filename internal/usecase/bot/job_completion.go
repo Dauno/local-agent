@@ -18,6 +18,7 @@ var _ port.ExternalAgentJobCompletionHandler = (*Service)(nil)
 var (
 	errAssistantExchangeUnavailable = errors.New("assistant exchange writer is unavailable")
 	errActivationStoreUnavailable   = errors.New("external-agent activation store is unavailable")
+	errActivationJobIdentityInvalid = errors.New("external-agent activation job identity is invalid")
 )
 
 func activationStateConflict(err error) error {
@@ -186,7 +187,11 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 
 	frame, frameErr := s.activationFrame(ctx, *activation)
 	if frameErr != nil {
-		return s.failActivation(ctx, activation, "activation_result_unavailable", false, frameErr)
+		code := "activation_result_unavailable"
+		if errors.Is(frameErr, errActivationJobIdentityInvalid) {
+			code = "activation_identity_invalid"
+		}
+		return s.failActivation(ctx, activation, code, false, frameErr)
 	}
 	if frame.Representation == domain.ActivationResultUnavailable {
 		return s.failActivation(ctx, activation, "activation_result_unavailable", false, errors.New("activation result representation is unavailable"))
@@ -221,9 +226,10 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 		return s.runtime.Run(modelCtx, port.AgentRequest{
 			ConversationKey: activation.ConversationKey,
 			Origin: port.AgentTurnOrigin{
-				Kind:         port.AgentTurnOriginJobCompletion,
-				Actor:        activation.Actor,
-				ActivationID: activation.ActivationID,
+				Kind:            port.AgentTurnOriginJobCompletion,
+				Actor:           activation.Actor,
+				ActivationID:    activation.ActivationID,
+				ActivationScope: activation.ActivationScope,
 			},
 			Messages:   modelContext,
 			Activation: activation,
@@ -268,7 +274,7 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 	if strings.TrimSpace(response) == "" {
 		return s.markUnknown(ctx, activation, "activation_empty_response")
 	}
-	if !activationResponseAllowed(response) {
+	if !activationResponseAllowed(response, activation.ActivationScope) {
 		return s.markUnknown(ctx, activation, "activation_response_policy_invalid")
 	}
 	message := domain.Message{Role: domain.RoleAssistant, Source: domain.MessageSourceAssistant, Content: response, CreatedAt: s.clock.Now().UTC()}
@@ -284,20 +290,47 @@ func (s *Service) runJobCompletion(ctx context.Context, activation *domain.Exter
 }
 
 func (s *Service) activationFrame(ctx context.Context, activation domain.ExternalAgentJobActivation) (domain.ActivationFrame, error) {
+	if s.completionReader == nil {
+		return domain.ActivationFrame{}, errors.New("activation job reader is unavailable")
+	}
+	job, err := s.completionReader.Status(ctx, activation.JobID, activation.Actor, activation.ConversationKey)
+	if err != nil {
+		return domain.ActivationFrame{}, errActivationJobIdentityInvalid
+	}
+	if job == nil || job.ID != activation.JobID || job.Actor != activation.Actor || job.ConversationKey != activation.ConversationKey ||
+		job.Status != domain.JobCompleted || activation.TerminalStatus != domain.JobCompleted ||
+		job.Status != activation.TerminalStatus || job.StatusRevision != activation.StatusRevision ||
+		job.PrimaryProject == "" {
+		return domain.ActivationFrame{}, errActivationJobIdentityInvalid
+	}
+	if job.WorkstreamID != activation.WorkstreamID || job.TaskID != activation.TaskID ||
+		job.ExecutionIdentity != activation.ExecutionIdentity || job.AdmissionRevision != activation.AdmissionRevision {
+		return domain.ActivationFrame{}, errActivationJobIdentityInvalid
+	}
+	excerpt, taskDigest, truncated, err := domain.BuildDelegatedTaskExcerpt(job.Task)
+	if err != nil {
+		return domain.ActivationFrame{}, err
+	}
 	frame := domain.ActivationFrame{
-		ActivationID: activation.ActivationID, JobID: activation.JobID, Actor: activation.Actor, TeamID: activation.TeamID,
-		ConversationKey: activation.ConversationKey, TerminalStatus: activation.TerminalStatus,
+		ActivationID: activation.ActivationID, JobID: activation.JobID, ActivationScope: activation.ActivationScope,
+		Actor: activation.Actor, TeamID: activation.TeamID, ConversationKey: activation.ConversationKey,
+		TerminalStatus: activation.TerminalStatus, PrimaryProject: job.PrimaryProject,
+		DelegatedTaskExcerpt: excerpt, DelegatedTaskSHA256: taskDigest, DelegatedTaskTruncated: truncated,
 		WorkstreamID: activation.WorkstreamID, TaskID: activation.TaskID, ExecutionIdentity: activation.ExecutionIdentity,
 		AdmissionRevision: activation.AdmissionRevision, ResultSHA256: activation.ResultSHA256, ResultBytes: activation.ContentBytes,
 		Representation: domain.ActivationResultUnavailable,
 	}
-	if activation.WorkstreamID != "" {
-		if s.workstreams == nil {
-			return domain.ActivationFrame{}, errors.New("activation workstream snapshot reader is unavailable")
+	if activation.ActivationScope == domain.ExternalAgentActivationWorkstream {
+		if s.workstreams == nil || !domain.CompletionBindingPresent(activation.WorkstreamID, activation.TaskID, activation.ExecutionIdentity, activation.AdmissionRevision) {
+			return domain.ActivationFrame{}, errors.New("activation workstream binding is unavailable")
 		}
-		snapshot, err := s.workstreams.SnapshotForActivation(ctx, activation.WorkstreamID, activation.Actor, activation.ConversationKey)
-		if err != nil {
-			return domain.ActivationFrame{}, fmt.Errorf("read activation workstream snapshot: %w", err)
+		snapshot, snapshotErr := s.workstreams.SnapshotForActivation(ctx, activation.WorkstreamID, activation.Actor, activation.ConversationKey)
+		if snapshotErr != nil {
+			return domain.ActivationFrame{}, fmt.Errorf("read activation workstream snapshot: %w", snapshotErr)
+		}
+		if snapshot.ID != activation.WorkstreamID || snapshot.OwnerActor != activation.Actor || snapshot.ConversationKey != activation.ConversationKey ||
+			snapshot.Project != job.PrimaryProject || snapshot.Status != domain.WorkstreamActive || snapshot.Revision < activation.AdmissionRevision {
+			return domain.ActivationFrame{}, errors.New("activation workstream snapshot identity is invalid")
 		}
 		frame.Workstream = snapshot
 		for _, task := range snapshot.Tasks {
@@ -306,12 +339,12 @@ func (s *Service) activationFrame(ctx context.Context, activation domain.Externa
 				break
 			}
 		}
-		if frame.Task.ID == "" {
-			return domain.ActivationFrame{}, errors.New("activation task is absent from workstream snapshot")
+		if frame.Task.ID == "" || frame.Task.Project != job.PrimaryProject || frame.Task.Description != job.Task ||
+			frame.Task.Status != domain.TaskRunning || frame.Task.ExecutionIdentity != activation.ExecutionIdentity {
+			return domain.ActivationFrame{}, errors.New("activation task binding is invalid")
 		}
-	}
-	if s.completionReader == nil {
-		return frame, nil
+	} else if activation.ActivationScope != domain.ExternalAgentActivationConversation {
+		return domain.ActivationFrame{}, errors.New("activation scope is invalid")
 	}
 	result, err := s.completionReader.ReadResult(ctx, activation.JobID, activation.Actor, activation.ConversationKey)
 	if err != nil {
@@ -477,7 +510,7 @@ func (s *Service) reconcileModelStarted(ctx context.Context, activation *domain.
 	if strings.TrimSpace(response) == "" {
 		return s.markUnknown(ctx, activation, "activation_empty_response")
 	}
-	if !activationResponseAllowed(response) {
+	if !activationResponseAllowed(response, activation.ActivationScope) {
 		return s.markUnknown(ctx, activation, "activation_response_policy_invalid")
 	}
 	metadata, _, err := activationMetadata(*activation)
@@ -532,7 +565,7 @@ func (s *Service) authoritativeActivation(ctx context.Context, supplied domain.E
 
 func activationIdentityMatches(left, right domain.ExternalAgentJobActivation) bool {
 	return left.ActivationID == right.ActivationID && left.JobID == right.JobID &&
-		left.StatusRevision == right.StatusRevision && left.Kind == right.Kind &&
+		left.ActivationScope == right.ActivationScope && left.StatusRevision == right.StatusRevision && left.Kind == right.Kind &&
 		left.TerminalStatus == right.TerminalStatus && left.NotificationSHA256 == right.NotificationSHA256 && left.ResultSHA256 == right.ResultSHA256 &&
 		left.Actor == right.Actor && left.TeamID == right.TeamID && left.ConversationKey == right.ConversationKey &&
 		left.WorkstreamID == right.WorkstreamID && left.TaskID == right.TaskID && left.ExecutionIdentity == right.ExecutionIdentity && left.AdmissionRevision == right.AdmissionRevision &&
@@ -580,22 +613,34 @@ func activationMetadata(activation domain.ExternalAgentJobActivation) (domain.Co
 	}, channelKind, nil
 }
 
-// activationResponseAllowed enforces the machine-recognizable portion of the
-// text-only completion contract at the publication boundary. Activation tools
-// are empty, so this is defense in depth against turning a model response into
-// a command or confirmation prompt. A proposal must use the line-anchored
-// `Proposal:` label exactly once; unlabeled prose is informational and has no
-// executable interpretation.
-func activationResponseAllowed(response string) bool {
+// activationResponseAllowed enforces the host-owned completion policy at the
+// publication boundary. A conversation activation never permits a proposal.
+func activationResponseAllowed(response string, scopes ...domain.ExternalAgentActivationScope) bool {
+	if strings.TrimSpace(response) == "" {
+		return false
+	}
+	scope := domain.ExternalAgentActivationWorkstream
+	if len(scopes) > 0 && scopes[0] != "" {
+		scope = scopes[0]
+	}
+	if scope != domain.ExternalAgentActivationWorkstream && scope != domain.ExternalAgentActivationConversation {
+		return false
+	}
 	lower := strings.ToLower(response)
 	for _, forbidden := range []string{
 		"workstream-human ", "adk_request_confirmation", "toolconfirmation", "<function_call",
+		"function_call", "delegate", "delegated", "invoke tool", "invoked tool", "tool invocation", "used a tool",
+		"confirmation", "mutation", "mutated", "i changed", "i updated", "i created", "i deleted", "i wrote", "i ran", "i executed",
 	} {
 		if strings.Contains(lower, forbidden) {
 			return false
 		}
 	}
-	return countProposalLabels(response) <= 1
+	proposals := countProposalLabels(response)
+	if scope == domain.ExternalAgentActivationConversation {
+		return proposals == 0
+	}
+	return proposals <= 1
 }
 
 // countProposalLabels counts the machine-recognizable proposal labels: lines

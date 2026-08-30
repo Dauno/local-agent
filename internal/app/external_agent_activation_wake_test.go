@@ -56,10 +56,10 @@ func seedActivation(t *testing.T, store *adaptersqlite.Store, jobID string) stri
 	activationID := jobID + "-activation-seed"
 	now := time.Now().UTC().UnixNano()
 	_, err := store.DB().ExecContext(t.Context(), `INSERT INTO external_agent_job_activations (
-		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
+		job_id, status_revision, kind, activation_id, activation_scope, terminal_status, notification_sha256,
 		actor, team_id, conversation_key, original_call_id, delivery_mode,
 		slack_message_ts, published_at, state, next_attempt_at, created_at, updated_at)
-		VALUES (?, 99, 'terminal', ?, 'completed', ?, 'U12345678', 'T12345678', 'slack:T12345678:dm:D12345678', 'original-1', 'markdown', '1.0', ?, 'pending', ?, ?, ?)`,
+		VALUES (?, 99, 'terminal', ?, 'conversation', 'completed', ?, 'U12345678', 'T12345678', 'slack:T12345678:dm:D12345678', 'original-1', 'markdown', '1.0', ?, 'pending', ?, ?, ?)`,
 		jobID, activationID, strings.Repeat("a", 64), now, now, now, now)
 	if err != nil {
 		t.Fatal(err)

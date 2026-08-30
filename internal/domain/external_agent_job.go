@@ -13,6 +13,40 @@ import (
 
 const MaxExternalAgentTaskRunes = 200_000
 
+type ExternalAgentCompletionPolicy string
+
+const (
+	ExternalAgentCompletionDeliveryOnly  ExternalAgentCompletionPolicy = "delivery_only"
+	ExternalAgentCompletionWorkstream    ExternalAgentCompletionPolicy = "workstream_only"
+	ExternalAgentCompletionAutomaticRoot ExternalAgentCompletionPolicy = "automatic_root"
+)
+
+func (p ExternalAgentCompletionPolicy) Valid() bool {
+	switch p {
+	case ExternalAgentCompletionDeliveryOnly, ExternalAgentCompletionWorkstream, ExternalAgentCompletionAutomaticRoot:
+		return true
+	default:
+		return false
+	}
+}
+
+type ExternalAgentActivationScope string
+
+const (
+	ExternalAgentActivationLegacy       ExternalAgentActivationScope = "legacy"
+	ExternalAgentActivationConversation ExternalAgentActivationScope = "conversation"
+	ExternalAgentActivationWorkstream   ExternalAgentActivationScope = "workstream"
+)
+
+func (s ExternalAgentActivationScope) Valid() bool {
+	switch s {
+	case ExternalAgentActivationLegacy, ExternalAgentActivationConversation, ExternalAgentActivationWorkstream:
+		return true
+	default:
+		return false
+	}
+}
+
 // MaxExternalAgentResultBytes is a final defensive bound for result reads made
 // through the host-completion path. Configured artifact bounds remain stricter
 // in normal composition.
@@ -32,8 +66,17 @@ func detachedCompletionMarker(jobID string) string {
 }
 
 func rootActivationRequired(job ExternalAgentJob) bool {
-	return job.Status == JobCompleted && job.Mode == JobDetached &&
-		CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision)
+	if job.Status != JobCompleted || job.Mode != JobDetached {
+		return false
+	}
+	switch job.EffectiveCompletionPolicy() {
+	case ExternalAgentCompletionAutomaticRoot:
+		return true
+	case ExternalAgentCompletionWorkstream:
+		return CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision)
+	default:
+		return false
+	}
 }
 
 type NotificationPublishState string
@@ -103,8 +146,7 @@ type ExternalAgentJobNotification struct {
 	// notification row or exposed through an ADK function response.
 	HostResultText string
 	// RootActivationRequired is the explicit, immutable completion disposition.
-	// It is set by mode at construction and backfilled for historical detached
-	// terminal snapshots; MarkNotificationPublished never infers it.
+	// It is set by the host completion policy at construction; MarkNotificationPublished never infers it.
 	RootActivationRequired bool
 	CanonicalMarkdown      string
 	// NotificationSHA256 and NotificationBytes are the notification identity
@@ -164,6 +206,7 @@ const (
 type ExternalAgentJobActivation struct {
 	ActivationID       string
 	JobID              string
+	ActivationScope    ExternalAgentActivationScope
 	StatusRevision     int
 	Kind               string
 	TerminalStatus     ExternalAgentJobStatus
@@ -221,6 +264,18 @@ func (a ExternalAgentJobActivation) Validate() error {
 	}
 	if err := ValidateCompletionBinding(a.WorkstreamID, a.TaskID, a.ExecutionIdentity, a.AdmissionRevision); err != nil {
 		return err
+	}
+	if a.ActivationScope == "" {
+		a.ActivationScope = ExternalAgentActivationLegacy
+	}
+	if !a.ActivationScope.Valid() {
+		return fmt.Errorf("invalid external-agent activation scope %q", a.ActivationScope)
+	}
+	if a.ActivationScope == ExternalAgentActivationWorkstream && !CompletionBindingPresent(a.WorkstreamID, a.TaskID, a.ExecutionIdentity, a.AdmissionRevision) {
+		return errors.New("workstream activation requires a complete completion binding")
+	}
+	if a.ActivationScope == ExternalAgentActivationLegacy && CompletionBindingPresent(a.WorkstreamID, a.TaskID, a.ExecutionIdentity, a.AdmissionRevision) {
+		return errors.New("legacy activation cannot carry a completion binding")
 	}
 	if a.DeliveryMode != JobResultDeliveryMarkdown && a.DeliveryMode != JobResultDeliveryFile {
 		return fmt.Errorf("invalid external-agent activation delivery mode %q", a.DeliveryMode)
@@ -331,6 +386,9 @@ type ExternalAgentJobNotificationHealth struct {
 // activation outbox. Processed is the terminal completed/failed count; the
 // ambiguous completion_unknown count stays separate for operator visibility.
 type ExternalAgentJobActivationHealth struct {
+	// LegacyNonTerminal counts historical legacy activations that remain
+	// non-terminal. Claim queries exclude these rows.
+	LegacyNonTerminal int
 	Pending           int
 	Processing        int
 	ModelStarted      int
@@ -437,6 +495,9 @@ type ExternalAgentJobInspection struct {
 }
 
 func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNotification, error) {
+	if err := validateCompletionPolicy(job); err != nil {
+		return ExternalAgentJobNotification{}, err
+	}
 	target, err := ConversationReplyTarget(job.ConversationKey)
 	if err != nil {
 		return ExternalAgentJobNotification{}, err
@@ -493,6 +554,9 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 // NewExternalAgentJobDelivery creates a notification from a complete,
 // already-sanitized result. It never truncates provider output.
 func NewExternalAgentJobDelivery(job ExternalAgentJob, result ExternalAgentInvocationResult) (ExternalAgentJobNotification, error) {
+	if err := validateCompletionPolicy(job); err != nil {
+		return ExternalAgentJobNotification{}, err
+	}
 	target, err := ConversationReplyTarget(job.ConversationKey)
 	if err != nil {
 		return ExternalAgentJobNotification{}, err
@@ -890,6 +954,7 @@ func (b ExternalAgentJobCompletionBinding) Present() bool {
 type ExternalAgentJob struct {
 	ID                     string
 	Mode                   ExternalAgentJobMode
+	CompletionPolicy       ExternalAgentCompletionPolicy
 	Provider               string
 	Profile                string
 	PrimaryProject         string
@@ -1014,6 +1079,9 @@ func (j ExternalAgentJob) Validate() error {
 	if j.Mode != JobForeground && j.Mode != JobDetached {
 		return fmt.Errorf("unsupported external-agent job mode %q", j.Mode)
 	}
+	if err := validateCompletionPolicy(j); err != nil {
+		return err
+	}
 	if j.Status == "" {
 		return errors.New("external-agent job status is required")
 	}
@@ -1024,6 +1092,33 @@ func (j ExternalAgentJob) Validate() error {
 		return err
 	}
 	return nil
+}
+
+func validateCompletionPolicy(job ExternalAgentJob) error {
+	policy := job.EffectiveCompletionPolicy()
+	if !policy.Valid() {
+		return fmt.Errorf("invalid external-agent completion policy %q", job.CompletionPolicy)
+	}
+	if policy == ExternalAgentCompletionAutomaticRoot && job.Mode != JobDetached {
+		return errors.New("automatic-root completion policy requires detached mode")
+	}
+	if job.Mode == JobForeground && policy != ExternalAgentCompletionDeliveryOnly {
+		return errors.New("foreground jobs require delivery-only completion policy")
+	}
+	return nil
+}
+
+// EffectiveCompletionPolicy returns the admission policy. Empty values are
+// accepted only for in-memory legacy fixtures and map to the mode default;
+// persisted v45 rows always carry an explicit policy.
+func (j ExternalAgentJob) EffectiveCompletionPolicy() ExternalAgentCompletionPolicy {
+	if j.CompletionPolicy != "" {
+		return j.CompletionPolicy
+	}
+	if j.Mode == JobDetached {
+		return ExternalAgentCompletionAutomaticRoot
+	}
+	return ExternalAgentCompletionDeliveryOnly
 }
 
 // CompletionBindingPresent reports whether a job carries the complete trusted

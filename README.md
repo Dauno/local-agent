@@ -95,16 +95,18 @@ local-agent run
 
 ### Database Upgrade
 
-Version `v0.13.0` uses schema v44. Before `doctor` or `run`, upgrade an existing
-v33-v43 database with:
+This release uses schema v45. Before `doctor` or `run`, upgrade an existing
+v33-v44 database with:
 
 ```sh
 local-agent db upgrade
 ```
 
 The command previews the change and creates a verified backup before it writes
-the new schema. Use `local-agent db upgrade --yes` only for a non-interactive
-upgrade. To roll back, restore the backup before you start an older binary.
+the new schema. It runs the v45 migration, postflight checks, and legacy
+identity disposition checks. Use `local-agent db upgrade --yes` only for a
+non-interactive upgrade. To roll back, restore the backup before you start an
+older binary.
 
 `doctor` is offline by default. Only `doctor --live` contacts Slack and the
 configured model endpoint. `run` never bootstraps missing files; use `init`

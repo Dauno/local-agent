@@ -27,18 +27,27 @@ const (
 // the original job actor for job-completion turns, never a Slack event actor
 // supplied later in the pipeline.
 type AgentTurnOrigin struct {
-	Kind         AgentTurnOriginKind
-	Actor        string
-	ActivationID string
+	Kind            AgentTurnOriginKind
+	Actor           string
+	ActivationID    string
+	ActivationScope domain.ExternalAgentActivationScope
 }
 
 func (o AgentTurnOrigin) Validate() error {
 	switch o.Kind {
 	case AgentTurnOriginUser:
-		if o.ActivationID != "" {
-			return errors.New("user turn origin cannot carry an activation ID")
+		if o.ActivationID != "" || o.ActivationScope != "" {
+			return errors.New("user turn origin cannot carry activation metadata")
 		}
 	case AgentTurnOriginJobCompletion:
+		if o.ActivationScope == "" {
+			// Pre-v45 callers did not carry a scope. Keep those in the
+			// workstream instruction path; durable v45 activations always set it.
+			o.ActivationScope = domain.ExternalAgentActivationWorkstream
+		}
+		if !o.ActivationScope.Valid() || o.ActivationScope == domain.ExternalAgentActivationLegacy {
+			return errors.New("job-completion turn origin has an invalid activation scope")
+		}
 		if strings.TrimSpace(o.Actor) == "" {
 			return errors.New("job-completion turn origin requires an actor")
 		}

@@ -231,7 +231,7 @@ The agent uses **durable ADK sessions** backed by SQLite. Key types:
 - **Dedupe**: at-most-once by event + message keys. Ephemeral Slack history recovery is not persisted.
 - **Canonical keys**: `slack:{team}:dm:{channel}` or `slack:{team}:channel:{channel}:thread:{root_ts}`.
 - **ADK session IDs**: `adk:{canonical-conversation-key}` — deterministic, opaque, never derived from untrusted text.
-- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 44 (external-agent contract chain: v30 → v31 → v32).
+- **Schema**: `PRAGMA user_version` for SQLite migrations. Current version: 45 (external-agent contract chain: v30 → v31 → v32 → v45).
 - **Memory**: curated entity memory stored in SQLite; `.local-agent/memory/` holds OKF file projections. Memory retrieval is deterministic (no LLM routing) and runs before each model call. Memory failure is non-fatal.
 - **Ephemeral context**: Slack enrichment and memory snippets are injected per-turn via the user message text; they must never become durable ADK events.
 - **Sandbox**: workspace inspection is enabled by default for the registered application root through `sandbox.enabled` and `sandbox.projects`; `list_directory` is non-recursive and blocks `.env` and `.git` at every depth (including symlinks).

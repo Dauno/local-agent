@@ -153,14 +153,25 @@ func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequ
 	if timeout > s.cfg.MaxTimeout {
 		return nil, errors.New("external-agent job timeout exceeds administrative maximum")
 	}
+	workstreamID, taskID, executionIdentity, admissionRevision := request.WorkstreamID, request.TaskID, request.ExecutionIdentity, request.AdmissionRevision
+	if err := domain.ValidateCompletionBinding(workstreamID, taskID, executionIdentity, admissionRevision); err != nil {
+		// A detached job with no exact trusted binding still uses the
+		// conversation completion route. Never let a partial model value
+		// become workstream authority.
+		workstreamID, taskID, executionIdentity, admissionRevision = "", "", "", 0
+	}
 	now := s.clock.Now().UTC()
+	completionPolicy := domain.ExternalAgentCompletionDeliveryOnly
+	if request.Mode == domain.JobDetached {
+		completionPolicy = domain.ExternalAgentCompletionAutomaticRoot
+	}
 	job := domain.ExternalAgentJob{
-		ID: "job_" + randomID(), Mode: request.Mode, Provider: request.Provider, Profile: request.Profile,
+		ID: "job_" + randomID(), Mode: request.Mode, CompletionPolicy: completionPolicy, Provider: request.Provider, Profile: request.Profile,
 		PrimaryProject: request.PrimaryProject, RegistryRevision: request.RegistryRevision,
 		Task: request.Task, RequestSHA256: domain.ExternalAgentJobRequestDigest(request),
 		WrapperCallID: request.WrapperCallID, OriginalCallID: request.OriginalCallID, Actor: request.Actor, TeamID: request.TeamID,
-		ConversationKey: request.ConversationKey, WorkstreamID: request.WorkstreamID, TaskID: request.TaskID,
-		ExecutionIdentity: request.ExecutionIdentity, AdmissionRevision: request.AdmissionRevision,
+		ConversationKey: request.ConversationKey, WorkstreamID: workstreamID, TaskID: taskID,
+		ExecutionIdentity: executionIdentity, AdmissionRevision: admissionRevision,
 		Status: domain.JobQueued, TimeoutAt: now.Add(timeout), CreatedAt: now, UpdatedAt: now,
 	}
 	if job.OriginalCallID == "" {

@@ -1,5 +1,11 @@
 # Release Notes
 
+## v0.15.0
+
+- Added schema v45 with immutable host completion policies and activation scopes.
+- Detached ad hoc workers use automatic root integration when no eligible workstream binding remains.
+- Conversation-scope completions use no tools, proposals, confirmations, delegation, or mutations.
+
 ## v0.14.1 (2026-08-28)
 
 - Improved Slack confirmation and job-accepted cards with bounded text that respects Slack limits.

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -42,7 +43,7 @@ func TestPublishedTerminalNotificationAtomicallyCreatesOneActivation(t *testing.
 	}
 }
 
-func TestPublishedUnboundDetachedNotificationDoesNotCreateActivation(t *testing.T) {
+func TestPublishedUnboundDetachedNotificationCreatesConversationActivation(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
 	job := activationTestJob("activation-unbound", now)
 	job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision = "", "", "", 0
@@ -52,8 +53,68 @@ func TestPublishedUnboundDetachedNotificationDoesNotCreateActivation(t *testing.
 	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000002", now.Add(3*time.Second)); err != nil {
 		t.Fatal(err)
 	}
+	if count := activationCountForJob(t, store, job.ID); count != 1 {
+		t.Fatalf("unbound detached activation count = %d, want 1", count)
+	}
+	activation, err := jobs.GetActivation(t.Context(), domain.ExternalAgentJobActivationID(job.ID, notification.StatusRevision, notification.Kind))
+	if err != nil || activation == nil || activation.ActivationScope != domain.ExternalAgentActivationConversation {
+		t.Fatalf("unbound detached activation = %#v, err = %v, want conversation scope", activation, err)
+	}
+}
+
+func TestPublishedAutomaticRootWithStaleBindingUsesConversationScope(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-stale-binding", now)
+	terminalizeActivationTestJob(t, jobs, job, now)
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE workstreams SET status = 'paused' WHERE workstream_id = ?`, job.WorkstreamID); err != nil {
+		t.Fatal(err)
+	}
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000003", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	activation, err := jobs.GetActivation(t.Context(), domain.ExternalAgentJobActivationID(job.ID, notification.StatusRevision, notification.Kind))
+	if err != nil || activation == nil || activation.ActivationScope != domain.ExternalAgentActivationConversation || activation.WorkstreamID != job.WorkstreamID {
+		t.Fatalf("stale binding activation = %#v, err = %v, want conversation scope with provenance", activation, err)
+	}
+}
+
+func TestLegacyActivationIsNotClaimed(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-legacy-unclaimable", now)
+	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+		t.Fatalf("create = %v, err = %v", created, err)
+	}
+	if _, err := store.DB().ExecContext(t.Context(), `INSERT INTO external_agent_job_activations (
+		job_id, status_revision, kind, activation_id, activation_scope, terminal_status, notification_sha256,
+		actor, team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
+		original_call_id, delivery_mode, slack_message_ts, published_at, state, next_attempt_at, created_at, updated_at)
+		VALUES (?, 1, 'terminal', ?, 'legacy', 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'markdown', '1710000000.000001', ?, 'pending', ?, ?, ?)`,
+		job.ID, "activation-legacy-unclaimable", strings.Repeat("a", 64), job.Actor, job.TeamID, string(job.ConversationKey),
+		job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision, job.OriginalCallID,
+		now.UnixNano(), now.UnixNano(), now.UnixNano(), now.UnixNano()); err != nil {
+		t.Fatal(err)
+	}
+	claimed, err := jobs.ClaimNextActivation(t.Context(), now, "activation-worker", time.Minute)
+	if err != nil || claimed != nil {
+		t.Fatalf("legacy activation claim = %#v, err = %v, want nil", claimed, err)
+	}
+}
+
+func TestPublishedHistoricalWorkstreamOnlyWithStaleBindingDoesNotActivate(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-workstream-only-stale", now)
+	job.CompletionPolicy = domain.ExternalAgentCompletionWorkstream
+	terminalizeActivationTestJob(t, jobs, job, now)
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE workstreams SET status = 'paused' WHERE workstream_id = ?`, job.WorkstreamID); err != nil {
+		t.Fatal(err)
+	}
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000004", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
 	if count := activationCountForJob(t, store, job.ID); count != 0 {
-		t.Fatalf("unbound detached activation count = %d, want 0", count)
+		t.Fatalf("stale historical workstream-only activation count = %d, want 0", count)
 	}
 }
 
