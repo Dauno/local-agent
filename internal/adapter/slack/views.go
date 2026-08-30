@@ -76,6 +76,7 @@ func newBuilderModalEngine() (*blockkit.Engine, error) {
 type builderModalView struct {
 	Name            string          `bk:"name,omitempty"`
 	AgentType       string          `bk:"agent_type"`
+	AgentTypeLabel  string          `bk:"agent_type_label"`
 	Description     string          `bk:"description,omitempty"`
 	Instruction     string          `bk:"instruction,omitempty"`
 	Models          []blockkit.Pair `bk:"models"`

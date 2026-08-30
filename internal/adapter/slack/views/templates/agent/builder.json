@@ -9,6 +9,7 @@
     "inputs": {
       "name": {"type": "text"},
       "agent_type": {"type": "enum", "required": true, "one_of": ["llm", "agent_cli"]},
+      "agent_type_label": {"type": "enum", "required": true, "one_of": ["LLM", "Agent CLI"]},
       "description": {"type": "text", "max": 500},
       "instruction": {"type": "longtext", "max": 3000},
       "models": {"type": "list<pair>", "required": true},
@@ -51,7 +52,7 @@
           {"text": {"type": "plain_text", "text": "Agent CLI", "emoji": false}, "value": "agent_cli"}
         ],
         "initial_option": {
-          "text": {"type": "plain_text", "text": "{{agent_type}}", "emoji": false},
+          "text": {"type": "plain_text", "text": "{{agent_type_label}}", "emoji": false},
           "value": "{{agent_type}}"
         }
       },

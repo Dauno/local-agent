@@ -152,6 +152,10 @@ func builderModalViewForKind(kind domain.AgentKind, profiles []BuilderProviderPr
 		model = compatible[0].Reference
 	}
 	agentType := string(kind)
+	agentTypeLabel, err := builderAgentTypeLabel(kind)
+	if err != nil {
+		return builderModalView{}, err
+	}
 	executionMode := values["execution_mode"]
 	timeoutSeconds := values["timeout_seconds"]
 	if kind == domain.AgentKindAgentCLI {
@@ -167,11 +171,22 @@ func builderModalViewForKind(kind domain.AgentKind, profiles []BuilderProviderPr
 		pairs[index] = blockkit.Pair{Label: profile.Reference, Value: profile.Reference}
 	}
 	return builderModalView{
-		Name: values["name"], AgentType: agentType, Description: values["description"],
+		Name: values["name"], AgentType: agentType, AgentTypeLabel: agentTypeLabel, Description: values["description"],
 		Instruction: values["instruction"], Models: pairs, Model: model,
 		IsExternalAgent: kind == domain.AgentKindAgentCLI, ExecutionMode: executionMode,
 		TimeoutSeconds: timeoutSeconds,
 	}, nil
+}
+
+func builderAgentTypeLabel(kind domain.AgentKind) (string, error) {
+	switch kind {
+	case domain.AgentKindLLM:
+		return "LLM", nil
+	case domain.AgentKindAgentCLI:
+		return "Agent CLI", nil
+	default:
+		return "", fmt.Errorf("unsupported builder agent kind %q", kind)
+	}
 }
 
 func containsBuilderProfile(profiles []BuilderProviderProfile, reference string) bool {
