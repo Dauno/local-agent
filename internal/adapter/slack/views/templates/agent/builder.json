@@ -18,6 +18,15 @@
       "execution_mode": {"type": "enum", "one_of": ["foreground", "durable_job"], "default": "foreground"},
       "timeout_seconds": {"type": "text", "max": 5, "default": "7200"}
     },
+    "outputs": {
+      "name": {"type": "text", "required": true},
+      "agent_type": {"type": "enum", "required": true, "one_of": ["llm", "agent_cli"]},
+      "description": {"type": "text"},
+      "instruction": {"type": "text"},
+      "model": {"type": "enum_open", "required": true},
+      "execution_mode": {"type": "enum", "one_of": ["foreground", "durable_job"]},
+      "timeout_seconds": {"type": "number"}
+    },
     "actions": {
       "agent_type": {"id": "agent_type", "text": "Tipo de agente"}
     }

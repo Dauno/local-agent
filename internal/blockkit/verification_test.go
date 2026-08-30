@@ -11,21 +11,21 @@ import (
 )
 
 func TestEngineAcceptsModalInputStateActionID(t *testing.T) {
-	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"Settings"},"callback_id":"settings","contract":{"inputs":{"field":{"type":"text","required":true}},"actions":{}},"layout":[{"type":"input","block_id":"field","label":{"type":"plain_text","text":"Field"},"element":{"type":"plain_text_input","action_id":"field"}}]}`
+	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"Settings"},"callback_id":"settings","contract":{"inputs":{"field":{"type":"text","required":true}},"outputs":{"field":{"type":"text","required":true}},"actions":{}},"layout":[{"type":"input","block_id":"field","label":{"type":"plain_text","text":"Field"},"element":{"type":"plain_text_input","action_id":"field"}}]}`
 	if _, err := newSingleTemplateEngine(t, body); err != nil {
 		t.Fatalf("New() rejected a modal state action ID: %v", err)
 	}
 }
 
 func TestEngineRejectsDispatchingModalStateActionID(t *testing.T) {
-	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"Settings"},"callback_id":"settings","contract":{"inputs":{"field":{"type":"text","required":true}},"actions":{}},"layout":[{"type":"input","block_id":"field","label":{"type":"plain_text","text":"Field"},"element":{"type":"plain_text_input","action_id":"field"},"dispatch_action":true}]}`
+	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"Settings"},"callback_id":"settings","contract":{"inputs":{"field":{"type":"text","required":true}},"outputs":{"field":{"type":"text","required":true}},"actions":{}},"layout":[{"type":"input","block_id":"field","label":{"type":"plain_text","text":"Field"},"element":{"type":"plain_text_input","action_id":"field"},"dispatch_action":true}]}`
 	if _, err := newSingleTemplateEngine(t, body); err == nil || !strings.Contains(err.Error(), "not declared") {
 		t.Fatalf("New() error = %v, want undeclared action error", err)
 	}
 }
 
 func TestEngineRejectsDuplicateModalInputStateActionIDs(t *testing.T) {
-	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"Settings"},"callback_id":"settings","contract":{"inputs":{"first":{"type":"text","required":true},"second":{"type":"text","required":true}},"actions":{}},"layout":[{"type":"input","block_id":"first","label":{"type":"plain_text","text":"{{first}}"},"element":{"type":"plain_text_input","action_id":"same"}},{"type":"input","block_id":"second","label":{"type":"plain_text","text":"{{second}}"},"element":{"type":"plain_text_input","action_id":"same"}}]}`
+	body := `{"schema_version":2,"surface":"modal","title":{"type":"plain_text","text":"Settings"},"callback_id":"settings","contract":{"inputs":{"first":{"type":"text","required":true},"second":{"type":"text","required":true}},"outputs":{"first":{"type":"text","required":true,"action":"same"},"second":{"type":"text","required":true,"action":"same"}},"actions":{}},"layout":[{"type":"input","block_id":"first","label":{"type":"plain_text","text":"{{first}}"},"element":{"type":"plain_text_input","action_id":"same"}},{"type":"input","block_id":"second","label":{"type":"plain_text","text":"{{second}}"},"element":{"type":"plain_text_input","action_id":"same"}}]}`
 	if _, err := newSingleTemplateEngine(t, body); err == nil || !strings.Contains(err.Error(), "duplicate action_id") {
 		t.Fatalf("New() error = %v, want duplicate action error", err)
 	}

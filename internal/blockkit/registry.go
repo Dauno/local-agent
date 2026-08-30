@@ -147,6 +147,7 @@ func parseDocument(data []byte, name string) (templateDocument, error) {
 		Surface:    raw.Surface,
 		Inputs:     make(map[string]Input, len(raw.Contract.Inputs)),
 		Actions:    make(map[string]Action, len(raw.Contract.Actions)),
+		Outputs:    make(map[string]Output, len(raw.Contract.Outputs)),
 		Layout:     raw.Layout,
 		Fallback:   fallbackText,
 		Title:      optionalValue(title, titleSet),
@@ -164,6 +165,16 @@ func parseDocument(data []byte, name string) (templateDocument, error) {
 	}
 	for actionName, action := range raw.Contract.Actions {
 		doc.Actions[actionName] = Action(action)
+	}
+	for outputName, output := range raw.Contract.Outputs {
+		doc.Outputs[outputName] = Output{
+			Type: output.Type, Required: output.Required,
+			OneOf: append([]string(nil), output.OneOf...),
+			Block: output.Block, Action: output.Action,
+		}
+	}
+	if raw.Surface == "message" && len(doc.Outputs) > 0 {
+		return templateDocument{}, errors.New("outputs are only valid on modal surface")
 	}
 	if raw.Surface == "message" && (titleSet || submitSet || closeSet || callbackSet) {
 		return templateDocument{}, errors.New("modal fields are not valid on message surface")

@@ -16,6 +16,34 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/agentbuilder"
 )
 
+func TestBuilderSubmissionRejectsMalformedTimeoutWithTimeoutField(t *testing.T) {
+	callback := builderSubmissionCallback(string(domain.AgentKindAgentCLI), "agentcli/default")
+	callback.View.State.Values["timeout_seconds"] = map[string]slackapi.BlockAction{
+		"timeout_seconds": {BlockID: "timeout_seconds", ActionID: "timeout_seconds", Value: "not-a-number"},
+	}
+	handler := NewBuilderSubmissionHandler(nil, agentbuilder.New(), validBuilderDefinitions(), nil)
+	response := handler.HandleSubmission(context.Background(), callback)
+	if response == nil || response.ResponseAction != slackapi.RAErrors {
+		t.Fatalf("response = %#v, want validation errors", response)
+	}
+	if _, ok := response.Errors["timeout_seconds"]; !ok {
+		t.Fatalf("validation errors = %#v, want timeout_seconds", response.Errors)
+	}
+}
+
+func TestBuilderSubmissionRejectsMissingNameWithNameField(t *testing.T) {
+	callback := builderSubmissionCallback(string(domain.AgentKindLLM), "openai/fast")
+	delete(callback.View.State.Values, "name")
+	handler := NewBuilderSubmissionHandler(nil, agentbuilder.New(), validBuilderDefinitions(), nil)
+	response := handler.HandleSubmission(context.Background(), callback)
+	if response == nil || response.ResponseAction != slackapi.RAErrors {
+		t.Fatalf("response = %#v, want validation errors", response)
+	}
+	if _, ok := response.Errors["name"]; !ok {
+		t.Fatalf("validation errors = %#v, want name", response.Errors)
+	}
+}
+
 func TestBuilderSubmissionValidatesKindAndProviderBeforeACK(t *testing.T) {
 	defs := &agentdef.Definitions{Providers: map[string]agentdef.Provider{
 		"openai": {
@@ -65,7 +93,7 @@ func builderSubmissionCallback(kind, profile string) slackapi.InteractionCallbac
 				"name":        {"name": {BlockID: "name", ActionID: "name", Value: "builder_worker"}},
 				"description": {"description": {BlockID: "description", ActionID: "description", Value: "description"}},
 				"instruction": {"instruction": {BlockID: "instruction", ActionID: "instruction", Value: "instruction"}},
-				"agent_type":  {"agent_type": {BlockID: "agent_type", ActionID: "agent_type", Value: kind}},
+				"agent_type":  {"agent_type": {BlockID: "agent_type", ActionID: "agent_type", SelectedOption: slackapi.OptionBlockObject{Value: kind}}},
 				"model":       {"model": {BlockID: "model", ActionID: "model", SelectedOption: slackapi.OptionBlockObject{Value: profile}}},
 			}},
 		},

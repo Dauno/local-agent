@@ -1246,6 +1246,9 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 				return models.redactor.Error(fmt.Errorf("initialize builder modal template renderer: %w", err))
 			}
 			handler := slackadapter.NewBuilderSubmissionHandler(draftStore, composition.agentBuilderSvc, setup.defs, infra.publisher)
+			if err := handler.InitializationError(); err != nil {
+				return models.redactor.Error(fmt.Errorf("initialize builder submission template engine: %w", err))
+			}
 			listener = listener.WithBuilderPresenter(presenter).WithBuilderHandler(handler)
 		}
 	}

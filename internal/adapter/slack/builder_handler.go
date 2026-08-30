@@ -28,11 +28,13 @@ const (
 
 // BuilderSubmissionHandler processes view_submission from the agent builder modal.
 type BuilderSubmissionHandler struct {
-	draftStore   port.AgentDraftStore
-	agentBuilder port.AgentBuilderService
-	currentDefs  *agentdef.Definitions
-	publisher    port.ResponsePublisher
-	now          func() time.Time
+	draftStore      port.AgentDraftStore
+	agentBuilder    port.AgentBuilderService
+	currentDefs     *agentdef.Definitions
+	publisher       port.ResponsePublisher
+	submitEngine    *blockkit.Engine
+	submitEngineErr error
+	now             func() time.Time
 }
 
 func NewBuilderSubmissionHandler(
@@ -41,18 +43,32 @@ func NewBuilderSubmissionHandler(
 	currentDefs *agentdef.Definitions,
 	publisher port.ResponsePublisher,
 ) *BuilderSubmissionHandler {
+	engine, engineErr := newBuilderModalEngine()
 	return &BuilderSubmissionHandler{
 		draftStore: draftStore, agentBuilder: agentBuilder,
-		currentDefs: currentDefs, publisher: publisher, now: time.Now,
+		currentDefs: currentDefs, publisher: publisher,
+		submitEngine: engine, submitEngineErr: engineErr, now: time.Now,
 	}
+}
+
+// InitializationError exposes template setup failure to the composition root.
+func (h *BuilderSubmissionHandler) InitializationError() error {
+	if h == nil {
+		return errors.New("builder submission handler is required")
+	}
+	return h.submitEngineErr
 }
 
 // HandleSubmission validates only the fields needed for the synchronous ACK.
 // Previewing and publishing are deliberately performed by PreviewAndPublish.
 func (h *BuilderSubmissionHandler) HandleSubmission(_ context.Context, callback slackapi.InteractionCallback) *slackapi.ViewSubmissionResponse {
-	draft, missing := builderDraftFromCallback(callback)
-	if missing != "" {
-		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{missing: "El campo es obligatorio"})
+	engine := (*blockkit.Engine)(nil)
+	if h != nil {
+		engine = h.submitEngine
+	}
+	draft, err := builderDraftFromCallback(engine, callback)
+	if err != nil {
+		return builderSubmissionErrorResponse(err)
 	}
 
 	if err := agentdef.ValidateAgentName(draft.Name); err != nil {
@@ -68,14 +84,14 @@ func (h *BuilderSubmissionHandler) HandleSubmission(_ context.Context, callback 
 			"instruction": fmt.Sprintf("Maximo %d caracteres", agentdef.MaxInstructionLength),
 		})
 	}
-	if err := validateBuilderDraft(callback, draft); err != nil {
-		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderValidationField(err): err.Error()})
+	if field, err := validateBuilderDraft(draft); err != nil {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{field: err.Error()})
 	}
 	if h == nil || h.agentBuilder == nil {
 		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"model": "El catalogo de proveedores no esta disponible"})
 	}
 	if _, err := h.agentBuilder.Preview(draft, h.currentDefs); err != nil {
-		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderValidationField(err): err.Error()})
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderPreviewErrorField(h, draft): err.Error()})
 	}
 	if _, _, err := builderContextForSubmission(callback); err != nil {
 		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"name": err.Error()})
@@ -92,13 +108,16 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 	if !domain.PlausibleTeamID(callback.Team.ID) || !domain.PlausibleUserID(callback.User.ID) {
 		return errors.New("builder actor or team is invalid")
 	}
-	draftInput, missing := builderDraftFromCallback(callback)
-	if missing != "" {
-		return fmt.Errorf("builder field %q is missing", missing)
+	draftInput, err := builderDraftFromCallback(h.submitEngine, callback)
+	if err != nil {
+		return fmt.Errorf("read builder submission: %w", err)
 	}
 	conversationKey, target, err := builderContextForSubmission(callback)
 	if err != nil {
 		return err
+	}
+	if field, err := validateBuilderDraft(draftInput); err != nil {
+		return fmt.Errorf("validate builder field %q: %w", field, err)
 	}
 	preview, err := h.agentBuilder.Preview(draftInput, h.currentDefs)
 	if err != nil {
@@ -245,133 +264,72 @@ func (h *BuilderSubmissionHandler) publishModalFallback(ctx context.Context, cal
 	return nil
 }
 
-func builderDraftFromCallback(callback slackapi.InteractionCallback) (domain.AgentDraft, string) {
-	if callback.View.State == nil {
-		return domain.AgentDraft{}, "name"
+func builderDraftFromCallback(engine *blockkit.Engine, callback slackapi.InteractionCallback) (domain.AgentDraft, error) {
+	var submission builderModalSubmission
+	var state map[string]map[string]slackapi.BlockAction
+	if callback.View.State != nil {
+		state = callback.View.State.Values
 	}
-	values := callback.View.State.Values
-	value := func(blockID, actionID string) (string, bool) {
-		block, ok := values[blockID]
-		if !ok {
-			return "", false
-		}
-		action, ok := block[actionID]
-		if !ok {
-			return "", false
-		}
-		return action.Value, true
+	if err := engine.Submit(&submission, state); err != nil {
+		return domain.AgentDraft{}, err
 	}
-
-	name, ok := value("name", "name")
-	if !ok || name == "" {
-		return domain.AgentDraft{}, "name"
+	draft := domain.AgentDraft{
+		Name:            submission.Name,
+		Description:     submission.Description,
+		Instruction:     submission.Instruction,
+		Kind:            domain.AgentKind(submission.AgentType),
+		ProviderProfile: submission.Model,
+		ExecutionMode:   submission.ExecutionMode,
+		TimeoutSeconds:  submission.TimeoutSeconds,
 	}
-	description, ok := value("description", "description")
-	if !ok {
-		return domain.AgentDraft{}, "description"
+	if draft.Kind == domain.AgentKindLLM {
+		draft.Model = submission.Model
 	}
-	instruction, ok := value("instruction", "instruction")
-	if !ok {
-		return domain.AgentDraft{}, "instruction"
-	}
-	kind, _ := value("agent_type", "agent_type")
-	if kind == "" {
-		if block, exists := values["agent_type"]; exists {
-			if action, exists := block["agent_type"]; exists {
-				kind = action.SelectedOption.Value
-			}
-		}
-	}
-	if kind == "" {
-		kind = string(domain.AgentKindLLM)
-	}
-	providerProfile := selectedValue(values, "provider_profile", "provider_profile")
-	if providerProfile == "" {
-		providerProfile = selectedValue(values, "model", "model")
-	}
-	model := ""
-	if kind == string(domain.AgentKindLLM) {
-		model = selectedValue(values, "model", "model")
-	}
-	executionMode := selectedValue(values, "execution_mode", "execution_mode")
-	timeoutSeconds := 0
-	if timeoutText := selectedValue(values, "timeout_seconds", "timeout_seconds"); timeoutText != "" {
-		timeoutSeconds, _ = strconv.Atoi(timeoutText)
-	}
-	return domain.AgentDraft{
-		Name:            name,
-		Description:     description,
-		Instruction:     instruction,
-		Model:           model,
-		Kind:            domain.AgentKind(kind),
-		ProviderProfile: providerProfile,
-		ExecutionMode:   executionMode,
-		TimeoutSeconds:  timeoutSeconds,
-	}, ""
+	return draft, nil
 }
 
-func selectedValue(values map[string]map[string]slackapi.BlockAction, blockID, actionID string) string {
-	if block, ok := values[blockID]; ok {
-		if action, ok := block[actionID]; ok {
-			if action.Value != "" {
-				return action.Value
-			}
-			return action.SelectedOption.Value
-		}
+func builderSubmissionErrorResponse(err error) *slackapi.ViewSubmissionResponse {
+	var submitErr *blockkit.SubmitError
+	if errors.As(err, &submitErr) && submitErr.BlockID != "" {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{submitErr.BlockID: submitErr.Err.Error()})
 	}
-	return ""
+	return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"model": err.Error()})
 }
 
-func validateBuilderDraft(callback slackapi.InteractionCallback, draft domain.AgentDraft) error {
+func validateBuilderDraft(draft domain.AgentDraft) (string, error) {
 	if err := domain.ValidateAgentKind(draft.Kind); err != nil {
-		return err
+		return "agent_type", err
 	}
 	if draft.ProviderProfile == "" {
-		return errors.New("selecciona un proveedor/perfil")
+		return "model", errors.New("selecciona un proveedor/perfil")
 	}
 	if draft.Kind == domain.AgentKindLLM {
 		if draft.ExecutionMode != "" && draft.ExecutionMode != domain.ExecutionModeForeground {
-			return errors.New("execution_mode solo admite foreground para LLM")
+			return "execution_mode", errors.New("execution_mode solo admite foreground para LLM")
 		}
 		if draft.TimeoutSeconds != 0 {
-			return errors.New("timeout_seconds solo es valido para agent_cli")
+			return "timeout_seconds", errors.New("timeout_seconds solo es valido para agent_cli")
 		}
-		return nil
+		return "", nil
 	}
 	mode := draft.ExecutionMode
 	if mode == "" {
 		mode = domain.ExecutionModeForeground
 	}
 	if err := domain.ValidateExecutionMode(draft.Kind, mode); err != nil {
-		return err
+		return "execution_mode", err
 	}
 	if err := domain.ValidateExternalAgentTimeout(draft.TimeoutSeconds); err != nil {
-		return err
+		return "timeout_seconds", err
 	}
-	// Parse the raw value so malformed numeric input is not silently treated as zero.
-	if callback.View.State != nil {
-		if raw := selectedValue(callback.View.State.Values, "timeout_seconds", "timeout_seconds"); raw != "" {
-			if _, err := strconv.Atoi(raw); err != nil {
-				return errors.New("timeout_seconds debe ser un numero entero")
-			}
-		}
-	}
-	return nil
+	return "", nil
 }
 
-func builderValidationField(err error) string {
-	message := err.Error()
-	if strings.Contains(message, "timeout") {
-		return "timeout_seconds"
-	}
-	if strings.Contains(message, "execution") {
-		return "execution_mode"
-	}
-	if strings.Contains(message, "proveedor") || strings.Contains(message, "provider") || strings.Contains(message, "perfil") {
-		return "model"
-	}
-	if strings.Contains(message, "kind") || strings.Contains(message, "tipo") {
-		return "agent_type"
+func builderPreviewErrorField(h *BuilderSubmissionHandler, draft domain.AgentDraft) string {
+	if h != nil && h.currentDefs != nil {
+		if _, exists := h.currentDefs.Agents[draft.Name]; exists {
+			return "name"
+		}
 	}
 	return "model"
 }

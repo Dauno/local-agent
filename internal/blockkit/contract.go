@@ -38,6 +38,25 @@ type Input struct {
 	OneOf    []string
 }
 
+// OutputType declares the semantic type of a value read from a modal state.
+type OutputType string
+
+const (
+	OutputTypeText     OutputType = "text"
+	OutputTypeNumber   OutputType = "number"
+	OutputTypeEnum     OutputType = "enum"
+	OutputTypeEnumOpen OutputType = "enum_open"
+)
+
+// Output declares one value read from a modal input block.
+type Output struct {
+	Type     OutputType
+	Required bool
+	OneOf    []string
+	Block    string
+	Action   string
+}
+
 // Action declares one interactive action in a template.
 type Action struct {
 	ID      string
@@ -70,6 +89,7 @@ type templateDocument struct {
 	Surface      string
 	Inputs       map[string]Input
 	Actions      map[string]Action
+	Outputs      map[string]Output
 	Layout       any
 	Fallback     *string
 	Title        any
@@ -77,12 +97,14 @@ type templateDocument struct {
 	Close        any
 	CallbackID   string
 	LayoutSHA256 string
+	inputBlocks  map[string]submitField
 	fileName     string
 }
 
 type templateContract struct {
 	Inputs  map[string]rawInput  `json:"inputs"`
 	Actions map[string]rawAction `json:"actions"`
+	Outputs map[string]rawOutput `json:"outputs"`
 }
 
 type rawInput struct {
@@ -99,6 +121,14 @@ type rawAction struct {
 	Text    string `json:"text"`
 	Style   string `json:"style"`
 	Carries string `json:"carries"`
+}
+
+type rawOutput struct {
+	Type     OutputType `json:"type"`
+	Required bool       `json:"required"`
+	OneOf    []string   `json:"one_of"`
+	Block    string     `json:"block"`
+	Action   string     `json:"action"`
 }
 
 type rawTemplateDocument struct {
@@ -124,6 +154,23 @@ type viewBinding struct {
 	fields map[string]fieldBinding
 }
 
+type submitField struct {
+	blockID     string
+	actionID    string
+	elementType string
+}
+
+type submitBinding struct {
+	typeOf reflect.Type
+	fields map[string]outputFieldBinding
+}
+
+type outputFieldBinding struct {
+	index     []int
+	output    string
+	omitempty bool
+}
+
 type inputValue struct {
 	input Input
 	value any
@@ -133,8 +180,9 @@ type renderValues map[string]inputValue
 
 // Engine is a loaded, validated template registry.
 type Engine struct {
-	templates map[string]templateDocument
-	bindings  map[string]viewBinding
+	templates      map[string]templateDocument
+	bindings       map[string]viewBinding
+	submitBindings map[string]submitBinding
 }
 
 // New loads and validates every template in fsys. It fails if any template is
@@ -146,14 +194,18 @@ func New(fsys fs.FS) (*Engine, error) {
 	}
 
 	engine := &Engine{
-		templates: make(map[string]templateDocument, len(documents)),
-		bindings:  make(map[string]viewBinding),
+		templates:      make(map[string]templateDocument, len(documents)),
+		bindings:       make(map[string]viewBinding),
+		submitBindings: make(map[string]submitBinding),
 	}
 	for _, loaded := range documents {
 		if err := validateDocument(loaded); err != nil {
 			return nil, fmt.Errorf("template %q: %w", loaded.fileName, err)
 		}
 		if err := validateLayoutContract(loaded); err != nil {
+			return nil, fmt.Errorf("template %q: %w", loaded.fileName, err)
+		}
+		if err := validateOutputContract(&loaded); err != nil {
 			return nil, fmt.Errorf("template %q: %w", loaded.fileName, err)
 		}
 		variants := []struct {

@@ -88,6 +88,9 @@ func newBuilderModalEngine() (*blockkit.Engine, error) {
 	if err := engine.Register(builderModalView{}); err != nil {
 		return nil, err
 	}
+	if err := engine.RegisterSubmit(builderModalSubmission{}); err != nil {
+		return nil, err
+	}
 	return engine, nil
 }
 
@@ -105,6 +108,18 @@ type builderModalView struct {
 }
 
 func (builderModalView) Template() string { return "agent.builder" }
+
+type builderModalSubmission struct {
+	Name           string `bk:"name"`
+	AgentType      string `bk:"agent_type"`
+	Description    string `bk:"description,omitempty"`
+	Instruction    string `bk:"instruction,omitempty"`
+	Model          string `bk:"model"`
+	ExecutionMode  string `bk:"execution_mode,omitempty"`
+	TimeoutSeconds int    `bk:"timeout_seconds,omitempty"`
+}
+
+func (builderModalSubmission) Template() string { return "agent.builder" }
 
 type agentPreviewView struct {
 	Name            string `bk:"name"`
