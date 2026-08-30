@@ -59,6 +59,73 @@ func (e *Engine) Message(view View) (Message, error) {
 	}, nil
 }
 
+// Preview renders a template with representative values and returns its JSON.
+func (e *Engine) Preview(name string, includeOptional bool) (Preview, error) {
+	if e == nil {
+		return Preview{}, errors.New("engine is nil")
+	}
+	doc, ok := e.templates[name]
+	if !ok {
+		names := strings.Join(e.Names(), ", ")
+		if names == "" {
+			names = "none"
+		}
+		return Preview{}, fmt.Errorf("template %q is not registered; valid templates: %s", name, names)
+	}
+	values, err := representativeValues(doc.Inputs, includeOptional)
+	if err != nil {
+		return Preview{}, fmt.Errorf("template %q: %w", name, err)
+	}
+	if err := validateInputValues(values); err != nil {
+		return Preview{}, fmt.Errorf("template %q: %w", name, err)
+	}
+	compiled, err := renderCompiled(doc, values)
+	if err != nil {
+		return Preview{}, fmt.Errorf("template %q: %w", name, err)
+	}
+	if err := verifyCompiled(doc, compiled.blocks); err != nil {
+		return Preview{}, fmt.Errorf("template %q: %w", name, err)
+	}
+	if err := validateRepresentativeMetadata(doc, values); err != nil {
+		return Preview{}, fmt.Errorf("template %q: %w", name, err)
+	}
+
+	var output any
+	if doc.Surface == "message" {
+		output = struct {
+			Blocks []slackapi.Block `json:"blocks"`
+		}{Blocks: compiled.blocks}
+	} else {
+		modal := slackapi.ModalViewRequest{
+			Type:       slackapi.VTModal,
+			CallbackID: doc.CallbackID,
+			Blocks:     slackapi.Blocks{BlockSet: compiled.blocks},
+		}
+		modal.Title, err = renderTextObject(doc.Title, doc, values, "title")
+		if err != nil {
+			return Preview{}, fmt.Errorf("template %q: %w", name, err)
+		}
+		if doc.Submit != nil {
+			modal.Submit, err = renderTextObject(doc.Submit, doc, values, "submit")
+			if err != nil {
+				return Preview{}, fmt.Errorf("template %q: %w", name, err)
+			}
+		}
+		if doc.Close != nil {
+			modal.Close, err = renderTextObject(doc.Close, doc, values, "close")
+			if err != nil {
+				return Preview{}, fmt.Errorf("template %q: %w", name, err)
+			}
+		}
+		output = modal
+	}
+	data, err := json.Marshal(output)
+	if err != nil {
+		return Preview{}, fmt.Errorf("template %q: marshal preview: %w", name, err)
+	}
+	return Preview{JSON: data}, nil
+}
+
 // Modal renders a modal-surface template.
 func (e *Engine) Modal(view View) (slackapi.ModalViewRequest, error) {
 	if e == nil {

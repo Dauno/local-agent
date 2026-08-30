@@ -107,7 +107,7 @@ func newConfirmationViewEngine() (*blockkit.Engine, error) {
 func newConfirmationPublisher(client confirmationBlockClient, botUserID string, timeout time.Duration, logger port.Logger) *ConfirmationPublisher {
 	engine, engineErr := newConfirmationViewEngine()
 	if engineErr == nil {
-		engineErr = engine.Register(confirmationPromptView{}, confirmationResolvedView{}, jobAcceptedView{})
+		engineErr = registerTemplateBindings(engine, "confirmation.prompt", "confirmation.resolved", "job.accepted")
 	}
 	layoutSHA256 := ""
 	if engineErr == nil {

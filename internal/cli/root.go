@@ -63,6 +63,13 @@ type LegacyIdentityQuarantineApplyBackend interface {
 	ApplyLegacyIdentityQuarantine(ctx context.Context, expected rollout.LegacyIdentityQuarantinePreview) (rollout.LegacyIdentityQuarantineReport, error)
 }
 
+// TemplateBackend is optional so existing embedders of the CLI backend remain
+// valid while the concrete application exposes offline template inspection.
+type TemplateBackend interface {
+	LintTemplates(ctx context.Context) ([]string, error)
+	PreviewTemplate(ctx context.Context, name string, includeOptional bool) (string, error)
+}
+
 type Streams struct {
 	In  io.Reader
 	Out io.Writer
@@ -111,6 +118,7 @@ func NewRoot(backend Backend, streams Streams) (*cobra.Command, error) {
 		newRunCommand(backend),
 		newManifestCommand(backend, streams),
 		newVersionCommand(backend, streams),
+		newTemplatesCommand(backend, streams),
 		newJobsCommand(backend, streams),
 		newKnowledgeCommand(backend, streams),
 		newDBCommand(backend, streams),

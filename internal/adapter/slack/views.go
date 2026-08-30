@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"slices"
 	"time"
 
 	"github.com/Dauno/slack-local-agent/internal/blockkit"
@@ -16,7 +17,11 @@ var viewsFS embed.FS
 const confirmationPromptTemplateName = "confirmation.prompt"
 
 func NewViewEngine() (*blockkit.Engine, error) {
-	return newViewEngine()
+	rooted, err := fs.Sub(viewsFS, "views")
+	if err != nil {
+		return nil, err
+	}
+	return newCompleteViewEngine(rooted)
 }
 
 func newViewEngine() (*blockkit.Engine, error) {
@@ -25,6 +30,95 @@ func newViewEngine() (*blockkit.Engine, error) {
 		return nil, err
 	}
 	return blockkit.New(rooted)
+}
+
+type templateBinding struct {
+	view       blockkit.View
+	submission blockkit.View
+}
+
+var templateBindings = []templateBinding{
+	{view: agentPreviewView{}},
+	{view: builderModalView{}, submission: builderModalSubmission{}},
+	{view: confirmationPromptView{}},
+	{view: confirmationResolvedView{}},
+	{view: jobAcceptedView{}},
+	{view: jobStatusView{}},
+	{view: jobStatusErrorView{}},
+	{view: onboardingWelcomeView{}},
+}
+
+func newCompleteViewEngine(fsys fs.FS) (*blockkit.Engine, error) {
+	engine, err := blockkit.New(fsys)
+	if err != nil {
+		return nil, err
+	}
+	if err := registerTemplateBindings(engine); err != nil {
+		return nil, err
+	}
+	if err := validateCompleteViewEngine(engine); err != nil {
+		return nil, err
+	}
+	return engine, nil
+}
+
+func newTemplateSubsetEngine(names ...string) (*blockkit.Engine, error) {
+	engine, err := newViewEngine()
+	if err != nil {
+		return nil, err
+	}
+	if err := registerTemplateBindings(engine, names...); err != nil {
+		return nil, err
+	}
+	return engine, nil
+}
+
+func registerTemplateBindings(engine *blockkit.Engine, names ...string) error {
+	wanted := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		wanted[name] = struct{}{}
+	}
+	all := len(names) == 0
+	views := make([]blockkit.View, 0, len(templateBindings))
+	submissions := make([]blockkit.View, 0, len(templateBindings))
+	for _, binding := range templateBindings {
+		name := binding.view.Template()
+		if !all {
+			if _, ok := wanted[name]; !ok {
+				continue
+			}
+			delete(wanted, name)
+		}
+		views = append(views, binding.view)
+		if binding.submission != nil {
+			submissions = append(submissions, binding.submission)
+		}
+	}
+	if len(wanted) != 0 {
+		missing := make([]string, 0, len(wanted))
+		for name := range wanted {
+			missing = append(missing, name)
+		}
+		slices.Sort(missing)
+		return fmt.Errorf("template bindings requested unknown template %q", missing[0])
+	}
+	if err := engine.Register(views...); err != nil {
+		return err
+	}
+	return engine.RegisterSubmit(submissions...)
+}
+
+func validateCompleteViewEngine(engine *blockkit.Engine) error {
+	linked := make(map[string]struct{}, len(templateBindings))
+	for _, binding := range templateBindings {
+		linked[binding.view.Template()] = struct{}{}
+	}
+	for _, name := range engine.Names() {
+		if _, ok := linked[name]; !ok {
+			return fmt.Errorf("template %q has no linked view", name)
+		}
+	}
+	return nil
 }
 
 func confirmationPromptLayoutSHA256(engine *blockkit.Engine) (string, error) {
@@ -42,36 +136,15 @@ func confirmationPromptLayoutSHA256(engine *blockkit.Engine) (string, error) {
 }
 
 func newAgentPreviewEngine() (*blockkit.Engine, error) {
-	engine, err := newViewEngine()
-	if err != nil {
-		return nil, err
-	}
-	if err := engine.Register(agentPreviewView{}); err != nil {
-		return nil, err
-	}
-	return engine, nil
+	return newTemplateSubsetEngine("agent.preview")
 }
 
 func newOnboardingEngine() (*blockkit.Engine, error) {
-	engine, err := newViewEngine()
-	if err != nil {
-		return nil, err
-	}
-	if err := engine.Register(onboardingWelcomeView{}); err != nil {
-		return nil, err
-	}
-	return engine, nil
+	return newTemplateSubsetEngine("onboarding.welcome")
 }
 
 func newJobEngine() (*blockkit.Engine, error) {
-	engine, err := newViewEngine()
-	if err != nil {
-		return nil, err
-	}
-	if err := engine.Register(jobAcceptedView{}, jobStatusView{}, jobStatusErrorView{}); err != nil {
-		return nil, err
-	}
-	return engine, nil
+	return newTemplateSubsetEngine("job.accepted", "job.status", "job.status_error")
 }
 
 const (
@@ -81,17 +154,7 @@ const (
 )
 
 func newBuilderModalEngine() (*blockkit.Engine, error) {
-	engine, err := newViewEngine()
-	if err != nil {
-		return nil, err
-	}
-	if err := engine.Register(builderModalView{}); err != nil {
-		return nil, err
-	}
-	if err := engine.RegisterSubmit(builderModalSubmission{}); err != nil {
-		return nil, err
-	}
-	return engine, nil
+	return newTemplateSubsetEngine("agent.builder")
 }
 
 type builderModalView struct {

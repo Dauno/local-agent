@@ -84,6 +84,17 @@ type Message struct {
 	inputSlots   map[string]string
 }
 
+// Description identifies one loaded template for offline inspection.
+type Description struct {
+	Name    string
+	Surface string
+}
+
+// Preview contains the JSON representation of one representative template render.
+type Preview struct {
+	JSON []byte
+}
+
 type templateDocument struct {
 	Name         string
 	Surface      string
@@ -274,6 +285,18 @@ func (e *Engine) Register(views ...View) error {
 		e.bindings[name] = binding
 	}
 	return nil
+}
+
+// Describe returns the offline description of one loaded template.
+func (e *Engine) Describe(name string) (Description, bool) {
+	if e == nil {
+		return Description{}, false
+	}
+	doc, ok := e.templates[name]
+	if !ok {
+		return Description{}, false
+	}
+	return Description{Name: doc.Name, Surface: doc.Surface}, true
 }
 
 // Names returns the registered template names in deterministic order.
