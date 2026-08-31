@@ -125,6 +125,9 @@ var configSchema = []schemaField{
 		{name: "progress_warning_seconds"},
 		{name: "worker_concurrency"},
 		{name: "artifact_retention_days"},
+		{name: "batch", children: []schemaField{
+			{name: "max_tasks"},
+		}},
 		{name: "delivery", children: []schemaField{
 			{name: "max_markdown_parts"},
 			{name: "max_file_bytes"},

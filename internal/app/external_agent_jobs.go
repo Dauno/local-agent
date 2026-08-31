@@ -3,11 +3,14 @@ package app
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"slices"
 	"strings"
 	"time"
+
+	"golang.org/x/sync/errgroup"
 
 	"github.com/Dauno/slack-local-agent/internal/adapter/agentcli"
 	slackadapter "github.com/Dauno/slack-local-agent/internal/adapter/slack"
@@ -57,12 +60,16 @@ type externalAgentJobDispatcher struct {
 	progressStore         port.ExternalAgentJobProgressStore
 	processRegistry       port.ExternalAgentProcessRegistry
 	progressWarnAfter     time.Duration
+	batchMaxTasks         int
 	logger                port.Logger
 	metrics               port.MetricRecorder
 	progressGauge         *externalagent.ActiveProgressGauge
 }
 
 func (d *externalAgentJobDispatcher) Run(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
+	if job.Provider == externalAgentBatchProvider && job.Profile == externalAgentBatchProfile {
+		return d.runAgentCLIBatch(ctx, job)
+	}
 	profileMatched := false
 	if matched, result, err := d.runAgentCLI(ctx, job, &profileMatched); matched {
 		return result, err
@@ -71,6 +78,105 @@ func (d *externalAgentJobDispatcher) Run(ctx context.Context, job domain.Externa
 		return domain.ExternalAgentInvocationResult{}, errors.New("durable external-agent job scope revision does not match current configuration")
 	}
 	return domain.ExternalAgentInvocationResult{}, errors.New("durable external-agent job provider/profile is unavailable")
+}
+
+func (d *externalAgentJobDispatcher) runAgentCLIBatch(ctx context.Context, job domain.ExternalAgentJob) (domain.ExternalAgentInvocationResult, error) {
+	maxTasks := d.batchMaxTasks
+	if maxTasks <= 0 {
+		maxTasks = 4
+	}
+	var spec externalAgentBatchSpec
+	if err := json.Unmarshal([]byte(job.Task), &spec); err != nil {
+		return domain.ExternalAgentInvocationResult{}, errors.New("durable agent batch specification is invalid")
+	}
+	if spec.Version != externalAgentBatchVersion || (spec.Mode != "parallel" && spec.Mode != "sequential") ||
+		spec.Project != job.PrimaryProject || len(spec.Tasks) < 1 || len(spec.Tasks) > maxTasks ||
+		strings.TrimSpace(spec.FinalInstruction) == "" {
+		return domain.ExternalAgentInvocationResult{}, errors.New("durable agent batch specification is invalid")
+	}
+	eligible := make(map[string]int)
+	for index := range d.children {
+		child := d.children[index]
+		if child.cliResolved != nil && child.executionMode == agentdef.ExecutionModeDurableJob {
+			eligible[child.definition.Name] = index
+		}
+	}
+	revision, err := externalAgentBatchRegistryRevision(spec, d.children, eligible, maxTasks)
+	if err != nil || revision != job.RegistryRevision {
+		return domain.ExternalAgentInvocationResult{}, errors.New("durable agent batch scope revision does not match current configuration")
+	}
+	for _, item := range spec.Tasks {
+		index := eligible[item.Agent]
+		child := d.children[index]
+		if child.definition.Confirmation == "required" || strings.TrimSpace(item.Task) == "" {
+			return domain.ExternalAgentInvocationResult{}, errors.New("durable agent batch task is not eligible")
+		}
+		if _, err := resolveExternalAgentProject(child.projectRoots, spec.Project); err != nil {
+			return domain.ExternalAgentInvocationResult{}, err
+		}
+	}
+	if d.store != nil {
+		if err := d.store.MarkSideEffectsPossible(ctx, job.ID, job.LeaseOwner, job.Attempt); err != nil {
+			return domain.ExternalAgentInvocationResult{}, err
+		}
+	}
+	outputs := make([]string, len(spec.Tasks))
+	runTask := func(runCtx context.Context, index int) error {
+		item := spec.Tasks[index]
+		child := d.children[eligible[item.Agent]]
+		taskCtx := runCtx
+		cancel := func() {}
+		if child.externalAgentTimeout > 0 {
+			taskCtx, cancel = context.WithTimeout(runCtx, child.externalAgentTimeout)
+		}
+		defer cancel()
+		text, runErr := generateAgentCLIText(taskCtx, child.model, d.global, child.definition.Instruction, spec.Project, item.Task)
+		if runErr != nil {
+			if errors.Is(taskCtx.Err(), context.DeadlineExceeded) && runCtx.Err() == nil {
+				return &domain.ExternalAgentError{
+					Code: domain.ExternalAgentErrorJobTimeout,
+					Err:  fmt.Errorf("agent batch task %d exceeded its configured timeout", index+1),
+				}
+			}
+			return fmt.Errorf("agent batch task %d failed: %w", index+1, runErr)
+		}
+		outputs[index] = text
+		return nil
+	}
+	if spec.Mode == "sequential" {
+		for index := range spec.Tasks {
+			if err := runTask(ctx, index); err != nil {
+				return domain.ExternalAgentInvocationResult{}, err
+			}
+		}
+	} else {
+		group, groupCtx := errgroup.WithContext(ctx)
+		for index := range spec.Tasks {
+			group.Go(func() error { return runTask(groupCtx, index) })
+		}
+		if err := group.Wait(); err != nil {
+			return domain.ExternalAgentInvocationResult{}, err
+		}
+	}
+	var combined strings.Builder
+	combined.WriteString("Delegated batch completed.\n")
+	for index, item := range spec.Tasks {
+		fmt.Fprintf(&combined, "\n## Task %d: %s\n\nDelegation:\n%s\n\nResult:\n%s\n", index+1, item.Agent, item.Task, outputs[index])
+	}
+	result := domain.ExternalAgentInvocationResult{Text: combined.String()}
+	if job.Mode == domain.JobDetached && d.artifacts != nil {
+		return d.materialize(ctx, job, result)
+	}
+	if job.Mode == domain.JobDetached && d.results != nil {
+		return domain.ExternalAgentInvocationResult{}, errors.New("native result delivery store is unavailable")
+	}
+	if job.Mode == domain.JobForeground {
+		return d.normalizeForegroundResult(ctx, job, result)
+	}
+	if d.sanitize != nil {
+		result.Text = d.sanitize(result.Text)
+	}
+	return result, nil
 }
 
 // runAgentCLI executes a durable job whose leaf is an agent CLI.
@@ -87,6 +193,10 @@ func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain
 		*profileMatched = true
 		if job.RegistryRevision == "" || job.RegistryRevision != child.registryRevision {
 			continue
+		}
+		executionTask, taskErr := domain.ExternalAgentExecutionTask(job.Task)
+		if taskErr != nil {
+			return true, domain.ExternalAgentInvocationResult{}, taskErr
 		}
 		// Side effects become possible the moment the CLI starts, because it
 		// decides on its own once given an approval mode. The job is marked
@@ -128,7 +238,7 @@ func (d *externalAgentJobDispatcher) runAgentCLI(ctx context.Context, job domain
 				}
 			}
 		})
-		text, runErr := generateAgentCLIText(runCtx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, job.Task)
+		text, runErr := generateAgentCLIText(runCtx, child.model, d.global, child.definition.Instruction, job.PrimaryProject, executionTask)
 		if sessionErr != nil {
 			return true, domain.ExternalAgentInvocationResult{}, sessionErr
 		}
@@ -499,6 +609,7 @@ func newExternalAgentJobService(
 		reconciliationTimeout: time.Duration(cfg.ExternalAgent.ReconciliationTimeoutSeconds) * time.Second,
 		progressStore:         store, processRegistry: infra.processRegistry,
 		progressWarnAfter: time.Duration(cfg.ExternalAgent.ProgressWarningSeconds) * time.Second,
+		batchMaxTasks:     cfg.ExternalAgent.Batch.MaxTasks,
 		logger:            models.logger, metrics: models.metrics,
 		progressGauge: externalagent.NewActiveProgressGauge(models.metrics),
 	}

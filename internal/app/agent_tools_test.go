@@ -663,7 +663,9 @@ func (m *durableToolRootModel) GenerateContent(_ context.Context, _ *model.LLMRe
 		if call == 1 {
 			yield(&model.LLMResponse{
 				Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					ID: "durable-call-1", Name: "cli_leaf", Args: map[string]any{"project": "workspace", "task": "inspect"},
+					ID: "durable-call-1", Name: "cli_leaf", Args: map[string]any{
+						"project": "workspace", "task": "inspect", "final_instruction": "Presenta el resultado en español.",
+					},
 				}}}},
 				FinishReason: genai.FinishReasonStop,
 				TurnComplete: true,
@@ -733,8 +735,12 @@ func TestDurableAgentCLIToolUsesOptionalConfirmationPolicy(t *testing.T) {
 			if starter.calls != test.wantStarts {
 				t.Fatalf("job starts = %d, want %d", starter.calls, test.wantStarts)
 			}
-			if test.wantStarts == 1 && (starter.request.Profile != "codex/build" || starter.request.Task != "inspect") {
-				t.Fatalf("job request = %#v", starter.request)
+			if test.wantStarts == 1 {
+				delegation, encoded, decodeErr := domain.DecodeExternalAgentDelegation(starter.request.Task)
+				if decodeErr != nil || !encoded || starter.request.Profile != "codex/build" || delegation.Task != "inspect" ||
+					delegation.FinalInstruction != "Presenta el resultado en español." {
+					t.Fatalf("job request = %#v, delegation = %#v, encoded = %v, err = %v", starter.request, delegation, encoded, decodeErr)
+				}
 			}
 		})
 	}

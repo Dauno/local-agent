@@ -729,10 +729,17 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	}
 	resultProducingTools := make([]string, 0, len(models.preparedAgentTools))
 	if cfg.Orchestration.ResultHandles.Enabled {
+		hasDurableAgentCLI := false
 		for _, child := range models.preparedAgentTools {
 			if child.cliResolved != nil {
 				resultProducingTools = append(resultProducingTools, child.definition.Name)
+				if child.executionMode == agentdef.ExecutionModeDurableJob {
+					hasDurableAgentCLI = true
+				}
 			}
+		}
+		if hasDurableAgentCLI {
+			resultProducingTools = append(resultProducingTools, "delegate_batch")
 		}
 	}
 	runtime, err := adkagent.NewRuntime(
@@ -1075,6 +1082,7 @@ func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup
 			delegatedGlobalInstruction = models.rootDef.EffectiveDelegatedGlobalInstruction()
 		}
 		result.compositeFactory = newCompositeAgentToolFactory(result.toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
+		result.compositeFactory.setBatchMaxTasks(cfg.ExternalAgent.Batch.MaxTasks)
 		result.compositeFactory.setChildContextResultStore(result.resultStore)
 		result.toolFactory = result.compositeFactory
 	}

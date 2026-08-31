@@ -91,6 +91,7 @@ func (a *Application) ReconcileJob(ctx context.Context, jobID string, expectedRe
 		children: []preparedAgentTool{{definition: definition, model: cliModel, cliResolved: resolved, projectRoots: setup.paths.SandboxProjectRoots, registryRevision: revision}},
 		store:    jobStore, artifacts: artifactStore, results: nativeResults, policy: policy, partLabels: setup.cfg.Slack.PartLabels,
 		reconciliationTimeout: time.Duration(setup.cfg.ExternalAgent.ReconciliationTimeoutSeconds) * time.Second,
+		batchMaxTasks:         setup.cfg.ExternalAgent.Batch.MaxTasks,
 	}
 	if root, ok := setup.defs.Agents["root_agent"]; ok {
 		dispatcher.global = root.EffectiveDelegatedGlobalInstruction()

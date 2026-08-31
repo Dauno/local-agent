@@ -659,8 +659,10 @@ func TestGuardRejectsMediaWithByteBoundBeforeHTTP(t *testing.T) {
 		Parts: []*genai.Part{genai.NewPartFromBytes(realTestPNG(t), "image/png")},
 	}}}
 	_, _, gotErr := collect(llm.GenerateContent(context.Background(), request, false))
-	if gotErr == nil || !strings.Contains(gotErr.Error(), "request_token_count_unavailable") {
-		t.Fatalf("GenerateContent() error = %v, want request_token_count_unavailable", gotErr)
+	var staged *RequestStageError
+	if !errors.As(gotErr, &staged) || staged.Stage != "request_guard" || staged.Code != "request_guard_failed" ||
+		staged.Err == nil || !strings.Contains(staged.Err.Error(), "request_token_count_unavailable") {
+		t.Fatalf("GenerateContent() error = %#v, want classified request guard failure", gotErr)
 	}
 	if calls.Load() != 0 {
 		t.Fatalf("media request with byte_bound made %d HTTP calls, want 0", calls.Load())
@@ -791,8 +793,9 @@ func TestGenerateContentReturnsProviderAndEmptyResponseErrors(t *testing.T) {
 		t.Cleanup(server.Close)
 		llm := mustTestLLM(t, server.URL)
 		_, yields, err := collect(llm.GenerateContent(context.Background(), textRequest(), false))
-		if err == nil || !strings.Contains(err.Error(), "Chat Completions request failed") || yields != 1 {
-			t.Fatalf("GenerateContent() = err %v, yields %d", err, yields)
+		var staged *RequestStageError
+		if !errors.As(err, &staged) || staged.Stage != "provider_request" || staged.Code != "provider_request_failed" || yields != 1 {
+			t.Fatalf("GenerateContent() = err %#v, yields %d", err, yields)
 		}
 	})
 

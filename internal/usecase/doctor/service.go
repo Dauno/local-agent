@@ -804,7 +804,16 @@ func (s *Service) checkSQLite(ctx context.Context, report *Report, cfg config.Co
 						false,
 					)
 				} else {
-					report.pass("external-agent activations", fmt.Sprintf("pending=%d, processed=%d, completion_unknown=%d, legacy_non_terminal=%d (not claimable)", health.Pending, health.Processed, health.CompletionUnknown, health.LegacyNonTerminal))
+					report.pass(
+						"external-agent activations",
+						fmt.Sprintf(
+							"pending=%d, processed=%d, completion_unknown=%d, legacy_non_terminal=%d (not claimable)",
+							health.Pending,
+							health.Processed,
+							health.CompletionUnknown,
+							health.LegacyNonTerminal,
+						),
+					)
 				}
 			}
 		})

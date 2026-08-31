@@ -38,6 +38,65 @@ const (
 	SSEErrorFinalAggregation = "final_aggregation"
 )
 
+// RequestStageError carries a content-free failure stage across the ADK
+// runtime. Err remains available for control flow, but callers must log only
+// Stage and Code because provider errors can contain sensitive response data.
+type RequestStageError struct {
+	Stage string
+	Code  string
+	Err   error
+}
+
+func (e *RequestStageError) Error() string {
+	if e == nil {
+		return ""
+	}
+	return fmt.Sprintf("OpenAI-compatible request failed (%s/%s)", e.Stage, e.Code)
+}
+
+func (e *RequestStageError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func (e *RequestStageError) ModelRequestStage() string {
+	if e == nil {
+		return ""
+	}
+	return e.Stage
+}
+
+func (e *RequestStageError) ModelRequestCode() string {
+	if e == nil {
+		return ""
+	}
+	return e.Code
+}
+
+func requestConversionCode(err error) string {
+	switch {
+	case errors.Is(err, ErrUnsupportedPart):
+		return "unsupported_part"
+	case errors.Is(err, ErrToolsUnsupported):
+		return "tools_unsupported"
+	}
+	message := strings.ToLower(err.Error())
+	for fragment, code := range map[string]string{
+		"function responses require": "function_response_invalid",
+		"function calls require":     "function_call_invalid",
+		"content cannot mix":         "mixed_content_invalid",
+		"tool declaration":           "tool_declaration_invalid",
+		"tool config":                "tool_config_invalid",
+	} {
+		if strings.Contains(message, fragment) {
+			return code
+		}
+	}
+	return "request_conversion_failed"
+}
+
 // SSEError is a typed, content-free classification for streaming failures.
 // It deliberately carries no frame or payload so diagnostics cannot leak raw
 // provider data.
@@ -239,11 +298,11 @@ func (m *OpenAICompatibleLLM) GenerateContent(ctx context.Context, request *mode
 
 		params, err := m.convertRequest(request, stream)
 		if err != nil {
-			yield(nil, err)
+			yield(nil, &RequestStageError{Stage: "request_conversion", Code: requestConversionCode(err), Err: err})
 			return
 		}
 		if err := m.guardRequest(ctx, params); err != nil {
-			yield(nil, err)
+			yield(nil, &RequestStageError{Stage: "request_guard", Code: "request_guard_failed", Err: err})
 			return
 		}
 		if stream {
@@ -252,13 +311,13 @@ func (m *OpenAICompatibleLLM) GenerateContent(ctx context.Context, request *mode
 		}
 		completion, err := m.client.Chat.Completions.New(ctx, params.params)
 		if err != nil {
-			yield(nil, fmt.Errorf("OpenAI-compatible Chat Completions request failed: %w", err))
+			yield(nil, &RequestStageError{Stage: "provider_request", Code: "provider_request_failed", Err: err})
 			return
 		}
 
 		response, err := responseFromCompletion(completion)
 		if err != nil {
-			yield(nil, err)
+			yield(nil, &RequestStageError{Stage: "provider_response", Code: "provider_response_invalid", Err: err})
 			return
 		}
 		yield(response, nil)

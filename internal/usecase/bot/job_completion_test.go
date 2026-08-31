@@ -309,8 +309,12 @@ func TestActivationFrameLoadsTrustedWorkstreamSnapshot(t *testing.T) {
 	activation.TaskID = "task-1"
 	activation.ExecutionIdentity = "exec-1"
 	task := domain.WorkstreamTask{ID: "task-1", Project: "workspace", Description: "inspect repository", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}
+	delegation, err := domain.EncodeExternalAgentDelegation(task.Description, "Presenta el resultado en español.")
+	if err != nil {
+		t.Fatal(err)
+	}
 	service := completionService(t, &fakeActivationStore{activation: activation}, &fakeRuntime{}, &fakePublisher{})
-	service.completionReader.(*fakeActivationResultReader).job.Task = task.Description
+	service.completionReader.(*fakeActivationResultReader).job.Task = delegation
 	service.workstreams = &fakeActivationWorkstreamService{snapshot: domain.WorkstreamSnapshot{
 		ID: "ws-1", ConversationKey: activation.ConversationKey, OwnerActor: activation.Actor,
 		Project: "workspace", Status: domain.WorkstreamActive, Revision: activation.AdmissionRevision,
@@ -324,8 +328,9 @@ func TestActivationFrameLoadsTrustedWorkstreamSnapshot(t *testing.T) {
 	if err := frame.Validate(); err != nil {
 		t.Fatalf("frame validation: %v", err)
 	}
-	if frame.Workstream.Objective != "repository objective" || frame.Task.Description != task.Description {
-		t.Fatalf("frame snapshot = %+v task = %+v", frame.Workstream, frame.Task)
+	if frame.Workstream.Objective != "repository objective" || frame.Task.Description != task.Description ||
+		frame.DelegatedTaskExcerpt != task.Description {
+		t.Fatalf("frame snapshot = %+v task = %+v delegated task = %q", frame.Workstream, frame.Task, frame.DelegatedTaskExcerpt)
 	}
 }
 
@@ -502,7 +507,7 @@ func TestHandleJobCompletionRunsNativeHandleFrameWithoutResultText(t *testing.T)
 	if runtime.runCalls != 1 || len(runtime.runRequest.Messages) != 1 {
 		t.Fatalf("native-handle run = %d %#v", runtime.runCalls, runtime.runRequest)
 	}
-	frameText := runtime.runRequest.Messages[0].Content
+	frameText := runtime.runRequest.InternalEvent
 	if !strings.Contains(frameText, `"result_representation":"native_handle"`) || !strings.Contains(frameText, strings.Repeat("c", 64)) || strings.Contains(frameText, resultText) {
 		t.Fatalf("native-handle frame leaked or omitted identity: %q", frameText)
 	}
@@ -535,7 +540,7 @@ func TestHandleJobCompletionRunsArtifactOnlyFrameForFileDelivery(t *testing.T) {
 	if runtime.runCalls != 1 || len(runtime.runRequest.Messages) != 1 {
 		t.Fatalf("artifact-only run = %d %#v", runtime.runCalls, runtime.runRequest)
 	}
-	frameText := runtime.runRequest.Messages[0].Content
+	frameText := runtime.runRequest.InternalEvent
 	if !strings.Contains(frameText, `"result_representation":"artifact_only"`) || !strings.Contains(frameText, `"result_media_type":"text/markdown"`) || strings.Contains(frameText, resultText) {
 		t.Fatalf("artifact-only frame leaked or omitted availability: %q", frameText)
 	}
@@ -620,6 +625,11 @@ func TestHandleJobCompletionUsesDurableBindingAndDisablesMemory(t *testing.T) {
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "synthesis"}}
 	publisher := &fakePublisher{}
 	service := completionService(t, activationStore, runtime, publisher)
+	delegation, err := domain.EncodeExternalAgentDelegation("inspect repository", "Presenta el resultado en español.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.completionReader.(*fakeActivationResultReader).job.Task = delegation
 	exchange := &fakeExchangeWriter{}
 	service.SetExchange(exchange)
 	service.clock = fakeClock{now: now}
@@ -631,7 +641,8 @@ func TestHandleJobCompletionUsesDurableBindingAndDisablesMemory(t *testing.T) {
 		t.Fatalf("runtime calls/context = %d %#v", runtime.runCalls, runtime.runRequest)
 	}
 	message := runtime.runRequest.Messages[0]
-	if message.Role != domain.RoleUser || message.Source != domain.MessageSourceJobCompletion || message.UserID != activation.Actor || message.ExternalTS != activation.ActivationID {
+	if message.Role != domain.RoleUser || message.Source != domain.MessageSourceJobCompletion || message.UserID != activation.Actor ||
+		message.ExternalTS != activation.ActivationID || message.Content != delegation {
 		t.Fatalf("job completion message = %#v", message)
 	}
 	if runtime.runRequest.ConversationKey != activation.ConversationKey {
@@ -1510,8 +1521,9 @@ func TestActivationResponseProposalLabelContract(t *testing.T) {
 func TestConversationActivationResponseDisallowsProposalAndAuthority(t *testing.T) {
 	for _, response := range []string{
 		"Proposal: create a task.",
-		"I requested confirmation.",
-		"I used a tool to update the workstream.",
+		"adk_request_confirmation",
+		"workstream-human {\"command\":\"update\"}",
+		"function_call",
 	} {
 		if activationResponseAllowed(response, domain.ExternalAgentActivationConversation) {
 			t.Fatalf("conversation response accepted: %q", response)
@@ -1551,7 +1563,8 @@ func TestHandleJobCompletionRejectsProposalInConversationScope(t *testing.T) {
 	if err := service.HandleJobCompletion(t.Context(), activation); err != nil {
 		t.Fatal(err)
 	}
-	if activationStore.activation.State != domain.ActivationCompletionUnknown || activationStore.prepareCalls != 0 || activationStore.unknownCalls != 1 || activationStore.lastErrorCode != "activation_response_policy_invalid" {
+	if activationStore.activation.State != domain.ActivationCompletionUnknown || activationStore.prepareCalls != 0 || activationStore.unknownCalls != 1 ||
+		activationStore.lastErrorCode != "activation_response_policy_invalid" {
 		t.Fatalf("conversation proposal lifecycle = %#v", activationStore)
 	}
 	if len(publisher.calls) != 0 {

@@ -95,6 +95,10 @@ type AgentRequest struct {
 	Origin          AgentTurnOrigin
 	Messages        []domain.Message
 	Context         domain.AgentContext
+	// InternalEvent carries one host-originated event separately from user
+	// messages. The runtime exposes it as ephemeral model-role evidence, not
+	// as a user utterance or a durable session event.
+	InternalEvent string
 	// Activation is host-owned durable identity used only to build the
 	// activation tool scope. It is not rendered into the model prompt.
 	Activation *domain.ExternalAgentJobActivation

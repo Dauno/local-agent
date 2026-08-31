@@ -101,6 +101,30 @@ func TestDurableAgentCLIJobBuildsDelegation(t *testing.T) {
 	}
 }
 
+func TestDurableAgentCLIJobSendsOnlyExecutionTaskToWorker(t *testing.T) {
+	t.Parallel()
+	captured := &captureModel{text: "result"}
+	dispatcher := &externalAgentJobDispatcher{
+		children: []preparedAgentTool{durableCLIChild(captured)},
+		policy:   domain.ResultDeliveryPolicy{MaxInlineResultBytes: 4096, MaxResultArtifactBytes: 4096, MaxMarkdownParts: 1, MaxFileBytes: 4096},
+	}
+	job := durableCLIJob()
+	var err error
+	job.Task, err = domain.EncodeExternalAgentDelegation("inspect repository", "Presenta el resultado en español.")
+	if err != nil {
+		t.Fatal(err)
+	}
+	matched, _, err := dispatcher.runAgentCLI(t.Context(), job, new(bool))
+	if !matched || err != nil {
+		t.Fatalf("matched = %v, err = %v", matched, err)
+	}
+	prompt := captured.request.Contents[0].Parts[0].Text
+	if !strings.Contains(prompt, `"task":"inspect repository"`) || strings.Contains(prompt, "Presenta el resultado") ||
+		strings.Contains(prompt, "local-agent-delegation") {
+		t.Fatalf("worker prompt contains the wrong delegation content: %q", prompt)
+	}
+}
+
 // A job whose scope no longer matches the running configuration must not run
 // against a changed registry.
 func TestDurableAgentCLIJobRejectsStaleRevision(t *testing.T) {

@@ -50,13 +50,21 @@ func TestActivationFrameRenderIncludesBoundedWorkstreamSnapshot(t *testing.T) {
 func TestActivationFrameRejectsOversizedSnapshot(t *testing.T) {
 	task := domain.WorkstreamTask{ID: "task-1", Project: "workspace", Description: "task", Status: domain.TaskProposed}
 	frame := domain.ActivationFrame{
-		ActivationID: "activation-1", JobID: "job-1", ActivationScope: domain.ExternalAgentActivationWorkstream, PrimaryProject: "workspace", DelegatedTaskExcerpt: "task", DelegatedTaskSHA256: digest("task"), WorkstreamID: "ws-1",
+		ActivationID:         "activation-1",
+		JobID:                "job-1",
+		ActivationScope:      domain.ExternalAgentActivationWorkstream,
+		PrimaryProject:       "workspace",
+		DelegatedTaskExcerpt: "task",
+		DelegatedTaskSHA256:  digest("task"),
+		WorkstreamID:         "ws-1",
 		Workstream: domain.WorkstreamSnapshot{
 			ID: "ws-1", Project: "workspace", Status: domain.WorkstreamActive, Revision: 1,
 			Objective: strings.Repeat("x", domain.HardMaxWorkstreamSnapshotRunes+1), Tasks: []domain.WorkstreamTask{task},
 		},
-		TaskID: "task-1", Task: task, AdmissionRevision: 1,
-		Representation: domain.ActivationResultUnavailable,
+		TaskID:            "task-1",
+		Task:              task,
+		AdmissionRevision: 1,
+		Representation:    domain.ActivationResultUnavailable,
 	}
 	if err := frame.Validate(); err == nil {
 		t.Fatal("oversized workstream snapshot was accepted")
@@ -65,8 +73,15 @@ func TestActivationFrameRejectsOversizedSnapshot(t *testing.T) {
 
 func TestActivationFrameNativeHandleRequiresBoundedMetadata(t *testing.T) {
 	frame := domain.ActivationFrame{
-		ActivationID: "activation-1", JobID: "job-1", ActivationScope: domain.ExternalAgentActivationConversation, PrimaryProject: "workspace", DelegatedTaskExcerpt: "task", DelegatedTaskSHA256: digest("task"), Representation: domain.ActivationResultNativeHandle,
-		ResultSHA256: strings.Repeat("a", 64), ResultBytes: 10,
+		ActivationID:         "activation-1",
+		JobID:                "job-1",
+		ActivationScope:      domain.ExternalAgentActivationConversation,
+		PrimaryProject:       "workspace",
+		DelegatedTaskExcerpt: "task",
+		DelegatedTaskSHA256:  digest("task"),
+		Representation:       domain.ActivationResultNativeHandle,
+		ResultSHA256:         strings.Repeat("a", 64),
+		ResultBytes:          10,
 	}
 	if err := frame.Validate(); err == nil {
 		t.Fatal("native handle without metadata was accepted")

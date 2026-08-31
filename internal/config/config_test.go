@@ -83,6 +83,7 @@ func TestDefaultMatchesPRD(t *testing.T) {
 			ProgressWarningSeconds:       900,
 			WorkerConcurrency:            1,
 			ArtifactRetentionDays:        30,
+			Batch:                        config.ExternalAgentBatchConfig{MaxTasks: 4},
 			Delivery:                     config.ExternalAgentDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
 		},
 		CodeIntelligence: &config.CodeIntelligenceConfig{Enabled: false, MaxProcesses: 4, InitTimeoutSeconds: 20, RequestTimeoutSeconds: 10},
@@ -340,6 +341,8 @@ external_agent:
    progress_warning_seconds: 900
    worker_concurrency: 1
    artifact_retention_days: 30
+   batch:
+     max_tasks: 4
    delivery:
      max_markdown_parts: 6
      max_file_bytes: 16777216
@@ -774,7 +777,8 @@ func TestValidateWorkstreamLimitsAndParseGate(t *testing.T) {
 	cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep = 2
 	cfg.Orchestration.ResultHandles.ProducingCallReserveTokens = 0
 	err = cfg.Validate()
-	if !errors.As(err, &validation) || !validation.Has("orchestration.result_handles.max_producing_calls_per_step") || !validation.Has("orchestration.result_handles.producing_call_reserve_tokens") {
+	if !errors.As(err, &validation) || validation.Has("orchestration.result_handles.max_producing_calls_per_step") ||
+		!validation.Has("orchestration.result_handles.producing_call_reserve_tokens") {
 		t.Fatalf("result-handle reservation validation = %v", err)
 	}
 	emptyRegistry := config.Default()

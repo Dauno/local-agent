@@ -174,8 +174,11 @@ func newDBRollbackCheckCommand(backend Backend, streams Streams) *cobra.Command 
 	return &cobra.Command{
 		Use:   "rollback-check",
 		Short: "Check the TRD 08 rollback drain precondition",
-		Long:  fmt.Sprintf("Reports whether any session still has a pending context-summary discovery marker, which blocks rollback after the schema v%d rollout to a schema-v41-compatible binary at or before 3cfe091.", rollout.TargetVersion),
-		Args:  cobra.NoArgs,
+		Long: fmt.Sprintf(
+			"Reports whether any session still has a pending context-summary discovery marker, which blocks rollback after the schema v%d rollout to a schema-v41-compatible binary at or before 3cfe091.",
+			rollout.TargetVersion,
+		),
+		Args: cobra.NoArgs,
 		RunE: func(command *cobra.Command, _ []string) error {
 			checker, ok := backend.(DatabaseRollbackCheckBackend)
 			if !ok {
@@ -186,13 +189,18 @@ func newDBRollbackCheckCommand(backend Backend, streams Streams) *cobra.Command 
 				return &ExitError{Code: 1, Cause: err}
 			}
 			if status.Clear {
-				_, _ = fmt.Fprintf(streams.Out, "rollback drain clear: 0 sessions have a pending discovery marker; safe to run a schema-v41-compatible binary at or before 3cfe091 after the schema v%d rollout\n", rollout.TargetVersion)
+				_, _ = fmt.Fprintf(
+					streams.Out,
+					"rollback drain clear: 0 sessions have a pending discovery marker; safe to run a schema-v41-compatible binary at or before 3cfe091 after the schema v%d rollout\n",
+					rollout.TargetVersion,
+				)
 				return nil
 			}
 			_, _ = fmt.Fprintf(
 				streams.Out,
 				"rollback blocked: %d sessions have a pending discovery marker; let the current binary drain them or cancel them explicitly before rolling back after the schema v%d rollout to a binary at or before 3cfe091\n",
-				len(status.PendingSessionIdentities), rollout.TargetVersion,
+				len(status.PendingSessionIdentities),
+				rollout.TargetVersion,
 			)
 			for _, identity := range status.PendingSessionIdentities {
 				_, _ = fmt.Fprintln(streams.Out, identity)

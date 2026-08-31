@@ -87,22 +87,44 @@ type ActivationFrame struct {
 }
 
 func (f ActivationFrame) Validate() error {
+	if err := f.validateActivationFrameIdentity(); err != nil {
+		return err
+	}
+	if err := f.validateDelegatedTask(); err != nil {
+		return err
+	}
+	if err := f.validateActivationScope(); err != nil {
+		return err
+	}
+	return f.validateActivationResult()
+}
+
+func (f ActivationFrame) validateActivationFrameIdentity() error {
 	if strings.TrimSpace(f.ActivationID) == "" || strings.TrimSpace(f.JobID) == "" || f.AdmissionRevision < 0 || f.ResultBytes < 0 || strings.TrimSpace(f.PrimaryProject) == "" {
 		return errors.New("activation frame identity is invalid")
 	}
 	if !f.ActivationScope.Valid() || f.ActivationScope == ExternalAgentActivationLegacy {
 		return errors.New("activation frame scope is invalid")
 	}
+	return nil
+}
+
+func (f ActivationFrame) validateDelegatedTask() error {
 	if err := ValidateCompletionBinding(f.WorkstreamID, f.TaskID, f.ExecutionIdentity, f.AdmissionRevision); err != nil {
 		return err
 	}
-	if !utf8.ValidString(f.DelegatedTaskExcerpt) || strings.TrimSpace(f.DelegatedTaskExcerpt) == "" || utf8.RuneCountInString(f.DelegatedTaskExcerpt) > MaxDelegatedTaskExcerptRunes || !validSHA256Hex(f.DelegatedTaskSHA256) {
+	if !utf8.ValidString(f.DelegatedTaskExcerpt) || strings.TrimSpace(f.DelegatedTaskExcerpt) == "" || utf8.RuneCountInString(f.DelegatedTaskExcerpt) > MaxDelegatedTaskExcerptRunes ||
+		!validSHA256Hex(f.DelegatedTaskSHA256) {
 		return errors.New("activation frame delegated task excerpt is invalid")
 	}
 	truncationMarker := strings.Contains(f.DelegatedTaskExcerpt, ActivationTaskExcerptTruncation)
 	if truncationMarker != f.DelegatedTaskTruncated {
 		return errors.New("activation frame delegated task truncation marker is invalid")
 	}
+	return nil
+}
+
+func (f ActivationFrame) validateActivationScope() error {
 	if f.ActivationScope == ExternalAgentActivationConversation {
 		if f.Workstream.ID != "" || f.Task.ID != "" {
 			return errors.New("conversation activation frame carries workstream authority")
@@ -110,38 +132,42 @@ func (f ActivationFrame) Validate() error {
 	} else if f.ActivationScope != ExternalAgentActivationWorkstream {
 		return errors.New("activation frame scope is invalid")
 	}
-	if f.ActivationScope == ExternalAgentActivationWorkstream {
-		if !CompletionBindingPresent(f.WorkstreamID, f.TaskID, f.ExecutionIdentity, f.AdmissionRevision) {
-			return errors.New("workstream activation frame binding is incomplete")
+	if f.ActivationScope != ExternalAgentActivationWorkstream {
+		return nil
+	}
+	if !CompletionBindingPresent(f.WorkstreamID, f.TaskID, f.ExecutionIdentity, f.AdmissionRevision) {
+		return errors.New("workstream activation frame binding is incomplete")
+	}
+	if f.Workstream.ID != f.WorkstreamID || f.Workstream.Status != WorkstreamActive || f.Workstream.Revision < f.AdmissionRevision {
+		return errors.New("activation frame workstream snapshot is invalid")
+	}
+	if workstreamSnapshotRunes(f.Workstream) > HardMaxWorkstreamSnapshotRunes {
+		return errors.New("activation frame workstream snapshot is too large")
+	}
+	if f.TaskID == "" || f.Task.ID != f.TaskID || f.Task.Status != TaskRunning || f.Task.Project != f.Workstream.Project || f.Task.Project != f.PrimaryProject ||
+		f.Task.ExecutionIdentity != f.ExecutionIdentity {
+		return errors.New("activation frame task binding is invalid")
+	}
+	found := false
+	for _, task := range f.Workstream.Tasks {
+		if task.ID == f.TaskID {
+			found = task.ExecutionIdentity == f.ExecutionIdentity
+			break
 		}
 	}
-	if f.ActivationScope == ExternalAgentActivationWorkstream {
-		if f.Workstream.ID != f.WorkstreamID || f.Workstream.Status != WorkstreamActive || f.Workstream.Revision < f.AdmissionRevision {
-			return errors.New("activation frame workstream snapshot is invalid")
-		}
-		if workstreamSnapshotRunes(f.Workstream) > HardMaxWorkstreamSnapshotRunes {
-			return errors.New("activation frame workstream snapshot is too large")
-		}
-		if f.TaskID == "" || f.Task.ID != f.TaskID || f.Task.Status != TaskRunning || f.Task.Project != f.Workstream.Project || f.Task.Project != f.PrimaryProject || f.Task.ExecutionIdentity != f.ExecutionIdentity {
-			return errors.New("activation frame task binding is invalid")
-		}
-		found := false
-		for _, task := range f.Workstream.Tasks {
-			if task.ID == f.TaskID {
-				found = task.ExecutionIdentity == f.ExecutionIdentity
-				break
-			}
-		}
-		if !found {
-			return errors.New("activation frame task is absent from workstream snapshot")
-		}
-		if err := f.Task.Validate(); err != nil {
-			return fmt.Errorf("activation frame task is invalid: %w", err)
-		}
-		if sha256Hex(f.Task.Description) != strings.ToLower(f.DelegatedTaskSHA256) {
-			return errors.New("activation frame delegated task digest does not match workstream task")
-		}
+	if !found {
+		return errors.New("activation frame task is absent from workstream snapshot")
 	}
+	if err := f.Task.Validate(); err != nil {
+		return fmt.Errorf("activation frame task is invalid: %w", err)
+	}
+	if sha256Hex(f.Task.Description) != strings.ToLower(f.DelegatedTaskSHA256) {
+		return errors.New("activation frame delegated task digest does not match workstream task")
+	}
+	return nil
+}
+
+func (f ActivationFrame) validateActivationResult() error {
 	switch f.Representation {
 	case ActivationResultDirectInline:
 		if strings.TrimSpace(f.ResultText) == "" || !utf8.ValidString(f.ResultText) || utf8.RuneCountInString(f.ResultText) > MaxActivationFrameRunes {
@@ -154,46 +180,51 @@ func (f ActivationFrame) Validate() error {
 			return errors.New("activation frame inline result carries non-inline metadata")
 		}
 	case ActivationResultBoundedHandoff, ActivationResultNativeHandle, ActivationResultArtifactOnly:
-		if f.ResultText != "" {
-			return errors.New("activation frame non-inline representation carries result text")
-		}
-		if f.ResultBytes <= 0 || !validSHA256Hex(f.ResultSHA256) {
-			return errors.New("activation frame non-inline result identity is invalid")
-		}
-		if f.ResultMediaType != "" && !validResultMediaType(f.ResultMediaType) {
-			return errors.New("activation frame result media type is invalid")
-		}
-		if f.Representation == ActivationResultNativeHandle {
-			if !validResultID(f.ResultID) || !validResultMediaType(f.ResultMediaType) || len(f.ResultAvailability) == 0 {
-				return errors.New("activation frame native result handle is invalid")
-			}
-		}
-		if len(f.RepresentationIDs) > HardMaxResultRepresentationIDs {
-			return errors.New("activation frame result representation limit exceeded")
-		}
-		seen := make(map[ResultAvailability]struct{}, len(f.ResultAvailability))
-		for _, availability := range f.ResultAvailability {
-			switch availability {
-			case ResultAvailabilityInline, ResultAvailabilityRangeRead, ResultAvailabilityPrivateArtifact:
-			default:
-				return errors.New("activation frame result availability is invalid")
-			}
-			if _, exists := seen[availability]; exists {
-				return errors.New("activation frame result availability is duplicated")
-			}
-			seen[availability] = struct{}{}
-		}
-		for _, representationID := range f.RepresentationIDs {
-			if !validResultID(representationID) {
-				return errors.New("activation frame result representation ID is invalid")
-			}
-		}
+		return f.validateNonInlineResult()
 	case ActivationResultUnavailable:
 		if f.ResultText != "" || f.ResultID != "" || len(f.ResultAvailability) != 0 || len(f.RepresentationIDs) != 0 {
 			return errors.New("activation frame unavailable result carries metadata")
 		}
 	default:
 		return fmt.Errorf("activation frame result representation %q is invalid", f.Representation)
+	}
+	return nil
+}
+
+func (f ActivationFrame) validateNonInlineResult() error {
+	if f.ResultText != "" {
+		return errors.New("activation frame non-inline representation carries result text")
+	}
+	if f.ResultBytes <= 0 || !validSHA256Hex(f.ResultSHA256) {
+		return errors.New("activation frame non-inline result identity is invalid")
+	}
+	if f.ResultMediaType != "" && !validResultMediaType(f.ResultMediaType) {
+		return errors.New("activation frame result media type is invalid")
+	}
+	if f.Representation == ActivationResultNativeHandle {
+		if !validResultID(f.ResultID) || !validResultMediaType(f.ResultMediaType) || len(f.ResultAvailability) == 0 {
+			return errors.New("activation frame native result handle is invalid")
+		}
+	}
+	if len(f.RepresentationIDs) > HardMaxResultRepresentationIDs {
+		return errors.New("activation frame result representation limit exceeded")
+	}
+	seen := make(map[ResultAvailability]struct{}, len(f.ResultAvailability))
+	for _, availability := range f.ResultAvailability {
+		switch availability {
+		case ResultAvailabilityInline, ResultAvailabilityRangeRead, ResultAvailabilityPrivateArtifact:
+		default:
+			return errors.New("activation frame result availability is invalid")
+		}
+		if _, exists := seen[availability]; exists {
+			return errors.New("activation frame result availability is duplicated")
+		}
+		seen[availability] = struct{}{}
+	}
+	for _, representationID := range f.RepresentationIDs {
+		if !validResultID(representationID) {
+			return errors.New("activation frame result representation ID is invalid")
+		}
 	}
 	return nil
 }

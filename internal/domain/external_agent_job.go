@@ -13,6 +13,58 @@ import (
 
 const MaxExternalAgentTaskRunes = 200_000
 
+const externalAgentDelegationPrefix = "local-agent-delegation:v1\n"
+
+type ExternalAgentDelegation struct {
+	Version          string `json:"version"`
+	Task             string `json:"task"`
+	FinalInstruction string `json:"final_instruction"`
+}
+
+func EncodeExternalAgentDelegation(task, finalInstruction string) (string, error) {
+	delegation := ExternalAgentDelegation{
+		Version: "delegation_v1", Task: task, FinalInstruction: finalInstruction,
+	}
+	if strings.TrimSpace(delegation.Task) == "" || strings.TrimSpace(delegation.FinalInstruction) == "" {
+		return "", errors.New("external-agent delegation task and final instruction are required")
+	}
+	encoded, err := json.Marshal(delegation)
+	if err != nil {
+		return "", fmt.Errorf("encode external-agent delegation: %w", err)
+	}
+	result := externalAgentDelegationPrefix + string(encoded)
+	if !utf8.ValidString(result) || utf8.RuneCountInString(result) > MaxExternalAgentTaskRunes {
+		return "", errors.New("external-agent delegation exceeds the configured character budget")
+	}
+	return result, nil
+}
+
+func DecodeExternalAgentDelegation(value string) (ExternalAgentDelegation, bool, error) {
+	if !strings.HasPrefix(value, externalAgentDelegationPrefix) {
+		if strings.TrimSpace(value) == "" {
+			return ExternalAgentDelegation{}, false, errors.New("external-agent task is required")
+		}
+		return ExternalAgentDelegation{Version: "legacy", Task: value}, false, nil
+	}
+	var delegation ExternalAgentDelegation
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(value, externalAgentDelegationPrefix)), &delegation); err != nil {
+		return ExternalAgentDelegation{}, true, errors.New("external-agent delegation envelope is invalid")
+	}
+	if delegation.Version != "delegation_v1" || strings.TrimSpace(delegation.Task) == "" ||
+		strings.TrimSpace(delegation.FinalInstruction) == "" {
+		return ExternalAgentDelegation{}, true, errors.New("external-agent delegation envelope is invalid")
+	}
+	return delegation, true, nil
+}
+
+func ExternalAgentExecutionTask(value string) (string, error) {
+	delegation, _, err := DecodeExternalAgentDelegation(value)
+	if err != nil {
+		return "", err
+	}
+	return delegation.Task, nil
+}
+
 type ExternalAgentCompletionPolicy string
 
 const (

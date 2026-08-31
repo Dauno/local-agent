@@ -71,8 +71,35 @@ type preparedAgentTool struct {
 }
 
 type externalAgentArgs struct {
-	Project string `json:"project" jsonschema:"registered project name to use as the workspace"`
-	Task    string `json:"task" jsonschema:"complete bounded task for the external agent"`
+	Project          string `json:"project" jsonschema:"registered project name to use as the workspace"`
+	Task             string `json:"task" jsonschema:"complete bounded internal task for the external agent"`
+	FinalInstruction string `json:"final_instruction" jsonschema:"requested final presentation for the Slack user in the language used by that user"`
+}
+
+const (
+	externalAgentBatchProvider = "local-agent"
+	externalAgentBatchProfile  = "delegate_batch"
+	externalAgentBatchVersion  = "batch_v2"
+)
+
+type externalAgentBatchItem struct {
+	Agent string `json:"agent" jsonschema:"exact configured durable agent name"`
+	Task  string `json:"task" jsonschema:"complete bounded task for this agent"`
+}
+
+type externalAgentBatchArgs struct {
+	Mode             string                   `json:"mode" jsonschema:"execution mode: parallel or sequential"`
+	Project          string                   `json:"project" jsonschema:"registered project name shared by all batch tasks"`
+	Tasks            []externalAgentBatchItem `json:"tasks" jsonschema:"task list bounded by external_agent.batch.max_tasks"`
+	FinalInstruction string                   `json:"final_instruction" jsonschema:"requested final synthesis or presentation after every batch task completes"`
+}
+
+type externalAgentBatchSpec struct {
+	Version          string                   `json:"version"`
+	Mode             string                   `json:"mode"`
+	Project          string                   `json:"project"`
+	Tasks            []externalAgentBatchItem `json:"tasks"`
+	FinalInstruction string                   `json:"final_instruction"`
 }
 
 type externalAgentResult struct {
@@ -194,6 +221,7 @@ type compositeAgentToolFactory struct {
 	jobStarter                 port.ExternalAgentJobStarter
 	completionBindings         port.ExternalAgentJobCompletionBindingResolver
 	declarativeTools           map[string]tooldef.ToolDef
+	batchMaxTasks              int
 }
 
 // declarativeToolProvider is implemented by the base factory so children and
@@ -217,6 +245,12 @@ func newCompositeAgentToolFactory(base port.AgentToolFactory, children []prepare
 func (f *compositeAgentToolFactory) setJobStarter(starter port.ExternalAgentJobStarter) {
 	if f != nil {
 		f.jobStarter = starter
+	}
+}
+
+func (f *compositeAgentToolFactory) setBatchMaxTasks(maxTasks int) {
+	if f != nil {
+		f.batchMaxTasks = maxTasks
 	}
 }
 
@@ -324,6 +358,14 @@ func (f *compositeAgentToolFactory) ToolsForInvocation(actor string, key domain.
 			return nil, fmt.Errorf("build agent tool %q: %w", child.definition.Name, err)
 		}
 		combined = append(combined, agenttool.New(childAgent, &agenttool.Config{}))
+	}
+
+	batchTool, err := newAgentCLIBatchDurableTool(f.children, f.jobStarter, actor, key, f.batchMaxTasks)
+	if err != nil {
+		return nil, fmt.Errorf("build durable agent batch tool: %w", err)
+	}
+	if batchTool != nil {
+		combined = append(combined, batchTool)
 	}
 
 	for idx := range f.workflowChildren {
@@ -643,12 +685,129 @@ func combineInstructions(globalInstruction, instruction string) string {
 	return strings.Join(parts, "\n\n")
 }
 
-// newAgentCLIDurableTool exposes an agent CLI leaf that runs as a durable job.
-//
-// It uses structured {project, task} arguments, an optional confirmation gate,
-// and an acceptance receipt. The root turn ends once
-// the job is accepted; the durable worker produces the result and Slack
-// receives it later.
+// newAgentCLIBatchDurableTool exposes one durable parallel batch. The batch
+// worker returns one ordered combined result through the normal activation path.
+func newAgentCLIBatchDurableTool(
+	children []preparedAgentTool,
+	jobStarter port.ExternalAgentJobStarter,
+	actor string,
+	key domain.ConversationKey,
+	maxTasks int,
+) (tool.Tool, error) {
+	if maxTasks <= 0 {
+		maxTasks = 4
+	}
+	eligible := make(map[string]int)
+	for index := range children {
+		child := children[index]
+		if child.cliResolved == nil || child.executionMode != agentdef.ExecutionModeDurableJob {
+			continue
+		}
+		eligible[child.definition.Name] = index
+	}
+	if len(eligible) == 0 {
+		return nil, nil
+	}
+	eligibleNames := make([]string, 0, len(eligible))
+	for name := range eligible {
+		eligibleNames = append(eligibleNames, name)
+	}
+	sort.Strings(eligibleNames)
+	return functiontool.New(functiontool.Config{
+		Name: "delegate_batch",
+		Description: fmt.Sprintf(
+			"Runs between one and %d explicit durable agent tasks as one batch job. Set mode to parallel for concurrent execution or sequential for strict ordered execution where each task finishes before the next starts. Use this tool for every request with multiple delegations or any combined result, comparison, synthesis, or summary. Put the requested final synthesis or presentation in final_instruction. All tasks must use the same registered project. The batch produces one acceptance receipt and one automatic root activation after every task finishes. Do not call the individual agent tools for tasks included in this batch. Eligible agents: %s.",
+			maxTasks,
+			strings.Join(eligibleNames, ", "),
+		),
+	}, func(ctx agent.Context, args externalAgentBatchArgs) (externalAgentResult, error) {
+		if args.Mode != "parallel" && args.Mode != "sequential" {
+			return externalAgentResult{}, errors.New("agent batch mode must be parallel or sequential")
+		}
+		if len(args.Tasks) < 1 || len(args.Tasks) > maxTasks {
+			return externalAgentResult{}, fmt.Errorf("agent batch requires between one and %d tasks", maxTasks)
+		}
+		if strings.TrimSpace(args.FinalInstruction) == "" {
+			return externalAgentResult{}, errors.New("agent batch final instruction must not be empty")
+		}
+		primaryPath := ""
+		timeout := time.Duration(0)
+		for _, item := range args.Tasks {
+			index, found := eligible[item.Agent]
+			if !found {
+				return externalAgentResult{}, fmt.Errorf("agent batch references unavailable durable agent %q", item.Agent)
+			}
+			child := children[index]
+			if child.definition.Confirmation == "required" {
+				return externalAgentResult{}, fmt.Errorf("agent batch does not support confirmation-required agent %q", item.Agent)
+			}
+			if strings.TrimSpace(item.Task) == "" {
+				return externalAgentResult{}, errors.New("agent batch task must not be empty")
+			}
+			resolvedPath, err := resolveExternalAgentProject(child.projectRoots, args.Project)
+			if err != nil {
+				return externalAgentResult{}, err
+			}
+			if primaryPath == "" {
+				primaryPath = resolvedPath
+			} else if primaryPath != resolvedPath {
+				return externalAgentResult{}, errors.New("agent batch project resolves to inconsistent workspace roots")
+			}
+			if args.Mode == "sequential" {
+				timeout += child.externalAgentTimeout
+			} else if child.externalAgentTimeout > timeout {
+				timeout = child.externalAgentTimeout
+			}
+		}
+		if jobStarter == nil || actor == "" || key == "" {
+			return externalAgentResult{}, errors.New("durable agent batch execution is not configured for this invocation")
+		}
+		spec := externalAgentBatchSpec{
+			Version: externalAgentBatchVersion, Mode: args.Mode, Project: args.Project,
+			Tasks: args.Tasks, FinalInstruction: args.FinalInstruction,
+		}
+		registryRevision, err := externalAgentBatchRegistryRevision(spec, children, eligible, maxTasks)
+		if err != nil {
+			return externalAgentResult{}, err
+		}
+		encodedTask, err := json.Marshal(spec)
+		if err != nil {
+			return externalAgentResult{}, fmt.Errorf("encode agent batch task: %w", err)
+		}
+		callID := ctxFunctionCallID(ctx)
+		job, err := jobStarter.Start(ctx, domain.ExternalAgentJobRequest{
+			Provider: externalAgentBatchProvider, Profile: externalAgentBatchProfile,
+			PrimaryProject: args.Project, PrimaryPath: primaryPath, RegistryRevision: registryRevision,
+			Task: string(encodedTask), Mode: domain.JobDetached, Timeout: timeout,
+			WrapperCallID: callID, OriginalCallID: callID, Actor: actor,
+			TeamID: teamIDFromConversation(key), ConversationKey: key,
+		})
+		if err != nil {
+			return externalAgentResult{}, err
+		}
+		encoded, _ := json.Marshal(map[string]any{
+			"status": "accepted", "job_id": job.ID, "request_sha256": job.RequestSHA256,
+			"batch_mode": args.Mode, "task_count": len(args.Tasks), "completion_route": "automatic_root",
+			"next_action": "return the batch acceptance receipt and end the turn; the automatic root activation will deliver the combined result",
+		})
+		return externalAgentResult{Result: string(encoded)}, nil
+	})
+}
+
+func externalAgentBatchRegistryRevision(spec externalAgentBatchSpec, children []preparedAgentTool, eligible map[string]int, maxTasks int) (string, error) {
+	hash := sha256.New()
+	_, _ = fmt.Fprintf(hash, "%s\x00%s\x00%d\x00", spec.Version, spec.Mode, maxTasks)
+	for _, item := range spec.Tasks {
+		index, found := eligible[item.Agent]
+		if !found || strings.TrimSpace(children[index].registryRevision) == "" {
+			return "", fmt.Errorf("agent batch configuration for %q is unavailable", item.Agent)
+		}
+		_, _ = hash.Write([]byte(item.Agent + "\x00" + children[index].registryRevision + "\x00"))
+	}
+	return "sha256:" + fmt.Sprintf("%x", hash.Sum(nil)), nil
+}
+
+// newAgentCLIDurableTool exposes one agent CLI leaf as a durable job.
 func newAgentCLIDurableTool(
 	definition agentdef.AgentDef,
 	resolved *agentdef.ResolvedModel,
@@ -667,7 +826,7 @@ func newAgentCLIDurableTool(
 		return nil, errors.New("agent CLI durable tools require at least one registered sandbox project")
 	}
 	requiresConfirmation := definition.Confirmation == "required"
-	description := definition.Description
+	description := definition.Description + " Use this tool only for one standalone delegation whose result is delivered independently. Put the requested user-facing presentation in final_instruction, in the language used by the Slack user. Keep task as the bounded internal execution instruction. For multiple tasks or any combined result, comparison, synthesis, or summary, use delegate_batch and do not call this individual tool. This durable job uses automatic root integration. After acceptance, return the receipt and end the turn. Do not poll job_status or call read_job_result tools. The activation worker delivers the final result."
 	if requiresConfirmation {
 		description += " Requires confirmation because the agent CLI may modify files and run commands within its approval policy."
 	}
@@ -681,6 +840,9 @@ func newAgentCLIDurableTool(
 		}
 		if strings.TrimSpace(args.Task) == "" {
 			return externalAgentResult{}, errors.New("agent CLI task must not be empty")
+		}
+		if strings.TrimSpace(args.FinalInstruction) == "" {
+			return externalAgentResult{}, errors.New("agent CLI final instruction must not be empty")
 		}
 		if requiresConfirmation {
 			confirmation := ctx.ToolConfirmation()
@@ -698,9 +860,13 @@ func newAgentCLIDurableTool(
 		if jobStarter == nil || actor == "" || key == "" || registryRevision == "" {
 			return externalAgentResult{}, errors.New("durable agent CLI execution is not configured for this invocation")
 		}
+		delegation, err := domain.EncodeExternalAgentDelegation(args.Task, args.FinalInstruction)
+		if err != nil {
+			return externalAgentResult{}, err
+		}
 		request := domain.ExternalAgentJobRequest{
 			Provider: resolved.Provider.Name, Profile: definition.Model, PrimaryProject: args.Project,
-			RegistryRevision: registryRevision, Task: args.Task, Mode: domain.JobDetached,
+			RegistryRevision: registryRevision, Task: delegation, Mode: domain.JobDetached,
 			Timeout: timeout, PrimaryPath: primaryPath,
 			WrapperCallID: ctxFunctionCallID(ctx), OriginalCallID: ctxFunctionCallID(ctx), Actor: actor,
 			TeamID: teamIDFromConversation(key), ConversationKey: key,
@@ -721,7 +887,11 @@ func newAgentCLIDurableTool(
 		if err != nil {
 			return externalAgentResult{}, err
 		}
-		encoded, _ := json.Marshal(map[string]any{"status": "accepted", "job_id": job.ID, "request_sha256": job.RequestSHA256})
+		encoded, _ := json.Marshal(map[string]any{
+			"status": "accepted", "job_id": job.ID, "request_sha256": job.RequestSHA256,
+			"completion_route": "automatic_root",
+			"next_action":      "return this standalone acceptance receipt and end the turn; do not poll or read the job result because root activation will deliver it",
+		})
 		return externalAgentResult{Result: string(encoded)}, nil
 	})
 }

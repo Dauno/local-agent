@@ -163,6 +163,9 @@ func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequ
 	now := s.clock.Now().UTC()
 	completionPolicy := domain.ExternalAgentCompletionDeliveryOnly
 	if request.Mode == domain.JobDetached {
+		// Detached jobs must activate the root so the result reaches the
+		// coordinating conversation without requiring a manual result read.
+		// The activation worker provides the single asynchronous delivery path.
 		completionPolicy = domain.ExternalAgentCompletionAutomaticRoot
 	}
 	job := domain.ExternalAgentJob{
