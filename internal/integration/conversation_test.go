@@ -3,6 +3,7 @@ package integration_test
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 
@@ -126,6 +127,7 @@ func integrationService(t *testing.T, store port.ConversationStore, runtime port
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20_000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{Store: store, Runtime: runtime, Publisher: integrationPublisher{}})
 	if err != nil {
 		t.Fatal(err)

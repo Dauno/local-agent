@@ -1,0 +1,14 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "contract": {
+    "inputs": {
+      "summary": {"type": "text", "required": true}
+    },
+    "actions": {}
+  },
+  "fallback": "Fallback: {{summary}}",
+  "layout": [
+    {"type": "section", "text": {"type": "plain_text", "text": "{{summary}}"}}
+  ]
+}

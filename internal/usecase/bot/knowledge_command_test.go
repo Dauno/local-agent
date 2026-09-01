@@ -72,6 +72,7 @@ func newKnowledgeBotService(
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, Dependencies{
 		Store: store, Runtime: runtime, Publisher: publisher,
 		Clock:     fakeClock{now: time.Unix(1700000000, 0)},
@@ -319,6 +320,7 @@ func TestNewUsesInjectedCoordinatorAndDefaultsToLimiter(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}
 	coordinator := NewLimiter(4)
 	service, err := New(cfg, Dependencies{Store: store, Runtime: &fakeRuntime{}, Publisher: &fakePublisher{}, Coordinator: coordinator})

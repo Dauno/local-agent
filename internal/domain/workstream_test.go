@@ -325,8 +325,11 @@ func TestWorkstreamBoundsCoverAllSnapshotCollectionsAndText(t *testing.T) {
 func TestWorkstreamTaskCannotStartBeforeDependenciesComplete(t *testing.T) {
 	workstream := testWorkstream()
 	workstream.Tasks = []domain.WorkstreamTask{
-		{ID: "input", Project: workstream.Project, Description: "input", Status: domain.TaskRunning, ExecutionIdentity: "exec-input"},
-		{ID: "dependent", Project: workstream.Project, Description: "dependent", Status: domain.TaskQueued, Dependencies: []string{"input"}, RequiredInputs: []string{"result-1"}},
+		{ID: "input", JobID: "job-input", Project: workstream.Project, Description: "input", Status: domain.TaskRunning, ExecutionIdentity: "exec-input"},
+		{
+			ID: "dependent", JobID: "job-dependent", Project: workstream.Project, Description: "dependent", Status: domain.TaskQueued,
+			Dependencies: []string{"input"}, RequiredInputs: []string{"result-1"},
+		},
 	}
 	if err := workstream.ValidateTaskReady("dependent"); !errors.Is(err, domain.ErrWorkstreamTaskNotReady) {
 		t.Fatalf("running dependency readiness error = %v, want %v", err, domain.ErrWorkstreamTaskNotReady)
@@ -341,18 +344,41 @@ func TestWorkstreamTaskCannotStartBeforeDependenciesComplete(t *testing.T) {
 	}
 }
 
+func TestWorkstreamQueueAndStartTaskAdmission(t *testing.T) {
+	workstream := testWorkstream()
+	workstream.Status = domain.WorkstreamActive
+	workstream.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: workstream.Project, Description: "admitted task", Status: domain.TaskProposed}}
+	queue := testProposal(domain.WorkstreamSourceSystem, domain.WorkstreamActionQueueTask, workstream.Revision)
+	queue.TaskID, queue.JobID = "task-1", "job-1"
+	if _, err := workstream.ApplyTransition(queue, time.Now().UTC()); err != nil {
+		t.Fatalf("queue task: %v", err)
+	}
+	if workstream.Tasks[0].Status != domain.TaskQueued || workstream.Tasks[0].JobID != "job-1" {
+		t.Fatalf("queued task = %+v", workstream.Tasks[0])
+	}
+	start := testProposal(domain.WorkstreamSourceSystem, domain.WorkstreamActionStartTask, workstream.Revision)
+	start.TaskID, start.JobID, start.ExecutionIdentity = "task-1", "job-1", "job-1"
+	if _, err := workstream.ApplyTransition(start, time.Now().UTC()); err != nil {
+		t.Fatalf("start queued task: %v", err)
+	}
+	if workstream.Tasks[0].Status != domain.TaskRunning || workstream.Tasks[0].ExecutionIdentity != "job-1" {
+		t.Fatalf("started task = %+v", workstream.Tasks[0])
+	}
+}
+
 func TestWorkstreamStartTaskAdmission(t *testing.T) {
 	workstream := testWorkstream()
 	workstream.Tasks = []domain.WorkstreamTask{
 		{ID: "task-1", Project: workstream.Project, Description: "admitted task", Status: domain.TaskProposed},
 	}
-	transition := testProposal(domain.WorkstreamSourceHuman, domain.WorkstreamActionStartTask, workstream.Revision)
+	transition := testProposal(domain.WorkstreamSourceSystem, domain.WorkstreamActionStartTask, workstream.Revision)
 	transition.TaskID = "task-1"
-	transition.ExecutionIdentity = "exec-1"
+	transition.JobID = "job-1"
+	transition.ExecutionIdentity = "job-1"
 	if _, err := workstream.ApplyTransition(transition, time.Now().UTC()); err != nil {
 		t.Fatalf("start task: %v", err)
 	}
-	if workstream.Tasks[0].Status != domain.TaskRunning || workstream.Tasks[0].ExecutionIdentity != "exec-1" {
+	if workstream.Tasks[0].Status != domain.TaskRunning || workstream.Tasks[0].JobID != "job-1" || workstream.Tasks[0].ExecutionIdentity != "job-1" {
 		t.Fatalf("started task = %+v", workstream.Tasks[0])
 	}
 
@@ -362,7 +388,8 @@ func TestWorkstreamStartTaskAdmission(t *testing.T) {
 	}
 	rootTransition := testProposal(domain.WorkstreamSourceRoot, domain.WorkstreamActionStartTask, workstream.Revision)
 	rootTransition.TaskID = "task-1"
-	rootTransition.ExecutionIdentity = "exec-1"
+	rootTransition.JobID = "job-1"
+	rootTransition.ExecutionIdentity = "job-1"
 	if _, err := workstream.ApplyTransition(rootTransition, time.Now().UTC()); err == nil {
 		t.Fatal("root source was allowed to start a task without the trusted human path")
 	}
@@ -371,10 +398,44 @@ func TestWorkstreamStartTaskAdmission(t *testing.T) {
 	workstream.Tasks = []domain.WorkstreamTask{
 		{ID: "task-1", Project: workstream.Project, Description: "admitted task", Status: domain.TaskProposed},
 	}
-	missingIdentity := testProposal(domain.WorkstreamSourceHuman, domain.WorkstreamActionStartTask, workstream.Revision)
+	missingIdentity := testProposal(domain.WorkstreamSourceSystem, domain.WorkstreamActionStartTask, workstream.Revision)
 	missingIdentity.TaskID = "task-1"
+	missingIdentity.JobID = "job-1"
 	if _, err := workstream.ApplyTransition(missingIdentity, time.Now().UTC()); err == nil {
 		t.Fatal("start task accepted an empty execution identity")
+	}
+}
+
+func TestWorkstreamCompletionRequiresTerminalTasks(t *testing.T) {
+	workstream := testWorkstream()
+	workstream.Status = domain.WorkstreamActive
+	workstream.Tasks = []domain.WorkstreamTask{{
+		ID: "task-1", JobID: "job-1", Project: workstream.Project, Description: "active task",
+		Status: domain.TaskRunning, ExecutionIdentity: "job-1",
+	}}
+	transition := testProposal(domain.WorkstreamSourceSystem, domain.WorkstreamActionCompleteWorkstream, workstream.Revision)
+	if _, err := workstream.ApplyTransition(transition, time.Now().UTC()); !errors.Is(err, domain.ErrWorkstreamTaskNotReady) {
+		t.Fatalf("completion with active task error = %v, want %v", err, domain.ErrWorkstreamTaskNotReady)
+	}
+}
+
+func TestWorkstreamSettleTaskRequiresItsJobAndRecordsResult(t *testing.T) {
+	workstream := testWorkstream()
+	workstream.Status = domain.WorkstreamActive
+	workstream.Tasks = []domain.WorkstreamTask{{
+		ID: "task-1", JobID: "job-1", Project: workstream.Project, Description: "admitted task",
+		Status: domain.TaskRunning, ExecutionIdentity: "job-1",
+	}}
+	transition := testProposal(domain.WorkstreamSourceSystem, domain.WorkstreamActionSettleTask, workstream.Revision)
+	transition.TaskID = "task-1"
+	transition.JobID = "job-1"
+	transition.TaskStatus = domain.TaskCompleted
+	transition.ResultIdentity = strings.Repeat("a", 64)
+	if _, err := workstream.ApplyTransition(transition, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	if workstream.Tasks[0].Status != domain.TaskCompleted || workstream.Tasks[0].ResultIdentity != transition.ResultIdentity {
+		t.Fatalf("settled task = %+v", workstream.Tasks[0])
 	}
 }
 
@@ -383,9 +444,10 @@ func TestWorkstreamStartTaskRequiresReadyInputs(t *testing.T) {
 	workstream.Tasks = []domain.WorkstreamTask{
 		{ID: "task-1", Project: workstream.Project, Description: "dependent task", Status: domain.TaskProposed, RequiredInputs: []string{"missing-result"}},
 	}
-	transition := testProposal(domain.WorkstreamSourceHuman, domain.WorkstreamActionStartTask, workstream.Revision)
+	transition := testProposal(domain.WorkstreamSourceSystem, domain.WorkstreamActionStartTask, workstream.Revision)
 	transition.TaskID = "task-1"
-	transition.ExecutionIdentity = "exec-1"
+	transition.JobID = "job-1"
+	transition.ExecutionIdentity = "job-1"
 	if _, err := workstream.ApplyTransition(transition, time.Now().UTC()); !errors.Is(err, domain.ErrWorkstreamTaskNotReady) {
 		t.Fatalf("unavailable required input error = %v, want %v", err, domain.ErrWorkstreamTaskNotReady)
 	}
@@ -449,9 +511,24 @@ func TestWorkstreamTransitionPayloadDigestCanonicalStability(t *testing.T) {
 		{"propose_task", domain.WorkstreamTransition{Action: domain.WorkstreamActionProposeTask, Task: task, TaskID: task.ID}, "a3d3b959490be4bdd711685fa2c1e999ad4481479ec5af1b94ca04c203e2a83c"},
 		{"reject_task", domain.WorkstreamTransition{Action: domain.WorkstreamActionRejectTask, TaskID: "task-1"}, "463cb167bde829db04efdeec582fb48212066bb2efe64f44e59de4028233a3e9"},
 		{
+			"queue_task",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionQueueTask, TaskID: "task-1", JobID: "job-1"},
+			"c8c7672cdebcae0d84ed9b2b96088bc24ba95fb27afde799dead1bd47247ffc4",
+		},
+		{
 			"start_task",
 			domain.WorkstreamTransition{Action: domain.WorkstreamActionStartTask, TaskID: "task-1", ExecutionIdentity: "exec-1"},
 			"024b2f76feea3423b340dd381ee4c54d1551f9ff6cc09366f0f77f0ddc02f05c",
+		},
+		{
+			"start_task_with_job",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionStartTask, TaskID: "task-1", JobID: "job-1", ExecutionIdentity: "exec-1"},
+			"d57ef473393e269fb28d6854b15cc9437fef1d2622ba1bcc9761ad38179a305e",
+		},
+		{
+			"settle_task",
+			domain.WorkstreamTransition{Action: domain.WorkstreamActionSettleTask, TaskID: "task-1", JobID: "job-1", TaskStatus: domain.TaskCompleted},
+			"9d5fa352c4f833daa0dde13d8f500c3c90524eb4e7a393d393db7d4a0f1f03d7",
 		},
 		{"revise_plan", domain.WorkstreamTransition{Action: domain.WorkstreamActionRevisePlan, CurrentPhase: "phase 2"}, "e75a1e0ef0c3c162ac0864c270eba48e905bc34f0db3d9d59e11e9006af396ac"},
 		{"record_constraint", domain.WorkstreamTransition{Action: domain.WorkstreamActionRecordConstraint, Constraint: constraint}, "2d9c955fa4e673963e926b6eeb38f13715b92f6a0bb9a9d8fa9f92c1a71d6176"},

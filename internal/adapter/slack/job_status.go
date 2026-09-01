@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 	"unicode/utf8"
 
@@ -48,6 +47,8 @@ type JobStatusHandler struct {
 	confirmations port.ConfirmationDeliveryStore
 	jobs          port.ExternalAgentJobWrapperReader
 	timeout       time.Duration
+	layoutSHA256  string
+	renderErr     error
 }
 
 // NewJobStatusHandler creates the Slack handler for authorized job status
@@ -71,7 +72,23 @@ func newJobStatusHandler(
 	confirmations port.ConfirmationDeliveryStore,
 	jobs port.ExternalAgentJobWrapperReader,
 ) *JobStatusHandler {
-	return &JobStatusHandler{client: client, confirmations: confirmations, jobs: jobs, timeout: timeout}
+	engine, renderErr := newViewEngine()
+	layoutSHA256 := ""
+	if renderErr == nil {
+		layoutSHA256, renderErr = confirmationPromptLayoutSHA256(engine)
+	}
+	return &JobStatusHandler{
+		client: client, confirmations: confirmations, jobs: jobs, timeout: timeout,
+		layoutSHA256: layoutSHA256, renderErr: renderErr,
+	}
+}
+
+// InitializationError exposes template setup failures to the composition root.
+func (h *JobStatusHandler) InitializationError() error {
+	if h == nil {
+		return errors.New("job status handler is required")
+	}
+	return h.renderErr
 }
 
 // Handle validates the Slack callback, confirmation identity, and durable job
@@ -79,6 +96,9 @@ func newJobStatusHandler(
 func (h *JobStatusHandler) Handle(ctx context.Context, callback slackapi.InteractionCallback) error {
 	if h == nil {
 		return errors.New("job status handler is not configured")
+	}
+	if h.renderErr != nil {
+		return fmt.Errorf("initialize confirmation view engine: %w", h.renderErr)
 	}
 	action, ok := normalizeJobStatusAction(&callback)
 	if !ok {
@@ -89,7 +109,7 @@ func (h *JobStatusHandler) Handle(ctx context.Context, callback slackapi.Interac
 	}
 
 	delivery, err := h.confirmations.GetByWrapperCallID(ctx, action.WrapperCallID)
-	if err != nil || !statusConfirmationMatches(delivery, action) {
+	if err != nil || !statusConfirmationMatches(delivery, action, h.layoutSHA256) {
 		return h.publishError(ctx, action, jobStatusUnauthorizedMessage)
 	}
 	job, err := h.jobs.StatusByWrapperCallID(ctx, action.WrapperCallID, action.Actor, action.ConversationKey)
@@ -104,7 +124,7 @@ func (h *JobStatusHandler) Handle(ctx context.Context, callback slackapi.Interac
 	return h.publish(ctx, action, fallbackText, blocks)
 }
 
-func statusConfirmationMatches(delivery *port.ConfirmationDelivery, action domain.ConfirmationInteractiveAction) bool {
+func statusConfirmationMatches(delivery *port.ConfirmationDelivery, action domain.ConfirmationInteractiveAction, layoutSHA256 string) bool {
 	if delivery == nil || delivery.RendererMode != confirmationRenderModeV2 ||
 		delivery.WrapperCallID != action.WrapperCallID || delivery.Actor != action.Actor ||
 		delivery.TeamID != action.TeamID || delivery.ChannelID != action.ChannelID ||
@@ -116,7 +136,7 @@ func statusConfirmationMatches(delivery *port.ConfirmationDelivery, action domai
 		return true
 	}
 	return action.RendererMode == delivery.RendererMode && action.CorrelationID == delivery.CorrelationID &&
-		action.ContentSHA256 == confirmationContentDigestForMode(*delivery, delivery.RendererMode)
+		action.ContentSHA256 == confirmationContentDigest(*delivery, layoutSHA256)
 }
 
 func statusJobMatches(job *domain.ExternalAgentJob, action domain.ConfirmationInteractiveAction) bool {
@@ -149,54 +169,33 @@ func (h *JobStatusHandler) publish(ctx context.Context, action domain.Confirmati
 }
 
 func compileJobStatusErrorResponse(message string) (string, []slackapi.Block, error) {
-	safe := truncateConfirmationText(neutralizeUnsafeControls(message), maxRendererCompositionTextLength)
-	blocks := []slackapi.Block{
-		slackapi.NewSectionBlock(slackapi.NewTextBlockObject(slackapi.PlainTextType, safe, false, false), nil, nil),
-	}
-	if err := validateCompiledBlocks("job_status", blocks, false); err != nil {
+	engine, err := newJobEngine()
+	if err != nil {
 		return "", nil, err
 	}
-	return truncateConfirmationText(safe, maxFallbackText), blocks, nil
+	safe := truncateConfirmationText(message, maxContextText)
+	view, err := engine.Message(jobStatusErrorView{Message: safe})
+	if err != nil {
+		return "", nil, err
+	}
+	return view.FallbackText, view.Blocks, nil
 }
 
 func compileJobStatusResponse(job domain.ExternalAgentJob) (string, []slackapi.Block, error) {
-	state := jobStatusLabel(job.Status)
-	jobID := truncateConfirmationText(neutralizeUnsafeControls(job.ID), 256)
-	created := formatJobStatusTime(job.CreatedAt)
-	updated := formatJobStatusTime(job.UpdatedAt)
-	hostText := jobHostStatusText(job.Status)
-
-	blocks := []slackapi.Block{
-		slackapi.NewSectionBlock(
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Estado del trabajo*\n"+escapeSlackMrkdwn(state), false, false),
-			nil,
-			nil,
-		),
-		slackapi.NewSectionBlock(nil, []*slackapi.TextBlockObject{
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Estado:*\n`"+escapeSlackMrkdwn(state)+"`", false, false),
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*ID del trabajo:*\n`"+escapeSlackMrkdwn(jobID)+"`", false, false),
-		}, nil),
-		slackapi.NewSectionBlock(nil, []*slackapi.TextBlockObject{
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Creado:*\n"+created, false, false),
-			slackapi.NewTextBlockObject(slackapi.MarkdownType, "*Actualizado:*\n"+updated, false, false),
-		}, nil),
-		slackapi.NewSectionBlock(
-			slackapi.NewTextBlockObject(slackapi.PlainTextType, hostText, false, false),
-			nil,
-			nil,
-		),
-	}
-	if err := validateCompiledBlocks("job_status", blocks, false); err != nil {
+	engine, err := newJobEngine()
+	if err != nil {
 		return "", nil, err
 	}
-	fallback := strings.Join([]string{
-		"Estado del trabajo: " + state,
-		"ID del trabajo: " + jobID,
-		"Creado: " + created,
-		"Actualizado: " + updated,
-		"Estado del host: " + hostText,
-	}, "\n")
-	return truncateConfirmationText(neutralizeUnsafeControls(fallback), maxFallbackText), blocks, nil
+	state := jobStatusLabel(job.Status)
+	view, err := engine.Message(jobStatusView{
+		JobID: truncateConfirmationText(job.ID, 255), Status: state,
+		CreatedAt: formatJobStatusTime(job.CreatedAt), UpdatedAt: formatJobStatusTime(job.UpdatedAt),
+		HostStatus: jobHostStatusText(job.Status),
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return view.FallbackText, view.Blocks, nil
 }
 
 func formatJobStatusTime(value time.Time) string {

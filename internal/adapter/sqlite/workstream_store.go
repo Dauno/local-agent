@@ -526,7 +526,7 @@ func loadWorkstream(ctx context.Context, queryer workstreamQueryer, where string
 		return domain.Workstream{}, err
 	}
 
-	rows, err = queryer.QueryContext(ctx, `SELECT task_id, project, description, status, result_identity,
+	rows, err = queryer.QueryContext(ctx, `SELECT task_id, job_id, project, description, status, result_identity,
 		confirmation_identity, confirmation_status, execution_identity, integrated
 		FROM workstream_tasks WHERE workstream_id = ? ORDER BY task_id`, workstream.ID)
 	if err != nil {
@@ -537,7 +537,7 @@ func loadWorkstream(ctx context.Context, queryer workstreamQueryer, where string
 		var task domain.WorkstreamTask
 		var status, confirmationStatus string
 		var integrated int
-		if err := rows.Scan(&task.ID, &task.Project, &task.Description, &status, &task.ResultIdentity,
+		if err := rows.Scan(&task.ID, &task.JobID, &task.Project, &task.Description, &status, &task.ResultIdentity,
 			&task.ConfirmationIdentity, &confirmationStatus, &task.ExecutionIdentity, &integrated); err != nil {
 			_ = rows.Close()
 			return domain.Workstream{}, err
@@ -692,9 +692,9 @@ func insertWorkstreamChildren(ctx context.Context, exec interface {
 		}
 		if _, err := exec.ExecContext(ctx, `INSERT INTO workstream_tasks (
 			workstream_id, task_id, project, description, status, result_identity,
-			confirmation_identity, confirmation_status, execution_identity, integrated)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, workstream.ID, task.ID, task.Project, task.Description,
-			string(task.Status), task.ResultIdentity, task.ConfirmationIdentity, string(confirmationStatus), task.ExecutionIdentity, boolInt(task.Integrated)); err != nil {
+			confirmation_identity, confirmation_status, execution_identity, integrated, job_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, workstream.ID, task.ID, task.Project, task.Description,
+			string(task.Status), task.ResultIdentity, task.ConfirmationIdentity, string(confirmationStatus), task.ExecutionIdentity, boolInt(task.Integrated), task.JobID); err != nil {
 			return fmt.Errorf("%w: insert workstream task: %v", port.ErrWorkstreamUnavailable, err)
 		}
 	}
@@ -744,6 +744,7 @@ func insertWorkstreamChildren(ctx context.Context, exec interface {
 	return nil
 }
 
+//nolint:gocyclo // The persistence branches mirror the finite workstream action set.
 func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition domain.WorkstreamTransition, next domain.Workstream) error {
 	insertTask := func(task domain.WorkstreamTask) error {
 		confirmationStatus := task.ConfirmationStatus
@@ -752,9 +753,9 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		}
 		if _, err := tx.ExecContext(ctx, `INSERT INTO workstream_tasks (
 			workstream_id, task_id, project, description, status, result_identity,
-			confirmation_identity, confirmation_status, execution_identity, integrated)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, next.ID, task.ID, task.Project, task.Description,
-			string(task.Status), task.ResultIdentity, task.ConfirmationIdentity, string(confirmationStatus), task.ExecutionIdentity, boolInt(task.Integrated)); err != nil {
+			confirmation_identity, confirmation_status, execution_identity, integrated, job_id)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, next.ID, task.ID, task.Project, task.Description,
+			string(task.Status), task.ResultIdentity, task.ConfirmationIdentity, string(confirmationStatus), task.ExecutionIdentity, boolInt(task.Integrated), task.JobID); err != nil {
 			return fmt.Errorf("%w: insert workstream task delta: %v", port.ErrWorkstreamUnavailable, err)
 		}
 		for _, input := range task.RequiredInputs {
@@ -903,6 +904,24 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		if affected, err := updated.RowsAffected(); err != nil || affected != 1 {
 			return fmt.Errorf("%w: update workstream task delta affected %d rows", port.ErrWorkstreamUnavailable, affected)
 		}
+	case domain.WorkstreamActionQueueTask:
+		task, ok := findTask(transition.TaskID)
+		if !ok {
+			return fmt.Errorf("%w: task delta is missing", port.ErrWorkstreamValidation)
+		}
+		confirmationStatus := task.ConfirmationStatus
+		if confirmationStatus == "" {
+			confirmationStatus = domain.TaskConfirmationNotRequired
+		}
+		updated, err := tx.ExecContext(ctx,
+			`UPDATE workstream_tasks SET status = ?, confirmation_identity = ?, confirmation_status = ?, integrated = ?, job_id = ? WHERE workstream_id = ? AND task_id = ?`,
+			string(task.Status), task.ConfirmationIdentity, string(confirmationStatus), boolInt(task.Integrated), task.JobID, next.ID, task.ID)
+		if err != nil {
+			return fmt.Errorf("%w: update workstream task queue delta: %v", port.ErrWorkstreamUnavailable, err)
+		}
+		if affected, err := updated.RowsAffected(); err != nil || affected != 1 {
+			return fmt.Errorf("%w: update workstream task queue delta affected %d rows", port.ErrWorkstreamUnavailable, affected)
+		}
 	case domain.WorkstreamActionStartTask:
 		task, ok := findTask(transition.TaskID)
 		if !ok {
@@ -914,11 +933,12 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		}
 		updated, err := tx.ExecContext(
 			ctx,
-			`UPDATE workstream_tasks SET status = ?, execution_identity = ?, confirmation_status = ?, integrated = ? WHERE workstream_id = ? AND task_id = ?`,
+			`UPDATE workstream_tasks SET status = ?, execution_identity = ?, confirmation_status = ?, integrated = ?, job_id = ? WHERE workstream_id = ? AND task_id = ?`,
 			string(task.Status),
 			task.ExecutionIdentity,
 			string(confirmationStatus),
 			boolInt(task.Integrated),
+			task.JobID,
 			next.ID,
 			task.ID,
 		)
@@ -927,6 +947,34 @@ func persistWorkstreamChildDelta(ctx context.Context, tx *sql.Tx, transition dom
 		}
 		if affected, err := updated.RowsAffected(); err != nil || affected != 1 {
 			return fmt.Errorf("%w: update workstream task start delta affected %d rows", port.ErrWorkstreamUnavailable, affected)
+		}
+	case domain.WorkstreamActionSettleTask:
+		task, ok := findTask(transition.TaskID)
+		if !ok {
+			return fmt.Errorf("%w: task delta is missing", port.ErrWorkstreamValidation)
+		}
+		confirmationStatus := task.ConfirmationStatus
+		if confirmationStatus == "" {
+			confirmationStatus = domain.TaskConfirmationNotRequired
+		}
+		updated, err := tx.ExecContext(
+			ctx,
+			`UPDATE workstream_tasks SET status = ?, result_identity = ?, confirmation_identity = ?, confirmation_status = ?, execution_identity = ?, integrated = ?, job_id = ? WHERE workstream_id = ? AND task_id = ?`,
+			string(task.Status),
+			task.ResultIdentity,
+			task.ConfirmationIdentity,
+			string(confirmationStatus),
+			task.ExecutionIdentity,
+			boolInt(task.Integrated),
+			task.JobID,
+			next.ID,
+			task.ID,
+		)
+		if err != nil {
+			return fmt.Errorf("%w: update workstream task settlement delta: %v", port.ErrWorkstreamUnavailable, err)
+		}
+		if affected, err := updated.RowsAffected(); err != nil || affected != 1 {
+			return fmt.Errorf("%w: update workstream task settlement delta affected %d rows", port.ErrWorkstreamUnavailable, affected)
 		}
 	case domain.WorkstreamActionLinkCompletedResult:
 		if transition.ResultLink == nil {

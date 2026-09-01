@@ -437,6 +437,13 @@ func TestWorkstreamToolsAreBoundAndAuthorityActionsConfirm(t *testing.T) {
 	if store.workstream.Status != domain.WorkstreamActive || store.workstream.Revision != 2 {
 		t.Fatalf("confirmed transition state = %+v", store.workstream)
 	}
+
+	if _, err := byName["workstream_transition"].Run(&stubToolContext{callID: "start-task-1"}, map[string]any{
+		"workstream_id": "ws-1", "project": "workspace", "expected_revision": 2,
+		"action": "start_task", "task_id": "task-1",
+	}); err == nil || !strings.Contains(err.Error(), "unknown workstream action") {
+		t.Fatalf("start_task remained exposed: err=%v", err)
+	}
 }
 
 func TestWorkstreamResultLinkToolStaysHiddenUntilFeatureGateEnabled(t *testing.T) {

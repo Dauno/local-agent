@@ -2,18 +2,47 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 	"github.com/Dauno/slack-local-agent/internal/usecase/agentbuilder"
 )
+
+func TestBuilderSubmissionRejectsMalformedTimeoutWithTimeoutField(t *testing.T) {
+	callback := builderSubmissionCallback(string(domain.AgentKindAgentCLI), "agentcli/default")
+	callback.View.State.Values["timeout_seconds"] = map[string]slackapi.BlockAction{
+		"timeout_seconds": {BlockID: "timeout_seconds", ActionID: "timeout_seconds", Value: "not-a-number"},
+	}
+	handler := NewBuilderSubmissionHandler(nil, agentbuilder.New(), validBuilderDefinitions(), nil)
+	response := handler.HandleSubmission(context.Background(), callback)
+	if response == nil || response.ResponseAction != slackapi.RAErrors {
+		t.Fatalf("response = %#v, want validation errors", response)
+	}
+	if _, ok := response.Errors["timeout_seconds"]; !ok {
+		t.Fatalf("validation errors = %#v, want timeout_seconds", response.Errors)
+	}
+}
+
+func TestBuilderSubmissionRejectsMissingNameWithNameField(t *testing.T) {
+	callback := builderSubmissionCallback(string(domain.AgentKindLLM), "openai/fast")
+	delete(callback.View.State.Values, "name")
+	handler := NewBuilderSubmissionHandler(nil, agentbuilder.New(), validBuilderDefinitions(), nil)
+	response := handler.HandleSubmission(context.Background(), callback)
+	if response == nil || response.ResponseAction != slackapi.RAErrors {
+		t.Fatalf("response = %#v, want validation errors", response)
+	}
+	if _, ok := response.Errors["name"]; !ok {
+		t.Fatalf("validation errors = %#v, want name", response.Errors)
+	}
+}
 
 func TestBuilderSubmissionValidatesKindAndProviderBeforeACK(t *testing.T) {
 	defs := &agentdef.Definitions{Providers: map[string]agentdef.Provider{
@@ -64,7 +93,7 @@ func builderSubmissionCallback(kind, profile string) slackapi.InteractionCallbac
 				"name":        {"name": {BlockID: "name", ActionID: "name", Value: "builder_worker"}},
 				"description": {"description": {BlockID: "description", ActionID: "description", Value: "description"}},
 				"instruction": {"instruction": {BlockID: "instruction", ActionID: "instruction", Value: "instruction"}},
-				"agent_type":  {"agent_type": {BlockID: "agent_type", ActionID: "agent_type", Value: kind}},
+				"agent_type":  {"agent_type": {BlockID: "agent_type", ActionID: "agent_type", SelectedOption: slackapi.OptionBlockObject{Value: kind}}},
 				"model":       {"model": {BlockID: "model", ActionID: "model", SelectedOption: slackapi.OptionBlockObject{Value: profile}}},
 			}},
 		},
@@ -90,7 +119,7 @@ func (c *builderPreviewPostClient) PostBlocks(_ context.Context, channelID, fall
 	return "message-1", nil
 }
 
-func TestBuilderPreviewUsesTemplateAndPreservesChunkingDigestAndInstallAction(t *testing.T) {
+func TestBuilderPreviewUsesDeclarativeViewAndCarriesDraftIdentity(t *testing.T) {
 	client := &builderPreviewPostClient{}
 	publisher := newPublisher(client, 0, nil, false)
 	draft := domain.AgentDraft{Name: "builder_worker", ProviderProfile: "openai/fast"}
@@ -106,34 +135,30 @@ func TestBuilderPreviewUsesTemplateAndPreservesChunkingDigestAndInstallAction(t 
 	if client.channel != target.ChannelID || client.thread != target.ThreadTS {
 		t.Fatalf("preview target = %q/%q, want %q/%q", client.channel, client.thread, target.ChannelID, target.ThreadTS)
 	}
-	code := "```yaml\n" + neutralizeUnsafeControls(yaml) + "\n```"
-	parts := splitBuilderBlockText(code, builderBlockTextLimit)
-	if len(client.blocks) != len(parts)+4 {
-		t.Fatalf("preview blocks = %d, want %d", len(client.blocks), len(parts)+4)
+	message, err := publisher.previewEngine.Message(agentPreviewView{
+		Name: "builder_worker", AgentClass: "LlmAgent", ProviderProfile: "openai/fast",
+		ExecutionMode: domain.ExecutionModeForeground, Timeout: "no aplica", SHA256: sha256,
+		DraftID: draftID, PreviewYAML: yaml,
+	})
+	if err != nil {
+		t.Fatalf("render agent preview view = %v", err)
 	}
-	for index, part := range parts {
-		section, ok := client.blocks[2+index].(*slackapi.SectionBlock)
-		if !ok || section.Text == nil || section.Text.Text != part {
-			got := "<not a section>"
-			if ok && section.Text != nil {
-				got = section.Text.Text
-			}
-			t.Fatalf("YAML block %d/%d (total %d) = %q, want %q", index+1, len(parts), len(client.blocks), got, part)
-		}
-		if got := utf8.RuneCountInString(section.Text.Text); got > builderBlockTextLimit {
-			t.Fatalf("YAML block %d has %d code points, want <= %d", index+1, got, builderBlockTextLimit)
-		}
+	yamlPrefix := string([]rune(yaml)[:100])
+	if !blockkit.Reachable(message, draft.Name) || !blockkit.Reachable(message, yamlPrefix) {
+		t.Fatal("preview values did not reach the declarative view")
 	}
-	if got := client.blocks[2+len(parts)].(*slackapi.SectionBlock).Text.Text; got != "*SHA-256:* `"+sha256+"`" {
-		t.Fatalf("digest block = %q", got)
+	if slot, ok := blockkit.SlotOf(message, draft.Name); !ok || slot != slackapi.MarkdownType {
+		t.Fatalf("preview name slot = %q, %t", slot, ok)
 	}
-	actions := client.blocks[len(client.blocks)-1].(*slackapi.ActionBlock)
-	button := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
-	if actions.BlockID != "builder_preview_actions" || button.ActionID != builderInstallActionID || button.Value != draftID || button.Text.Text != "Solicitar instalación" {
-		t.Fatalf("install action = %#v", actions)
+	encoded, err := json.Marshal(client.blocks)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if client.fallback != builderPreviewFallbackText(draft, definition, yaml, sha256) || utf8.RuneCountInString(client.fallback) > maxFallbackText {
-		t.Fatalf("preview fallback = %q", client.fallback)
+	if !strings.Contains(string(encoded), `"value":"draft_opaque_1"`) {
+		t.Fatalf("install action did not carry draft ID: %s", encoded)
+	}
+	if client.fallback != message.FallbackText {
+		t.Fatalf("preview fallback = %q, want %q", client.fallback, message.FallbackText)
 	}
 }
 

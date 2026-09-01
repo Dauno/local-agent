@@ -1,10 +1,14 @@
 package slack
 
 import (
+	"cmp"
 	"fmt"
+	"slices"
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/agentdef"
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
@@ -16,29 +20,27 @@ type BuilderProviderProfile struct {
 // BuilderModalPresenter builds the Block Kit modal for creating an agent.
 type BuilderModalPresenter struct {
 	profiles  []BuilderProviderProfile
-	renderer  *TemplateRenderer
+	engine    *blockkit.Engine
 	renderErr error
 }
 
 func NewBuilderModalPresenterWithProviders(profiles []BuilderProviderProfile) *BuilderModalPresenter {
-	renderer, err := NewEmbeddedTemplateRenderer()
+	engine, err := newBuilderModalEngine()
 	if err == nil {
 		for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindAgentCLI} {
 			if kind == domain.AgentKindAgentCLI && len(builderProfilesForKind(kind, profiles)) == 0 {
 				continue
 			}
-			_, err = renderer.CompileModal("builder_modal", TemplateContext{
-				Kind: kind, Profiles: profiles, Values: completeBuilderTemplateValues(nil),
-			})
-			if err != nil {
-				err = fmt.Errorf("validate %s builder provider profiles: %w", kind, err)
+			_, viewErr := builderModalViewForKind(kind, profiles, nil)
+			if viewErr != nil {
+				err = fmt.Errorf("validate %s builder provider profiles: %w", kind, viewErr)
 				break
 			}
 		}
 	}
 	return &BuilderModalPresenter{
 		profiles:  append([]BuilderProviderProfile(nil), profiles...),
-		renderer:  renderer,
+		engine:    engine,
 		renderErr: err,
 	}
 }
@@ -121,7 +123,7 @@ func (p *BuilderModalPresenter) BuildViewForKind(kind domain.AgentKind, values m
 // BuildViewForKindResult renders one modal kind and returns any context or
 // Slack-limit failure to the owning handler.
 func (p *BuilderModalPresenter) BuildViewForKindResult(kind domain.AgentKind, values map[string]string) (slackapi.ModalViewRequest, error) {
-	if p == nil || p.renderErr != nil || p.renderer == nil {
+	if p == nil || p.renderErr != nil || p.engine == nil {
 		if p != nil && p.renderErr != nil {
 			return slackapi.ModalViewRequest{}, p.renderErr
 		}
@@ -130,21 +132,82 @@ func (p *BuilderModalPresenter) BuildViewForKindResult(kind domain.AgentKind, va
 	if kind != domain.AgentKindAgentCLI {
 		kind = domain.AgentKindLLM
 	}
-	view, err := p.renderer.CompileModal("builder_modal", TemplateContext{
-		Kind:     kind,
-		Values:   completeBuilderTemplateValues(values),
-		Profiles: p.profiles,
-	})
+	model, err := builderModalViewForKind(kind, p.profiles, values)
 	if err != nil {
 		return slackapi.ModalViewRequest{}, err
 	}
-	return view, nil
+	return p.engine.Modal(model)
 }
 
-func completeBuilderTemplateValues(values map[string]string) map[string]string {
-	complete := make(map[string]string, len(scalarKeysByTemplate["builder_modal"]))
-	for key := range scalarKeysByTemplate["builder_modal"] {
-		complete[key] = values[key]
+func builderModalViewForKind(kind domain.AgentKind, profiles []BuilderProviderProfile, values map[string]string) (builderModalView, error) {
+	if kind != domain.AgentKindAgentCLI {
+		kind = domain.AgentKindLLM
 	}
-	return complete
+	compatible := builderProfilesForKind(kind, profiles)
+	if len(compatible) == 0 {
+		return builderModalView{}, fmt.Errorf("%s builder has no compatible provider profiles", kind)
+	}
+	model := values["model"]
+	if !containsBuilderProfile(compatible, model) {
+		model = compatible[0].Reference
+	}
+	agentType := string(kind)
+	agentTypeLabel, err := builderAgentTypeLabel(kind)
+	if err != nil {
+		return builderModalView{}, err
+	}
+	executionMode := values["execution_mode"]
+	timeoutSeconds := values["timeout_seconds"]
+	if kind == domain.AgentKindAgentCLI {
+		if executionMode == "" {
+			executionMode = domain.ExecutionModeForeground
+		}
+		if timeoutSeconds == "" {
+			timeoutSeconds = fmt.Sprint(domain.DefaultExternalAgentTimeoutSeconds)
+		}
+	}
+	pairs := make([]blockkit.Pair, len(compatible))
+	for index, profile := range compatible {
+		pairs[index] = blockkit.Pair{Label: profile.Reference, Value: profile.Reference}
+	}
+	return builderModalView{
+		Name: values["name"], AgentType: agentType, AgentTypeLabel: agentTypeLabel, Description: values["description"],
+		Instruction: values["instruction"], Models: pairs, Model: model,
+		IsExternalAgent: kind == domain.AgentKindAgentCLI, ExecutionMode: executionMode,
+		TimeoutSeconds: timeoutSeconds,
+	}, nil
+}
+
+func builderAgentTypeLabel(kind domain.AgentKind) (string, error) {
+	switch kind {
+	case domain.AgentKindLLM:
+		return "LLM", nil
+	case domain.AgentKindAgentCLI:
+		return "Agent CLI", nil
+	default:
+		return "", fmt.Errorf("unsupported builder agent kind %q", kind)
+	}
+}
+
+func containsBuilderProfile(profiles []BuilderProviderProfile, reference string) bool {
+	for _, profile := range profiles {
+		if profile.Reference == reference {
+			return true
+		}
+	}
+	return false
+}
+
+func builderProfilesForKind(kind domain.AgentKind, profiles []BuilderProviderProfile) []BuilderProviderProfile {
+	filtered := make([]BuilderProviderProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		if kind == domain.AgentKindLLM && profile.ProviderType == agentdef.ProviderTypeOpenAICompatible {
+			filtered = append(filtered, profile)
+		}
+		if kind == domain.AgentKindAgentCLI && profile.ProviderType == agentdef.ProviderTypeAgentCLI {
+			filtered = append(filtered, profile)
+		}
+	}
+	slices.SortFunc(filtered, func(a, b BuilderProviderProfile) int { return cmp.Compare(a.Reference, b.Reference) })
+	return filtered
 }

@@ -9,7 +9,7 @@ import (
 func TestExternalAgentDelegationConfirmationKeepsCompleteTaskOutOfHint(t *testing.T) {
 	task := strings.Repeat("review the README and report findings ", 20)
 	hint, payload := externalAgentDelegationConfirmation(
-		context.Background(), nil, "actor", "conversation", externalAgentArgs{Project: "local-agent", Task: task},
+		context.Background(), nil, "actor", "conversation", externalAgentArgs{Project: "local-agent", Task: task, FinalInstruction: "Present the result."},
 	)
 
 	if strings.Contains(hint, task) {

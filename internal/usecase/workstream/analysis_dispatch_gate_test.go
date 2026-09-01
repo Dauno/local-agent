@@ -57,10 +57,12 @@ func TestServiceBlocksConfirmationTransitionWhenAnalysisIsIncomplete(t *testing.
 	}
 }
 
-// TestServiceBlocksStartTaskWhenAnalysisFailed is criterion 7 (ApplyHuman /
-// start_task execution path): a failed analysis bound to the workstream
-// blocks task execution, not only root confirmation.
-func TestServiceBlocksStartTaskWhenAnalysisFailed(t *testing.T) {
+// TestServiceRejectsHumanStartTaskBeforeAnalysisGate is criterion 7 under
+// the v47 job admission contract: start_task is a system-only transition
+// owned by job admission, so a human start_task is refused by the domain
+// system-job-path rule before the analysis gate ever runs and before
+// anything reaches the store, even while a failed analysis is bound.
+func TestServiceRejectsHumanStartTaskBeforeAnalysisGate(t *testing.T) {
 	stored := testWorkstream()
 	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "admit me", Status: domain.TaskProposed}}
 	store := &fakeStore{workstream: stored}
@@ -74,11 +76,14 @@ func TestServiceBlocksStartTaskWhenAnalysisFailed(t *testing.T) {
 		WorkstreamID: "ws-1", ExpectedRevision: 0, SourceID: "slack-human:event-start",
 		Action: domain.WorkstreamActionStartTask, TaskID: "task-1",
 	})
-	if !errors.Is(err, domain.ErrWorkstreamAnalysisBlocking) {
-		t.Fatalf("start_task with a failed bound analysis = %v, want %v", err, domain.ErrWorkstreamAnalysisBlocking)
+	if !errors.Is(err, domain.ErrWorkstreamInvalidTransition) {
+		t.Fatalf("human start_task with a failed bound analysis = %v, want %v", err, domain.ErrWorkstreamInvalidTransition)
 	}
-	if store.lastTransition.Action != "" {
-		t.Fatalf("blocked start_task reached the store: %+v", store.lastTransition)
+	if gate.calls != 0 {
+		t.Fatalf("the analysis gate ran %d times for a refused non-system start_task", gate.calls)
+	}
+	if store.workstream.Revision != 0 || store.workstream.Tasks[0].Status != domain.TaskProposed {
+		t.Fatalf("refused start_task mutated the stored workstream: %+v", store.workstream)
 	}
 }
 

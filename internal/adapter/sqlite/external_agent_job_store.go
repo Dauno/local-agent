@@ -18,6 +18,7 @@ import (
 
 var (
 	_ port.ExternalAgentJobStore                     = (*ExternalAgentJobStore)(nil)
+	_ port.ExternalAgentJobWorkstreamAdmissionStore  = (*ExternalAgentJobStore)(nil)
 	_ port.ExternalAgentJobWrapperStore              = (*ExternalAgentJobStore)(nil)
 	_ port.ExpiredExternalAgentJobRecovery           = (*ExternalAgentJobStore)(nil)
 	_ port.ExternalAgentJobNotificationStore         = (*ExternalAgentJobStore)(nil)
@@ -62,8 +63,26 @@ func NewExternalAgentJobStore(store *Store) *ExternalAgentJobStore {
 }
 
 func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.ExternalAgentJob) (bool, *domain.ExternalAgentJob, error) {
+	return s.createIfAbsent(ctx, job, nil)
+}
+
+func (s *ExternalAgentJobStore) CreateIfAbsentForWorkstream(
+	ctx context.Context,
+	job domain.ExternalAgentJob,
+	admission domain.WorkstreamTaskAdmission,
+) (bool, *domain.ExternalAgentJob, error) {
+	if err := admission.Validate(); err != nil {
+		return false, nil, err
+	}
+	return s.createIfAbsent(ctx, job, &admission)
+}
+
+func (s *ExternalAgentJobStore) createIfAbsent(ctx context.Context, job domain.ExternalAgentJob, admission *domain.WorkstreamTaskAdmission) (bool, *domain.ExternalAgentJob, error) {
 	if s == nil || s.db == nil {
 		return false, nil, errors.New("external-agent job store is not configured")
+	}
+	if job.CompletionPolicy == "" {
+		job.CompletionPolicy = job.EffectiveCompletionPolicy()
 	}
 	if err := job.Validate(); err != nil {
 		return false, nil, err
@@ -88,24 +107,23 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 		return false, nil, fmt.Errorf("begin external-agent job admission: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
-	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
-		if err := validateCompletionBindingAdmission(ctx, tx, job); err != nil {
-			return false, nil, err
-		}
-	}
 	result, err := tx.ExecContext(ctx, `INSERT INTO external_agent_jobs (
-		job_id, mode, provider, profile, primary_project, additional_projects,
+		job_id, mode, completion_policy, provider, profile, primary_project, additional_projects,
 		registry_revision, task, request_sha256, wrapper_call_id, original_call_id,
-		actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
+		actor, slack_team_id, conversation_key,
 		status, attempt, acp_session_id, transcript_path,
 		side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at,
 		result_summary, result_artifact, result_sha256, result_bytes, error_code,
 		status_revision, created_at, started_at, finished_at, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		VALUES (
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?)
 		ON CONFLICT DO NOTHING`,
-		job.ID, job.Mode, job.Provider, job.Profile, job.PrimaryProject, string(projects),
+		job.ID, job.Mode, job.CompletionPolicy, job.Provider, job.Profile, job.PrimaryProject, string(projects),
 		job.RegistryRevision, job.Task, job.RequestSHA256, job.WrapperCallID, job.OriginalCallID,
-		job.Actor, job.TeamID, string(job.ConversationKey), job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision,
+		job.Actor, job.TeamID, string(job.ConversationKey),
 		job.Status, job.Attempt, job.ExternalAgentSessionID, job.TranscriptPath,
 		boolInt(job.SideEffectsPossible), job.LeaseOwner, unix(job.LeaseExpiry), unix(job.HeartbeatAt), unix(job.TimeoutAt),
 		job.ResultSummary, job.ResultArtifact, job.ResultSHA256, job.ResultBytes, job.ErrorCode,
@@ -119,6 +137,11 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 		return false, nil, fmt.Errorf("inspect external-agent job insert: %w", err)
 	}
 	if affected == 1 {
+		if admission != nil {
+			if err := s.admitWorkstreamTask(ctx, tx, job, *admission); err != nil {
+				return false, nil, err
+			}
+		}
 		if err := tx.Commit(); err != nil {
 			return false, nil, fmt.Errorf("commit external-agent job admission: %w", err)
 		}
@@ -130,31 +153,204 @@ func (s *ExternalAgentJobStore) CreateIfAbsent(ctx context.Context, job domain.E
 	} else if err != nil {
 		return false, nil, fmt.Errorf("load existing external-agent job: %w", err)
 	}
+	if existing.ID == "" {
+		if err := tx.Commit(); err != nil {
+			return false, nil, fmt.Errorf("commit existing external-agent job lookup: %w", err)
+		}
+		return false, nil, nil
+	}
+	if admission != nil {
+		var existingWorkstreamID, existingTaskID string
+		bindingErr := tx.QueryRowContext(ctx, `SELECT workstream_id, task_id FROM workstream_tasks WHERE job_id = ?`, existing.ID).Scan(&existingWorkstreamID, &existingTaskID)
+		if bindingErr != nil {
+			if errors.Is(bindingErr, sql.ErrNoRows) {
+				return false, nil, domain.ErrWorkstreamSourceConflict
+			}
+			return false, nil, fmt.Errorf("inspect existing external-agent workstream association: %w", bindingErr)
+		}
+		if existingWorkstreamID != admission.WorkstreamID || existingTaskID != admission.TaskID {
+			return false, nil, domain.ErrWorkstreamSourceConflict
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return false, nil, fmt.Errorf("commit existing external-agent job lookup: %w", err)
-	}
-	if existing.ID == "" {
-		return false, nil, nil
 	}
 	return false, &existing, nil
 }
 
-func validateCompletionBindingAdmission(ctx context.Context, queryer queryRower, job domain.ExternalAgentJob) error {
-	var eligible int
-	err := queryer.QueryRowContext(ctx, `SELECT COUNT(*)
-		FROM workstreams w
-		JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
-		WHERE w.workstream_id = ? AND w.conversation_key = ? AND w.owner_actor = ?
-			AND w.project = ? AND w.status = 'active' AND w.revision >= ?
-			AND t.task_id = ? AND t.project = ? AND t.description = ?
-			AND t.status = 'running' AND t.execution_identity = ?`,
-		job.WorkstreamID, string(job.ConversationKey), job.Actor, job.PrimaryProject,
-		job.AdmissionRevision, job.TaskID, job.PrimaryProject, job.Task, job.ExecutionIdentity).Scan(&eligible)
-	if err != nil {
-		return fmt.Errorf("check external-agent completion binding: %w", err)
+func (s *ExternalAgentJobStore) admitWorkstreamTask(ctx context.Context, tx *sql.Tx, job domain.ExternalAgentJob, admission domain.WorkstreamTaskAdmission) error {
+	current, err := loadWorkstream(ctx, tx, `WHERE workstream_id = ?`, admission.WorkstreamID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return port.ErrWorkstreamNotFound
 	}
-	if eligible != 1 {
-		return errors.New("external-agent completion binding is not admitted")
+	if err != nil {
+		return fmt.Errorf("load workstream for job admission: %w", err)
+	}
+	if err := current.ValidateBinding(job.Actor, job.ConversationKey, job.PrimaryProject); err != nil {
+		return err
+	}
+	if current.Status != domain.WorkstreamActive {
+		return domain.ErrWorkstreamNotActive
+	}
+	transition := domain.WorkstreamTransition{
+		WorkstreamID: admission.WorkstreamID, ExpectedRevision: admission.ExpectedRevision,
+		Source: domain.WorkstreamSourceSystem, SourceID: job.ID, Actor: job.Actor,
+		ConversationKey: job.ConversationKey, Project: job.PrimaryProject,
+		Action: domain.WorkstreamActionQueueTask, TaskID: admission.TaskID, JobID: job.ID,
+	}
+	if err := applyWorkstreamTransitionTx(ctx, tx, transition, job.CreatedAt); err != nil {
+		return fmt.Errorf("admit workstream task for external-agent job: %w", err)
+	}
+	return nil
+}
+
+func applyWorkstreamTransitionTx(ctx context.Context, tx *sql.Tx, transition domain.WorkstreamTransition, now time.Time) error {
+	current, err := loadWorkstream(ctx, tx, `WHERE workstream_id = ?`, transition.WorkstreamID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return port.ErrWorkstreamNotFound
+	}
+	if err != nil {
+		return fmt.Errorf("load workstream for system transition: %w", err)
+	}
+	if err := current.ValidateBinding(transition.Actor, transition.ConversationKey, transition.Project); err != nil {
+		return err
+	}
+	next := current
+	record, err := (&next).ApplyTransitionWithLimits(transition, storageWorkstreamLimits(), now.UTC())
+	if errors.Is(err, domain.ErrWorkstreamRevisionConflict) {
+		return port.ErrWorkstreamCASConflict
+	}
+	if err != nil {
+		return err
+	}
+	if err := ensureNoOtherActiveConversation(ctx, tx, next); err != nil {
+		return err
+	}
+	updated, err := tx.ExecContext(ctx, `UPDATE workstreams SET
+		status = ?, revision = ?, objective = ?, current_phase = ?, continuation_of = ?, updated_at = ?
+		WHERE workstream_id = ? AND revision = ?`,
+		string(next.Status), next.Revision, next.Objective, next.CurrentPhase, next.ContinuationOf,
+		next.UpdatedAt.UTC().UnixNano(), next.ID, current.Revision)
+	if err != nil {
+		return fmt.Errorf("update workstream for system transition: %w", err)
+	}
+	if affected, err := updated.RowsAffected(); err != nil || affected != 1 {
+		return port.ErrWorkstreamCASConflict
+	}
+	if err := persistWorkstreamChildDelta(ctx, tx, transition, next); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO workstream_transitions (
+		workstream_id, from_revision, to_revision, source, source_id, actor, action,
+		payload_digest, payload_json, state_digest, state_json, committed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		record.WorkstreamID, record.FromRevision, record.ToRevision, string(record.Source), record.SourceID,
+		record.Actor, string(record.Action), record.PayloadDigest, record.PayloadJSON, record.StateDigest,
+		record.StateJSON, record.CommittedAt.UTC().UnixNano()); err != nil {
+		if isWorkstreamSourceConstraint(err) {
+			return domain.ErrWorkstreamSourceConflict
+		}
+		return fmt.Errorf("append workstream system transition: %w", err)
+	}
+	return nil
+}
+
+func (s *ExternalAgentJobStore) startWorkstreamTaskForJob(ctx context.Context, tx *sql.Tx, job domain.ExternalAgentJob, now time.Time) error {
+	var workstreamID, taskID, taskStatus, owner, conversation, project, workstreamStatus string
+	var revision int
+	err := tx.QueryRowContext(ctx, `SELECT t.workstream_id, t.task_id, t.status,
+		w.owner_actor, w.conversation_key, w.project, w.status, w.revision
+		FROM workstream_tasks t
+		JOIN workstreams w ON w.workstream_id = t.workstream_id
+		WHERE t.job_id = ?`, job.ID).Scan(
+		&workstreamID, &taskID, &taskStatus, &owner, &conversation, &project, &workstreamStatus, &revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load workstream task for job start: %w", err)
+	}
+	if owner != job.Actor || conversation != string(job.ConversationKey) || project != job.PrimaryProject {
+		return errors.New("workstream task job binding is invalid")
+	}
+	if domain.WorkstreamStatus(workstreamStatus).Terminal() || domain.TaskStatus(taskStatus) == domain.TaskRunning {
+		return nil
+	}
+	if domain.WorkstreamStatus(workstreamStatus) != domain.WorkstreamActive {
+		return domain.ErrWorkstreamNotActive
+	}
+	if domain.TaskStatus(taskStatus) != domain.TaskQueued {
+		return fmt.Errorf("workstream task %q is %q, want queued", taskID, taskStatus)
+	}
+	transition := domain.WorkstreamTransition{
+		WorkstreamID: workstreamID, ExpectedRevision: revision, Source: domain.WorkstreamSourceSystem,
+		SourceID: fmt.Sprintf("job-start:%s:%d", job.ID, job.StatusRevision), Actor: job.Actor,
+		ConversationKey: job.ConversationKey, Project: job.PrimaryProject, Action: domain.WorkstreamActionStartTask,
+		TaskID: taskID, JobID: job.ID, ExecutionIdentity: job.ID,
+	}
+	if err := applyWorkstreamTransitionTx(ctx, tx, transition, now); err != nil {
+		return fmt.Errorf("start workstream task for external-agent job: %w", err)
+	}
+	return nil
+}
+
+func (s *ExternalAgentJobStore) settleWorkstreamTaskForJob(
+	ctx context.Context,
+	tx *sql.Tx,
+	job domain.ExternalAgentJob,
+	result *domain.ExternalAgentInvocationResult,
+	now time.Time,
+) error {
+	var workstreamID, taskID, taskStatus, owner, conversation, project, workstreamStatus string
+	var revision int
+	err := tx.QueryRowContext(ctx, `SELECT t.workstream_id, t.task_id, t.status,
+		w.owner_actor, w.conversation_key, w.project, w.status, w.revision
+		FROM workstream_tasks t
+		JOIN workstreams w ON w.workstream_id = t.workstream_id
+		WHERE t.job_id = ?`, job.ID).Scan(
+		&workstreamID, &taskID, &taskStatus, &owner, &conversation, &project, &workstreamStatus, &revision)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("load workstream task for job settlement: %w", err)
+	}
+	if owner != job.Actor || conversation != string(job.ConversationKey) || project != job.PrimaryProject {
+		return errors.New("workstream task job binding is invalid")
+	}
+	currentTaskStatus := domain.TaskStatus(taskStatus)
+	if domain.WorkstreamStatus(workstreamStatus).Terminal() {
+		return nil
+	}
+	var nextStatus domain.TaskStatus
+	switch job.Status {
+	case domain.JobCompleted:
+		nextStatus = domain.TaskCompleted
+	case domain.JobFailed:
+		nextStatus = domain.TaskFailed
+	case domain.JobCancelled:
+		nextStatus = domain.TaskCancelled
+	case domain.JobCompletionUnknown, domain.JobAbandoned:
+		nextStatus = domain.TaskCompletionUnknown
+	default:
+		return nil
+	}
+	if currentTaskStatus.Terminal() &&
+		(currentTaskStatus != domain.TaskCompletionUnknown || nextStatus == domain.TaskCompletionUnknown) {
+		return nil
+	}
+	resultIdentity := ""
+	if job.Status == domain.JobCompleted && result != nil {
+		resultIdentity = result.NativeResultID
+	}
+	transition := domain.WorkstreamTransition{
+		WorkstreamID: workstreamID, ExpectedRevision: revision, Source: domain.WorkstreamSourceSystem,
+		SourceID: fmt.Sprintf("job-settle:%s:%d", job.ID, job.StatusRevision), Actor: job.Actor,
+		ConversationKey: job.ConversationKey, Project: job.PrimaryProject, Action: domain.WorkstreamActionSettleTask,
+		TaskID: taskID, JobID: job.ID, TaskStatus: nextStatus, ResultIdentity: resultIdentity,
+	}
+	if err := applyWorkstreamTransitionTx(ctx, tx, transition, now); err != nil {
+		return fmt.Errorf("apply workstream task settlement: %w", err)
 	}
 	return nil
 }
@@ -419,6 +615,9 @@ func (s *ExternalAgentJobStore) ClaimNext(ctx context.Context, now time.Time, ow
 	if err != nil {
 		return nil, fmt.Errorf("load claimed external-agent job: %w", err)
 	}
+	if err := s.startWorkstreamTaskForJob(ctx, tx, job, now); err != nil {
+		return nil, err
+	}
 	if err := insertJobEvent(ctx, tx, job, "lease"); err != nil {
 		return nil, err
 	}
@@ -552,6 +751,11 @@ func (s *ExternalAgentJobStore) RequestCancellation(ctx context.Context, jobID, 
 	}
 	if affected, _ := changed.RowsAffected(); affected != 1 {
 		return nil, errors.New("external-agent cancellation lost its compare-and-set")
+	}
+	if job.Status == domain.JobCancelled {
+		if err := s.settleWorkstreamTaskForJob(ctx, tx, job, nil, job.UpdatedAt); err != nil {
+			return nil, err
+		}
 	}
 	if err := insertJobEvent(ctx, tx, job, "cancellation"); err != nil {
 		return nil, err
@@ -707,6 +911,9 @@ func (s *ExternalAgentJobStore) AbandonCompletionUnknown(
 	if affected, _ := result.RowsAffected(); affected != 1 {
 		return nil, errors.New("external-agent job closure compare-and-set failed")
 	}
+	if err := s.settleWorkstreamTaskForJob(ctx, tx, job, nil, job.UpdatedAt); err != nil {
+		return nil, err
+	}
 	if err := insertJobEvent(ctx, tx, job, "transition"); err != nil {
 		return nil, err
 	}
@@ -826,6 +1033,9 @@ func (s *ExternalAgentJobStore) Transition(
 	affected, _ := changed.RowsAffected()
 	if affected != 1 {
 		return errors.New("external-agent job transition lost its lease")
+	}
+	if err := s.settleWorkstreamTaskForJob(ctx, tx, job, result, job.UpdatedAt); err != nil {
+		return err
 	}
 	if err := insertJobEvent(ctx, tx, job, "transition"); err != nil {
 		return err
@@ -1033,6 +1243,9 @@ func (s *ExternalAgentJobStore) RecoverExpired(ctx context.Context, jobID string
 	if err != nil {
 		return err
 	}
+	if err := s.settleWorkstreamTaskForJob(ctx, tx, job, nil, now); err != nil {
+		return err
+	}
 	if err := quarantineUnboundNativeExternalAgentResults(ctx, tx, job.ID); err != nil {
 		return fmt.Errorf("quarantine unbound native external-agent results during recovery: %w", err)
 	}
@@ -1092,7 +1305,7 @@ func insertJobNotification(ctx context.Context, exec interface {
 		notification.ArtifactRef, notification.ResultBytes, notification.MaxMarkdownParts, notification.UploadState,
 		boolInt(notification.RootActivationRequired), notification.NotificationSHA256,
 		notification.NotificationBytes, notification.ResultSHA256,
-		notification.WorkstreamID, notification.TaskID, notification.ExecutionIdentity, notification.AdmissionRevision,
+		"", "", "", 0,
 	)
 	return err
 }
@@ -1174,6 +1387,13 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 		return fmt.Errorf("begin notification publication: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
+	var jobActor, jobConversation string
+	if err := tx.QueryRowContext(ctx, `SELECT actor, conversation_key FROM external_agent_jobs WHERE job_id = ?`, notification.JobID).Scan(&jobActor, &jobConversation); err != nil {
+		return fmt.Errorf("read notification job binding: %w", err)
+	}
+	if notification.Actor == "" || notification.ConversationKey == "" || notification.Actor != jobActor || string(notification.ConversationKey) != jobConversation {
+		return errors.New("notification job binding is not authorized")
+	}
 	result, err := tx.ExecContext(
 		ctx,
 		`UPDATE external_agent_job_notifications SET
@@ -1216,34 +1436,53 @@ func (s *ExternalAgentJobStore) MarkNotificationPublished(ctx context.Context, n
 		return ErrNotificationStateConflict
 	}
 	activationID := domain.ExternalAgentJobActivationID(notification.JobID, notification.StatusRevision, notification.Kind)
-	if _, err := tx.ExecContext(ctx, `INSERT INTO external_agent_job_activations (
-		job_id, status_revision, kind, activation_id, terminal_status, notification_sha256,
-		result_sha256, actor, team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
-		original_call_id, delivery_mode, content_bytes,
-		slack_message_ts, published_at, state, attempt, lease_owner, lease_expiry,
-		next_attempt_at, last_error_code, response_body, response_sha256, exchange_intent_id,
-		correlation_id, response_slack_ts, created_at, updated_at)
-		SELECT n.job_id, n.status_revision, n.kind, ?, n.terminal_status, n.notification_sha256,
-			n.result_sha256, j.actor, j.slack_team_id, j.conversation_key, j.workstream_id, j.task_id, j.execution_identity, j.admission_revision,
+	if _, err := tx.ExecContext(ctx, `WITH route AS (
+			SELECT j.job_id,
+				CASE WHEN w.status = 'active' AND w.owner_actor = j.actor
+					AND w.conversation_key = j.conversation_key AND w.project = j.primary_project
+					AND t.job_id = j.job_id AND t.execution_identity != ''
+					THEN 1 ELSE 0 END AS workstream_route,
+				CASE WHEN w.status = 'active' AND w.owner_actor = j.actor
+					AND w.conversation_key = j.conversation_key AND w.project = j.primary_project
+					AND t.job_id = j.job_id AND t.execution_identity != ''
+					THEN t.workstream_id ELSE '' END AS workstream_id,
+				CASE WHEN w.status = 'active' AND w.owner_actor = j.actor
+					AND w.conversation_key = j.conversation_key AND w.project = j.primary_project
+					AND t.job_id = j.job_id AND t.execution_identity != ''
+					THEN t.task_id ELSE '' END AS task_id,
+				CASE WHEN w.status = 'active' AND w.owner_actor = j.actor
+					AND w.conversation_key = j.conversation_key AND w.project = j.primary_project
+					AND t.job_id = j.job_id AND t.execution_identity != ''
+					THEN t.execution_identity ELSE '' END AS execution_identity,
+				CASE WHEN w.status = 'active' AND w.owner_actor = j.actor
+					AND w.conversation_key = j.conversation_key AND w.project = j.primary_project
+					AND t.job_id = j.job_id AND t.execution_identity != ''
+					THEN w.revision ELSE 0 END AS admission_revision
+			FROM external_agent_jobs j
+			LEFT JOIN workstream_tasks t ON t.job_id = j.job_id
+			LEFT JOIN workstreams w ON w.workstream_id = t.workstream_id
+		)
+		INSERT INTO external_agent_job_activations (
+			job_id, status_revision, kind, activation_id, activation_scope, terminal_status, notification_sha256,
+			result_sha256, actor, team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision,
+			original_call_id, delivery_mode, content_bytes,
+			slack_message_ts, published_at, state, attempt, lease_owner, lease_expiry,
+			next_attempt_at, last_error_code, response_body, response_sha256, exchange_intent_id,
+			correlation_id, response_slack_ts, created_at, updated_at)
+		SELECT n.job_id, n.status_revision, n.kind, ?,
+			CASE WHEN r.workstream_route = 1 THEN 'workstream' ELSE 'conversation' END,
+			n.terminal_status, n.notification_sha256,
+			n.result_sha256, j.actor, j.slack_team_id, j.conversation_key,
+			r.workstream_id, r.task_id, r.execution_identity, r.admission_revision,
 			j.original_call_id, n.delivery_mode,
 			n.result_bytes,
 			n.recovered_slack_ts, n.published_at, 'pending', 0, '', 0, n.published_at,
 			'', '', '', '', '', '', n.published_at, n.published_at
 		FROM external_agent_job_notifications n
 		JOIN external_agent_jobs j ON j.job_id = n.job_id
+		JOIN route r ON r.job_id = j.job_id
 		WHERE n.job_id = ? AND n.status_revision = ? AND n.kind = ? AND n.terminal_status = 'completed'
 			AND n.root_activation_required = 1 AND j.mode = 'detached'
-			AND length(j.workstream_id) > 0 AND length(j.task_id) > 0 AND length(j.execution_identity) > 0
-			AND EXISTS (
-				SELECT 1 FROM workstreams w
-				JOIN workstream_tasks t ON t.workstream_id = w.workstream_id
-				WHERE w.workstream_id = j.workstream_id AND w.conversation_key = j.conversation_key
-					AND w.owner_actor = j.actor AND w.project = j.primary_project
-					AND w.status = 'active' AND w.revision >= j.admission_revision
-					AND t.task_id = j.task_id AND t.project = j.primary_project
-					AND t.description = j.task AND t.status = 'running'
-					AND t.execution_identity = j.execution_identity
-			)
 		ON CONFLICT(job_id, status_revision, kind) DO NOTHING`,
 		activationID, notification.JobID, notification.StatusRevision, notification.Kind); err != nil {
 		return fmt.Errorf("insert external-agent activation: %w", err)
@@ -1370,8 +1609,7 @@ func (s *ExternalAgentJobStore) MarkNotificationUnknown(ctx context.Context, not
 			markdown, fmt.Sprintf("%x", digest), domain.JobNotificationRenderer,
 			notification.Target.ChannelID, notification.Target.ThreadTS,
 			domain.NotificationPending, now.UnixNano(), now.UnixNano(), now.UnixNano(),
-			fmt.Sprintf("%x", digest), int64(len([]byte(markdown))), notification.WorkstreamID,
-			notification.TaskID, notification.ExecutionIdentity, notification.AdmissionRevision)
+			fmt.Sprintf("%x", digest), int64(len([]byte(markdown))), "", "", "", 0)
 		if err != nil {
 			return fmt.Errorf("enqueue result delivery failure notification: %w", err)
 		}
@@ -1548,7 +1786,7 @@ func safeAdminUploadState(value string) domain.JobResultUploadState {
 	}
 }
 
-const notificationColumns = `n.job_id, n.status_revision, n.kind, n.terminal_status, n.published_at, n.canonical_markdown, n.content_sha256, n.renderer_version, n.channel_id, n.thread_ts, n.publish_state, n.lease_owner, n.lease_expiry, n.attempts, n.next_attempt_at, n.recovered_slack_ts, n.last_error_code, n.created_at, n.updated_at, n.delivery_mode, n.policy_version, n.artifact_ref, n.result_bytes, n.max_markdown_parts, n.upload_state, n.slack_file_id, n.root_activation_required, n.notification_sha256, n.notification_bytes, n.result_sha256, n.workstream_id, n.task_id, n.execution_identity, n.admission_revision`
+const notificationColumns = `n.job_id, n.status_revision, n.kind, n.terminal_status, n.published_at, n.canonical_markdown, n.content_sha256, n.renderer_version, n.channel_id, n.thread_ts, n.publish_state, n.lease_owner, n.lease_expiry, n.attempts, n.next_attempt_at, n.recovered_slack_ts, n.last_error_code, n.created_at, n.updated_at, n.delivery_mode, n.policy_version, n.artifact_ref, n.result_bytes, n.max_markdown_parts, n.upload_state, n.slack_file_id, n.root_activation_required, n.notification_sha256, n.notification_bytes, n.result_sha256`
 
 func loadNotification(ctx context.Context, queryer queryRower, jobID string, revision int, kind string) (domain.ExternalAgentJobNotification, error) {
 	var n domain.ExternalAgentJobNotification
@@ -1594,10 +1832,6 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 		&n.NotificationSHA256,
 		&n.NotificationBytes,
 		&n.ResultSHA256,
-		&n.WorkstreamID,
-		&n.TaskID,
-		&n.ExecutionIdentity,
-		&n.AdmissionRevision,
 		&n.Actor,
 		&n.ConversationKey,
 	)
@@ -1617,7 +1851,7 @@ func loadNotification(ctx context.Context, queryer queryRower, jobID string, rev
 	return n, nil
 }
 
-const jobColumns = `job_id, mode, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, workstream_id, task_id, execution_identity, admission_revision, status, attempt, acp_session_id, transcript_path, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
+const jobColumns = `job_id, mode, completion_policy, provider, profile, primary_project, additional_projects, registry_revision, task, request_sha256, wrapper_call_id, original_call_id, actor, slack_team_id, conversation_key, status, attempt, acp_session_id, transcript_path, side_effects_possible, lease_owner, lease_expiry, heartbeat_at, timeout_at, result_summary, result_artifact, result_sha256, result_bytes, error_code, status_revision, created_at, started_at, finished_at, updated_at`
 
 type queryRower interface {
 	QueryRowContext(context.Context, string, ...any) *sql.Row
@@ -1632,7 +1866,7 @@ func (s *ExternalAgentJobStore) load(ctx context.Context, queryer queryRower, wh
 func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 	var (
 		job                                                                  domain.ExternalAgentJob
-		mode, projects, status, conversation                                 string
+		mode, completionPolicy, projects, status, conversation               string
 		additionalProjects                                                   []string
 		leaseExpiry, heartbeat, timeout, created, started, finished, updated int64
 		sideEffects                                                          int
@@ -1640,6 +1874,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 	err := row.Scan(
 		&job.ID,
 		&mode,
+		&completionPolicy,
 		&job.Provider,
 		&job.Profile,
 		&job.PrimaryProject,
@@ -1652,10 +1887,6 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 		&job.Actor,
 		&job.TeamID,
 		&conversation,
-		&job.WorkstreamID,
-		&job.TaskID,
-		&job.ExecutionIdentity,
-		&job.AdmissionRevision,
 		&status,
 		&job.Attempt,
 		&job.ExternalAgentSessionID,
@@ -1686,6 +1917,7 @@ func scanJob(row rowScanner) (domain.ExternalAgentJob, error) {
 		return domain.ExternalAgentJob{}, errors.New("external-agent job contains unsupported additional projects")
 	}
 	job.Mode = domain.ExternalAgentJobMode(mode)
+	job.CompletionPolicy = domain.ExternalAgentCompletionPolicy(completionPolicy)
 	job.Status = domain.ExternalAgentJobStatus(status)
 	job.ConversationKey = domain.ConversationKey(conversation)
 	job.SideEffectsPossible = sideEffects != 0

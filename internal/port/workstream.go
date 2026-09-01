@@ -41,9 +41,9 @@ type WorkstreamSnapshotReader interface {
 	SnapshotForActivation(ctx context.Context, workstreamID, actor string, conversationKey domain.ConversationKey) (domain.WorkstreamSnapshot, error)
 }
 
-// ExternalAgentJobCompletionBindingResolver derives an immutable detached-job
-// binding from the active, actor-bound workstream. Model-provided task text is
-// used only for exact matching; it cannot select IDs or revisions.
+// ExternalAgentJobCompletionBindingResolver resolves a legacy individual-job
+// task selector from the active, actor-bound workstream. The job store still
+// owns the new atomic association.
 type ExternalAgentJobCompletionBindingResolver interface {
 	CompletionBindingForTask(ctx context.Context, actor string, conversationKey domain.ConversationKey, project, task string) (domain.ExternalAgentJobCompletionBinding, bool, error)
 }

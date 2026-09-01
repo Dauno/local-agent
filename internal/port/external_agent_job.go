@@ -66,6 +66,13 @@ type ExternalAgentJobStore interface {
 	ListExpiredRunning(ctx context.Context, now time.Time) ([]domain.ExternalAgentJob, error)
 }
 
+// ExternalAgentJobWorkstreamAdmissionStore atomically admits a new job and
+// associates it with the selected workstream task. The selector is transient;
+// the durable association belongs to the workstream task row.
+type ExternalAgentJobWorkstreamAdmissionStore interface {
+	CreateIfAbsentForWorkstream(ctx context.Context, job domain.ExternalAgentJob, admission domain.WorkstreamTaskAdmission) (created bool, existing *domain.ExternalAgentJob, err error)
+}
+
 // ExternalAgentJobWrapperStore resolves a durable job by its opaque wrapper call
 // ID. It does not apply actor or conversation authorization.
 type ExternalAgentJobWrapperStore interface {

@@ -1105,7 +1105,7 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "read_job_result",
-		Description: "Reads bounded result metadata for a completed external-agent durable job in this Slack conversation. V2 jobs return a handle; legacy inline jobs may return complete sanitized text. No external-agent task is rerun.",
+		Description: "Reads bounded result metadata for a completed external-agent durable job in this Slack conversation. Do not call this tool for an automatic_root job because its activation delivers the result. V2 jobs return a handle; legacy inline jobs may return complete sanitized text. No external-agent task is rerun.",
 	}, func(ctx agent.Context, args jobIDArgs) (readJobResultResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return readJobResultResult{}, errors.New("job_id is required")
@@ -1116,6 +1116,9 @@ func (f *Factory) readJobResultTool(actor string, key domain.ConversationKey) (t
 		}
 		if job == nil {
 			return readJobResultResult{}, errors.New("external-agent job was not found")
+		}
+		if job.EffectiveCompletionPolicy() == domain.ExternalAgentCompletionAutomaticRoot {
+			return readJobResultResult{}, errors.New("automatic root integration owns this result; wait for its completion response")
 		}
 		if nativeReader, ok := reader.(port.ExternalAgentJobNativeResultReader); ok {
 			handle, found, err := nativeReader.NativeResultHandleForJob(ctx, args.JobID, actor, key)
@@ -1172,10 +1175,20 @@ func (f *Factory) readJobResultChunkTool(actor string, key domain.ConversationKe
 	reader := f.externalJobs
 	return functiontool.New(functiontool.Config{
 		Name:        "read_job_result_chunk",
-		Description: "Reads one bounded, verified UTF-8 chunk from a completed external-agent durable job in this Slack conversation. Read-only; the complete file-mode artifact is never placed in the tool response.",
+		Description: "Reads one bounded, verified UTF-8 chunk from a completed external-agent durable job in this Slack conversation. Do not call this tool for an automatic_root job because its activation delivers the result. Read-only; the complete file-mode artifact is never placed in the tool response.",
 	}, func(ctx agent.Context, args readJobResultChunkArgs) (readJobResultChunkResult, error) {
 		if strings.TrimSpace(args.JobID) == "" {
 			return readJobResultChunkResult{}, errors.New("job_id is required")
+		}
+		job, err := reader.Status(ctx, args.JobID, actor, key)
+		if err != nil {
+			return readJobResultChunkResult{}, err
+		}
+		if job == nil {
+			return readJobResultChunkResult{}, errors.New("external-agent job was not found")
+		}
+		if job.EffectiveCompletionPolicy() == domain.ExternalAgentCompletionAutomaticRoot {
+			return readJobResultChunkResult{}, errors.New("automatic root integration owns this result; wait for its completion response")
 		}
 		chunk, err := reader.ReadResultChunk(ctx, args.JobID, actor, key, args.OffsetBytes, args.MaxBytes)
 		if err != nil {

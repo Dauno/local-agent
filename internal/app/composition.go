@@ -458,6 +458,9 @@ func (a *Application) openRuntimeInfrastructure(ctx context.Context, setup runti
 	history := slackadapter.NewHistoryReader(api, auth.UserID, slackTimeout, models.logger, cfg.Slack.PartLabels)
 	fileLoader := slackadapter.NewFileLoader(api, models.botToken, slackTimeout)
 	confirmationPublisher := slackadapter.NewConfirmationPublisher(api, auth.UserID, slackTimeout, models.logger)
+	if err := confirmationPublisher.InitializationError(); err != nil {
+		return nil, models.redactor.Error(fmt.Errorf("initialize confirmation view engine: %w", err))
+	}
 	blockPublisher := slackadapter.NewBlockPublisher(api, slackTimeout, models.logger)
 	standardPublisher := slackadapter.NewStandardPublisher(api, auth.UserID, slackTimeout, slackadapter.ResolveProgressLabels(cfg.Slack.StandardAgent.ProgressLabels))
 	artifactSvc := artifact.InMemoryService()
@@ -726,10 +729,17 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 	}
 	resultProducingTools := make([]string, 0, len(models.preparedAgentTools))
 	if cfg.Orchestration.ResultHandles.Enabled {
+		hasDurableAgentCLI := false
 		for _, child := range models.preparedAgentTools {
 			if child.cliResolved != nil {
 				resultProducingTools = append(resultProducingTools, child.definition.Name)
+				if child.executionMode == agentdef.ExecutionModeDurableJob {
+					hasDurableAgentCLI = true
+				}
 			}
+		}
+		if hasDurableAgentCLI {
+			resultProducingTools = append(resultProducingTools, "delegate_batch")
 		}
 	}
 	runtime, err := adkagent.NewRuntime(
@@ -760,6 +770,10 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		return nil, models.redactor.Error(fmt.Errorf("initialize ADK runtime: %w", err))
 	}
 	confirmationStore := adaptersqlite.NewConfirmationStore(infra.store)
+	confirmationLayoutSHA256, err := infra.confirmationPublisher.ConfirmationPromptLayoutSHA256()
+	if err != nil {
+		return nil, models.redactor.Error(fmt.Errorf("resolve confirmation prompt layout fingerprint: %w", err))
+	}
 	// One coordinator instance is shared by root turns, activations,
 	// confirmations, workstream commands, and knowledge commands so a busy
 	// conversation never mutates knowledge state while another operation
@@ -868,6 +882,7 @@ func (a *Application) composeRuntime(ctx context.Context, setup runtimeSetup, mo
 		StreamingCarryRunes:      models.redactor.StreamingCarryRunes(),
 		ResultHandlesEnabled:     cfg.Orchestration.ResultHandles.Enabled,
 		MaxDirectInlineBytes:     models.rootDirectInlineBytes,
+		ConfirmationLayoutSHA256: confirmationLayoutSHA256,
 		KnowledgeRetrievalLimits: knowledgeRetrievalLimits,
 		WorkstreamsEnabled:       cfg.Orchestration.Workstreams.Enabled,
 		KnowledgeGateEnabled:     cfg.Orchestration.Knowledge.Enabled,
@@ -1067,6 +1082,7 @@ func (a *Application) composeRootRuntime(ctx context.Context, setup runtimeSetup
 			delegatedGlobalInstruction = models.rootDef.EffectiveDelegatedGlobalInstruction()
 		}
 		result.compositeFactory = newCompositeAgentToolFactory(result.toolFactory, models.preparedAgentTools, models.preparedWorkflows, delegatedGlobalInstruction)
+		result.compositeFactory.setBatchMaxTasks(cfg.ExternalAgent.Batch.MaxTasks)
 		result.compositeFactory.setChildContextResultStore(result.resultStore)
 		result.toolFactory = result.compositeFactory
 	}
@@ -1203,6 +1219,9 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 			adaptersqlite.NewConfirmationStore(infra.store),
 			composition.externalJobService,
 		)
+		if err := statusHandler.InitializationError(); err != nil {
+			return models.redactor.Error(fmt.Errorf("initialize job status view engine: %w", err))
+		}
 		listener = listener.WithJobStatusHandler(statusHandler)
 	}
 	if composition != nil && composition.agentBuilderSvc != nil && setup.defs != nil && infra.publisher != nil && infra.store != nil {
@@ -1235,6 +1254,9 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 				return models.redactor.Error(fmt.Errorf("initialize builder modal template renderer: %w", err))
 			}
 			handler := slackadapter.NewBuilderSubmissionHandler(draftStore, composition.agentBuilderSvc, setup.defs, infra.publisher)
+			if err := handler.InitializationError(); err != nil {
+				return models.redactor.Error(fmt.Errorf("initialize builder submission template engine: %w", err))
+			}
 			listener = listener.WithBuilderPresenter(presenter).WithBuilderHandler(handler)
 		}
 	}
@@ -1243,11 +1265,11 @@ func (a *Application) startSlackRuntime(intakeCtx, handlerCtx context.Context, s
 		return models.redactor.Error(fmt.Errorf("initialize Slack interactive dispatcher: %w", dispatcherErr))
 	}
 	listener = listener.WithDispatcher(dispatcher)
-	catalog, catalogErr := slackadapter.EmbeddedTemplateCatalog()
-	if catalogErr != nil {
-		return models.redactor.Error(fmt.Errorf("validate embedded Slack UI templates: %w", catalogErr))
+	viewEngine, viewEngineErr := slackadapter.NewViewEngine()
+	if viewEngineErr != nil {
+		return models.redactor.Error(fmt.Errorf("validate embedded Slack UI templates: %w", viewEngineErr))
 	}
-	if err := listener.ValidateTemplateCatalog(catalog); err != nil {
+	if err := listener.ValidateViewEngine(viewEngine); err != nil {
 		return models.redactor.Error(fmt.Errorf("validate Slack interactive dispatcher: %w", err))
 	}
 	modelName := models.rootModelName

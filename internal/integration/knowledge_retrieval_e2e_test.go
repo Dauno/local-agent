@@ -133,6 +133,7 @@ func TestKnowledgeRetrievalEndToEndEphemeralBoundary(t *testing.T) {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 		KnowledgeRetrievalLimits: func() domain.KnowledgeRetrievalLimits {
 			limits := domain.DefaultKnowledgeRetrievalLimits()
 			limits.TimeoutSeconds = 2

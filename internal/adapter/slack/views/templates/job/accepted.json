@@ -1,0 +1,30 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "fallback": "Job accepted / running\nJob ID: {{job_id}}\nStatus: {{status}}\nCreated: {{created_at:rfc3339}}\nUpdated: {{updated_at:rfc3339}}\n{{status_sentence}}",
+  "contract": {
+    "inputs": {
+      "job_id": {"type": "id", "required": true, "max": 255},
+      "status": {"type": "enum", "required": true, "one_of": ["queued", "running", "cancel_requested", "interrupted_safe", "completion_unknown", "reconciling", "completed", "failed", "cancelled", "abandoned"]},
+      "created_at": {"type": "timestamp", "required": true},
+      "updated_at": {"type": "timestamp", "required": true},
+      "status_sentence": {"type": "text", "required": true}
+    },
+    "actions": {}
+  },
+  "layout": [
+    {
+      "type": "card",
+      "title": {"type": "mrkdwn", "text": "*Job accepted / running*", "verbatim": false},
+      "subtitle": {"type": "mrkdwn", "text": "*Job ID:* {{job_id:code}} · *Status:* {{status:code}}", "verbatim": false},
+      "body": {"type": "mrkdwn", "text": "{{status_sentence}}", "verbatim": false}
+    },
+    {
+      "type": "context",
+      "elements": [
+        {"type": "mrkdwn", "text": "*Created:*\n{{created_at:rfc3339}}"},
+        {"type": "mrkdwn", "text": "*Updated:*\n{{updated_at:rfc3339}}"}
+      ]
+    }
+  ]
+}

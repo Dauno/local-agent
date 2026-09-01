@@ -3,10 +3,12 @@ package slack
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -53,25 +55,20 @@ func TestBuilderLauncherUsesOnboardingTemplateAndPreservesContract(t *testing.T)
 	if client.fallback != "Local Agent puede analizar proyectos, revisar errores, resumir contexto y ayudarte a crear agentes. Puedes abrir el formulario o describir una necesidad." {
 		t.Fatalf("fallback = %q", client.fallback)
 	}
-	if len(client.blocks) != 3 {
-		t.Fatalf("block count = %d, want 3", len(client.blocks))
+	message := blockkit.Message{FallbackText: client.fallback, Blocks: client.blocks}
+	for _, value := range []string{onboardingIntroText, onboardingDescribePrompt, metadata} {
+		if !blockkit.Reachable(message, value) {
+			t.Fatalf("onboarding value %q did not reach the view", value)
+		}
 	}
-	section, ok := client.blocks[0].(*slackapi.SectionBlock)
-	if !ok || section.Text == nil || section.Text.Type != slackapi.MarkdownType || section.Text.Text != onboardingIntroText {
-		t.Fatalf("welcome section = %#v", client.blocks[0])
+	encoded, err := json.Marshal(client.blocks)
+	if err != nil {
+		t.Fatal(err)
 	}
-	actions, ok := client.blocks[1].(*slackapi.ActionBlock)
-	if !ok || actions.BlockID != "onboarding_actions" || len(actions.Elements.ElementSet) != 2 {
-		t.Fatalf("launcher actions = %#v", client.blocks[1])
-	}
-	button, ok := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
-	if !ok || button.ActionID != "local_agent.builder.open" || button.Value != metadata || button.Text == nil || button.Text.Text != "Abrir formulario" || button.Style != slackapi.StylePrimary ||
-		button.URL != "" {
-		t.Fatalf("launcher button = %#v", actions.Elements.ElementSet[0])
-	}
-	describe, ok := actions.Elements.ElementSet[1].(*slackapi.ButtonBlockElement)
-	if !ok || describe.ActionID != "local_agent.onboarding.describe" || describe.Value != metadata || describe.Text == nil || describe.Text.Text != onboardingDescribePrompt {
-		t.Fatalf("describe button = %#v", actions.Elements.ElementSet[1])
+	for _, actionID := range []string{"local_agent.builder.open", "local_agent.onboarding.describe"} {
+		if !strings.Contains(string(encoded), actionID) {
+			t.Fatalf("onboarding action %q is missing from %s", actionID, encoded)
+		}
 	}
 	if client.metadata.EventType != "" || len(client.metadata.EventPayload) != 0 {
 		t.Fatalf("unexpected launcher metadata = %#v", client.metadata)
@@ -79,34 +76,31 @@ func TestBuilderLauncherUsesOnboardingTemplateAndPreservesContract(t *testing.T)
 }
 
 func TestOnboardingTemplateCompilationIsDeterministic(t *testing.T) {
-	renderer := mustEmbeddedRenderer(t)
-	renderContext := TemplateContext{Values: map[string]string{
-		"builder_context": `{"v":1,"actor_id":"U12345678","conversation_key":"slack:T12345678:dm:D12345678"}`,
-		"intro":           onboardingIntroText, "describe_prompt": onboardingDescribePrompt,
-	}}
-	firstFallback, firstBlocks, err := renderer.CompileMessageWithFallback("onboarding_message", renderContext)
+	engine, err := newOnboardingEngine()
+	if err != nil {
+		t.Fatal(err)
+	}
+	view := onboardingWelcomeView{
+		BuilderContext: `{"v":1,"actor_id":"U12345678","conversation_key":"slack:T12345678:dm:D12345678"}`,
+		Intro:          onboardingIntroText, DescribePrompt: onboardingDescribePrompt,
+	}
+	first, err := engine.Message(view)
 	if err != nil {
 		t.Fatalf("first compilation error = %v", err)
 	}
-	secondFallback, secondBlocks, err := renderer.CompileMessageWithFallback("onboarding_message", renderContext)
+	second, err := engine.Message(view)
 	if err != nil {
 		t.Fatalf("second compilation error = %v", err)
 	}
-	first, err := json.Marshal(struct {
-		Fallback string
-		Blocks   []slackapi.Block
-	}{firstFallback, firstBlocks})
+	firstJSON, err := json.Marshal(first)
 	if err != nil {
 		t.Fatal(err)
 	}
-	second, err := json.Marshal(struct {
-		Fallback string
-		Blocks   []slackapi.Block
-	}{secondFallback, secondBlocks})
+	secondJSON, err := json.Marshal(second)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(first) != string(second) {
-		t.Fatalf("identical onboarding contexts produced different payloads\nfirst: %s\nsecond: %s", first, second)
+	if string(firstJSON) != string(secondJSON) {
+		t.Fatalf("identical onboarding contexts produced different payloads\nfirst: %s\nsecond: %s", firstJSON, secondJSON)
 	}
 }

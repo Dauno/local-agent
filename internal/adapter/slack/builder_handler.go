@@ -14,6 +14,7 @@ import (
 	slackapi "github.com/slack-go/slack"
 
 	"github.com/Dauno/slack-local-agent/internal/agentdef"
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -27,11 +28,13 @@ const (
 
 // BuilderSubmissionHandler processes view_submission from the agent builder modal.
 type BuilderSubmissionHandler struct {
-	draftStore   port.AgentDraftStore
-	agentBuilder port.AgentBuilderService
-	currentDefs  *agentdef.Definitions
-	publisher    port.ResponsePublisher
-	now          func() time.Time
+	draftStore      port.AgentDraftStore
+	agentBuilder    port.AgentBuilderService
+	currentDefs     *agentdef.Definitions
+	publisher       port.ResponsePublisher
+	submitEngine    *blockkit.Engine
+	submitEngineErr error
+	now             func() time.Time
 }
 
 func NewBuilderSubmissionHandler(
@@ -40,18 +43,32 @@ func NewBuilderSubmissionHandler(
 	currentDefs *agentdef.Definitions,
 	publisher port.ResponsePublisher,
 ) *BuilderSubmissionHandler {
+	engine, engineErr := newBuilderModalEngine()
 	return &BuilderSubmissionHandler{
 		draftStore: draftStore, agentBuilder: agentBuilder,
-		currentDefs: currentDefs, publisher: publisher, now: time.Now,
+		currentDefs: currentDefs, publisher: publisher,
+		submitEngine: engine, submitEngineErr: engineErr, now: time.Now,
 	}
+}
+
+// InitializationError exposes template setup failure to the composition root.
+func (h *BuilderSubmissionHandler) InitializationError() error {
+	if h == nil {
+		return errors.New("builder submission handler is required")
+	}
+	return h.submitEngineErr
 }
 
 // HandleSubmission validates only the fields needed for the synchronous ACK.
 // Previewing and publishing are deliberately performed by PreviewAndPublish.
 func (h *BuilderSubmissionHandler) HandleSubmission(_ context.Context, callback slackapi.InteractionCallback) *slackapi.ViewSubmissionResponse {
-	draft, missing := builderDraftFromCallback(callback)
-	if missing != "" {
-		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{missing: "El campo es obligatorio"})
+	engine := (*blockkit.Engine)(nil)
+	if h != nil {
+		engine = h.submitEngine
+	}
+	draft, err := builderDraftFromCallback(engine, callback)
+	if err != nil {
+		return builderSubmissionErrorResponse(err)
 	}
 
 	if err := agentdef.ValidateAgentName(draft.Name); err != nil {
@@ -67,14 +84,14 @@ func (h *BuilderSubmissionHandler) HandleSubmission(_ context.Context, callback 
 			"instruction": fmt.Sprintf("Maximo %d caracteres", agentdef.MaxInstructionLength),
 		})
 	}
-	if err := validateBuilderDraft(callback, draft); err != nil {
-		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderValidationField(err): err.Error()})
+	if field, err := validateBuilderDraft(draft); err != nil {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{field: err.Error()})
 	}
 	if h == nil || h.agentBuilder == nil {
 		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"model": "El catalogo de proveedores no esta disponible"})
 	}
 	if _, err := h.agentBuilder.Preview(draft, h.currentDefs); err != nil {
-		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderValidationField(err): err.Error()})
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{builderPreviewErrorField(h, draft): err.Error()})
 	}
 	if _, _, err := builderContextForSubmission(callback); err != nil {
 		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"name": err.Error()})
@@ -91,13 +108,16 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 	if !domain.PlausibleTeamID(callback.Team.ID) || !domain.PlausibleUserID(callback.User.ID) {
 		return errors.New("builder actor or team is invalid")
 	}
-	draftInput, missing := builderDraftFromCallback(callback)
-	if missing != "" {
-		return fmt.Errorf("builder field %q is missing", missing)
+	draftInput, err := builderDraftFromCallback(h.submitEngine, callback)
+	if err != nil {
+		return fmt.Errorf("read builder submission: %w", err)
 	}
 	conversationKey, target, err := builderContextForSubmission(callback)
 	if err != nil {
 		return err
+	}
+	if field, err := validateBuilderDraft(draftInput); err != nil {
+		return fmt.Errorf("validate builder field %q: %w", field, err)
 	}
 	preview, err := h.agentBuilder.Preview(draftInput, h.currentDefs)
 	if err != nil {
@@ -143,11 +163,11 @@ func (h *BuilderSubmissionHandler) PreviewAndPublish(ctx context.Context, callba
 		}
 		return nil
 	}
-	renderer, err := NewEmbeddedTemplateRenderer()
+	engine, err := newAgentPreviewEngine()
 	if err != nil {
-		return fmt.Errorf("initialize agent preview template renderer: %w", err)
+		return fmt.Errorf("initialize agent preview view engine: %w", err)
 	}
-	text, _, err := compileBuilderPreviewMessage(renderer, draftInput, preview.AgentDef, preview.YAML, preview.SHA256, draftID)
+	text, _, err := compileAgentPreviewMessage(engine, draftInput, preview.AgentDef, preview.YAML, preview.SHA256, draftID)
 	if err != nil {
 		return fmt.Errorf("render agent preview template: %w", err)
 	}
@@ -244,133 +264,72 @@ func (h *BuilderSubmissionHandler) publishModalFallback(ctx context.Context, cal
 	return nil
 }
 
-func builderDraftFromCallback(callback slackapi.InteractionCallback) (domain.AgentDraft, string) {
-	if callback.View.State == nil {
-		return domain.AgentDraft{}, "name"
+func builderDraftFromCallback(engine *blockkit.Engine, callback slackapi.InteractionCallback) (domain.AgentDraft, error) {
+	var submission builderModalSubmission
+	var state map[string]map[string]slackapi.BlockAction
+	if callback.View.State != nil {
+		state = callback.View.State.Values
 	}
-	values := callback.View.State.Values
-	value := func(blockID, actionID string) (string, bool) {
-		block, ok := values[blockID]
-		if !ok {
-			return "", false
-		}
-		action, ok := block[actionID]
-		if !ok {
-			return "", false
-		}
-		return action.Value, true
+	if err := engine.Submit(&submission, state); err != nil {
+		return domain.AgentDraft{}, err
 	}
-
-	name, ok := value("name", "name")
-	if !ok || name == "" {
-		return domain.AgentDraft{}, "name"
+	draft := domain.AgentDraft{
+		Name:            submission.Name,
+		Description:     submission.Description,
+		Instruction:     submission.Instruction,
+		Kind:            domain.AgentKind(submission.AgentType),
+		ProviderProfile: submission.Model,
+		ExecutionMode:   submission.ExecutionMode,
+		TimeoutSeconds:  submission.TimeoutSeconds,
 	}
-	description, ok := value("description", "description")
-	if !ok {
-		return domain.AgentDraft{}, "description"
+	if draft.Kind == domain.AgentKindLLM {
+		draft.Model = submission.Model
 	}
-	instruction, ok := value("instruction", "instruction")
-	if !ok {
-		return domain.AgentDraft{}, "instruction"
-	}
-	kind, _ := value("agent_type", "agent_type")
-	if kind == "" {
-		if block, exists := values["agent_type"]; exists {
-			if action, exists := block["agent_type"]; exists {
-				kind = action.SelectedOption.Value
-			}
-		}
-	}
-	if kind == "" {
-		kind = string(domain.AgentKindLLM)
-	}
-	providerProfile := selectedValue(values, "provider_profile", "provider_profile")
-	if providerProfile == "" {
-		providerProfile = selectedValue(values, "model", "model")
-	}
-	model := ""
-	if kind == string(domain.AgentKindLLM) {
-		model = selectedValue(values, "model", "model")
-	}
-	executionMode := selectedValue(values, "execution_mode", "execution_mode")
-	timeoutSeconds := 0
-	if timeoutText := selectedValue(values, "timeout_seconds", "timeout_seconds"); timeoutText != "" {
-		timeoutSeconds, _ = strconv.Atoi(timeoutText)
-	}
-	return domain.AgentDraft{
-		Name:            name,
-		Description:     description,
-		Instruction:     instruction,
-		Model:           model,
-		Kind:            domain.AgentKind(kind),
-		ProviderProfile: providerProfile,
-		ExecutionMode:   executionMode,
-		TimeoutSeconds:  timeoutSeconds,
-	}, ""
+	return draft, nil
 }
 
-func selectedValue(values map[string]map[string]slackapi.BlockAction, blockID, actionID string) string {
-	if block, ok := values[blockID]; ok {
-		if action, ok := block[actionID]; ok {
-			if action.Value != "" {
-				return action.Value
-			}
-			return action.SelectedOption.Value
-		}
+func builderSubmissionErrorResponse(err error) *slackapi.ViewSubmissionResponse {
+	var submitErr *blockkit.SubmitError
+	if errors.As(err, &submitErr) && submitErr.BlockID != "" {
+		return slackapi.NewErrorsViewSubmissionResponse(map[string]string{submitErr.BlockID: submitErr.Err.Error()})
 	}
-	return ""
+	return slackapi.NewErrorsViewSubmissionResponse(map[string]string{"model": err.Error()})
 }
 
-func validateBuilderDraft(callback slackapi.InteractionCallback, draft domain.AgentDraft) error {
+func validateBuilderDraft(draft domain.AgentDraft) (string, error) {
 	if err := domain.ValidateAgentKind(draft.Kind); err != nil {
-		return err
+		return "agent_type", err
 	}
 	if draft.ProviderProfile == "" {
-		return errors.New("selecciona un proveedor/perfil")
+		return "model", errors.New("selecciona un proveedor/perfil")
 	}
 	if draft.Kind == domain.AgentKindLLM {
 		if draft.ExecutionMode != "" && draft.ExecutionMode != domain.ExecutionModeForeground {
-			return errors.New("execution_mode solo admite foreground para LLM")
+			return "execution_mode", errors.New("execution_mode solo admite foreground para LLM")
 		}
 		if draft.TimeoutSeconds != 0 {
-			return errors.New("timeout_seconds solo es valido para agent_cli")
+			return "timeout_seconds", errors.New("timeout_seconds solo es valido para agent_cli")
 		}
-		return nil
+		return "", nil
 	}
 	mode := draft.ExecutionMode
 	if mode == "" {
 		mode = domain.ExecutionModeForeground
 	}
 	if err := domain.ValidateExecutionMode(draft.Kind, mode); err != nil {
-		return err
+		return "execution_mode", err
 	}
 	if err := domain.ValidateExternalAgentTimeout(draft.TimeoutSeconds); err != nil {
-		return err
+		return "timeout_seconds", err
 	}
-	// Parse the raw value so malformed numeric input is not silently treated as zero.
-	if callback.View.State != nil {
-		if raw := selectedValue(callback.View.State.Values, "timeout_seconds", "timeout_seconds"); raw != "" {
-			if _, err := strconv.Atoi(raw); err != nil {
-				return errors.New("timeout_seconds debe ser un numero entero")
-			}
-		}
-	}
-	return nil
+	return "", nil
 }
 
-func builderValidationField(err error) string {
-	message := err.Error()
-	if strings.Contains(message, "timeout") {
-		return "timeout_seconds"
-	}
-	if strings.Contains(message, "execution") {
-		return "execution_mode"
-	}
-	if strings.Contains(message, "proveedor") || strings.Contains(message, "provider") || strings.Contains(message, "perfil") {
-		return "model"
-	}
-	if strings.Contains(message, "kind") || strings.Contains(message, "tipo") {
-		return "agent_type"
+func builderPreviewErrorField(h *BuilderSubmissionHandler, draft domain.AgentDraft) string {
+	if h != nil && h.currentDefs != nil {
+		if _, exists := h.currentDefs.Agents[draft.Name]; exists {
+			return "name"
+		}
 	}
 	return "model"
 }
@@ -423,27 +382,6 @@ func newBuilderDraftID() (string, error) {
 	return "draft_" + hex.EncodeToString(data), nil
 }
 
-func builderPreviewMarkdown(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256 string) string {
-	profile := draft.ProviderProfile
-	if profile == "" {
-		profile = draft.Model
-	}
-	timeout := "no aplica"
-	if definition.TimeoutSec > 0 {
-		timeout = strconv.Itoa(definition.TimeoutSec) + " segundos"
-	}
-	return fmt.Sprintf(
-		"*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\n```yaml\n%s\n```\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
-		neutralizeUnsafeControls(draft.Name),
-		definition.AgentClass,
-		neutralizeUnsafeControls(profile),
-		definition.ExecutionMode,
-		timeout,
-		neutralizeUnsafeControls(yaml),
-		sha256,
-	)
-}
-
 func (c sdkPostClient) PostBlocks(ctx context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
 	options := []slackapi.MsgOption{
 		slackapi.MsgOptionText(fallbackText, false),
@@ -465,11 +403,13 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 	if p == nil || p.client == nil {
 		return errors.New("slack posting client is required")
 	}
-	renderer, err := NewEmbeddedTemplateRenderer()
-	if err != nil {
-		return fmt.Errorf("initialize agent preview template renderer: %w", err)
+	if p.previewEngineErr != nil || p.previewEngine == nil {
+		if p.previewEngineErr != nil {
+			return fmt.Errorf("initialize agent preview view engine: %w", p.previewEngineErr)
+		}
+		return errors.New("agent preview view engine is required")
 	}
-	fallbackText, blocks, err := compileBuilderPreviewMessage(renderer, draft, definition, yaml, sha256, draftID)
+	fallbackText, blocks, err := compileAgentPreviewMessage(p.previewEngine, draft, definition, yaml, sha256, draftID)
 	if err != nil {
 		return fmt.Errorf("render agent preview template: %w", err)
 	}
@@ -490,55 +430,20 @@ func (p *Publisher) publishBuilderPreview(ctx context.Context, target domain.Rep
 	return nil
 }
 
-func compileBuilderPreviewMessage(renderer *TemplateRenderer, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) (string, []slackapi.Block, error) {
-	code := "```yaml\n" + neutralizeUnsafeControls(yaml) + "\n```"
-	values := builderPreviewTemplateValues(draft, definition, yaml, sha256, draftID)
-	parts := splitBuilderBlockText(code, builderBlockTextLimit)
-	return compileMessageWithParts(renderer, "agent_preview", values, parts)
-}
-
-func compileMessageWithParts(renderer *TemplateRenderer, templateName string, values map[string]string, parts []string) (string, []slackapi.Block, error) {
-	return renderer.CompileMessageWithFallback(templateName, TemplateContext{Values: values, PreviewYAMLParts: parts})
-}
-
-func builderPreviewTemplateValues(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) map[string]string {
-	metadata := fmt.Sprintf(
-		"*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`",
-		definition.AgentClass,
-		neutralizeUnsafeControls(draft.ProviderProfile),
-		definition.ExecutionMode,
-		previewTimeout(definition.TimeoutSec),
-	)
-	return map[string]string{
-		"name":             fmt.Sprintf("*Previsualizacion del agente `%s`*", neutralizeUnsafeControls(draft.Name)),
-		"agent_class":      metadata,
-		"provider_profile": neutralizeUnsafeControls(draft.ProviderProfile),
-		"execution_mode":   definition.ExecutionMode,
-		"timeout":          previewTimeout(definition.TimeoutSec),
-		"sha256":           fmt.Sprintf("*SHA-256:* `%s`", sha256),
-		"draft_id":         draftID,
-		"fallback_text":    builderPreviewFallbackText(draft, definition, yaml, sha256),
-	}
-}
-
-func builderPreviewFallbackText(draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256 string) string {
-	full := builderPreviewMarkdown(draft, definition, yaml, sha256)
-	if utf8.RuneCountInString(full) <= maxFallbackText {
-		return full
-	}
+func compileAgentPreviewMessage(engine *blockkit.Engine, draft domain.AgentDraft, definition port.AgentDefPreview, yaml, sha256, draftID string) (string, []slackapi.Block, error) {
 	profile := draft.ProviderProfile
 	if profile == "" {
 		profile = draft.Model
 	}
-	return fmt.Sprintf(
-		"*Previsualizacion del agente `%s`*\n\n*Clase:* `%s`\n*Runtime/perfil:* `%s`\n*Ejecucion:* `%s`\n*Timeout:* `%s`\n\nEl YAML completo se muestra en los bloques del mensaje.\n\n*SHA-256:* `%s`\n\nSolicitar instalación con el botón del preview.",
-		neutralizeUnsafeControls(draft.Name),
-		definition.AgentClass,
-		neutralizeUnsafeControls(profile),
-		definition.ExecutionMode,
-		previewTimeout(definition.TimeoutSec),
-		sha256,
-	)
+	message, err := engine.Message(agentPreviewView{
+		Name: draft.Name, AgentClass: definition.AgentClass, ProviderProfile: profile,
+		ExecutionMode: definition.ExecutionMode, Timeout: previewTimeout(definition.TimeoutSec),
+		SHA256: sha256, DraftID: draftID, PreviewYAML: yaml,
+	})
+	if err != nil {
+		return "", nil, err
+	}
+	return message.FallbackText, message.Blocks, nil
 }
 
 func previewTimeout(seconds int) string {
@@ -546,18 +451,4 @@ func previewTimeout(seconds int) string {
 		return "no aplica"
 	}
 	return strconv.Itoa(seconds) + " segundos"
-}
-
-func splitBuilderBlockText(text string, maxRunes int) []string {
-	if maxRunes <= 0 || utf8.RuneCountInString(text) <= maxRunes {
-		return []string{text}
-	}
-	runes := []rune(text)
-	parts := make([]string, 0, (len(runes)+maxRunes-1)/maxRunes)
-	for len(runes) > 0 {
-		n := min(len(runes), maxRunes)
-		parts = append(parts, string(runes[:n]))
-		runes = runes[n:]
-	}
-	return parts
 }

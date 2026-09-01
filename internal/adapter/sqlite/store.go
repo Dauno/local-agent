@@ -688,8 +688,8 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 	if err := s.db.QueryRowContext(ctx, "PRAGMA user_version").Scan(&version); err != nil {
 		return fmt.Errorf("inspect SQLite schema version: %w", err)
 	}
-	if version < 30 {
-		return fmt.Errorf("external-agent job activation requires SQLite schema v30, found v%d", version)
+	if version < SchemaVersion {
+		return fmt.Errorf("external-agent job activation requires SQLite schema v%d, found v%d", SchemaVersion, version)
 	}
 	var name string
 	if err := s.db.QueryRowContext(ctx, `SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'external_agent_job_notifications'`).Scan(&name); err != nil {
@@ -699,6 +699,36 @@ func (s *Store) CheckExternalAgentJobStore(ctx context.Context) error {
 		return errors.New("external-agent notification outbox is missing")
 	}
 	var columns int
+	var jobPolicyColumns int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('external_agent_jobs')
+		WHERE name = 'completion_policy'`).Scan(&jobPolicyColumns); err != nil {
+		return fmt.Errorf("inspect external-agent completion policy field: %w", err)
+	}
+	if jobPolicyColumns != 1 {
+		return errors.New("external-agent completion policy field is missing")
+	}
+	var legacyBindingColumns int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('external_agent_jobs')
+		WHERE name IN ('workstream_id', 'task_id', 'execution_identity', 'admission_revision')`).Scan(&legacyBindingColumns); err != nil {
+		return fmt.Errorf("inspect removed external-agent workstream fields: %w", err)
+	}
+	if legacyBindingColumns != 0 {
+		return errors.New("external-agent job table still contains workstream binding fields")
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('workstream_tasks')
+		WHERE name = 'job_id'`).Scan(&jobPolicyColumns); err != nil {
+		return fmt.Errorf("inspect workstream task job association field: %w", err)
+	}
+	if jobPolicyColumns != 1 {
+		return errors.New("workstream task job association field is missing")
+	}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('external_agent_job_activations')
+		WHERE name = 'activation_scope'`).Scan(&jobPolicyColumns); err != nil {
+		return fmt.Errorf("inspect external-agent activation scope field: %w", err)
+	}
+	if jobPolicyColumns != 1 {
+		return errors.New("external-agent activation scope field is missing")
+	}
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('external_agent_job_notifications')
 		WHERE name IN ('delivery_mode', 'policy_version', 'artifact_ref', 'result_bytes', 'max_markdown_parts', 'upload_state', 'slack_file_id', 'terminal_status', 'published_at')`).Scan(&columns); err != nil {
 		return fmt.Errorf("inspect external-agent result delivery fields: %w", err)

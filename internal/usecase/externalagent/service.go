@@ -153,20 +153,42 @@ func (s *Service) Start(ctx context.Context, request domain.ExternalAgentJobRequ
 	if timeout > s.cfg.MaxTimeout {
 		return nil, errors.New("external-agent job timeout exceeds administrative maximum")
 	}
+	if request.WorkstreamTask != nil {
+		if err := request.WorkstreamTask.Validate(); err != nil {
+			return nil, err
+		}
+	}
 	now := s.clock.Now().UTC()
+	completionPolicy := domain.ExternalAgentCompletionDeliveryOnly
+	if request.Mode == domain.JobDetached {
+		// Detached jobs must activate the root so the result reaches the
+		// coordinating conversation without requiring a manual result read.
+		// The activation worker provides the single asynchronous delivery path.
+		completionPolicy = domain.ExternalAgentCompletionAutomaticRoot
+	}
 	job := domain.ExternalAgentJob{
-		ID: "job_" + randomID(), Mode: request.Mode, Provider: request.Provider, Profile: request.Profile,
+		ID: "job_" + randomID(), Mode: request.Mode, CompletionPolicy: completionPolicy, Provider: request.Provider, Profile: request.Profile,
 		PrimaryProject: request.PrimaryProject, RegistryRevision: request.RegistryRevision,
 		Task: request.Task, RequestSHA256: domain.ExternalAgentJobRequestDigest(request),
 		WrapperCallID: request.WrapperCallID, OriginalCallID: request.OriginalCallID, Actor: request.Actor, TeamID: request.TeamID,
-		ConversationKey: request.ConversationKey, WorkstreamID: request.WorkstreamID, TaskID: request.TaskID,
-		ExecutionIdentity: request.ExecutionIdentity, AdmissionRevision: request.AdmissionRevision,
-		Status: domain.JobQueued, TimeoutAt: now.Add(timeout), CreatedAt: now, UpdatedAt: now,
+		ConversationKey: request.ConversationKey,
+		Status:          domain.JobQueued, TimeoutAt: now.Add(timeout), CreatedAt: now, UpdatedAt: now,
 	}
 	if job.OriginalCallID == "" {
 		job.OriginalCallID = job.ID
 	}
-	created, existing, err := s.store.CreateIfAbsent(ctx, job)
+	var created bool
+	var existing *domain.ExternalAgentJob
+	var err error
+	if request.WorkstreamTask != nil {
+		admissionStore, ok := s.store.(port.ExternalAgentJobWorkstreamAdmissionStore)
+		if !ok {
+			return nil, errors.New("workstream job admission is not configured")
+		}
+		created, existing, err = admissionStore.CreateIfAbsentForWorkstream(ctx, job, *request.WorkstreamTask)
+	} else {
+		created, existing, err = s.store.CreateIfAbsent(ctx, job)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("queue external-agent job: %w", err)
 	}

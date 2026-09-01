@@ -538,6 +538,7 @@ func newTestServiceWithConfirmations(
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}
 	if mutate != nil {
 		mutate(&cfg)
@@ -553,6 +554,40 @@ func newTestServiceWithConfirmations(
 		t.Fatal(err)
 	}
 	return service
+}
+
+func TestNewRejectsInvalidConfirmationLayoutFingerprint(t *testing.T) {
+	t.Parallel()
+	valid := strings.Repeat("a", 64)
+	for _, test := range []struct {
+		name  string
+		value string
+	}{
+		{name: "missing", value: ""},
+		{name: "short", value: valid[:63]},
+		{name: "uppercase", value: strings.ToUpper(valid)},
+		{name: "non hexadecimal", value: strings.Repeat("g", 64)},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			cfg := Config{
+				AccessPolicy:             domain.AccessPolicy{AllowedUserIDs: []string{"U12345678"}},
+				ContextLimits:            domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
+				RetainMessages:           100,
+				MaxConcurrentCalls:       4,
+				BusyMessage:              "busy",
+				ModelErrorMessage:        "model error",
+				UnauthorizedMessage:      "denied",
+				ConfirmationLayoutSHA256: test.value,
+			}
+			_, err := New(cfg, Dependencies{
+				Store:   &fakeStore{recent: make(map[domain.ConversationKey][]domain.Message)},
+				Runtime: &fakeRuntime{}, Publisher: &fakePublisher{},
+			})
+			if err == nil {
+				t.Fatal("New accepted an invalid confirmation layout fingerprint")
+			}
+		})
+	}
 }
 
 func TestHandleAuthorizedDM(t *testing.T) {
@@ -986,7 +1021,7 @@ func richConfirmationAction(delivery port.ConfirmationDelivery) domain.Confirmat
 		Actor: delivery.Actor, TeamID: delivery.TeamID, ChannelID: delivery.ChannelID,
 		MessageTS: delivery.SlackMessageTS, ThreadTS: delivery.ThreadTS,
 		CorrelationID: delivery.CorrelationID, RendererMode: delivery.RendererMode,
-		ContentSHA256: port.ConfirmationContentDigest(delivery), Approved: true,
+		ContentSHA256: port.ConfirmationContentDigest(delivery, strings.Repeat("a", 64)), Approved: true,
 	}
 }
 

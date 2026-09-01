@@ -9,7 +9,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/usecase/rollout"
 )
 
-const createAdoptionPostflightDetail = "created at v41 by init; no postflight queries ran"
+const createAdoptionPostflightDetail = "created at v45 by init; no postflight queries ran"
 
 // recordAdoptionAtCreation writes Create's second, separate transaction on
 // the pool OpenExisting already opened. Transaction 1 (the v1-v41 migration

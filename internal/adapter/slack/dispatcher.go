@@ -91,7 +91,7 @@ func validateInteractiveRegistration(registration InteractiveRegistration) error
 	if strings.TrimSpace(registration.ID) == "" {
 		return errors.New("interactive registration ID is required")
 	}
-	if len(registration.ID) > maxRendererIDLength {
+	if len(registration.ID) > maxInteractiveIDLength {
 		return errors.New("interactive registration ID exceeds Slack limit")
 	}
 	for _, r := range registration.ID {

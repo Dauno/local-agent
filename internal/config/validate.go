@@ -244,8 +244,8 @@ func validateOrchestration(problems *[]FieldError, cfg Config) {
 	if cfg.Orchestration.Workstreams.SnapshotBudgetTokens < 1 || cfg.Orchestration.Workstreams.SnapshotBudgetTokens > domain.HardWorkstreamSnapshotBudgetTokens {
 		addConfigProblem(problems, "orchestration.workstreams.snapshot_budget_tokens", fmt.Sprintf("must be between 1 and %d", domain.HardWorkstreamSnapshotBudgetTokens))
 	}
-	if cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep != 1 {
-		addConfigProblem(problems, "orchestration.result_handles.max_producing_calls_per_step", "must equal 1")
+	if cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep < 1 || cfg.Orchestration.ResultHandles.MaxProducingCallsPerStep > 4 {
+		addConfigProblem(problems, "orchestration.result_handles.max_producing_calls_per_step", "must be between 1 and 4")
 	}
 	if cfg.Orchestration.ResultHandles.ProducingCallReserveTokens <= 0 {
 		addConfigProblem(problems, "orchestration.result_handles.producing_call_reserve_tokens", "must be greater than zero")
@@ -705,6 +705,7 @@ func validateExternalAgent(problems *[]FieldError, cfg ExternalAgentConfig) {
 		{"external_agent.max_job_timeout_seconds", cfg.MaxJobTimeoutSeconds, maxTimeoutCeiling},
 		{"external_agent.worker_concurrency", cfg.WorkerConcurrency, 64},
 		{"external_agent.artifact_retention_days", cfg.ArtifactRetentionDays, 3650},
+		{"external_agent.batch.max_tasks", cfg.Batch.MaxTasks, 16},
 	}
 	for _, item := range positive {
 		if item.value <= 0 {

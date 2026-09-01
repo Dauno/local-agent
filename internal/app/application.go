@@ -125,9 +125,9 @@ func schemaLockFailure(err error) error {
 }
 
 // schemaOpenFailure maps OpenCurrent rejections to the shared operator
-// texts; every other error keeps its own shape. A schema inside [33, 40]
+// texts; every other error keeps its own shape. A schema inside [33, 46]
 // keeps the upgrade-first message because db upgrade accepts it; a schema
-// outside [33, 44] maps to the terminal message that never recommends
+// outside [33, 47] maps to the terminal message that never recommends
 // db upgrade for a file db upgrade itself refuses (FIND-179).
 func schemaOpenFailure(err error) error {
 	if upgrade, ok := errors.AsType[*adaptersqlite.SchemaUpgradeRequiredError](err); ok {

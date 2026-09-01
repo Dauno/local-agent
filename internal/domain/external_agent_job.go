@@ -13,6 +13,92 @@ import (
 
 const MaxExternalAgentTaskRunes = 200_000
 
+const externalAgentDelegationPrefix = "local-agent-delegation:v1\n"
+
+type ExternalAgentDelegation struct {
+	Version          string `json:"version"`
+	Task             string `json:"task"`
+	FinalInstruction string `json:"final_instruction"`
+}
+
+func EncodeExternalAgentDelegation(task, finalInstruction string) (string, error) {
+	delegation := ExternalAgentDelegation{
+		Version: "delegation_v1", Task: task, FinalInstruction: finalInstruction,
+	}
+	if strings.TrimSpace(delegation.Task) == "" || strings.TrimSpace(delegation.FinalInstruction) == "" {
+		return "", errors.New("external-agent delegation task and final instruction are required")
+	}
+	encoded, err := json.Marshal(delegation)
+	if err != nil {
+		return "", fmt.Errorf("encode external-agent delegation: %w", err)
+	}
+	result := externalAgentDelegationPrefix + string(encoded)
+	if !utf8.ValidString(result) || utf8.RuneCountInString(result) > MaxExternalAgentTaskRunes {
+		return "", errors.New("external-agent delegation exceeds the configured character budget")
+	}
+	return result, nil
+}
+
+func DecodeExternalAgentDelegation(value string) (ExternalAgentDelegation, bool, error) {
+	if !strings.HasPrefix(value, externalAgentDelegationPrefix) {
+		if strings.TrimSpace(value) == "" {
+			return ExternalAgentDelegation{}, false, errors.New("external-agent task is required")
+		}
+		return ExternalAgentDelegation{Version: "legacy", Task: value}, false, nil
+	}
+	var delegation ExternalAgentDelegation
+	if err := json.Unmarshal([]byte(strings.TrimPrefix(value, externalAgentDelegationPrefix)), &delegation); err != nil {
+		return ExternalAgentDelegation{}, true, errors.New("external-agent delegation envelope is invalid")
+	}
+	if delegation.Version != "delegation_v1" || strings.TrimSpace(delegation.Task) == "" ||
+		strings.TrimSpace(delegation.FinalInstruction) == "" {
+		return ExternalAgentDelegation{}, true, errors.New("external-agent delegation envelope is invalid")
+	}
+	return delegation, true, nil
+}
+
+func ExternalAgentExecutionTask(value string) (string, error) {
+	delegation, _, err := DecodeExternalAgentDelegation(value)
+	if err != nil {
+		return "", err
+	}
+	return delegation.Task, nil
+}
+
+type ExternalAgentCompletionPolicy string
+
+const (
+	ExternalAgentCompletionDeliveryOnly  ExternalAgentCompletionPolicy = "delivery_only"
+	ExternalAgentCompletionWorkstream    ExternalAgentCompletionPolicy = "workstream_only"
+	ExternalAgentCompletionAutomaticRoot ExternalAgentCompletionPolicy = "automatic_root"
+)
+
+func (p ExternalAgentCompletionPolicy) Valid() bool {
+	switch p {
+	case ExternalAgentCompletionDeliveryOnly, ExternalAgentCompletionWorkstream, ExternalAgentCompletionAutomaticRoot:
+		return true
+	default:
+		return false
+	}
+}
+
+type ExternalAgentActivationScope string
+
+const (
+	ExternalAgentActivationLegacy       ExternalAgentActivationScope = "legacy"
+	ExternalAgentActivationConversation ExternalAgentActivationScope = "conversation"
+	ExternalAgentActivationWorkstream   ExternalAgentActivationScope = "workstream"
+)
+
+func (s ExternalAgentActivationScope) Valid() bool {
+	switch s {
+	case ExternalAgentActivationLegacy, ExternalAgentActivationConversation, ExternalAgentActivationWorkstream:
+		return true
+	default:
+		return false
+	}
+}
+
 // MaxExternalAgentResultBytes is a final defensive bound for result reads made
 // through the host-completion path. Configured artifact bounds remain stricter
 // in normal composition.
@@ -32,8 +118,15 @@ func detachedCompletionMarker(jobID string) string {
 }
 
 func rootActivationRequired(job ExternalAgentJob) bool {
-	return job.Status == JobCompleted && job.Mode == JobDetached &&
-		CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision)
+	if job.Status != JobCompleted || job.Mode != JobDetached {
+		return false
+	}
+	switch job.EffectiveCompletionPolicy() {
+	case ExternalAgentCompletionAutomaticRoot:
+		return true
+	default:
+		return false
+	}
 }
 
 type NotificationPublishState string
@@ -93,18 +186,13 @@ type ExternalAgentJobNotification struct {
 	PublishedAt    time.Time
 	// Actor and ConversationKey are loaded from the authoritative job row for
 	// host-owned completion. They are not part of the immutable delivery key.
-	Actor             string
-	ConversationKey   ConversationKey
-	WorkstreamID      string
-	TaskID            string
-	ExecutionIdentity string
-	AdmissionRevision int
+	Actor           string
+	ConversationKey ConversationKey
 	// HostResultText is ephemeral completion data. It is never written to the
 	// notification row or exposed through an ADK function response.
 	HostResultText string
 	// RootActivationRequired is the explicit, immutable completion disposition.
-	// It is set by mode at construction and backfilled for historical detached
-	// terminal snapshots; MarkNotificationPublished never infers it.
+	// It is set by the host completion policy at construction; MarkNotificationPublished never infers it.
 	RootActivationRequired bool
 	CanonicalMarkdown      string
 	// NotificationSHA256 and NotificationBytes are the notification identity
@@ -164,6 +252,7 @@ const (
 type ExternalAgentJobActivation struct {
 	ActivationID       string
 	JobID              string
+	ActivationScope    ExternalAgentActivationScope
 	StatusRevision     int
 	Kind               string
 	TerminalStatus     ExternalAgentJobStatus
@@ -221,6 +310,18 @@ func (a ExternalAgentJobActivation) Validate() error {
 	}
 	if err := ValidateCompletionBinding(a.WorkstreamID, a.TaskID, a.ExecutionIdentity, a.AdmissionRevision); err != nil {
 		return err
+	}
+	if a.ActivationScope == "" {
+		a.ActivationScope = ExternalAgentActivationLegacy
+	}
+	if !a.ActivationScope.Valid() {
+		return fmt.Errorf("invalid external-agent activation scope %q", a.ActivationScope)
+	}
+	if a.ActivationScope == ExternalAgentActivationWorkstream && !CompletionBindingPresent(a.WorkstreamID, a.TaskID, a.ExecutionIdentity, a.AdmissionRevision) {
+		return errors.New("workstream activation requires a complete completion binding")
+	}
+	if a.ActivationScope == ExternalAgentActivationLegacy && CompletionBindingPresent(a.WorkstreamID, a.TaskID, a.ExecutionIdentity, a.AdmissionRevision) {
+		return errors.New("legacy activation cannot carry a completion binding")
 	}
 	if a.DeliveryMode != JobResultDeliveryMarkdown && a.DeliveryMode != JobResultDeliveryFile {
 		return fmt.Errorf("invalid external-agent activation delivery mode %q", a.DeliveryMode)
@@ -331,6 +432,9 @@ type ExternalAgentJobNotificationHealth struct {
 // activation outbox. Processed is the terminal completed/failed count; the
 // ambiguous completion_unknown count stays separate for operator visibility.
 type ExternalAgentJobActivationHealth struct {
+	// LegacyNonTerminal counts historical legacy activations that remain
+	// non-terminal. Claim queries exclude these rows.
+	LegacyNonTerminal int
 	Pending           int
 	Processing        int
 	ModelStarted      int
@@ -437,6 +541,9 @@ type ExternalAgentJobInspection struct {
 }
 
 func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNotification, error) {
+	if err := validateCompletionPolicy(job); err != nil {
+		return ExternalAgentJobNotification{}, err
+	}
 	target, err := ConversationReplyTarget(job.ConversationKey)
 	if err != nil {
 		return ExternalAgentJobNotification{}, err
@@ -477,8 +584,6 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
-		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
-		AdmissionRevision:      job.AdmissionRevision,
 		CanonicalMarkdown:      markdown,
 		RootActivationRequired: activationRequired,
 		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
@@ -493,6 +598,9 @@ func NewExternalAgentJobNotification(job ExternalAgentJob) (ExternalAgentJobNoti
 // NewExternalAgentJobDelivery creates a notification from a complete,
 // already-sanitized result. It never truncates provider output.
 func NewExternalAgentJobDelivery(job ExternalAgentJob, result ExternalAgentInvocationResult) (ExternalAgentJobNotification, error) {
+	if err := validateCompletionPolicy(job); err != nil {
+		return ExternalAgentJobNotification{}, err
+	}
 	target, err := ConversationReplyTarget(job.ConversationKey)
 	if err != nil {
 		return ExternalAgentJobNotification{}, err
@@ -595,8 +703,6 @@ func NewExternalAgentJobDelivery(job ExternalAgentJob, result ExternalAgentInvoc
 		JobID: job.ID, StatusRevision: job.StatusRevision, Kind: JobNotificationTerminal,
 		TerminalStatus: job.Status,
 		Actor:          job.Actor, ConversationKey: job.ConversationKey,
-		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
-		AdmissionRevision: job.AdmissionRevision,
 		CanonicalMarkdown: markdown, RendererVersion: JobNotificationRenderer,
 		RootActivationRequired: activationRequired,
 		NotificationSHA256:     notificationSHA, NotificationBytes: int64(len([]byte(markdown))),
@@ -848,29 +954,41 @@ const (
 )
 
 type ExternalAgentJobRequest struct {
-	Provider             string               `json:"provider"`
-	Profile              string               `json:"profile"`
-	PrimaryProject       string               `json:"primary_project"`
-	RegistryRevision     string               `json:"registry_revision"`
-	Task                 string               `json:"task"`
-	Mode                 ExternalAgentJobMode `json:"mode"`
-	PermissionOptionKind string               `json:"permission_option_kind"`
-	Timeout              time.Duration        `json:"timeout_nanos"`
-	PrimaryPath          string               `json:"-"`
-	WrapperCallID        string               `json:"wrapper_call_id"`
-	OriginalCallID       string               `json:"original_call_id"`
-	Actor                string               `json:"actor"`
-	TeamID               string               `json:"team_id"`
-	ConversationKey      ConversationKey      `json:"conversation_key"`
-	WorkstreamID         string               `json:"workstream_id,omitempty"`
-	TaskID               string               `json:"task_id,omitempty"`
-	ExecutionIdentity    string               `json:"execution_identity,omitempty"`
-	AdmissionRevision    int                  `json:"admission_revision,omitzero"`
+	Provider             string                   `json:"provider"`
+	Profile              string                   `json:"profile"`
+	PrimaryProject       string                   `json:"primary_project"`
+	RegistryRevision     string                   `json:"registry_revision"`
+	Task                 string                   `json:"task"`
+	Mode                 ExternalAgentJobMode     `json:"mode"`
+	PermissionOptionKind string                   `json:"permission_option_kind"`
+	Timeout              time.Duration            `json:"timeout_nanos"`
+	PrimaryPath          string                   `json:"-"`
+	WrapperCallID        string                   `json:"wrapper_call_id"`
+	OriginalCallID       string                   `json:"original_call_id"`
+	Actor                string                   `json:"actor"`
+	TeamID               string                   `json:"team_id"`
+	ConversationKey      ConversationKey          `json:"conversation_key"`
+	WorkstreamTask       *WorkstreamTaskAdmission `json:"workstream_task,omitempty"`
+}
+
+// WorkstreamTaskAdmission is a transient selector used to associate one new
+// durable job with one workstream task. It is never stored on the job row.
+type WorkstreamTaskAdmission struct {
+	WorkstreamID     string `json:"workstream_id"`
+	TaskID           string `json:"task_id"`
+	ExpectedRevision int    `json:"expected_revision"`
+}
+
+func (a WorkstreamTaskAdmission) Validate() error {
+	if strings.TrimSpace(a.WorkstreamID) == "" || strings.TrimSpace(a.TaskID) == "" || a.ExpectedRevision < 0 {
+		return errors.New("workstream task admission selector is invalid")
+	}
+	return nil
 }
 
 // ExternalAgentJobCompletionBinding is the trusted workstream execution
-// identity copied into a detached job when its requested task is currently
-// running. It is never supplied by the model.
+// identity returned by the legacy task-text resolver. New job admission uses
+// WorkstreamTaskAdmission instead.
 type ExternalAgentJobCompletionBinding struct {
 	WorkstreamID      string
 	TaskID            string
@@ -887,9 +1005,12 @@ func (b ExternalAgentJobCompletionBinding) Present() bool {
 	return CompletionBindingPresent(b.WorkstreamID, b.TaskID, b.ExecutionIdentity, b.AdmissionRevision)
 }
 
+// ExternalAgentJob is generic execution state. A workstream association, when
+// present, is owned by WorkstreamTask.JobID and is never duplicated here.
 type ExternalAgentJob struct {
 	ID                     string
 	Mode                   ExternalAgentJobMode
+	CompletionPolicy       ExternalAgentCompletionPolicy
 	Provider               string
 	Profile                string
 	PrimaryProject         string
@@ -901,10 +1022,6 @@ type ExternalAgentJob struct {
 	Actor                  string
 	TeamID                 string
 	ConversationKey        ConversationKey
-	WorkstreamID           string
-	TaskID                 string
-	ExecutionIdentity      string
-	AdmissionRevision      int
 	Status                 ExternalAgentJobStatus
 	Attempt                int
 	ExternalAgentSessionID string
@@ -1014,28 +1131,55 @@ func (j ExternalAgentJob) Validate() error {
 	if j.Mode != JobForeground && j.Mode != JobDetached {
 		return fmt.Errorf("unsupported external-agent job mode %q", j.Mode)
 	}
+	if err := validateCompletionPolicy(j); err != nil {
+		return err
+	}
 	if j.Status == "" {
 		return errors.New("external-agent job status is required")
 	}
 	if j.Attempt < 0 || j.ResultBytes < 0 || j.StatusRevision < 0 {
 		return errors.New("external-agent job counters are invalid")
 	}
-	if err := ValidateCompletionBinding(j.WorkstreamID, j.TaskID, j.ExecutionIdentity, j.AdmissionRevision); err != nil {
-		return err
+	return nil
+}
+
+func validateCompletionPolicy(job ExternalAgentJob) error {
+	policy := job.EffectiveCompletionPolicy()
+	if !policy.Valid() {
+		return fmt.Errorf("invalid external-agent completion policy %q", job.CompletionPolicy)
+	}
+	if policy == ExternalAgentCompletionAutomaticRoot && job.Mode != JobDetached {
+		return errors.New("automatic-root completion policy requires detached mode")
+	}
+	if job.Mode == JobForeground && policy != ExternalAgentCompletionDeliveryOnly {
+		return errors.New("foreground jobs require delivery-only completion policy")
 	}
 	return nil
 }
 
-// CompletionBindingPresent reports whether a job carries the complete trusted
-// workstream/task/execution identity required for detached root activation.
+// EffectiveCompletionPolicy returns the admission policy. Empty values are
+// accepted only for in-memory legacy fixtures and map to the mode default;
+// persisted v47 rows always carry an explicit policy.
+func (j ExternalAgentJob) EffectiveCompletionPolicy() ExternalAgentCompletionPolicy {
+	if j.CompletionPolicy != "" {
+		return j.CompletionPolicy
+	}
+	if j.Mode == JobDetached {
+		return ExternalAgentCompletionAutomaticRoot
+	}
+	return ExternalAgentCompletionDeliveryOnly
+}
+
+// CompletionBindingPresent reports whether an activation carries the complete
+// trusted workstream/task/execution identity required for workstream scope.
 func CompletionBindingPresent(workstreamID, taskID, executionIdentity string, admissionRevision int) bool {
 	return strings.TrimSpace(workstreamID) != "" && strings.TrimSpace(taskID) != "" &&
 		strings.TrimSpace(executionIdentity) != "" && admissionRevision >= 0
 }
 
 // ValidateCompletionBinding accepts an empty legacy binding but rejects partial
-// identities. Historical rows remain readable; only complete bindings can
-// create a new detached root activation.
+// identities. Historical activation rows remain readable; only complete
+// bindings can create a workstream-scoped activation.
 func ValidateCompletionBinding(workstreamID, taskID, executionIdentity string, admissionRevision int) error {
 	values := []string{strings.TrimSpace(workstreamID), strings.TrimSpace(taskID), strings.TrimSpace(executionIdentity)}
 	if values[0] == "" && values[1] == "" && values[2] == "" && admissionRevision == 0 {

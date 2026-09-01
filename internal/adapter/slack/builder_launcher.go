@@ -8,6 +8,7 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -18,7 +19,7 @@ type builderLauncherPublisher struct {
 	recoveryClient standardMessageClient
 	store          port.BuilderLauncherDeliveryStore
 	botUserID      string
-	renderer       *TemplateRenderer
+	engine         *blockkit.Engine
 	renderErr      error
 }
 
@@ -50,10 +51,10 @@ func newBuilderLauncherPublisherWithDependencies(
 	publisher port.ResponsePublisher,
 	logger port.Logger,
 ) *builderLauncherPublisher {
-	renderer, renderErr := NewEmbeddedTemplateRenderer()
+	engine, renderErr := newOnboardingEngine()
 	return &builderLauncherPublisher{
 		client: client, recoveryClient: recovery, store: store, botUserID: botUserID,
-		renderer: renderer, renderErr: renderErr,
+		engine: engine, renderErr: renderErr,
 	}
 }
 
@@ -99,7 +100,7 @@ func (p *builderLauncherPublisher) PublishBuilderLauncher(ctx context.Context, r
 			return p.store.MarkBuilderLauncherPublished(ctx, claim, recovered.LastMessageTS, time.Now().UTC())
 		}
 	}
-	fallbackText, blocks, err := compileOnboardingMessage(p.renderer, metadata, nil)
+	fallbackText, blocks, err := compileOnboardingViewMessage(p.engine, metadata, nil)
 	if err != nil {
 		if p.renderErr != nil {
 			err = p.renderErr
@@ -164,15 +165,19 @@ const (
 	onboardingDescribePrompt = "Describe lo que necesitas en un mensaje y trabajamos sobre ello."
 )
 
-func compileOnboardingMessage(renderer *TemplateRenderer, builderContext string, prompts []string) (string, []slackapi.Block, error) {
-	return renderer.CompileMessageWithFallback("onboarding_message", TemplateContext{
-		Values: map[string]string{
-			"builder_context": builderContext,
-			"intro":           onboardingIntroText,
-			"describe_prompt": onboardingDescribePrompt,
-		},
-		SuggestedPrompts: prompts,
+func compileOnboardingViewMessage(engine *blockkit.Engine, builderContext string, prompts []string) (string, []slackapi.Block, error) {
+	pairs := make([]blockkit.Pair, len(prompts))
+	for index, prompt := range prompts {
+		pairs[index] = blockkit.Pair{Value: prompt}
+	}
+	message, err := engine.Message(onboardingWelcomeView{
+		BuilderContext: builderContext, Intro: onboardingIntroText,
+		DescribePrompt: onboardingDescribePrompt, SuggestedPrompts: pairs,
 	})
+	if err != nil {
+		return "", nil, err
+	}
+	return message.FallbackText, message.Blocks, nil
 }
 
 var _ port.BuilderLauncherPublisher = (*builderLauncherPublisher)(nil)

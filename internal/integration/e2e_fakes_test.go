@@ -377,6 +377,7 @@ func newE2EService(t *testing.T, opts ...e2eServiceOption) *e2eDeps {
 		ContextLimits:  domain.ContextLimits{MaxMessages: 30, MaxChars: 20000},
 		RetainMessages: 100, MaxConcurrentCalls: 4,
 		BusyMessage: "busy", ModelErrorMessage: "model error", UnauthorizedMessage: "denied",
+		ConfirmationLayoutSHA256: strings.Repeat("a", 64),
 	}, botusecase.Dependencies{
 		Store:             store,
 		Runtime:           runtime,

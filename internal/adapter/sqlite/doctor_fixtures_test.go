@@ -313,8 +313,8 @@ func TestDoctorResultIdentityUpgradedFixturePasses(t *testing.T) {
 	if !strings.Contains(result.Detail, "3 historical completed jobs without result identity") {
 		t.Fatalf("upgraded identity detail missing historical count: %q", result.Detail)
 	}
-	if result, ok := findDoctorResult(report, "external-agent activations"); !ok || result.Status != doctor.StatusPass {
-		t.Fatalf("upgraded activation health must pass: %#v", result)
+	if result, ok := findDoctorResult(report, "external-agent activations"); !ok || result.Status != doctor.StatusPass || !strings.Contains(result.Detail, "legacy_non_terminal=1") {
+		t.Fatalf("upgraded activation health must report legacy count: %#v", result)
 	}
 	assertDoctorOutputIsContentFree(t, report, []string{
 		"fg-pending", "fg-processing", "fg-model_started", "fg-response_prepared", "fg-completed",

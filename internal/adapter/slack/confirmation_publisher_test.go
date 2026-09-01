@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -9,11 +10,11 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -178,12 +179,12 @@ func TestNormalizeInteractiveActionAcceptsDocumentedPayloadWithoutMetadata(t *te
 	}
 }
 
-func TestNormalizeInteractiveActionAcceptsPendingV1Metadata(t *testing.T) {
+func TestNormalizeInteractiveActionRejectsRetiredV1Metadata(t *testing.T) {
 	t.Parallel()
 	callback := newTestCallback(approveActionID, "wrapper-v1", "T12345678", "U12345678", "C12345678", "1720000001.000001", "")
-	callback.Message.Metadata.EventPayload["render_mode"] = confirmationRenderModeV1
-	if _, ok := normalizeInteractiveAction(&callback); !ok {
-		t.Fatal("normalizeInteractiveAction rejected a pending v1 confirmation")
+	callback.Message.Metadata.EventPayload["render_mode"] = "confirmation_v1"
+	if _, ok := normalizeInteractiveAction(&callback); ok {
+		t.Fatal("normalizeInteractiveAction accepted retired v1 confirmation metadata")
 	}
 }
 
@@ -197,169 +198,206 @@ func TestNormalizeInteractiveActionRejectsConflictingContainer(t *testing.T) {
 	}
 }
 
-func TestRenderConfirmationBlocks(t *testing.T) {
-	t.Parallel()
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc",
-		Summary: "Write file", CorrelationID: "confirmation:wrapper-abc",
-		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	blocks := renderConfirmationBlocks(delivery)
-	if len(blocks) != 3 {
-		t.Fatalf("renderConfirmationBlocks returned %d blocks, want 3", len(blocks))
-	}
-}
-
-func TestConfirmationV2RendersOrderedSafeBlocks(t *testing.T) {
+func TestConfirmationPromptRendersSemanticValues(t *testing.T) {
 	delivery := port.ConfirmationDelivery{
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Write <@U12345678> & report",
 		Payload: `{"project":"repo","task":"Inspect <@U12345678> and report","workstream_id":"ws-1","expected_revision":4,"action":"propose_task","task_id":"task-1","current_phase":"plan"}`,
 		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	fallback, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), delivery, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if utf8.RuneCountInString(fallback) > maxFallbackText || strings.Contains(fallback, "<@U12345678>") {
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	for _, value := range []string{delivery.Summary, "orig-abc", "15:30", "repo", "Inspect <@U12345678> and report", "ws-1", "propose_task"} {
+		if !blockkit.Reachable(message, value) {
+			t.Fatalf("value %q did not reach the rendered tree", value)
+		}
+	}
+	if slot, ok := blockkit.SlotOf(message, delivery.Summary); !ok || slot != slackapi.PlainTextType {
+		t.Fatalf("SlotOf(summary) = %q, %t", slot, ok)
+	}
+	if slot, ok := blockkit.SlotOf(message, delivery.OriginalCallID); !ok || slot != slackapi.MarkdownType {
+		t.Fatalf("SlotOf(call_id) = %q, %t", slot, ok)
+	}
+	if slot, ok := blockkit.SlotOf(message, "repo"); !ok || slot != slackapi.PlainTextType {
+		t.Fatalf("SlotOf(project) = %q, %t", slot, ok)
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(encoded)
+	if strings.Count(text, `"value":"wrapper-abc"`) != 3 {
+		t.Fatalf("confirmation action values = %s", text)
+	}
+	if strings.Contains(text, "Payload:") || strings.Contains(text, "workstream_id") {
+		t.Fatalf("JSON payload was rendered as raw confirmation content: %s", text)
+	}
+	if fallback == "" || strings.ContainsAny(fallback, "*`") || strings.Contains(fallback, "<@U12345678>") {
 		t.Fatalf("fallback = %q", fallback)
 	}
-	if len(blocks) != 4 {
-		t.Fatalf("blocks = %d, want card, task, workstream, actions", len(blocks))
-	}
-	card := blocks[0].(*slackapi.CardBlock)
-	if card.Title == nil || card.Title.Type != slackapi.PlainTextType || card.Title.Text != "Confirmation required" {
-		t.Fatalf("card title = %#v", card.Title)
-	}
-	if card.Subtitle == nil || card.Subtitle.Type != slackapi.MarkdownType {
-		t.Fatalf("card subtitle = %#v", card.Subtitle)
-	}
-	if card.Body == nil || card.Body.Type != slackapi.PlainTextType || card.Body.Text != confirmationCardSummary(delivery.Summary) {
-		t.Fatalf("card body = %#v", card.Body)
-	}
-	task := blocks[1].(*slackapi.SectionBlock)
-	if task.Text.Type != slackapi.PlainTextType || !strings.Contains(task.Text.Text, "Inspect &lt;@U12345678>") || len(task.Fields) != 1 || task.Fields[0].Type != slackapi.PlainTextType ||
-		task.Fields[0].Text != "Project: repo" {
-		t.Fatalf("task block = %#v", task)
-	}
-	workstream := blocks[2].(*slackapi.SectionBlock)
-	if workstream.Text.Type != slackapi.PlainTextType || !strings.Contains(workstream.Text.Text, "Workstream data:") || !strings.Contains(workstream.Text.Text, "Workstream ID: ws-1") {
-		t.Fatalf("workstream block = %#v", workstream)
-	}
-	actions := blocks[3].(*slackapi.ActionBlock)
-	if len(actions.Elements.ElementSet) != 3 {
-		t.Fatalf("confirmation buttons = %d, want 3", len(actions.Elements.ElementSet))
-	}
-	approve := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
-	reject := actions.Elements.ElementSet[1].(*slackapi.ButtonBlockElement)
-	status := actions.Elements.ElementSet[2].(*slackapi.ButtonBlockElement)
-	if approve.ActionID != approveActionID || reject.ActionID != rejectActionID || status.ActionID != statusActionID ||
-		approve.Value != delivery.WrapperCallID || reject.Value != delivery.WrapperCallID || status.Value != delivery.WrapperCallID {
-		t.Fatalf("confirmation buttons = %#v", actions.Elements.ElementSet)
-	}
-	if approve.Text.Type != slackapi.PlainTextType || reject.Text.Type != slackapi.PlainTextType || status.Text.Type != slackapi.PlainTextType || status.Text.Text != "Ver estado" {
-		t.Fatalf("button text types = %q, %q, %q", approve.Text.Type, reject.Text.Type, status.Text.Type)
-	}
 }
 
-func TestConfirmationV2BoundsLongSummaryInsideCardBody(t *testing.T) {
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID:  "wrapper-long-summary",
-		OriginalCallID: "call-long-summary",
-		Summary:        strings.Repeat("summary ", 80),
-		Payload:        `{"project":"local-agent","task":"Review the repository README and report all findings."}`,
-		Expiry:         time.Date(2026, 8, 28, 15, 30, 0, 0, time.UTC),
-	}
-	_, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+func TestConfirmationPromptUsesDefaultsAndOptionalRegions(t *testing.T) {
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary", Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}, mustConfirmationLayoutSHA256(t))
 	if err != nil {
 		t.Fatal(err)
 	}
-	card := blocks[0].(*slackapi.CardBlock)
-	if card.Title == nil || utf8.RuneCountInString(card.Title.Text) > maxRendererCardTitleLength {
-		t.Fatalf("card title = %#v", card.Title)
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	for _, value := range []string{"not provided"} {
+		if !blockkit.Reachable(message, value) {
+			t.Fatalf("default value %q did not reach the rendered tree", value)
+		}
 	}
-	if card.Body == nil || utf8.RuneCountInString(card.Body.Text) != maxRendererCardBodyLength || !strings.HasSuffix(card.Body.Text, "...") {
-		t.Fatalf("card body = %#v", card.Body)
-	}
-	if task := blocks[1].(*slackapi.SectionBlock).Text.Text; !strings.Contains(task, "Review the repository README") {
-		t.Fatalf("proposed task = %q", task)
-	}
-}
-
-func TestConfirmationV2RendersStructStyleTaskDescription(t *testing.T) {
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-task",
-		Summary:       "Approve task",
-		Payload:       `{"project":"repo","task":{"ID":"task-1","Project":"repo","Description":"Inspect the repository"}}`,
-		Expiry:        time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	_, blocks, err := compileConfirmationMessage(mustEmbeddedRenderer(t), delivery)
+	encoded, err := json.Marshal(blocks)
 	if err != nil {
 		t.Fatal(err)
 	}
-	task := blocks[1].(*slackapi.SectionBlock)
-	if task.Text.Text != "Proposed task:\nInspect the repository" {
-		t.Fatalf("task text = %q", task.Text.Text)
+	if strings.Contains(string(encoded), "Workstream data:") || strings.Contains(string(encoded), "Payload:") {
+		t.Fatalf("optional regions rendered without values: %s", encoded)
 	}
 }
 
-func TestConfirmationV2UsesUnicodeAndExactSlackLimits(t *testing.T) {
-	renderer := mustEmbeddedRenderer(t)
-	tests := []struct {
-		name        string
-		valueKey    string
-		limit       int
-		wantAtLimit bool
-	}{
-		{name: "fallback", valueKey: "fallback_text", limit: maxFallbackText, wantAtLimit: true},
-		{name: "card body", valueKey: "card_summary", limit: maxRendererCardBodyLength, wantAtLimit: true},
-		{name: "card subtitle", valueKey: "subtitle", limit: maxRendererCardSubtitleLength, wantAtLimit: true},
-		{name: "section field", valueKey: "project", limit: maxRendererSectionFieldLength, wantAtLimit: true},
-		{name: "section text", valueKey: "proposed_task", limit: maxRendererCompositionTextLength, wantAtLimit: true},
-		{name: "button value", valueKey: "wrapper_call_id", limit: maxRendererOptionValueLength, wantAtLimit: true},
+func TestConfirmationPromptRendersLongUnparsedPayload(t *testing.T) {
+	payload := strings.Repeat("abcdefghij_", 900)
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary", Payload: payload,
+		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}, mustConfirmationLayoutSHA256(t))
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, test := range tests {
-		t.Run(test.name, func(t *testing.T) {
-			context := confirmationV2TemplateContext()
-			context.Values[test.valueKey] = strings.Repeat("界", test.limit)
-			if _, _, err := renderer.CompileMessageWithFallback(confirmationTemplateV2, context); (err == nil) != test.wantAtLimit {
-				t.Fatalf("at-limit compile error = %v", err)
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	if !blockkit.Reachable(message, payload[:100]) || !blockkit.Reachable(message, payload[len(payload)-100:]) {
+		t.Fatal("long unparsed payload did not reach the rendered tree")
+	}
+}
+
+func TestConfirmationPromptChunksPayload(t *testing.T) {
+	payload := strings.Repeat("x", 2801)
+	_, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary", Payload: payload,
+		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}, mustConfirmationLayoutSHA256(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Count(string(encoded), "Payload:"); got != 1 {
+		t.Fatalf("payload header count = %d, want 1", got)
+	}
+	if got := strings.Count(string(encoded), `"type":"section"`); got < 4 {
+		t.Fatalf("payload render did not include both chunks: %s", encoded)
+	}
+}
+
+func TestConfirmationPromptTruncatesLongJSONTask(t *testing.T) {
+	longTask := strings.Repeat("task_", 700)
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-1", OriginalCallID: "call-1", Summary: "Summary",
+		Payload: `{"project":"repo","task":"` + longTask + `"}`,
+		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}, mustConfirmationLayoutSHA256(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	data, err := json.Marshal(message.Blocks)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "...") || strings.Contains(string(data), longTask) {
+		t.Fatalf("long JSON task was not bounded: %s", data)
+	}
+}
+
+func TestConfirmationPromptExtractsStructTaskDescription(t *testing.T) {
+	fallback, blocks, err := compileConfirmationMessageV2(mustConfirmationEngine(t), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-1", Summary: "Approve task", OriginalCallID: "call-1",
+		Payload: `{"project":"repo","task":{"ID":"task-1","Project":"repo","Description":"Inspect the repository"}}`,
+		Expiry:  time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}, mustConfirmationLayoutSHA256(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	if !blockkit.Reachable(message, "Inspect the repository") {
+		t.Fatal("task description did not reach the rendered tree")
+	}
+}
+
+func TestConfirmationResolvedRendersWithAndWithoutResult(t *testing.T) {
+	statuses := []port.ConfirmationDeliveryStatus{
+		port.ConfirmationApproved, port.ConfirmationConsumed, port.ConfirmationRejected,
+		port.ConfirmationExpired, port.ConfirmationFailed,
+	}
+	for _, status := range statuses {
+		for _, result := range []string{"", "done <@U12345678> & report"} {
+			name := string(status)
+			if result != "" {
+				name += " with result"
 			}
-			context.Values[test.valueKey] += "界"
-			if _, _, err := renderer.CompileMessageWithFallback(confirmationTemplateV2, context); err == nil {
-				t.Fatal("limit+1 value was accepted")
-			}
-		})
+			t.Run(name, func(t *testing.T) {
+				fallback, blocks, err := compileConfirmationResolvedMessage(mustConfirmationEngine(t), port.ConfirmationDelivery{
+					Status: status, Summary: "Write <@U12345678> & report", OriginalCallID: "orig-abc",
+				}, time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC), result)
+				if err != nil {
+					t.Fatal(err)
+				}
+				message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+				wantStatus := string(status)
+				if status == port.ConfirmationConsumed {
+					wantStatus = string(port.ConfirmationApproved)
+				}
+				for _, value := range []string{wantStatus, "Write <@U12345678> & report", "orig-abc", "15:30"} {
+					if !blockkit.Reachable(message, value) {
+						t.Fatalf("value %q did not reach the resolved tree", value)
+					}
+				}
+				encoded, err := json.Marshal(blocks)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if result == "" && strings.Contains(string(encoded), "Confirmation result:") {
+					t.Fatal("empty result rendered a result block")
+				}
+				if result != "" && !blockkit.Reachable(message, result) {
+					t.Fatal("result did not reach the resolved tree")
+				}
+				if fallback == "" || strings.ContainsAny(fallback, "*`") || strings.Contains(fallback, "<@U12345678>") {
+					t.Fatalf("fallback = %q", fallback)
+				}
+			})
+		}
 	}
 }
 
-func TestConfirmationTemplateValidatesButtonTextAndURL(t *testing.T) {
-	files := embeddedTemplateFiles(t)
-	replaceMessage(
-		files,
-		confirmationTemplateV2,
-		`"text": {"type": "plain_text", "text": "Approve", "emoji": false}`,
-		`"text": {"type": "plain_text", "text": "`+strings.Repeat("x", maxRendererButtonTextLength)+`", "emoji": false}`,
-	)
-	if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err != nil {
-		t.Fatalf("button text at limit rejected: %v", err)
+func mustConfirmationEngine(t *testing.T) *blockkit.Engine {
+	t.Helper()
+	engine, err := newConfirmationViewEngine()
+	if err != nil {
+		t.Fatalf("new confirmation view engine: %v", err)
 	}
-
-	files = embeddedTemplateFiles(t)
-	replaceMessage(files, confirmationTemplateV2, `"style": "primary"`, `"url": "javascript:alert(1)", "style": "primary"`)
-	if _, err := LoadTemplateCatalogFromFS(templateMapFS(files)); err == nil {
-		t.Fatal("javascript button URL was accepted")
+	if err := engine.Register(confirmationPromptView{}, confirmationResolvedView{}); err != nil {
+		t.Fatalf("register confirmation views: %v", err)
 	}
+	return engine
 }
 
-func confirmationV2TemplateContext() TemplateContext {
-	return TemplateContext{Values: map[string]string{
-		"card_summary":    "Summary",
-		"subtitle":        "*Call ID:*\n`call-1` · *Expires:* 15:04 UTC",
-		"project":         "Project: repo",
-		"proposed_task":   "Proposed task:\nInspect the repository",
-		"wrapper_call_id": "wrapper-1",
-		"fallback_text":   "Confirmation required: Summary",
-	}}
+func mustConfirmationLayoutSHA256(t *testing.T) string {
+	t.Helper()
+	engine := mustConfirmationEngine(t)
+	layoutSHA256, ok := engine.LayoutSHA256(confirmationPromptTemplateName)
+	if !ok || layoutSHA256 == "" {
+		t.Fatalf("confirmation prompt layout fingerprint = %q, %t", layoutSHA256, ok)
+	}
+	return layoutSHA256
 }
 
 func TestConfirmationMetadata(t *testing.T) {
@@ -369,7 +407,7 @@ func TestConfirmationMetadata(t *testing.T) {
 		Summary: "Write file", CorrelationID: "confirmation:wrapper-abc",
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	metadata := confirmationMetadata(delivery)
+	metadata := confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t))
 	if metadata.EventType != confirmationMetadataEventType {
 		t.Errorf("metadata EventType = %q, want %q", metadata.EventType, confirmationMetadataEventType)
 	}
@@ -381,8 +419,9 @@ func TestConfirmationContentDigestDeterministic(t *testing.T) {
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc",
 		Summary: "Write file", Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	d1 := confirmationContentDigest(delivery)
-	d2 := confirmationContentDigest(delivery)
+	layoutSHA256 := mustConfirmationLayoutSHA256(t)
+	d1 := confirmationContentDigest(delivery, layoutSHA256)
+	d2 := confirmationContentDigest(delivery, layoutSHA256)
 	if d1 != d2 {
 		t.Errorf("digest not deterministic: %q vs %q", d1, d2)
 	}
@@ -391,78 +430,58 @@ func TestConfirmationContentDigestDeterministic(t *testing.T) {
 	}
 }
 
-func TestConfirmationContentDigestPreservesLegacyV1(t *testing.T) {
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Actor: "U12345678",
-		TeamID: "T12345678", ChannelID: "D12345678", ThreadTS: "1710000000.000000",
-		Summary: "Write file", ParameterHash: "abc123",
-		RendererMode: confirmationRenderModeV1,
-		Expiry:       time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+func TestConfirmationPublisherResolvesPromptLayoutFingerprint(t *testing.T) {
+	t.Parallel()
+	publisher := newConfirmationPublisher(nil, "U99999999", 5*time.Second, nil)
+	got, err := publisher.ConfirmationPromptLayoutSHA256()
+	if err != nil {
+		t.Fatalf("ConfirmationPromptLayoutSHA256() error = %v", err)
 	}
-	const legacyV1 = "2f36fd991b846946e691510ec93c1356e769b5088f7f97731c25d5102d39c2b7"
-	if got := confirmationContentDigest(delivery); got != legacyV1 {
-		t.Fatalf("legacy digest = %q, want %q", got, legacyV1)
-	}
-	delivery.Payload = `{"action":"cancel_workstream"}`
-	if got := confirmationContentDigest(delivery); got == legacyV1 {
-		t.Fatal("payload-bearing confirmation reused legacy digest")
+	engine := mustConfirmationEngine(t)
+	want, ok := engine.LayoutSHA256(confirmationPromptTemplateName)
+	if !ok || got != want {
+		t.Fatalf("prompt layout fingerprint = %q, want %q", got, want)
 	}
 }
 
-func TestConfirmationContentDigestV2BindsPresentationContract(t *testing.T) {
+func TestConfirmationPromptCompileRejectsFingerprintMismatch(t *testing.T) {
+	t.Parallel()
+	_, _, err := compileConfirmationMessageV2(
+		mustConfirmationEngine(t),
+		port.ConfirmationDelivery{WrapperCallID: "wrapper", OriginalCallID: "call", Summary: "summary", Expiry: time.Now().Add(time.Hour)},
+		strings.Repeat("0", 64),
+	)
+	if err == nil {
+		t.Fatal("compileConfirmationMessageV2 accepted a mismatched layout fingerprint")
+	}
+}
+
+func TestConfirmationContentDigestChangesWithLayoutFingerprint(t *testing.T) {
+	t.Parallel()
+	delivery := port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Write file",
+		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
+	}
+	left := port.ConfirmationContentDigest(delivery, strings.Repeat("a", 64))
+	right := port.ConfirmationContentDigest(delivery, strings.Repeat("b", 64))
+	if left == right {
+		t.Fatal("confirmation digest ignored the layout fingerprint")
+	}
+}
+
+func TestConfirmationContentDigestBindsPresentationContract(t *testing.T) {
 	delivery := port.ConfirmationDelivery{
 		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Actor: "U12345678",
 		TeamID: "T12345678", ChannelID: "D12345678", ThreadTS: "1710000000.000000",
 		Summary: "Write file", ParameterHash: "abc123", RendererMode: confirmationRenderModeV2,
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	v2Digest := port.ConfirmationContentDigestV2(delivery)
-	if v2Digest != port.ConfirmationContentDigest(delivery) {
-		t.Fatalf("v2 digest dispatch = %q, want %q", port.ConfirmationContentDigest(delivery), v2Digest)
-	}
-	v1 := delivery
-	v1.RendererMode = confirmationRenderModeV1
-	if v2Digest == port.ConfirmationContentDigest(v1) {
-		t.Fatal("v2 digest reused the v1 digest")
-	}
+	layoutSHA256 := mustConfirmationLayoutSHA256(t)
+	digest := port.ConfirmationContentDigest(delivery, layoutSHA256)
 	withPayload := delivery
 	withPayload.Payload = `{"project":"repo","task":"Inspect the repository"}`
-	if v2Digest == port.ConfirmationContentDigestV2(withPayload) {
-		t.Fatal("v2 digest omitted display payload data")
-	}
-}
-
-func TestConfirmationPayloadPrecedesActionsAndAppearsInFallback(t *testing.T) {
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-abc", OriginalCallID: "orig-abc", Summary: "Cancel workstream",
-		Payload: strings.Repeat("x", 3000), Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	renderer, err := NewEmbeddedTemplateRenderer()
-	if err != nil {
-		t.Fatal(err)
-	}
-	fallback, blocks, err := compileConfirmationMessageV1(renderer, delivery)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(fallback, "complete proposed payload is shown") {
-		t.Fatalf("oversized fallback did not identify complete payload blocks: %q", fallback)
-	}
-	if len(blocks) != 4 {
-		t.Fatalf("blocks = %d, want two payload blocks plus confirmation blocks", len(blocks))
-	}
-	for index := range 2 {
-		section, ok := blocks[index].(*slackapi.SectionBlock)
-		if !ok || section.Text == nil || section.Text.Type != slackapi.PlainTextType || !strings.HasPrefix(section.Text.Text, "Proposed payload:\n") {
-			t.Fatalf("payload block %d = %#v", index, blocks[index])
-		}
-	}
-	if _, ok := blocks[len(blocks)-1].(*slackapi.ActionBlock); !ok {
-		t.Fatalf("last block = %#v, want actions after payload", blocks[len(blocks)-1])
-	}
-	delivery.Payload = `{"action":"cancel_workstream"}`
-	if fallback := confirmationFallbackTextV1(delivery); !strings.Contains(fallback, delivery.Payload) {
-		t.Fatal("bounded accessible fallback omitted confirmation payload")
+	if digest == port.ConfirmationContentDigest(withPayload, layoutSHA256) {
+		t.Fatal("digest omitted display payload data")
 	}
 }
 
@@ -592,20 +611,21 @@ func TestNonBlockActionInteractiveIgnored(t *testing.T) {
 }
 
 type fakeConfirmationBlockClient struct {
-	mu             sync.Mutex
-	postedChans    []string
-	postedBlocks   [][]slackapi.Block
-	updatedChans   []string
-	updatedTS      []string
-	updatedBlocks  [][]slackapi.Block
-	fallbackTexts  []string
-	postedMetadata []slackapi.SlackMetadata
-	postedThreads  []string
-	messages       []slackapi.Message
-	hasMore        bool
-	postErr        error
-	updateErr      error
-	historyErr     error
+	mu               sync.Mutex
+	postedChans      []string
+	postedBlocks     [][]slackapi.Block
+	updatedChans     []string
+	updatedTS        []string
+	updatedBlocks    [][]slackapi.Block
+	updatedFallbacks []string
+	fallbackTexts    []string
+	postedMetadata   []slackapi.SlackMetadata
+	postedThreads    []string
+	messages         []slackapi.Message
+	hasMore          bool
+	postErr          error
+	updateErr        error
+	historyErr       error
 }
 
 func (c *fakeConfirmationBlockClient) PostBlocks(_ context.Context, channelID, fallbackText string, blocks []slackapi.Block, metadata slackapi.SlackMetadata, threadTS string) (string, error) {
@@ -628,7 +648,7 @@ func (c *fakeConfirmationBlockClient) ConfirmationMessages(_ context.Context, _,
 	return append([]slackapi.Message(nil), c.messages...), c.hasMore, c.historyErr
 }
 
-func (c *fakeConfirmationBlockClient) UpdateBlocks(_ context.Context, channelID, messageTS string, blocks []slackapi.Block, _ string) error {
+func (c *fakeConfirmationBlockClient) UpdateBlocks(_ context.Context, channelID, messageTS string, blocks []slackapi.Block, fallback string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.updateErr != nil {
@@ -637,6 +657,7 @@ func (c *fakeConfirmationBlockClient) UpdateBlocks(_ context.Context, channelID,
 	c.updatedChans = append(c.updatedChans, channelID)
 	c.updatedTS = append(c.updatedTS, messageTS)
 	c.updatedBlocks = append(c.updatedBlocks, blocks)
+	c.updatedFallbacks = append(c.updatedFallbacks, fallback)
 	return nil
 }
 
@@ -662,7 +683,7 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 	if len(client.postedChans) != 1 || client.postedChans[0] != "C12345678" {
 		t.Errorf("posted channel = %v, want [C12345678]", client.postedChans)
 	}
-	if len(client.fallbackTexts) != 1 || client.fallbackTexts[0] != confirmationFallbackText(delivery) {
+	if len(client.fallbackTexts) != 1 || client.fallbackTexts[0] == "" {
 		t.Fatalf("accessible fallback = %q", client.fallbackTexts)
 	}
 	if client.postedThreads[0] != delivery.ThreadTS {
@@ -673,44 +694,49 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 	}
 	if client.postedMetadata[0].EventPayload["correlation_id"] != delivery.CorrelationID ||
 		client.postedMetadata[0].EventPayload["render_mode"] != confirmationRenderMode ||
-		client.postedMetadata[0].EventPayload["content_sha256"] != confirmationContentDigest(delivery) {
+		client.postedMetadata[0].EventPayload["content_sha256"] != confirmationContentDigest(delivery, pub.layoutSHA256) {
 		t.Fatalf("posted metadata payload = %#v", client.postedMetadata[0].EventPayload)
 	}
-	blocks := client.postedBlocks[0]
-	if len(blocks) != 3 {
-		t.Fatalf("confirmation blocks = %d, want 3", len(blocks))
+	message := blockkit.Message{FallbackText: client.fallbackTexts[0], Blocks: client.postedBlocks[0]}
+	for _, value := range []string{"Write file", "orig-abc", "15:30", "not provided"} {
+		if !blockkit.Reachable(message, value) {
+			t.Fatalf("published value %q did not reach the rendered tree", value)
+		}
 	}
-	card := blocks[0].(*slackapi.CardBlock)
-	if card.Title == nil || card.Title.Type != slackapi.PlainTextType || card.Title.Text != "Confirmation required" {
-		t.Fatalf("confirmation card title = %#v", card.Title)
+	encoded, err := json.Marshal(client.postedBlocks[0])
+	if err != nil {
+		t.Fatal(err)
 	}
-	if card.Subtitle == nil || card.Subtitle.Text != "*Call ID:*\n`orig-abc` · *Expires:* 15:30 UTC" {
-		t.Fatalf("confirmation card subtitle = %#v", card.Subtitle)
+	if strings.Count(string(encoded), `"value":"wrapper-abc"`) != 3 {
+		t.Fatalf("published action values = %s", encoded)
 	}
-	if card.Body == nil || card.Body.Text != "Write file" {
-		t.Fatalf("confirmation card body = %#v", card.Body)
+}
+
+func TestConfirmationPublisherBoundsPersistedSummary(t *testing.T) {
+	t.Parallel()
+	client := &fakeConfirmationBlockClient{}
+	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
+	longSummary := strings.Repeat("á", 220)
+
+	_, err := pub.PublishConfirmation(context.Background(), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-long", OriginalCallID: "original-long",
+		ChannelID: "C12345678", Summary: longSummary,
+		CorrelationID: "confirmation:wrapper-long",
+		Expiry:        time.Date(2026, 8, 31, 18, 30, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("PublishConfirmation() error = %v", err)
 	}
-	projectTask := blocks[1].(*slackapi.SectionBlock)
-	if projectTask.Text == nil || projectTask.Text.Type != slackapi.PlainTextType || projectTask.Text.Text != "Proposed task: not provided" || len(projectTask.Fields) != 1 ||
-		projectTask.Fields[0].Type != slackapi.PlainTextType ||
-		projectTask.Fields[0].Text != "Project: not provided" {
-		t.Fatalf("confirmation project and task = %#v", projectTask)
+	if len(client.postedBlocks) != 1 {
+		t.Fatalf("posted blocks = %d, want 1 message", len(client.postedBlocks))
 	}
-	actions := blocks[2].(*slackapi.ActionBlock)
-	if actions.BlockID != "confirmation_buttons" || len(actions.Elements.ElementSet) != 3 {
-		t.Fatalf("confirmation actions = %#v", actions)
+	expectedSummary := truncateConfirmationText(longSummary, 200)
+	message := blockkit.Message{FallbackText: client.fallbackTexts[0], Blocks: client.postedBlocks[0]}
+	if !blockkit.Reachable(message, expectedSummary) {
+		t.Fatalf("bounded summary did not reach the rendered tree")
 	}
-	approve := actions.Elements.ElementSet[0].(*slackapi.ButtonBlockElement)
-	reject := actions.Elements.ElementSet[1].(*slackapi.ButtonBlockElement)
-	status := actions.Elements.ElementSet[2].(*slackapi.ButtonBlockElement)
-	if approve.ActionID != approveActionID || approve.Value != delivery.WrapperCallID || approve.Style != slackapi.StylePrimary || approve.Text.Text != "Approve" {
-		t.Fatalf("approve button = %#v", approve)
-	}
-	if reject.ActionID != rejectActionID || reject.Value != delivery.WrapperCallID || reject.Style != slackapi.StyleDanger || reject.Text.Text != "Reject" {
-		t.Fatalf("reject button = %#v", reject)
-	}
-	if status.ActionID != statusActionID || status.Value != delivery.WrapperCallID || status.Text.Text != "Ver estado" {
-		t.Fatalf("status button = %#v", status)
+	if blockkit.Reachable(message, longSummary) {
+		t.Fatal("unbounded summary reached the rendered tree")
 	}
 }
 
@@ -736,11 +762,14 @@ func TestConfirmationPublisherUpdate(t *testing.T) {
 	if client.updatedTS[0] != "1720000001.000001" {
 		t.Errorf("updated timestamp = %q", client.updatedTS[0])
 	}
-	if got := client.updatedBlocks[0][0].(*slackapi.SectionBlock).Text.Text; strings.Contains(got, ":white_check_mark:") || !strings.HasPrefix(got, "*Confirmation approved*") {
-		t.Fatalf("updated title = %q", got)
+	message := blockkit.Message{FallbackText: client.updatedFallbacks[0], Blocks: client.updatedBlocks[0]}
+	for _, value := range []string{"Write file", "orig-abc", "approved", "done"} {
+		if !blockkit.Reachable(message, value) {
+			t.Fatalf("updated value %q did not reach the rendered tree", value)
+		}
 	}
-	if got := client.updatedBlocks[0][2].(*slackapi.SectionBlock).Text; got.Type != slackapi.PlainTextType || got.Text != "Confirmation result:\ndone" {
-		t.Fatalf("updated result = %#v", got)
+	if message.FallbackText == "" || strings.ContainsAny(message.FallbackText, "*`") {
+		t.Fatalf("updated fallback = %q", message.FallbackText)
 	}
 }
 
@@ -796,35 +825,13 @@ func TestConfirmationPublisherRecoversMatchingPrompt(t *testing.T) {
 		RendererMode: confirmationRenderMode, Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
 	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t)),
 	}}}
 	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
 
 	result, found, err := pub.RecoverConfirmation(t.Context(), delivery)
 	if err != nil || !found || result.SlackMessageTS != "1720000001.000001" {
 		t.Fatalf("RecoverConfirmation() = %#v, %t, %v", result, found, err)
-	}
-}
-
-func TestConfirmationPublisherRecoversPendingV1Prompt(t *testing.T) {
-	t.Parallel()
-	delivery := port.ConfirmationDelivery{
-		WrapperCallID: "wrapper-v1", OriginalCallID: "orig-v1", Actor: "U12345678",
-		TeamID: "T12345678", ChannelID: "C12345678", ThreadTS: "1720000000.000000",
-		Summary: "Write file", ParameterHash: "abc123", CorrelationID: "confirmation:wrapper-v1",
-		RendererMode: confirmationRenderModeV1, Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
-	}
-	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
-	}}}
-	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
-	result, found, err := pub.RecoverConfirmation(t.Context(), delivery)
-	if err != nil || !found || result.SlackMessageTS != "1720000001.000001" {
-		t.Fatalf("RecoverConfirmation(v1) = %#v, %t, %v", result, found, err)
-	}
-	_, blocks, err := compileConfirmationMessageForMode(mustEmbeddedRenderer(t), delivery, confirmationRenderModeV1)
-	if err != nil || len(blocks) != 2 {
-		t.Fatalf("v1 renderer compatibility = blocks:%d err:%v", len(blocks), err)
 	}
 }
 
@@ -836,7 +843,7 @@ func TestConfirmationPublisherRecoveryFailsClosed(t *testing.T) {
 		CorrelationID: "confirmation:wrapper-abc", RendererMode: confirmationRenderMode,
 		Expiry: time.Date(2026, 7, 21, 15, 30, 0, 0, time.UTC),
 	}
-	metadata := confirmationMetadata(delivery)
+	metadata := confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t))
 	metadata.EventPayload["content_sha256"] = strings.Repeat("0", 64)
 	client := &fakeConfirmationBlockClient{messages: []slackapi.Message{{
 		User: "U99999999", Timestamp: "1720000001.000001", Metadata: metadata,
@@ -854,7 +861,7 @@ func TestConfirmationPublisherRecoveryFailsClosed(t *testing.T) {
 	}
 
 	client.messages = []slackapi.Message{{
-		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery),
+		User: "U99999999", Timestamp: "1720000001.000001", Metadata: confirmationMetadata(delivery, mustConfirmationLayoutSHA256(t)),
 	}}
 	if _, _, err := pub.RecoverConfirmation(t.Context(), delivery); err == nil {
 		t.Fatal("RecoverConfirmation accepted a match from incomplete history")

@@ -1,14 +1,23 @@
 package slack
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 	"time"
 
-	slackapi "github.com/slack-go/slack"
-
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
+
+func mustJobEngine(t *testing.T) *blockkit.Engine {
+	t.Helper()
+	engine, err := newJobEngine()
+	if err != nil {
+		t.Fatalf("new job view engine: %v", err)
+	}
+	return engine
+}
 
 func acceptedTestJob() domain.ExternalAgentJob {
 	return domain.ExternalAgentJob{
@@ -21,39 +30,22 @@ func acceptedTestJob() domain.ExternalAgentJob {
 }
 
 func TestCompileJobAcceptedMessageIncludesHostReceiptFields(t *testing.T) {
-	fallback, blocks, err := compileJobAcceptedMessage(mustEmbeddedRenderer(t), acceptedTestJob())
+	fallback, blocks, err := compileJobAcceptedMessage(mustJobEngine(t), acceptedTestJob())
 	if err != nil {
 		t.Fatalf("compileJobAcceptedMessage() error = %v", err)
 	}
-	if fallback == "" || !strings.Contains(fallback, "job_123") || !strings.Contains(fallback, "queued") {
-		t.Fatalf("fallback = %q", fallback)
-	}
-	if !strings.Contains(fallback, "2026-07-21T20:30:00Z") || !strings.Contains(fallback, "2026-07-21T20:31:00Z") {
-		t.Fatalf("fallback timestamps = %q", fallback)
-	}
-	if len(blocks) != 2 {
-		t.Fatalf("blocks = %d, want 2", len(blocks))
-	}
-	for _, block := range blocks {
-		if _, ok := block.(*slackapi.ActionBlock); ok {
-			t.Fatal("accepted receipt must not contain interactive elements")
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	for _, value := range []string{"job_123", "queued", "2026-07-21T20:30:00Z", "2026-07-21T20:31:00Z", jobAcceptedStatusSentence} {
+		if !blockkit.Reachable(message, value) {
+			t.Fatalf("accepted value %q did not reach the view", value)
 		}
 	}
-	card := blocks[0].(*slackapi.CardBlock)
-	if !strings.Contains(card.Subtitle.Text, "job_123") || !strings.Contains(card.Subtitle.Text, "queued") {
-		t.Fatalf("card subtitle = %#v", card.Subtitle)
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if card.Body == nil || card.Body.Text != jobAcceptedStatusSentence {
-		t.Fatalf("card body = %#v", card.Body)
-	}
-	context := blocks[1].(*slackapi.ContextBlock)
-	if len(context.ContextElements.Elements) != 2 {
-		t.Fatalf("context elements = %#v", context.ContextElements.Elements)
-	}
-	created := context.ContextElements.Elements[0].(*slackapi.TextBlockObject)
-	updated := context.ContextElements.Elements[1].(*slackapi.TextBlockObject)
-	if !strings.Contains(created.Text, "2026-07-21T20:30:00Z") || !strings.Contains(updated.Text, "2026-07-21T20:31:00Z") {
-		t.Fatalf("timestamp elements = %#v, %#v", created, updated)
+	if strings.Contains(string(encoded), "action_id") {
+		t.Fatalf("accepted receipt contains interactive elements: %s", encoded)
 	}
 	if err := validateJobAcceptedMessageLimits(fallback, blocks); err != nil {
 		t.Fatalf("validateJobAcceptedMessageLimits() error = %v", err)
@@ -63,52 +55,32 @@ func TestCompileJobAcceptedMessageIncludesHostReceiptFields(t *testing.T) {
 func TestCompileJobAcceptedMessageNeutralizesAndEscapesJobID(t *testing.T) {
 	job := acceptedTestJob()
 	job.ID = "job-<!channel>-<@U12345678>"
-	_, blocks, err := compileJobAcceptedMessage(mustEmbeddedRenderer(t), job)
+	_, blocks, err := compileJobAcceptedMessage(mustJobEngine(t), job)
 	if err != nil {
 		t.Fatalf("compileJobAcceptedMessage() error = %v", err)
 	}
-	text := blocks[0].(*slackapi.CardBlock).Subtitle.Text
-	if strings.Contains(text, "<!channel>") || strings.Contains(text, "<@U12345678>") {
-		t.Fatalf("unsafe Slack controls remain in %q", text)
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
 	}
-	if !strings.Contains(text, "&amp;") || !strings.Contains(text, "&gt;") {
-		t.Fatalf("job ID was not escaped as mrkdwn: %q", text)
+	if strings.Contains(string(encoded), "<!channel>") || strings.Contains(string(encoded), "<@U12345678>") || !strings.Contains(string(encoded), `\u0026lt;`) {
+		t.Fatalf("unsafe Slack controls were not safely rendered: %q", encoded)
 	}
 }
 
 func TestCompileJobAcceptedMessageRespectsLimits(t *testing.T) {
 	job := acceptedTestJob()
 	job.ID = strings.Repeat("x", maxFallbackText*2)
-	fallback, blocks, err := compileJobAcceptedMessage(mustEmbeddedRenderer(t), job)
+	fallback, blocks, err := compileJobAcceptedMessage(mustJobEngine(t), job)
 	if err != nil {
 		t.Fatalf("compileJobAcceptedMessage() error = %v", err)
 	}
 	if len([]rune(fallback)) > maxFallbackText || len(blocks) > maxBlocksPerMessage {
 		t.Fatalf("compiled receipt exceeds limits: fallback=%d blocks=%d", len([]rune(fallback)), len(blocks))
 	}
-	card := blocks[0].(*slackapi.CardBlock)
-	if card.Title == nil || len([]rune(card.Title.Text)) > maxRendererCardTitleLength {
-		t.Fatalf("card title exceeds limit: %#v", card.Title)
-	}
-	if card.Subtitle == nil || len([]rune(card.Subtitle.Text)) > maxRendererCardSubtitleLength {
-		t.Fatalf("card subtitle exceeds limit: %#v", card.Subtitle)
-	}
-	if card.Body == nil || len([]rune(card.Body.Text)) > maxRendererCardBodyLength {
-		t.Fatalf("card body exceeds limit: %#v", card.Body)
-	}
-	for index, block := range blocks {
-		section, ok := block.(*slackapi.SectionBlock)
-		if !ok {
-			continue
-		}
-		if section.Text != nil && len([]rune(section.Text.Text)) > maxRendererCompositionTextLength {
-			t.Fatalf("block %d text exceeds composition limit", index)
-		}
-		for _, field := range section.Fields {
-			if len([]rune(field.Text)) > maxRendererSectionFieldLength {
-				t.Fatalf("block %d field exceeds section field limit", index)
-			}
-		}
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	if !blockkit.Reachable(message, strings.Repeat("x", 10)) {
+		t.Fatal("truncated job ID did not reach the rendered view")
 	}
 }
 
@@ -126,7 +98,7 @@ func TestCompileJobAcceptedMessageRequiresReceiptFields(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			job := acceptedTestJob()
 			tt.edit(&job)
-			if _, _, err := compileJobAcceptedMessage(mustEmbeddedRenderer(t), job); err == nil {
+			if _, _, err := compileJobAcceptedMessage(mustJobEngine(t), job); err == nil {
 				t.Fatal("compileJobAcceptedMessage() accepted incomplete receipt")
 			}
 		})

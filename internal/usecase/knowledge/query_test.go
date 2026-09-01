@@ -32,7 +32,7 @@ func TestExtractKnowledgeQueryGroundsShortMessagesWithWorkstream(t *testing.T) {
 		Objective:    "migrate the api to postgresql 17",
 		CurrentPhase: "planning",
 		Tasks: []domain.WorkstreamTask{
-			{ID: "t1", Description: "audit connection pool settings", Status: domain.TaskQueued},
+			{ID: "t1", JobID: "job-t1", Description: "audit connection pool settings", Status: domain.TaskQueued},
 			{ID: "t2", Description: "closed task must not ground the query", Status: domain.TaskCompleted},
 		},
 	}

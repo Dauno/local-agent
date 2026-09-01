@@ -70,10 +70,28 @@ func TestBuilderModalPresenterRendersLLMParity(t *testing.T) {
 		t.Fatal("agent_type input does not dispatch actions")
 	}
 	typeSelect := typeBlock.Element.(*slackapi.SelectBlockElement)
-	assertStaticSelect(t, typeSelect, "agent_type", []string{"llm", "agent_cli"}, "llm")
+	assertStaticSelect(t, typeSelect, "agent_type", []expectedStaticOption{{Text: "LLM", Value: "llm"}, {Text: "Agent CLI", Value: "agent_cli"}}, expectedStaticOption{Text: "LLM", Value: "llm"})
 
 	model := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement)
-	assertStaticSelect(t, model, "model", []string{"openai/a", "openai/z"}, "openai/z")
+	assertStaticSelect(
+		t, model, "model",
+		[]expectedStaticOption{{Text: "openai/a", Value: "openai/a"}, {Text: "openai/z", Value: "openai/z"}},
+		expectedStaticOption{Text: "openai/z", Value: "openai/z"},
+	)
+}
+
+func TestBuilderModalPresenterUsesFirstProfileWhenModelIsMissing(t *testing.T) {
+	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
+		{Reference: "openai/z", ProviderType: agentdef.ProviderTypeOpenAICompatible},
+		{Reference: "openai/a", ProviderType: agentdef.ProviderTypeOpenAICompatible},
+	})
+	view := presenter.BuildViewForKind(domain.AgentKindLLM, map[string]string{
+		"name": "incident_analyst", "agent_type": string(domain.AgentKindLLM),
+	})
+	model := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement)
+	if model.InitialOption == nil || model.InitialOption.Value != "openai/a" {
+		t.Fatalf("default model = %#v, want first compatible profile", model.InitialOption)
+	}
 }
 
 func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
@@ -102,12 +120,20 @@ func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
 	}
 
 	model := builderInputBlock(t, view, "model").Element.(*slackapi.SelectBlockElement)
-	assertStaticSelect(t, model, "model", []string{"agentcli/a", "agentcli/z"}, "agentcli/z")
+	assertStaticSelect(
+		t, model, "model",
+		[]expectedStaticOption{{Text: "agentcli/a", Value: "agentcli/a"}, {Text: "agentcli/z", Value: "agentcli/z"}},
+		expectedStaticOption{Text: "agentcli/z", Value: "agentcli/z"},
+	)
 
 	modeBlock := builderInputBlock(t, view, "execution_mode")
 	assertBuilderInput(t, modeBlock, "Ejecucion", "")
 	mode := modeBlock.Element.(*slackapi.SelectBlockElement)
-	assertStaticSelect(t, mode, "execution_mode", []string{domain.ExecutionModeForeground, domain.ExecutionModeDurableJob}, domain.ExecutionModeDurableJob)
+	assertStaticSelect(
+		t, mode, "execution_mode",
+		[]expectedStaticOption{{Text: domain.ExecutionModeForeground, Value: domain.ExecutionModeForeground}, {Text: domain.ExecutionModeDurableJob, Value: domain.ExecutionModeDurableJob}},
+		expectedStaticOption{Text: domain.ExecutionModeDurableJob, Value: domain.ExecutionModeDurableJob},
+	)
 
 	timeoutBlock := builderInputBlock(t, view, "timeout_seconds")
 	assertBuilderInput(t, timeoutBlock, "Timeout (segundos)", "Maximo 86400")
@@ -115,6 +141,62 @@ func TestBuilderModalPresenterRendersExternalAgentParity(t *testing.T) {
 	if timeout.InitialValue != "86400" || timeout.MaxLength != len("86400") || timeout.Placeholder == nil || timeout.Placeholder.Text != "7200" {
 		t.Fatalf("timeout element = %#v", timeout)
 	}
+}
+
+func TestBuilderModalInitialOptionsMatchTheirOptionObjects(t *testing.T) {
+	presenter := NewBuilderModalPresenterWithProviders([]BuilderProviderProfile{
+		{Reference: "agentcli/default", ProviderType: agentdef.ProviderTypeAgentCLI},
+		{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible},
+	})
+	for _, kind := range []domain.AgentKind{domain.AgentKindLLM, domain.AgentKindAgentCLI} {
+		view, err := presenter.BuildViewForKindResult(kind, nil)
+		if err != nil {
+			t.Fatalf("build %s modal: %v", kind, err)
+		}
+		assertInitialOptionsMatchOptions(t, view)
+	}
+}
+
+func assertInitialOptionsMatchOptions(t *testing.T, view slackapi.ModalViewRequest) {
+	t.Helper()
+	data, err := json.Marshal(view.Blocks.BlockSet)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root any
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	var walk func(any)
+	walk = func(node any) {
+		switch typed := node.(type) {
+		case []any:
+			for _, child := range typed {
+				walk(child)
+			}
+		case map[string]any:
+			if initial, ok := typed["initial_option"]; ok {
+				options, ok := typed["options"].([]any)
+				if !ok {
+					t.Fatalf("static select options have type %T", typed["options"])
+				}
+				found := false
+				for _, option := range options {
+					if reflect.DeepEqual(initial, option) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					t.Fatalf("initial option %#v is not one of options %#v", initial, options)
+				}
+			}
+			for _, child := range typed {
+				walk(child)
+			}
+		}
+	}
+	walk(root)
 }
 
 func TestBuilderModalPresenterPreservesValuesAndPrivateMetadata(t *testing.T) {
@@ -271,48 +353,6 @@ func TestBuilderModalUpdateRejectsUnavailableKindBeforeSlack(t *testing.T) {
 	}
 }
 
-func TestBuilderModalTemplateCopyAndOrderChangesDriveRenderer(t *testing.T) {
-	files := embeddedTemplateFiles(t)
-	path := "templates/builder_modal.json"
-	var document map[string]any
-	if err := json.Unmarshal(files[path], &document); err != nil {
-		t.Fatalf("decode builder template: %v", err)
-	}
-	payload := document["payload"].(map[string]any)
-	blocks := payload["blocks"].([]any)
-	section := blocks[0].(map[string]any)
-	sectionText := section["text"].(map[string]any)
-	sectionText["text"] = "Plantilla personalizada."
-	blocks[0], blocks[1] = blocks[1], blocks[0]
-	payload["blocks"] = blocks
-	files[path], _ = json.Marshal(document)
-
-	catalog, err := LoadTemplateCatalogFromFS(templateMapFS(files))
-	if err != nil {
-		t.Fatalf("load edited catalog: %v", err)
-	}
-	renderer, err := NewTemplateRenderer(catalog)
-	if err != nil {
-		t.Fatalf("new renderer: %v", err)
-	}
-	view, err := renderer.CompileModal("builder_modal", TemplateContext{
-		Kind:     domain.AgentKindLLM,
-		Profiles: []BuilderProviderProfile{{Reference: "openai/fast", ProviderType: agentdef.ProviderTypeOpenAICompatible}},
-		Values: map[string]string{
-			"name": "", "description": "", "instruction": "", "agent_type": "llm", "model": "openai/fast",
-		},
-	})
-	if err != nil {
-		t.Fatalf("compile edited builder template: %v", err)
-	}
-	if got, ok := view.Blocks.BlockSet[0].(*slackapi.InputBlock); !ok || got.BlockID != "name" {
-		t.Fatalf("edited first block = %#v, want name input", view.Blocks.BlockSet[0])
-	}
-	if got, ok := view.Blocks.BlockSet[1].(*slackapi.SectionBlock); !ok || got.Text == nil || got.Text.Text != "Plantilla personalizada." {
-		t.Fatalf("edited second block = %#v", view.Blocks.BlockSet[1])
-	}
-}
-
 func TestBuilderModalPresenterIsDeterministic(t *testing.T) {
 	profiles := []BuilderProviderProfile{
 		{Reference: "agentcli/z", ProviderType: agentdef.ProviderTypeAgentCLI},
@@ -357,16 +397,29 @@ func assertBuilderInput(t *testing.T, block *slackapi.InputBlock, label, hint st
 	}
 }
 
-func assertStaticSelect(t *testing.T, selectElement *slackapi.SelectBlockElement, actionID string, wantOptions []string, wantInitial string) {
+type expectedStaticOption struct {
+	Text  string
+	Value string
+}
+
+func assertStaticSelect(t *testing.T, selectElement *slackapi.SelectBlockElement, actionID string, wantOptions []expectedStaticOption, wantInitial expectedStaticOption) {
 	t.Helper()
 	if selectElement.Type != slackapi.OptTypeStatic || selectElement.ActionID != actionID {
 		t.Fatalf("select = %#v", selectElement)
 	}
-	if got := optionValues(selectElement.Options); !reflect.DeepEqual(got, wantOptions) {
-		t.Fatalf("%s options = %v, want %v", actionID, got, wantOptions)
+	if len(selectElement.Options) != len(wantOptions) {
+		t.Fatalf("%s option count = %d, want %d", actionID, len(selectElement.Options), len(wantOptions))
 	}
-	if selectElement.InitialOption == nil || selectElement.InitialOption.Value != wantInitial {
-		t.Fatalf("%s initial option = %#v, want %q", actionID, selectElement.InitialOption, wantInitial)
+	for index, want := range wantOptions {
+		got := selectElement.Options[index]
+		if got == nil || got.Text == nil || got.Text.Type != slackapi.PlainTextType || got.Text.Text != want.Text || got.Value != want.Value {
+			t.Fatalf("%s option %d = %#v, want text %q and value %q", actionID, index, got, want.Text, want.Value)
+		}
+	}
+	if selectElement.InitialOption == nil || selectElement.InitialOption.Text == nil ||
+		selectElement.InitialOption.Text.Type != slackapi.PlainTextType || selectElement.InitialOption.Text.Text != wantInitial.Text ||
+		selectElement.InitialOption.Value != wantInitial.Value {
+		t.Fatalf("%s initial option = %#v, want text %q and value %q", actionID, selectElement.InitialOption, wantInitial.Text, wantInitial.Value)
 	}
 }
 
@@ -380,4 +433,14 @@ func builderInputBlock(t *testing.T, view slackapi.ModalViewRequest, blockID str
 	}
 	t.Fatalf("input block %q not found", blockID)
 	return nil
+}
+
+func blockIDs(blocks []slackapi.Block) []string {
+	ids := make([]string, 0, len(blocks))
+	for _, block := range blocks {
+		if block.ID() != "" {
+			ids = append(ids, block.ID())
+		}
+	}
+	return ids
 }

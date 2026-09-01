@@ -67,7 +67,12 @@ type ExternalAgentConfig struct {
 	ProgressWarningSeconds       int                         `yaml:"progress_warning_seconds"`
 	WorkerConcurrency            int                         `yaml:"worker_concurrency"`
 	ArtifactRetentionDays        int                         `yaml:"artifact_retention_days"`
+	Batch                        ExternalAgentBatchConfig    `yaml:"batch"`
 	Delivery                     ExternalAgentDeliveryConfig `yaml:"delivery"`
+}
+
+type ExternalAgentBatchConfig struct {
+	MaxTasks int `yaml:"max_tasks"`
 }
 
 type ExternalAgentDeliveryConfig struct {
@@ -388,6 +393,7 @@ func Default() Config {
 			ProgressWarningSeconds:       900,
 			WorkerConcurrency:            1,
 			ArtifactRetentionDays:        30,
+			Batch:                        ExternalAgentBatchConfig{MaxTasks: 4},
 			Delivery:                     ExternalAgentDeliveryConfig{MaxMarkdownParts: 6, MaxFileBytes: 16 * 1024 * 1024},
 		},
 		CodeIntelligence: &CodeIntelligenceConfig{

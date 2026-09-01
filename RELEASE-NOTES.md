@@ -1,5 +1,12 @@
 # Release Notes
 
+## v0.15.0
+
+- Added schema v47 for workstream-owned durable job admission and task settlement.
+- `workstream_tasks.job_id` is the only durable job association; external-agent jobs remain generic.
+- Detached ad hoc workers use automatic root integration when no eligible workstream binding remains.
+- Conversation-scope completions use no tools, proposals, confirmations, delegation, or mutations.
+
 ## v0.14.1 (2026-08-28)
 
 - Improved Slack confirmation and job-accepted cards with bounded text that respects Slack limits.

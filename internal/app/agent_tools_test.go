@@ -663,7 +663,9 @@ func (m *durableToolRootModel) GenerateContent(_ context.Context, _ *model.LLMRe
 		if call == 1 {
 			yield(&model.LLMResponse{
 				Content: &genai.Content{Role: genai.RoleModel, Parts: []*genai.Part{{FunctionCall: &genai.FunctionCall{
-					ID: "durable-call-1", Name: "cli_leaf", Args: map[string]any{"project": "workspace", "task": "inspect"},
+					ID: "durable-call-1", Name: "cli_leaf", Args: map[string]any{
+						"project": "workspace", "task": "inspect", "final_instruction": "Presenta el resultado en español.",
+					},
 				}}}},
 				FinishReason: genai.FinishReasonStop,
 				TurnComplete: true,
@@ -687,6 +689,38 @@ func (s *recordingJobStarter) Start(_ context.Context, request domain.ExternalAg
 	s.calls++
 	s.request = request
 	return &domain.ExternalAgentJob{ID: "job-1", RequestSHA256: "digest"}, nil
+}
+
+func TestDurableAgentBatchPassesOnlyTransientWorkstreamSelector(t *testing.T) {
+	starter := &recordingJobStarter{}
+	batch, err := newAgentCLIBatchDurableTool(
+		[]preparedAgentTool{batchTestChild("smoke_worker", "sha256:smoke", "done")},
+		starter, "U12345678", "slack:T12345678:dm:D12345678", 4,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnable, ok := batch.(interface {
+		Run(agent.Context, any) (map[string]any, error)
+	})
+	if !ok {
+		t.Fatal("batch tool does not expose the function runner")
+	}
+	_, err = runnable.Run(&agent.ContextMock{}, map[string]any{
+		"mode": "sequential", "project": "workspace",
+		"tasks":             []any{map[string]any{"agent": "smoke_worker", "task": "inspect"}},
+		"final_instruction": "Presenta una síntesis.",
+		"workstream": map[string]any{
+			"workstream_id": "ws-1", "task_id": "task-1", "expected_revision": 4,
+		},
+	})
+	if err != nil {
+		t.Fatalf("run batch tool: %v", err)
+	}
+	if starter.request.WorkstreamTask == nil || starter.request.WorkstreamTask.WorkstreamID != "ws-1" ||
+		starter.request.WorkstreamTask.TaskID != "task-1" || starter.request.WorkstreamTask.ExpectedRevision != 4 {
+		t.Fatalf("workstream admission selector = %#v", starter.request.WorkstreamTask)
+	}
 }
 
 func TestDurableAgentCLIToolUsesOptionalConfirmationPolicy(t *testing.T) {
@@ -733,8 +767,12 @@ func TestDurableAgentCLIToolUsesOptionalConfirmationPolicy(t *testing.T) {
 			if starter.calls != test.wantStarts {
 				t.Fatalf("job starts = %d, want %d", starter.calls, test.wantStarts)
 			}
-			if test.wantStarts == 1 && (starter.request.Profile != "codex/build" || starter.request.Task != "inspect") {
-				t.Fatalf("job request = %#v", starter.request)
+			if test.wantStarts == 1 {
+				delegation, encoded, decodeErr := domain.DecodeExternalAgentDelegation(starter.request.Task)
+				if decodeErr != nil || !encoded || starter.request.Profile != "codex/build" || delegation.Task != "inspect" ||
+					delegation.FinalInstruction != "Presenta el resultado en español." {
+					t.Fatalf("job request = %#v, delegation = %#v, encoded = %v, err = %v", starter.request, delegation, encoded, decodeErr)
+				}
 			}
 		})
 	}

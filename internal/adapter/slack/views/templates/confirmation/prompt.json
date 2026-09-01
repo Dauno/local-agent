@@ -1,0 +1,65 @@
+{
+  "schema_version": 2,
+  "surface": "message",
+  "contract": {
+    "inputs": {
+      "summary": {"type": "text", "required": true, "max": 200},
+      "call_id": {"type": "id", "required": true},
+      "wrapper_call_id": {"type": "id", "required": true},
+      "expires_at": {"type": "timestamp", "required": true},
+      "project": {"type": "text", "default": "not provided"},
+      "task": {"type": "text", "default": "not provided"},
+      "workstream": {"type": "list<pair>"},
+      "payload": {"type": "longtext", "chunk": 2800}
+    },
+    "actions": {
+      "approve": {"id": "local_agent.confirm.approve", "text": "Approve", "style": "primary", "carries": "wrapper_call_id"},
+      "reject": {"id": "local_agent.confirm.reject", "text": "Reject", "style": "danger", "carries": "wrapper_call_id"},
+      "status": {"id": "local_agent.job.status", "text": "Ver estado", "carries": "wrapper_call_id"}
+    }
+  },
+  "layout": [
+    {
+      "type": "card",
+      "title": {"type": "plain_text", "text": "Confirmation required"},
+      "subtitle": {"type": "mrkdwn", "text": "*Call ID:*\n{{call_id:code}} · *Expires:* {{expires_at:hhmm}} UTC"},
+      "body": {"type": "plain_text", "text": "{{summary}}"}
+    },
+    {
+      "type": "section",
+      "text": {"type": "plain_text", "text": "Proposed task:\n{{task}}"},
+      "fields": [
+        {"type": "plain_text", "text": "Project: {{project}}"}
+      ]
+    },
+    {
+      "region": "workstream",
+      "block": {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "Workstream data:"}
+      }
+    },
+    {
+      "region": "workstream",
+      "each": {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "{{item.label}}: {{item.value}}"}
+      }
+    },
+    {
+      "region": "payload",
+      "block": {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "Payload:"}
+      }
+    },
+    {
+      "region": "payload",
+      "each": {
+        "type": "section",
+        "text": {"type": "plain_text", "text": "{{item}}"}
+      }
+    },
+    {"actions": ["approve", "reject", "status"]}
+  ]
+}

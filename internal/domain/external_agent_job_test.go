@@ -102,14 +102,11 @@ func TestExternalAgentJobDeliveryKeepsCompleteMarkdownAndFileIdentity(t *testing
 
 func TestExternalAgentJobDeliverySeparatesNotificationAndResultIdentity(t *testing.T) {
 	job := domain.ExternalAgentJob{
-		ID:                "job_1",
-		Mode:              domain.JobDetached,
-		Status:            domain.JobCompleted,
-		StatusRevision:    2,
-		ConversationKey:   "slack:T12345678:dm:D12345678",
-		WorkstreamID:      "ws-1",
-		TaskID:            "task-1",
-		ExecutionIdentity: "exec-1",
+		ID:              "job_1",
+		Mode:            domain.JobDetached,
+		Status:          domain.JobCompleted,
+		StatusRevision:  2,
+		ConversationKey: "slack:T12345678:dm:D12345678",
 	}
 	resultText := "safe &lt;result>"
 	digest := fmt.Sprintf("%x", sha256.Sum256([]byte(resultText)))
@@ -159,7 +156,6 @@ func TestDetachedActivationLegacyNotificationUsesTerminalMarker(t *testing.T) {
 	job := domain.ExternalAgentJob{
 		ID: "job_1", Mode: domain.JobDetached, Status: domain.JobCompleted, StatusRevision: 2,
 		ResultSummary: "full result must not be repeated", ConversationKey: "slack:T12345678:dm:D12345678",
-		WorkstreamID: "ws-1", TaskID: "task-1", ExecutionIdentity: "exec-1",
 	}
 	notification, err := domain.NewExternalAgentJobNotification(job)
 	if err != nil {
@@ -173,16 +169,13 @@ func TestDetachedActivationLegacyNotificationUsesTerminalMarker(t *testing.T) {
 func TestLegacyNotificationConstructorSetsRouteAndIdentityByMode(t *testing.T) {
 	now := time.Now().UTC()
 	base := domain.ExternalAgentJob{
-		ID:                "job_1",
-		Status:            domain.JobFailed,
-		StatusRevision:    1,
-		ConversationKey:   "slack:T12345678:dm:D12345678",
-		WorkstreamID:      "ws-1",
-		TaskID:            "task-1",
-		ExecutionIdentity: "exec-1",
-		ErrorCode:         "acp_process_exit",
-		CreatedAt:         now,
-		UpdatedAt:         now,
+		ID:              "job_1",
+		Status:          domain.JobFailed,
+		StatusRevision:  1,
+		ConversationKey: "slack:T12345678:dm:D12345678",
+		ErrorCode:       "acp_process_exit",
+		CreatedAt:       now,
+		UpdatedAt:       now,
 	}
 
 	foreground := base

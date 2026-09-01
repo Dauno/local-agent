@@ -2,6 +2,7 @@ package slack
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"strings"
 	"testing"
@@ -9,6 +10,7 @@ import (
 
 	slackapi "github.com/slack-go/slack"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
@@ -118,15 +120,15 @@ func statusTestJob(delivery port.ConfirmationDelivery) *domain.ExternalAgentJob 
 	}
 }
 
-func statusTestCallback(delivery port.ConfirmationDelivery, userID, channelID, threadTS string) slackapi.InteractionCallback {
+func statusTestCallback(delivery port.ConfirmationDelivery, userID, channelID, threadTS, layoutSHA256 string) slackapi.InteractionCallback {
 	callback := newTestCallback(statusActionID, delivery.WrapperCallID, delivery.TeamID, userID, channelID, delivery.SlackMessageTS, threadTS)
-	callback.Message.Metadata = confirmationMetadata(delivery)
+	callback.Message.Metadata = confirmationMetadata(delivery, layoutSHA256)
 	return callback
 }
 
 func TestNormalizeJobStatusActionPreservesWrapperCallID(t *testing.T) {
 	delivery := statusTestDelivery()
-	callback := statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS)
+	callback := statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))
 	action, ok := normalizeJobStatusAction(&callback)
 	if !ok {
 		t.Fatal("normalizeJobStatusAction rejected a valid status action")
@@ -139,13 +141,25 @@ func TestNormalizeJobStatusActionPreservesWrapperCallID(t *testing.T) {
 	}
 }
 
+func TestJobStatusHandlerResolvesPromptLayoutFingerprint(t *testing.T) {
+	t.Parallel()
+	handler := newJobStatusHandler(nil, time.Second, nil, nil)
+	if err := handler.InitializationError(); err != nil {
+		t.Fatalf("InitializationError() = %v", err)
+	}
+	want := mustConfirmationLayoutSHA256(t)
+	if handler.layoutSHA256 != want {
+		t.Fatalf("prompt layout fingerprint = %q, want %q", handler.layoutSHA256, want)
+	}
+}
+
 func TestJobStatusHandlerPublishesAuthorizedEphemeralStatus(t *testing.T) {
 	delivery := statusTestDelivery()
 	client := &fakeJobStatusEphemeralClient{}
 	reader := &fakeJobStatusReader{job: statusTestJob(delivery)}
 	handler := newJobStatusHandler(client, time.Second, &fakeJobStatusConfirmationStore{delivery: &delivery}, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	if len(client.calls) != 1 {
@@ -159,12 +173,18 @@ func TestJobStatusHandlerPublishesAuthorizedEphemeralStatus(t *testing.T) {
 		!strings.Contains(call.fallback, "2026-07-21T15:05:00Z") {
 		t.Fatalf("ephemeral fallback = %q", call.fallback)
 	}
-	encoded := call.fallback
-	for _, block := range call.blocks {
-		encoded += blockToText(block)
+	message := blockkit.Message{FallbackText: call.fallback, Blocks: call.blocks}
+	for _, value := range []string{"job-status-1", "running", "2026-07-21T15:05:00Z", "The host is running the job."} {
+		if !blockkit.Reachable(message, value) {
+			t.Fatalf("status value %q did not reach the view", value)
+		}
+	}
+	encoded, err := json.Marshal(call.blocks)
+	if err != nil {
+		t.Fatal(err)
 	}
 	for _, secret := range []string{"secret task text", "secret result text", "secret error code"} {
-		if strings.Contains(encoded, secret) {
+		if strings.Contains(string(encoded), secret) {
 			t.Fatalf("status response leaked %q", secret)
 		}
 	}
@@ -180,7 +200,7 @@ func TestJobStatusHandlerRejectsUnauthorizedUserWithoutReadingJob(t *testing.T) 
 	reader := &fakeJobStatusReader{job: statusTestJob(delivery)}
 	handler := newJobStatusHandler(client, time.Second, store, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, "U87654321", delivery.ChannelID, delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, "U87654321", delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	assertStatusAuthorizationFailure(t, client)
@@ -196,7 +216,7 @@ func TestJobStatusHandlerRejectsWrongConversationWithoutReadingJob(t *testing.T)
 	reader := &fakeJobStatusReader{job: statusTestJob(delivery)}
 	handler := newJobStatusHandler(client, time.Second, store, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, "C87654321", delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, "C87654321", delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	assertStatusAuthorizationFailure(t, client)
@@ -211,7 +231,7 @@ func TestJobStatusHandlerRejectsUnknownJobWithoutSideEffects(t *testing.T) {
 	reader := &fakeJobStatusReader{err: errors.New("not found")}
 	handler := newJobStatusHandler(client, time.Second, &fakeJobStatusConfirmationStore{delivery: &delivery}, reader)
 
-	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS)); err != nil {
+	if err := handler.Handle(t.Context(), statusTestCallback(delivery, delivery.Actor, delivery.ChannelID, delivery.ThreadTS, mustConfirmationLayoutSHA256(t))); err != nil {
 		t.Fatalf("Handle() error = %v", err)
 	}
 	assertStatusAuthorizationFailure(t, client)
@@ -241,17 +261,17 @@ func TestJobStatusResponseConstructionNeutralizesControlsAndIncludesRequiredFiel
 	if err != nil {
 		t.Fatalf("compileJobStatusResponse() error = %v", err)
 	}
-	if !strings.Contains(fallback, "completed") || !strings.Contains(fallback, "job-&lt;@U12345678>") ||
-		!strings.Contains(fallback, "2026-07-21T15:00:00Z") || !strings.Contains(fallback, "2026-07-21T15:05:00Z") {
-		t.Fatalf("status response fallback = %q", fallback)
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	if !blockkit.Reachable(message, "completed") || !blockkit.Reachable(message, "2026-07-21T15:00:00Z") ||
+		!blockkit.Reachable(message, "2026-07-21T15:05:00Z") {
+		t.Fatal("status values did not reach the view")
 	}
-	if len(blocks) != 4 {
-		t.Fatalf("status response blocks = %d, want 4", len(blocks))
+	encoded, err := json.Marshal(blocks)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for _, block := range blocks {
-		if block == nil {
-			t.Fatal("status response contains nil block")
-		}
+	if strings.Contains(string(encoded), "<@U12345678>") || !strings.Contains(string(encoded), `\u0026lt;`) {
+		t.Fatalf("unsafe Slack control was not safely rendered in %s", encoded)
 	}
 }
 
@@ -265,39 +285,15 @@ func TestJobStatusResponseRespectsBlockKitLimits(t *testing.T) {
 	if len([]rune(fallback)) > maxFallbackText || len(blocks) > maxBlocksPerMessage {
 		t.Fatalf("response exceeds limits: fallback=%d blocks=%d", len([]rune(fallback)), len(blocks))
 	}
-	for _, block := range blocks {
-		section, ok := block.(*slackapi.SectionBlock)
-		if !ok {
-			t.Fatalf("status block type = %T", block)
-		}
-		if section.Text != nil && len([]rune(section.Text.Text)) > maxRendererCompositionTextLength {
-			t.Fatalf("section text exceeds limit: %d", len([]rune(section.Text.Text)))
-		}
-		for _, field := range section.Fields {
-			if len([]rune(field.Text)) > maxRendererSectionFieldLength {
-				t.Fatalf("section field exceeds limit: %d", len([]rune(field.Text)))
-			}
-		}
+	message := blockkit.Message{FallbackText: fallback, Blocks: blocks}
+	if !blockkit.Reachable(message, "界") {
+		t.Fatal("long job ID did not reach the rendered view")
 	}
-	tooLong, _, err := compileJobStatusErrorResponse(strings.Repeat("x", maxRendererCompositionTextLength*2))
+	tooLong, _, err := compileJobStatusErrorResponse(strings.Repeat("x", maxContextText*2))
 	if err != nil {
 		t.Fatalf("compileJobStatusErrorResponse() error = %v", err)
 	}
 	if len([]rune(tooLong)) > maxFallbackText {
 		t.Fatalf("error fallback exceeds limit: %d", len([]rune(tooLong)))
 	}
-}
-
-func blockToText(block slackapi.Block) string {
-	var text string
-	switch typed := block.(type) {
-	case *slackapi.SectionBlock:
-		if typed.Text != nil {
-			text += typed.Text.Text
-		}
-		for _, field := range typed.Fields {
-			text += field.Text
-		}
-	}
-	return text
 }

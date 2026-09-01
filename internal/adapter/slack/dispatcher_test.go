@@ -3,7 +3,7 @@ package slack
 import (
 	"context"
 	"errors"
-	"reflect"
+	"slices"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -12,6 +12,7 @@ import (
 	slackapi "github.com/slack-go/slack"
 	"github.com/slack-go/slack/socketmode"
 
+	"github.com/Dauno/slack-local-agent/internal/blockkit"
 	"github.com/Dauno/slack-local-agent/internal/domain"
 )
 
@@ -139,28 +140,37 @@ func TestInteractiveDispatcherRejectsMalformedAndUnknownPayloads(t *testing.T) {
 	}
 }
 
-func TestTemplateCatalogExtractsIDsAndValidatesDispatcherCoverage(t *testing.T) {
-	catalog, err := LoadTemplateCatalog()
+func TestViewEngineValidatesDispatcherCoverageInBothDirections(t *testing.T) {
+	engine, err := NewViewEngine()
 	if err != nil {
-		t.Fatalf("LoadTemplateCatalog() error = %v", err)
+		t.Fatalf("NewViewEngine() error = %v", err)
 	}
-	ids := catalog.InteractiveIDs()
-	if !reflect.DeepEqual(ids.ModalCallbacks, []string{builderSubmitCallbackID}) {
-		t.Fatalf("modal callbacks = %v", ids.ModalCallbacks)
+	if got := engine.CallbackIDs(); len(got) != 1 || got[0] != builderSubmitCallbackID {
+		t.Fatalf("callback IDs = %v", got)
 	}
-	if !reflect.DeepEqual(ids.Actions, []string{"agent_type", "local_agent.builder.open", builderInstallActionID, approveActionID, rejectActionID, statusActionID, "local_agent.onboarding.describe"}) {
-		t.Fatalf("actions = %v", ids.Actions)
+	wantActions := []string{
+		"agent_type", "local_agent.builder.open", builderInstallActionID,
+		approveActionID, rejectActionID, statusActionID, "local_agent.onboarding.describe",
 	}
-	if !reflect.DeepEqual(ids.BuilderBlocks, []string{"agent_type", "description", "execution_mode", "instruction", "model", "name", "timeout_seconds"}) {
-		t.Fatalf("builder blocks = %v", ids.BuilderBlocks)
-	}
-	if !reflect.DeepEqual(ids.MessageBlocks, []string{"builder_preview_actions", "confirmation_buttons", "onboarding_actions"}) {
-		t.Fatalf("message blocks = %v", ids.MessageBlocks)
+	if got := engine.ActionIDs(); !slices.Equal(got, wantActions) {
+		t.Fatalf("action IDs = %v, want %v", got, wantActions)
 	}
 
 	listener := newListener(nil, NewRouter(testBot), nil)
-	if err := listener.ValidateTemplateCatalog(catalog); err != nil {
-		t.Fatalf("default listener dispatcher failed catalog validation: %v", err)
+	if err := listener.ValidateViewEngine(engine); err != nil {
+		t.Fatalf("default listener dispatcher failed view validation: %v", err)
+	}
+
+	extraAction, err := NewInteractiveDispatcher(append(viewRegistrationsForTest(engine), InteractiveRegistration{
+		ID: "extra.action", EventType: InteractiveEventBlockActions,
+		ActionHandler: func(context.Context, slackapi.InteractionCallback) error { return nil },
+	}))
+	if err != nil {
+		t.Fatalf("construct extra-action dispatcher: %v", err)
+	}
+	listener = listener.WithDispatcher(extraAction)
+	if err := listener.ValidateViewEngine(engine); err == nil {
+		t.Fatal("view validation accepted an action with no template declaration")
 	}
 
 	missingView, err := NewInteractiveDispatcher([]InteractiveRegistration{
@@ -169,9 +179,26 @@ func TestTemplateCatalogExtractsIDsAndValidatesDispatcherCoverage(t *testing.T) 
 	if err != nil {
 		t.Fatalf("construct partial dispatcher: %v", err)
 	}
-	if err := catalog.ValidateDispatcher(missingView); err == nil {
-		t.Fatal("catalog accepted dispatcher without builder view handler")
+	listener = listener.WithDispatcher(missingView)
+	if err := listener.ValidateViewEngine(engine); err == nil {
+		t.Fatal("view validation accepted a dispatcher without declared handlers")
 	}
+}
+
+func viewRegistrationsForTest(engine *blockkit.Engine) []InteractiveRegistration {
+	registrations := []InteractiveRegistration{{
+		ID: builderSubmitCallbackID, EventType: InteractiveEventViewSubmission,
+		ViewHandler: func(context.Context, slackapi.InteractionCallback) (ViewDispatchResult, error) {
+			return ViewDispatchResult{}, nil
+		},
+	}}
+	for _, actionID := range engine.ActionIDs() {
+		registrations = append(registrations, InteractiveRegistration{
+			ID: actionID, EventType: InteractiveEventBlockActions,
+			ActionHandler: func(context.Context, slackapi.InteractionCallback) error { return nil },
+		})
+	}
+	return registrations
 }
 
 func TestInteractiveDispatcherConcurrentReadOnlyDispatch(t *testing.T) {

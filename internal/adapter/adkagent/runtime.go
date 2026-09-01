@@ -116,13 +116,13 @@ func NewRuntime(cfg RuntimeConfig) (*Runtime, error) {
 		}
 	}
 	if len(resultProducingTools) > 0 {
-		if cfg.ResultProducingCallsPerStep != 1 || cfg.ResultProducingCallReserveTokens <= 0 {
-			return nil, errors.New("result-producing tool reservation requires one call and a positive token reserve")
+		if cfg.ResultProducingCallsPerStep < 1 || cfg.ResultProducingCallsPerStep > 4 || cfg.ResultProducingCallReserveTokens <= 0 {
+			return nil, errors.New("result-producing tool reservation requires between one and four calls and a positive per-call token reserve")
 		}
 		if cfg.ContextCompiler == nil {
 			return nil, errors.New("result-producing tool reservation requires an admissible context compiler budget")
 		}
-		if _, err := reserveResultCallTokens(cfg.ContextBudget, cfg.ResultProducingCallReserveTokens); err != nil {
+		if _, err := reserveResultCallTokens(cfg.ContextBudget, cfg.ResultProducingCallReserveTokens*cfg.ResultProducingCallsPerStep); err != nil {
 			return nil, fmt.Errorf("result-producing tool reservation requires an admissible context compiler budget: %w", err)
 		}
 	}
@@ -197,7 +197,7 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData, strea
 	budget := r.contextBudget
 	if reservation != nil {
 		var err error
-		budget, err = reserveResultCallTokens(budget, r.resultProducingCallReserveTokens)
+		budget, err = reserveResultCallTokens(budget, r.resultProducingCallReserveTokens*r.resultProducingCallsPerStep)
 		if err != nil {
 			return nil, err
 		}
@@ -212,9 +212,12 @@ func (r *Runtime) buildAgent(tools []tool.Tool, ephemeral beforeModelData, strea
 	if len(tools) > 0 {
 		agentCfg.Tools = tools
 	}
-	if r.contextProjector != nil || r.contextCompiler != nil || ephemeral.reference() != "" {
+	if r.contextProjector != nil || r.contextCompiler != nil || ephemeral.reference() != "" || ephemeral.internalEvent != "" {
 		if r.contextProjector != nil && r.contextCompiler == nil {
 			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, BeforeModelCallback(r.contextProjector))
+		}
+		if ephemeral.internalEvent != "" {
+			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, injectInternalEvent(ephemeral.internalEvent))
 		}
 		if reference := ephemeral.reference(); reference != "" {
 			agentCfg.BeforeModelCallbacks = append(agentCfg.BeforeModelCallbacks, injectEphemeralReference(reference))
@@ -377,11 +380,11 @@ func (r *Runtime) recordEpoch(recorder *epochRecorder) llmagent.AfterModelCallba
 }
 
 type resultCallReservation struct {
-	producerNames map[string]struct{}
-	limit         int
-	mu            sync.Mutex
-	calls         int
-	allowedCallID string
+	producerNames  map[string]struct{}
+	limit          int
+	mu             sync.Mutex
+	calls          int
+	allowedCallIDs map[string]struct{}
 }
 
 func newResultCallReservation(tools []tool.Tool, producerNames map[string]struct{}, limit int) *resultCallReservation {
@@ -404,7 +407,7 @@ func (r *resultCallReservation) Reset() {
 	}
 	r.mu.Lock()
 	r.calls = 0
-	r.allowedCallID = ""
+	r.allowedCallIDs = nil
 	r.mu.Unlock()
 }
 
@@ -412,18 +415,21 @@ func (r *resultCallReservation) AfterModel(_ agent.Context, response *model.LLMR
 	if r == nil || responseErr != nil || response == nil || response.Content == nil {
 		return nil, nil //nolint:nilerr // ADK callback contract: nil,nil means "no override", not an error
 	}
-	allowedCallID := ""
+	allowedCallIDs := make(map[string]struct{}, r.limit)
 	for _, part := range response.Content.Parts {
-		if part == nil || part.FunctionCall == nil {
+		if part == nil || part.FunctionCall == nil || part.FunctionCall.ID == "" {
 			continue
 		}
-		if _, producer := r.producerNames[part.FunctionCall.Name]; producer {
-			allowedCallID = part.FunctionCall.ID
+		if _, producer := r.producerNames[part.FunctionCall.Name]; !producer {
+			continue
+		}
+		if len(allowedCallIDs) >= r.limit {
 			break
 		}
+		allowedCallIDs[part.FunctionCall.ID] = struct{}{}
 	}
 	r.mu.Lock()
-	r.allowedCallID = allowedCallID
+	r.allowedCallIDs = allowedCallIDs
 	r.mu.Unlock()
 	return nil, nil
 }
@@ -437,8 +443,13 @@ func (r *resultCallReservation) BeforeTool(ctx agent.Context, candidate tool.Too
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.allowedCallID != "" && (ctx == nil || ctx.FunctionCallID() != r.allowedCallID) {
-		return nil, errors.New("result-producing call limit reached for model step")
+	if len(r.allowedCallIDs) > 0 {
+		if ctx == nil {
+			return nil, errors.New("result-producing call limit reached for model step")
+		}
+		if _, allowed := r.allowedCallIDs[ctx.FunctionCallID()]; !allowed {
+			return nil, errors.New("result-producing call limit reached for model step")
+		}
 	}
 	if r.calls >= r.limit {
 		return nil, errors.New("result-producing call limit reached for model step")
@@ -472,29 +483,13 @@ func reserveResultCallTokens(budget domain.RequestBudget, reserve int) (domain.R
 
 func (r *Runtime) toolsForInvocation(origin port.AgentTurnOrigin, key domain.ConversationKey, activation *domain.ExternalAgentJobActivation) ([]tool.Tool, error) {
 	if origin.Kind == port.AgentTurnOriginJobCompletion {
-		if r.toolFactory == nil {
-			return nil, nil
-		}
-		if activation == nil || activation.ActivationID != origin.ActivationID || activation.Actor != origin.Actor || activation.ConversationKey != key {
+		if activation != nil && (activation.ActivationID != origin.ActivationID || activation.Actor != origin.Actor || activation.ConversationKey != key) {
 			return nil, errors.New("job-completion activation binding is incomplete")
 		}
-		factory, ok := r.toolFactory.(port.ActivationAgentToolFactory)
-		if !ok {
-			return nil, errors.New("job-completion host-only tool factory is unavailable")
-		}
-		rawTools, err := factory.ToolsForActivation(origin.Actor, key, *activation)
-		if err != nil {
-			return nil, err
-		}
-		tools := make([]tool.Tool, 0, len(rawTools))
-		for index, raw := range rawTools {
-			candidate, ok := raw.(tool.Tool)
-			if !ok || candidate == nil {
-				return nil, fmt.Errorf("activation tool %d is not an ADK tool: %T", index, raw)
-			}
-			tools = append(tools, candidate)
-		}
-		return tools, nil
+		// Completion turns never receive ADK tools. The host verifies the
+		// result before model contact, and activation data cannot authorize
+		// reads, confirmations, delegation, or mutation.
+		return nil, nil
 	}
 
 	tools := append([]tool.Tool(nil), r.staticTools...)
@@ -1172,6 +1167,7 @@ func extractConfirmation(fc *genai.FunctionCall) *domain.PendingConfirmation {
 	if strings.TrimSpace(summary) == "" {
 		summary = fmt.Sprintf("Tool %q requires confirmation", originalCall.Name)
 	}
+	summary = boundedConfirmationSummary(summary)
 	payload, ok := confirmationPayload(fc, originalCall)
 	if !ok {
 		return nil
@@ -1222,6 +1218,19 @@ func confirmationHint(fc *genai.FunctionCall) string {
 	return usableConfirmationHint(confirmation.Hint)
 }
 
+func boundedConfirmationSummary(summary string) string {
+	const maxCodePoints = 200
+	const truncationMarker = "…"
+
+	summary = strings.TrimSpace(summary)
+	runes := []rune(summary)
+	if len(runes) <= maxCodePoints {
+		return summary
+	}
+	marker := []rune(truncationMarker)
+	return string(runes[:maxCodePoints-len(marker)]) + truncationMarker
+}
+
 func requestedToolConfirmation(fc *genai.FunctionCall) (toolconfirmation.ToolConfirmation, bool) {
 	if fc == nil || fc.Args == nil {
 		return toolconfirmation.ToolConfirmation{}, false
@@ -1259,6 +1268,7 @@ type beforeModelData struct {
 	context            domain.AgentContext
 	actor              string
 	origin             port.AgentTurnOrigin
+	internalEvent      string
 	beforeModel        func(context.Context) error
 	knowledge          []domain.KnowledgeFrameCard
 	workstreamRevision int64
@@ -1267,9 +1277,10 @@ type beforeModelData struct {
 
 func buildBeforeModelContext(req port.AgentRequest) beforeModelData {
 	return beforeModelData{
-		context:     req.Context,
-		actor:       latestActor(req),
-		beforeModel: req.BeforeModel,
+		context:       req.Context,
+		actor:         latestActor(req),
+		internalEvent: req.InternalEvent,
+		beforeModel:   req.BeforeModel,
 		// Knowledge and the workstream snapshot live only in the before-model
 		// path: they are cloned here and never appended to durable session
 		// events.
@@ -1306,6 +1317,17 @@ func (d beforeModelData) reference() string {
 		parts = append(parts, contextRef)
 	}
 	return strings.Join(parts, "\n\n")
+}
+
+func injectInternalEvent(event string) llmagent.BeforeModelCallback {
+	return func(_ agent.Context, request *model.LLMRequest) (*model.LLMResponse, error) {
+		if request == nil {
+			return nil, errors.New("ADK model request is nil")
+		}
+		internal := "<host_job_completion_event>\n" + event + "\n</host_job_completion_event>"
+		request.Contents = append(request.Contents, genai.NewContentFromText(internal, genai.RoleModel))
+		return nil, nil
+	}
 }
 
 func injectEphemeralReference(reference string) llmagent.BeforeModelCallback {
