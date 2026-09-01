@@ -1,6 +1,6 @@
 # Release Notes
 
-## v0.15.0
+## v0.15.0 (2026-09-01)
 
 - Added schema v47 for workstream-owned durable job admission and task settlement.
 - `workstream_tasks.job_id` is the only durable job association; external-agent jobs remain generic.
