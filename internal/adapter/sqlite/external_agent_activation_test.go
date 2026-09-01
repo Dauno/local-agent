@@ -46,7 +46,6 @@ func TestPublishedTerminalNotificationAtomicallyCreatesOneActivation(t *testing.
 func TestPublishedUnboundDetachedNotificationCreatesConversationActivation(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
 	job := activationTestJob("activation-unbound", now)
-	job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision = "", "", "", 0
 	terminalizeActivationTestJob(t, jobs, job, now)
 	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
 
@@ -62,11 +61,32 @@ func TestPublishedUnboundDetachedNotificationCreatesConversationActivation(t *te
 	}
 }
 
+func TestPublishedBoundDetachedNotificationCreatesWorkstreamActivation(t *testing.T) {
+	store, jobs, now := newActivationTestStore(t)
+	job := activationTestJob("activation-bound", now)
+	terminalizeActivationTestJob(t, jobs, job, now)
+	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
+	if err := jobs.MarkNotificationPublished(t.Context(), notification, "1710000000.000003", now.Add(3*time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	if count := activationCountForJob(t, store, job.ID); count != 1 {
+		t.Fatalf("bound activation count = %d, want 1", count)
+	}
+	activation, err := jobs.GetActivation(t.Context(), domain.ExternalAgentJobActivationID(job.ID, notification.StatusRevision, notification.Kind))
+	if err != nil || activation == nil {
+		t.Fatalf("bound activation = %#v, err = %v", activation, err)
+	}
+	if activation.ActivationScope != domain.ExternalAgentActivationWorkstream || activation.WorkstreamID != activationTestWorkstreamID ||
+		activation.TaskID != activationTestTaskID(job) || activation.ExecutionIdentity != job.ID || activation.AdmissionRevision < 1 {
+		t.Fatalf("bound activation route = %#v", activation)
+	}
+}
+
 func TestPublishedAutomaticRootWithStaleBindingUsesConversationScope(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
 	job := activationTestJob("activation-stale-binding", now)
 	terminalizeActivationTestJob(t, jobs, job, now)
-	if _, err := store.DB().ExecContext(t.Context(), `UPDATE workstreams SET status = 'paused' WHERE workstream_id = ?`, job.WorkstreamID); err != nil {
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE workstreams SET status = 'paused' WHERE workstream_id = ?`, activationTestWorkstreamID); err != nil {
 		t.Fatal(err)
 	}
 	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
@@ -74,14 +94,15 @@ func TestPublishedAutomaticRootWithStaleBindingUsesConversationScope(t *testing.
 		t.Fatal(err)
 	}
 	activation, err := jobs.GetActivation(t.Context(), domain.ExternalAgentJobActivationID(job.ID, notification.StatusRevision, notification.Kind))
-	if err != nil || activation == nil || activation.ActivationScope != domain.ExternalAgentActivationConversation || activation.WorkstreamID != job.WorkstreamID {
-		t.Fatalf("stale binding activation = %#v, err = %v, want conversation scope with provenance", activation, err)
+	if err != nil || activation == nil || activation.ActivationScope != domain.ExternalAgentActivationConversation || activation.WorkstreamID != "" {
+		t.Fatalf("stale binding activation = %#v, err = %v, want conversation scope without workstream authority", activation, err)
 	}
 }
 
 func TestLegacyActivationIsNotClaimed(t *testing.T) {
 	store, jobs, now := newActivationTestStore(t)
 	job := activationTestJob("activation-legacy-unclaimable", now)
+	// A legacy activation does not carry the v47 task association contract.
 	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
 		t.Fatalf("create = %v, err = %v", created, err)
 	}
@@ -91,7 +112,7 @@ func TestLegacyActivationIsNotClaimed(t *testing.T) {
 		original_call_id, delivery_mode, slack_message_ts, published_at, state, next_attempt_at, created_at, updated_at)
 		VALUES (?, 1, 'terminal', ?, 'legacy', 'completed', ?, ?, ?, ?, ?, ?, ?, ?, ?, 'markdown', '1710000000.000001', ?, 'pending', ?, ?, ?)`,
 		job.ID, "activation-legacy-unclaimable", strings.Repeat("a", 64), job.Actor, job.TeamID, string(job.ConversationKey),
-		job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision, job.OriginalCallID,
+		"", "", "", 0, job.OriginalCallID,
 		now.UnixNano(), now.UnixNano(), now.UnixNano(), now.UnixNano()); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +127,7 @@ func TestPublishedHistoricalWorkstreamOnlyWithStaleBindingDoesNotActivate(t *tes
 	job := activationTestJob("activation-workstream-only-stale", now)
 	job.CompletionPolicy = domain.ExternalAgentCompletionWorkstream
 	terminalizeActivationTestJob(t, jobs, job, now)
-	if _, err := store.DB().ExecContext(t.Context(), `UPDATE workstreams SET status = 'paused' WHERE workstream_id = ?`, job.WorkstreamID); err != nil {
+	if _, err := store.DB().ExecContext(t.Context(), `UPDATE workstreams SET status = 'paused' WHERE workstream_id = ?`, activationTestWorkstreamID); err != nil {
 		t.Fatal(err)
 	}
 	notification := claimActivationTestNotification(t, jobs, now.Add(2*time.Second), "publisher")
@@ -705,15 +726,19 @@ func newActivationTestStore(t *testing.T) (*Store, *ExternalAgentJobStore, time.
 	return store, NewExternalAgentJobStore(store), time.Now().UTC().Truncate(time.Nanosecond)
 }
 
+const activationTestWorkstreamID = "ws-activation-test"
+
+func activationTestTaskID(job domain.ExternalAgentJob) string { return "task-" + job.ID }
+
+func activationTestHasBinding(job domain.ExternalAgentJob) bool {
+	return job.ID != "activation-unbound" && job.ID != "activation-legacy-unclaimable"
+}
+
 func activationTestJob(id string, now time.Time) domain.ExternalAgentJob {
 	job := testExternalAgentJob(now)
 	job.ID = id
 	job.OriginalCallID = id + "-call"
 	job.Mode = domain.JobDetached
-	job.WorkstreamID = "ws-activation-test"
-	job.TaskID = "task-" + id
-	job.ExecutionIdentity = "exec-" + id
-	job.AdmissionRevision = 0
 	return job
 }
 
@@ -723,10 +748,19 @@ func terminalizeActivationTestJob(t *testing.T, jobs *ExternalAgentJobStore, job
 
 func terminalizeActivationTestJobWithResult(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time, result *domain.ExternalAgentInvocationResult) {
 	t.Helper()
-	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
+	if activationTestHasBinding(job) {
 		seedActivationTestBinding(t, jobs, job, now)
 	}
-	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+	var created bool
+	var err error
+	if activationTestHasBinding(job) {
+		created, _, err = jobs.CreateIfAbsentForWorkstream(t.Context(), job, domain.WorkstreamTaskAdmission{
+			WorkstreamID: activationTestWorkstreamID, TaskID: activationTestTaskID(job), ExpectedRevision: activationTestWorkstreamRevision(t, jobs),
+		})
+	} else {
+		created, _, err = jobs.CreateIfAbsent(t.Context(), job)
+	}
+	if err != nil || !created {
 		t.Fatalf("create %s = %v, err=%v", job.ID, created, err)
 	}
 	claimed, err := jobs.ClaimNext(t.Context(), now, "job-worker-"+job.ID, time.Minute)
@@ -747,17 +781,33 @@ func claimActivationTestNotification(t *testing.T, jobs *ExternalAgentJobStore, 
 	return notification
 }
 
-// terminalizeActivationTestJobByStatus drives a claimed job to the requested
-// terminal status through the legal store state machine (P0-05 normal
-// transition path). JobCancelled and JobAbandoned need an intermediate state,
-// and JobAbandoned emits one terminal notification per revision.
+// terminalizeActivationTestJobByStatus drives a job to the requested terminal
+// status through the legal store state machine. Queued cancellation uses the
+// direct cancellation path because a running task requires an intermediate
+// cancellation-requested state.
 func terminalizeActivationTestJobByStatus(t *testing.T, jobs *ExternalAgentJobStore, job domain.ExternalAgentJob, now time.Time, status domain.ExternalAgentJobStatus) {
 	t.Helper()
-	if domain.CompletionBindingPresent(job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision) {
+	if activationTestHasBinding(job) {
 		seedActivationTestBinding(t, jobs, job, now)
 	}
-	if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+	var created bool
+	var err error
+	if activationTestHasBinding(job) {
+		created, _, err = jobs.CreateIfAbsentForWorkstream(t.Context(), job, domain.WorkstreamTaskAdmission{
+			WorkstreamID: activationTestWorkstreamID, TaskID: activationTestTaskID(job), ExpectedRevision: activationTestWorkstreamRevision(t, jobs),
+		})
+	} else {
+		created, _, err = jobs.CreateIfAbsent(t.Context(), job)
+	}
+	if err != nil || !created {
 		t.Fatalf("create %s = %v, err=%v", job.ID, created, err)
+	}
+	if status == domain.JobCancelled {
+		cancelled, cancelErr := jobs.RequestCancellation(t.Context(), job.ID, job.Actor)
+		if cancelErr != nil || cancelled == nil || cancelled.Status != domain.JobCancelled {
+			t.Fatalf("cancel %s = %#v, err=%v", job.ID, cancelled, cancelErr)
+		}
+		return
 	}
 	claimed, err := jobs.ClaimNext(t.Context(), now, "job-worker-"+job.ID, time.Minute)
 	if err != nil || claimed == nil {
@@ -769,9 +819,6 @@ func terminalizeActivationTestJobByStatus(t *testing.T, jobs *ExternalAgentJobSt
 		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobCompleted, &domain.ExternalAgentInvocationResult{Text: "result"}, "", now.Add(time.Second))
 	case domain.JobFailed:
 		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobFailed, nil, "acp_process_exit", now.Add(time.Second))
-	case domain.JobCancelled:
-		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobCancelRequested, nil, "", now.Add(time.Second))
-		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobCancelled, nil, "", now.Add(2*time.Second))
 	case domain.JobCompletionUnknown:
 		transitionTerminalTestJob(t, jobs, job.ID, owner, attempt, domain.JobCompletionUnknown, nil, "completion_unknown", now.Add(time.Second))
 	case domain.JobAbandoned:
@@ -786,18 +833,27 @@ func seedActivationTestBinding(t *testing.T, jobs *ExternalAgentJobStore, job do
 	t.Helper()
 	if _, err := jobs.db.ExecContext(t.Context(), `INSERT INTO workstreams (
 		workstream_id, conversation_key, owner_actor, project, status, revision, objective, created_at, updated_at)
-		VALUES (?, ?, ?, ?, 'active', ?, 'activation test', ?, ?)
+		VALUES (?, ?, ?, ?, 'active', 0, 'activation test', ?, ?)
 		ON CONFLICT(workstream_id) DO NOTHING`,
-		job.WorkstreamID, string(job.ConversationKey), job.Actor, job.PrimaryProject, job.AdmissionRevision,
+		activationTestWorkstreamID, string(job.ConversationKey), job.Actor, job.PrimaryProject,
 		now.UnixNano(), now.UnixNano()); err != nil {
-		t.Fatalf("seed workstream %s: %v", job.WorkstreamID, err)
+		t.Fatalf("seed workstream %s: %v", activationTestWorkstreamID, err)
 	}
 	if _, err := jobs.db.ExecContext(t.Context(), `INSERT INTO workstream_tasks (
-		workstream_id, task_id, project, description, status, execution_identity)
-		VALUES (?, ?, ?, ?, 'running', ?)`,
-		job.WorkstreamID, job.TaskID, job.PrimaryProject, job.Task, job.ExecutionIdentity); err != nil {
-		t.Fatalf("seed workstream task %s: %v", job.TaskID, err)
+		workstream_id, task_id, project, description, status)
+		VALUES (?, ?, ?, ?, 'proposed')`,
+		activationTestWorkstreamID, activationTestTaskID(job), job.PrimaryProject, job.Task); err != nil {
+		t.Fatalf("seed workstream task %s: %v", activationTestTaskID(job), err)
 	}
+}
+
+func activationTestWorkstreamRevision(t *testing.T, jobs *ExternalAgentJobStore) int {
+	t.Helper()
+	var revision int
+	if err := jobs.db.QueryRowContext(t.Context(), `SELECT revision FROM workstreams WHERE workstream_id = ?`, activationTestWorkstreamID).Scan(&revision); err != nil {
+		t.Fatalf("read activation test workstream revision: %v", err)
+	}
+	return revision
 }
 
 func transitionTerminalTestJob(
@@ -1000,7 +1056,10 @@ func TestQueuedCancellationTerminalActivationByMode(t *testing.T) {
 			job := activationTestJob("activation-cancelled-"+string(mode), now)
 			job.Mode = mode
 			seedActivationTestBinding(t, jobs, job, now)
-			if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+			created, _, err := jobs.CreateIfAbsentForWorkstream(t.Context(), job, domain.WorkstreamTaskAdmission{
+				WorkstreamID: activationTestWorkstreamID, TaskID: activationTestTaskID(job), ExpectedRevision: 0,
+			})
+			if err != nil || !created {
 				t.Fatalf("create = %v, err = %v", created, err)
 			}
 			cancelled, err := jobs.RequestCancellation(t.Context(), job.ID, job.Actor)
@@ -1045,7 +1104,10 @@ func TestExpiredRecoveryTerminalActivationByMode(t *testing.T) {
 				job := activationTestJob("activation-recovered-"+outcome.name+"-"+string(mode), now)
 				job.Mode = mode
 				seedActivationTestBinding(t, jobs, job, now)
-				if created, _, err := jobs.CreateIfAbsent(t.Context(), job); err != nil || !created {
+				created, _, err := jobs.CreateIfAbsentForWorkstream(t.Context(), job, domain.WorkstreamTaskAdmission{
+					WorkstreamID: activationTestWorkstreamID, TaskID: activationTestTaskID(job), ExpectedRevision: 0,
+				})
+				if err != nil || !created {
 					t.Fatalf("create = %v, err = %v", created, err)
 				}
 				claimed, err := jobs.ClaimNext(t.Context(), now, "job-worker-"+job.ID, time.Minute)

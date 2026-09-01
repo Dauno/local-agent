@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-func TestMigrationV37AddsCompletionBindingColumns(t *testing.T) {
+func TestCurrentSchemaKeepsCompletionBindingOnlyOnDeliveryRows(t *testing.T) {
 	store, err := Initialize(t.Context(), t.TempDir()+"/completion-v37.db")
 	if err != nil {
 		t.Fatal(err)
@@ -24,9 +24,7 @@ func TestMigrationV37AddsCompletionBindingColumns(t *testing.T) {
 	}
 
 	wanted := map[string][]string{
-		"external_agent_jobs": {
-			"workstream_id", "task_id", "execution_identity", "admission_revision",
-		},
+		"external_agent_jobs": {},
 		"external_agent_job_notifications": {
 			"workstream_id", "task_id", "execution_identity", "admission_revision",
 		},
@@ -34,6 +32,15 @@ func TestMigrationV37AddsCompletionBindingColumns(t *testing.T) {
 			"workstream_id", "task_id", "execution_identity", "admission_revision",
 			"fallback_required", "fallback_slack_ts",
 		},
+	}
+	var jobBindingColumns int
+	query := `SELECT COUNT(*) FROM pragma_table_info('external_agent_jobs')
+		WHERE name IN ('workstream_id', 'task_id', 'execution_identity', 'admission_revision')`
+	if err := store.DB().QueryRowContext(t.Context(), query).Scan(&jobBindingColumns); err != nil {
+		t.Fatal(err)
+	}
+	if jobBindingColumns != 0 {
+		t.Fatalf("job table retains removed workstream columns: %d", jobBindingColumns)
 	}
 	for table, columns := range wanted {
 		rows, err := store.DB().QueryContext(t.Context(), `PRAGMA table_info(`+table+`)`)

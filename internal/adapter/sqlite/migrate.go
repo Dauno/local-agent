@@ -54,6 +54,8 @@ var migrations = map[int]migrationFunc{
 	43: migrateV43,
 	44: migrateV44,
 	45: migrateV45,
+	46: migrateV46,
+	47: migrateV47,
 }
 
 func migrate(ctx context.Context, db *sql.DB) error {
@@ -94,8 +96,11 @@ func migrate(ctx context.Context, db *sql.DB) error {
 	// process-failure classification to the live progress projection; existing
 	// rows stay empty for the same reason. V45 adds immutable host completion
 	// policies and activation scopes. It backfills disposition only and never
-	// inserts activations or changes delivery evidence.
-	// Older schemas retain the existing explicit-reset requirement.
+	// inserts activations or changes delivery evidence. V46 assigns each new
+	// workstream task to at most one durable job; existing tasks remain unbound.
+	// V47 removes workstream binding columns from external-agent jobs and adds
+	// system task settlement to the workstream journal. Older schemas retain
+	// the existing explicit-reset requirement.
 	if current > 0 && current < SchemaVersion && current != 14 && current != 17 && current != 18 && current != 19 && current != 20 && current != 21 && current != 22 && current != 23 &&
 		current != 24 &&
 		current != 25 &&
@@ -117,7 +122,9 @@ func migrate(ctx context.Context, db *sql.DB) error {
 		current != 41 &&
 		current != 42 &&
 		current != 43 &&
-		current != 44 {
+		current != 44 &&
+		current != 45 &&
+		current != 46 {
 		return &StateResetNeededError{Found: current, Supported: SchemaVersion}
 	}
 

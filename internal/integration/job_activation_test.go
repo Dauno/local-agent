@@ -55,9 +55,8 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	job.CompletionPolicy = domain.ExternalAgentCompletionAutomaticRoot
 	job.ConversationKey = key
 	job.OriginalCallID = "original-call-e2e"
-	job.WorkstreamID = "ws-activation-e2e"
-	job.TaskID = "task-activation-e2e"
-	job.AdmissionRevision = 0
+	workstreamID := "ws-activation-e2e"
+	taskID := "task-activation-e2e"
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	workstreams, err := workstreamusecase.New(workstreamusecase.Config{
 		Enabled: true, AllowedProjects: map[string]struct{}{job.PrimaryProject: {}},
@@ -65,49 +64,33 @@ func TestJobCompletionActivationEndToEnd(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// The binding must be reachable through public routes: a human creates and
-	// activates the workstream, proposes the task, and starts it for execution.
-	// The host generates the execution identity.
+	// The binding is admitted by the job store in the same transaction as the job.
 	binding := port.WorkstreamBinding{Actor: job.Actor, ConversationKey: job.ConversationKey, Project: job.PrimaryProject}
-	if _, err := workstreams.CreateHuman(t.Context(), binding, job.WorkstreamID, "activation objective", "slack-human:ws-activation-create"); err != nil {
+	if _, err := workstreams.CreateHuman(t.Context(), binding, workstreamID, "activation objective", "slack-human:ws-activation-create"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
+		WorkstreamID: workstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
 		Action: domain.WorkstreamActionActivateWorkstream, SourceID: "slack-human:ws-activation-activate",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
+		WorkstreamID: workstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
 		Action: domain.WorkstreamActionProposeTask, SourceID: "slack-human:ws-activation-propose",
-		Task: &domain.WorkstreamTask{ID: job.TaskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
+		Task: &domain.WorkstreamTask{ID: taskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, started, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 2, Project: job.PrimaryProject,
-		Action: domain.WorkstreamActionStartTask, TaskID: job.TaskID, SourceID: "slack-human:ws-activation-start",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, task := range started.Tasks {
-		if task.ID == job.TaskID {
-			job.ExecutionIdentity = task.ExecutionIdentity
-		}
-	}
-	if job.ExecutionIdentity == "" {
-		t.Fatal("started task has no host execution identity")
-	}
-	job.AdmissionRevision = 3
 	job.RequestSHA256 = domain.ExternalAgentJobRequestDigest(domain.ExternalAgentJobRequest{
 		Provider: job.Provider, Profile: job.Profile, PrimaryProject: job.PrimaryProject,
 		RegistryRevision: job.RegistryRevision, Task: job.Task, Mode: job.Mode,
 		Actor: job.Actor, TeamID: job.TeamID, ConversationKey: job.ConversationKey,
-		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
+		WorkstreamTask: &domain.WorkstreamTaskAdmission{WorkstreamID: workstreamID, TaskID: taskID, ExpectedRevision: 2},
 	})
-	created, _, err := jobs.CreateIfAbsent(t.Context(), job)
+	created, _, err := jobs.CreateIfAbsentForWorkstream(t.Context(), job, domain.WorkstreamTaskAdmission{
+		WorkstreamID: workstreamID, TaskID: taskID, ExpectedRevision: 2,
+	})
 	if err != nil || !created {
 		t.Fatalf("create job = %v, err=%v", created, err)
 	}
@@ -338,9 +321,8 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 	job.CompletionPolicy = domain.ExternalAgentCompletionAutomaticRoot
 	job.ConversationKey = key
 	job.OriginalCallID = "original-call-proposal-e2e"
-	job.WorkstreamID = "ws-proposal-e2e"
-	job.TaskID = "task-proposal-e2e"
-	job.AdmissionRevision = 0
+	workstreamID := "ws-proposal-e2e"
+	taskID := "task-proposal-e2e"
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	workstreams, err := workstreamusecase.New(workstreamusecase.Config{
 		Enabled: true, AllowedProjects: map[string]struct{}{job.PrimaryProject: {}},
@@ -349,45 +331,31 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := port.WorkstreamBinding{Actor: job.Actor, ConversationKey: job.ConversationKey, Project: job.PrimaryProject}
-	if _, err := workstreams.CreateHuman(t.Context(), binding, job.WorkstreamID, "proposal objective", "slack-human:ws-proposal-create"); err != nil {
+	if _, err := workstreams.CreateHuman(t.Context(), binding, workstreamID, "proposal objective", "slack-human:ws-proposal-create"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
+		WorkstreamID: workstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
 		Action: domain.WorkstreamActionActivateWorkstream, SourceID: "slack-human:ws-proposal-activate",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
+		WorkstreamID: workstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
 		Action: domain.WorkstreamActionProposeTask, SourceID: "slack-human:ws-proposal-propose",
-		Task: &domain.WorkstreamTask{ID: job.TaskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
+		Task: &domain.WorkstreamTask{ID: taskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, started, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 2, Project: job.PrimaryProject,
-		Action: domain.WorkstreamActionStartTask, TaskID: job.TaskID, SourceID: "slack-human:ws-proposal-start",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, task := range started.Tasks {
-		if task.ID == job.TaskID {
-			job.ExecutionIdentity = task.ExecutionIdentity
-		}
-	}
-	if job.ExecutionIdentity == "" {
-		t.Fatal("started task has no host execution identity")
-	}
-	job.AdmissionRevision = 3
 	job.RequestSHA256 = domain.ExternalAgentJobRequestDigest(domain.ExternalAgentJobRequest{
 		Provider: job.Provider, Profile: job.Profile, PrimaryProject: job.PrimaryProject,
 		RegistryRevision: job.RegistryRevision, Task: job.Task, Mode: job.Mode,
 		Actor: job.Actor, TeamID: job.TeamID, ConversationKey: job.ConversationKey,
-		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
+		WorkstreamTask: &domain.WorkstreamTaskAdmission{WorkstreamID: workstreamID, TaskID: taskID, ExpectedRevision: 2},
 	})
-	created, _, err := jobs.CreateIfAbsent(t.Context(), job)
+	created, _, err := jobs.CreateIfAbsentForWorkstream(t.Context(), job, domain.WorkstreamTaskAdmission{
+		WorkstreamID: workstreamID, TaskID: taskID, ExpectedRevision: 2,
+	})
 	if err != nil || !created {
 		t.Fatalf("create job = %v, err=%v", created, err)
 	}
@@ -510,16 +478,16 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 	// The informational proposal never mutated the durable workstream or
 	// created a confirmation.
 	var revision, taskCount, confirmationCount int
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT revision FROM workstreams WHERE workstream_id = ?`, job.WorkstreamID).Scan(&revision); err != nil {
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT revision FROM workstreams WHERE workstream_id = ?`, workstreamID).Scan(&revision); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_tasks WHERE workstream_id = ?`, job.WorkstreamID).Scan(&taskCount); err != nil {
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_tasks WHERE workstream_id = ?`, workstreamID).Scan(&taskCount); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM tool_confirmation_deliveries`).Scan(&confirmationCount); err != nil {
 		t.Fatal(err)
 	}
-	if revision != 3 || taskCount != 1 || confirmationCount != 0 {
+	if revision != 5 || taskCount != 1 || confirmationCount != 0 {
 		t.Fatalf("proposal mutated durable state: revision=%d tasks=%d confirmations=%d", revision, taskCount, confirmationCount)
 	}
 
@@ -527,28 +495,28 @@ func TestJobCompletionProposalPathEndToEnd(t *testing.T) {
 	// the source result identity of the completed execution so the dependent
 	// task keeps its provenance bound as a required input.
 	const sourceResultID = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
-	humanCommand := `workstream-human {"project":"workspace","workstream_id":"ws-proposal-e2e","expected_revision":3,"action":"propose_task","task_id":"task-proposal-e2e-2","task_description":"verify the proposal integration","source_result_identity":"` + sourceResultID + `"}`
+	humanCommand := `workstream-human {"project":"workspace","workstream_id":"ws-proposal-e2e","expected_revision":5,"action":"propose_task","task_id":"task-proposal-e2e-2","task_description":"verify the proposal integration","source_result_identity":"` + sourceResultID + `"}`
 	humanInvocation := foregroundThreadedDMInvocation("Ev-proposal-human-01", humanCommand, key)
 	if outcome, err := bot.Handle(t.Context(), humanInvocation); err != nil || outcome != botusecase.OutcomeResponded {
 		t.Fatalf("human command outcome=%q err=%v", outcome, err)
 	}
-	if calls := responsePublisher.snapshot(); len(calls) != 2 || !strings.Contains(calls[1].text, "applied human action `propose_task` at revision `4`") {
+	if calls := responsePublisher.snapshot(); len(calls) != 2 || !strings.Contains(calls[1].text, "applied human action `propose_task` at revision `6`") {
 		t.Fatalf("human command publication = %#v", calls)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT revision FROM workstreams WHERE workstream_id = ?`, job.WorkstreamID).Scan(&revision); err != nil {
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT revision FROM workstreams WHERE workstream_id = ?`, workstreamID).Scan(&revision); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_tasks WHERE workstream_id = ?`, job.WorkstreamID).Scan(&taskCount); err != nil {
+	if err := store.DB().QueryRowContext(t.Context(), `SELECT COUNT(*) FROM workstream_tasks WHERE workstream_id = ?`, workstreamID).Scan(&taskCount); err != nil {
 		t.Fatal(err)
 	}
-	if revision != 4 || taskCount != 2 {
+	if revision != 6 || taskCount != 2 {
 		t.Fatalf("human command did not commit through the trusted path: revision=%d tasks=%d", revision, taskCount)
 	}
 	var sourceInputs int
 	if err := store.DB().QueryRowContext(
 		t.Context(),
 		`SELECT COUNT(*) FROM workstream_task_inputs WHERE workstream_id = ? AND task_id = ? AND input_identity = ?`,
-		job.WorkstreamID,
+		workstreamID,
 		"task-proposal-e2e-2",
 		sourceResultID,
 	).Scan(
@@ -583,9 +551,8 @@ func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 	job.CompletionPolicy = domain.ExternalAgentCompletionAutomaticRoot
 	job.ConversationKey = key
 	job.OriginalCallID = "original-call-fallback-e2e"
-	job.WorkstreamID = "ws-fallback-e2e"
-	job.TaskID = "task-fallback-e2e"
-	job.AdmissionRevision = 0
+	workstreamID := "ws-fallback-e2e"
+	taskID := "task-fallback-e2e"
 	jobs := adaptersqlite.NewExternalAgentJobStore(store)
 	workstreams, err := workstreamusecase.New(workstreamusecase.Config{
 		Enabled: true, AllowedProjects: map[string]struct{}{job.PrimaryProject: {}},
@@ -594,42 +561,31 @@ func TestJobCompletionUnavailableResultPublishesTerminalFallback(t *testing.T) {
 		t.Fatal(err)
 	}
 	binding := port.WorkstreamBinding{Actor: job.Actor, ConversationKey: job.ConversationKey, Project: job.PrimaryProject}
-	if _, err := workstreams.CreateHuman(t.Context(), binding, job.WorkstreamID, "fallback objective", "slack-human:ws-fallback-create"); err != nil {
+	if _, err := workstreams.CreateHuman(t.Context(), binding, workstreamID, "fallback objective", "slack-human:ws-fallback-create"); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
+		WorkstreamID: workstreamID, ExpectedRevision: 0, Project: job.PrimaryProject,
 		Action: domain.WorkstreamActionActivateWorkstream, SourceID: "slack-human:ws-fallback-activate",
 	}); err != nil {
 		t.Fatal(err)
 	}
 	if _, _, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
+		WorkstreamID: workstreamID, ExpectedRevision: 1, Project: job.PrimaryProject,
 		Action: domain.WorkstreamActionProposeTask, SourceID: "slack-human:ws-fallback-propose",
-		Task: &domain.WorkstreamTask{ID: job.TaskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
+		Task: &domain.WorkstreamTask{ID: taskID, Project: job.PrimaryProject, Description: job.Task, Status: domain.TaskProposed},
 	}); err != nil {
 		t.Fatal(err)
 	}
-	_, started, err := workstreams.ApplyHuman(t.Context(), binding, domain.WorkstreamTransition{
-		WorkstreamID: job.WorkstreamID, ExpectedRevision: 2, Project: job.PrimaryProject,
-		Action: domain.WorkstreamActionStartTask, TaskID: job.TaskID, SourceID: "slack-human:ws-fallback-start",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, task := range started.Tasks {
-		if task.ID == job.TaskID {
-			job.ExecutionIdentity = task.ExecutionIdentity
-		}
-	}
-	job.AdmissionRevision = 3
 	job.RequestSHA256 = domain.ExternalAgentJobRequestDigest(domain.ExternalAgentJobRequest{
 		Provider: job.Provider, Profile: job.Profile, PrimaryProject: job.PrimaryProject,
 		RegistryRevision: job.RegistryRevision, Task: job.Task, Mode: job.Mode,
 		Actor: job.Actor, TeamID: job.TeamID, ConversationKey: job.ConversationKey,
-		WorkstreamID: job.WorkstreamID, TaskID: job.TaskID, ExecutionIdentity: job.ExecutionIdentity,
+		WorkstreamTask: &domain.WorkstreamTaskAdmission{WorkstreamID: workstreamID, TaskID: taskID, ExpectedRevision: 2},
 	})
-	created, _, err := jobs.CreateIfAbsent(t.Context(), job)
+	created, _, err := jobs.CreateIfAbsentForWorkstream(t.Context(), job, domain.WorkstreamTaskAdmission{
+		WorkstreamID: workstreamID, TaskID: taskID, ExpectedRevision: 2,
+	})
 	if err != nil || !created {
 		t.Fatalf("create job = %v, err=%v", created, err)
 	}

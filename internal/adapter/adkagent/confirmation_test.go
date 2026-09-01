@@ -1,6 +1,7 @@
 package adkagent
 
 import (
+	"strings"
 	"testing"
 
 	"google.golang.org/adk/v2/tool/toolconfirmation"
@@ -30,6 +31,34 @@ func TestExtractConfirmationPreservesHostHint(t *testing.T) {
 		t.Fatalf("summary = %q", confirmation.Summary)
 	}
 	if confirmation.Payload != `{"action":"cancel_workstream","expected_revision":2,"payload_digest":"digest-1","workstream_id":"ws-1"}` {
+		t.Fatalf("payload = %q", confirmation.Payload)
+	}
+}
+
+func TestExtractConfirmationBoundsSummaryByUnicodeCodePoints(t *testing.T) {
+	longHint := strings.Repeat("á", 220)
+	call := &genai.FunctionCall{
+		ID: "wrapper-1",
+		Args: map[string]any{
+			"originalFunctionCall": &genai.FunctionCall{ID: "original-1", Name: "workstream_transition", Args: map[string]any{"action": "start_task"}},
+			"toolConfirmation": toolconfirmation.ToolConfirmation{
+				Hint:    longHint,
+				Payload: map[string]any{"action": "start_task", "payload_digest": "digest-1"},
+			},
+		},
+	}
+
+	confirmation := extractConfirmation(call)
+	if confirmation == nil {
+		t.Fatal("extractConfirmation returned nil")
+	}
+	if got := len([]rune(confirmation.Summary)); got != 200 {
+		t.Fatalf("summary code points = %d, want 200", got)
+	}
+	if !strings.HasSuffix(confirmation.Summary, "…") {
+		t.Fatalf("summary = %q, want truncation marker", confirmation.Summary)
+	}
+	if confirmation.Payload != `{"action":"start_task","payload_digest":"digest-1"}` {
 		t.Fatalf("payload = %q", confirmation.Payload)
 	}
 }

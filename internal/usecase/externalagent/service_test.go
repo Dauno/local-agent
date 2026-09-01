@@ -52,7 +52,7 @@ func TestStartAssignsHostCompletionPolicyByMode(t *testing.T) {
 	}
 }
 
-func TestStartDropsPartialWorkstreamBindingToConversationRoute(t *testing.T) {
+func TestStartRejectsInvalidWorkstreamTaskAdmission(t *testing.T) {
 	store, err := sqlite.Initialize(context.Background(), filepath.Join(t.TempDir(), "partial-binding.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -66,13 +66,9 @@ func TestStartDropsPartialWorkstreamBindingToConversationRoute(t *testing.T) {
 		t.Fatal(err)
 	}
 	request := testRequest(domain.JobDetached)
-	request.WorkstreamID = "untrusted-partial-binding"
-	job, err := service.Start(t.Context(), request)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if job.CompletionPolicy != domain.ExternalAgentCompletionAutomaticRoot || job.WorkstreamID != "" || job.TaskID != "" || job.ExecutionIdentity != "" || job.AdmissionRevision != 0 {
-		t.Fatalf("partial binding admission = %#v", job)
+	request.WorkstreamTask = &domain.WorkstreamTaskAdmission{WorkstreamID: "untrusted-partial-binding"}
+	if _, err := service.Start(t.Context(), request); err == nil {
+		t.Fatal("invalid workstream task admission was accepted")
 	}
 }
 

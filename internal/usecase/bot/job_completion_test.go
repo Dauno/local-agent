@@ -308,7 +308,7 @@ func TestActivationFrameLoadsTrustedWorkstreamSnapshot(t *testing.T) {
 	activation.WorkstreamID = "ws-1"
 	activation.TaskID = "task-1"
 	activation.ExecutionIdentity = "exec-1"
-	task := domain.WorkstreamTask{ID: "task-1", Project: "workspace", Description: "inspect repository", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}
+	task := domain.WorkstreamTask{ID: "task-1", JobID: activation.JobID, Project: "workspace", Description: "inspect repository", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}
 	delegation, err := domain.EncodeExternalAgentDelegation(task.Description, "Presenta el resultado en español.")
 	if err != nil {
 		t.Fatal(err)
@@ -597,8 +597,6 @@ func completionService(t *testing.T, activationStore *fakeActivationStore, runti
 		job: &domain.ExternalAgentJob{
 			ID: activationStore.activation.JobID, Provider: "fixture", Profile: "fixture", PrimaryProject: "workspace", Task: resultText,
 			Actor: activationStore.activation.Actor, ConversationKey: activationStore.activation.ConversationKey,
-			WorkstreamID: activationStore.activation.WorkstreamID, TaskID: activationStore.activation.TaskID,
-			ExecutionIdentity: activationStore.activation.ExecutionIdentity, AdmissionRevision: activationStore.activation.AdmissionRevision,
 			Status: domain.JobCompleted, StatusRevision: activationStore.activation.StatusRevision,
 		},
 		result: domain.ExternalAgentJobResult{
@@ -763,7 +761,7 @@ func TestJobCompletionFrameReadHoldsConversationCoordinator(t *testing.T) {
 	activation.WorkstreamID = "ws-1"
 	activation.TaskID = "task-1"
 	activation.ExecutionIdentity = "exec-1"
-	task := domain.WorkstreamTask{ID: "task-1", Project: "workspace", Description: "inspect repository", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}
+	task := domain.WorkstreamTask{ID: "task-1", JobID: activation.JobID, Project: "workspace", Description: "inspect repository", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}
 	activationStore := &fakeActivationStore{activation: activation}
 	runtime := &fakeRuntime{runTurn: port.AgentTurn{Text: "synthesis"}}
 	publisher := &fakePublisher{}
@@ -774,8 +772,7 @@ func TestJobCompletionFrameReadHoldsConversationCoordinator(t *testing.T) {
 	service.completionReader = &fakeActivationResultReader{
 		job: &domain.ExternalAgentJob{
 			ID: activation.JobID, Provider: "fixture", Profile: "fixture", PrimaryProject: "workspace", Task: task.Description,
-			Actor: activation.Actor, ConversationKey: activation.ConversationKey, WorkstreamID: activation.WorkstreamID,
-			TaskID: activation.TaskID, ExecutionIdentity: activation.ExecutionIdentity, AdmissionRevision: activation.AdmissionRevision,
+			Actor: activation.Actor, ConversationKey: activation.ConversationKey,
 			Status: domain.JobCompleted, StatusRevision: activation.StatusRevision,
 		},
 		result: domain.ExternalAgentJobResult{

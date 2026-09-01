@@ -14,7 +14,7 @@ import (
 	"github.com/Dauno/slack-local-agent/internal/port"
 )
 
-const humanWorkstreamCommandPrefix = "workstream-human "
+const humanWorkstreamCommandPrefix = "workstream-human"
 
 type humanWorkstreamCommand struct {
 	Project              string                      `json:"project"`
@@ -84,11 +84,12 @@ func (s *Service) applyHumanWorkstreamCommand(ctx context.Context, invocation do
 }
 
 func parseHumanWorkstreamCommand(text string) (humanWorkstreamCommand, bool, error) {
-	if !strings.HasPrefix(text, humanWorkstreamCommandPrefix) {
+	payload, handled := humanWorkstreamCommandPayload(text)
+	if !handled {
 		return humanWorkstreamCommand{}, false, nil
 	}
 	var command humanWorkstreamCommand
-	decoder := json.NewDecoder(bytes.NewReader([]byte(strings.TrimSpace(strings.TrimPrefix(text, humanWorkstreamCommandPrefix)))))
+	decoder := json.NewDecoder(bytes.NewReader([]byte(payload)))
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&command); err != nil {
 		return humanWorkstreamCommand{}, true, fmt.Errorf("JSON payload: %w", err)
@@ -129,10 +130,7 @@ func parseHumanWorkstreamCommand(text string) (humanWorkstreamCommand, bool, err
 			RequiredInputs: requiredInputs,
 		}
 	case domain.WorkstreamActionStartTask:
-		if strings.TrimSpace(command.TaskID) == "" {
-			return humanWorkstreamCommand{}, true, errors.New("task_id is required to start a task")
-		}
-		transition.TaskID = command.TaskID
+		return humanWorkstreamCommand{}, true, errors.New("start_task is admitted by a durable job; use a natural-language execution request")
 	case domain.WorkstreamActionRecordConstraint:
 		transition.Constraint = &domain.WorkstreamConstraint{ID: command.ConstraintID, Text: command.ConstraintText}
 	case domain.WorkstreamActionProposeDecision:
@@ -157,4 +155,22 @@ func parseHumanWorkstreamCommand(text string) (humanWorkstreamCommand, bool, err
 		Objective:        command.Objective,
 		Transition:       transition,
 	}, true, nil
+}
+
+func humanWorkstreamCommandPayload(text string) (string, bool) {
+	if !strings.HasPrefix(text, humanWorkstreamCommandPrefix) {
+		return "", false
+	}
+	remainder := strings.TrimPrefix(text, humanWorkstreamCommandPrefix)
+	if remainder == "" || !strings.ContainsRune(" \t\r\n", rune(remainder[0])) {
+		return "", false
+	}
+	lines := strings.FieldsFunc(remainder, func(r rune) bool {
+		return r == '\r' || r == '\n'
+	})
+	var payload strings.Builder
+	for _, line := range lines {
+		payload.WriteString(strings.TrimSpace(line))
+	}
+	return payload.String(), true
 }

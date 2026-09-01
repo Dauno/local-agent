@@ -95,15 +95,15 @@ local-agent run
 
 ### Database Upgrade
 
-This release uses schema v45. Before `doctor` or `run`, upgrade an existing
-v33-v44 database with:
+This release uses schema v47. Before `doctor` or `run`, upgrade an existing
+v33-v46 database with:
 
 ```sh
 local-agent db upgrade
 ```
 
 The command previews the change and creates a verified backup before it writes
-the new schema. It runs the v45 migration, postflight checks, and legacy
+the new schema. It runs the v47 migration, postflight checks, and legacy
 identity disposition checks. Use `local-agent db upgrade --yes` only for a
 non-interactive upgrade. To roll back, restore the backup before you start an
 older binary.

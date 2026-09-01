@@ -79,7 +79,7 @@ type externalAgentArgs struct {
 const (
 	externalAgentBatchProvider = "local-agent"
 	externalAgentBatchProfile  = "delegate_batch"
-	externalAgentBatchVersion  = "batch_v2"
+	externalAgentBatchVersion  = "batch_v4"
 )
 
 type externalAgentBatchItem struct {
@@ -87,11 +87,18 @@ type externalAgentBatchItem struct {
 	Task  string `json:"task" jsonschema:"complete bounded task for this agent"`
 }
 
+type externalAgentBatchWorkstreamBinding struct {
+	WorkstreamID     string `json:"workstream_id" jsonschema:"active durable workstream selector"`
+	TaskID           string `json:"task_id" jsonschema:"workstream task selector; host admits the task atomically with this job"`
+	ExpectedRevision int    `json:"expected_revision" jsonschema:"current workstream revision required for CAS"`
+}
+
 type externalAgentBatchArgs struct {
-	Mode             string                   `json:"mode" jsonschema:"execution mode: parallel or sequential"`
-	Project          string                   `json:"project" jsonschema:"registered project name shared by all batch tasks"`
-	Tasks            []externalAgentBatchItem `json:"tasks" jsonschema:"task list bounded by external_agent.batch.max_tasks"`
-	FinalInstruction string                   `json:"final_instruction" jsonschema:"requested final synthesis or presentation after every batch task completes"`
+	Mode             string                               `json:"mode" jsonschema:"execution mode: parallel or sequential"`
+	Project          string                               `json:"project" jsonschema:"registered project name shared by all batch tasks"`
+	Tasks            []externalAgentBatchItem             `json:"tasks" jsonschema:"task list bounded by external_agent.batch.max_tasks"`
+	FinalInstruction string                               `json:"final_instruction" jsonschema:"requested final synthesis or presentation after every batch task completes"`
+	Workstream       *externalAgentBatchWorkstreamBinding `json:"workstream,omitempty" jsonschema:"optional trusted workstream task selector"`
 }
 
 type externalAgentBatchSpec struct {
@@ -716,7 +723,7 @@ func newAgentCLIBatchDurableTool(
 	return functiontool.New(functiontool.Config{
 		Name: "delegate_batch",
 		Description: fmt.Sprintf(
-			"Runs between one and %d explicit durable agent tasks as one batch job. Set mode to parallel for concurrent execution or sequential for strict ordered execution where each task finishes before the next starts. Use this tool for every request with multiple delegations or any combined result, comparison, synthesis, or summary. Put the requested final synthesis or presentation in final_instruction. All tasks must use the same registered project. The batch produces one acceptance receipt and one automatic root activation after every task finishes. Do not call the individual agent tools for tasks included in this batch. Eligible agents: %s.",
+			"Runs between one and %d explicit durable agent tasks as one batch job. Set mode to parallel for concurrent execution or sequential for strict ordered execution where each task finishes before the next starts. Use this tool for every request with multiple delegations or any combined result, comparison, synthesis, or summary. Put the requested final synthesis or presentation in final_instruction. All tasks must use the same registered project. To bind the batch to a workstream task, provide workstream_id, task_id, and expected_revision in workstream. The host validates the active workstream, admits the task, and owns the association atomically. If the active workstream has a proposed task for this execution, always include its workstream selector. Do not call a separate task-start action. The batch produces one acceptance receipt and one automatic root activation after every task finishes. Do not call the individual agent tools for tasks included in this batch. Eligible agents: %s.",
 			maxTasks,
 			strings.Join(eligibleNames, ", "),
 		),
@@ -775,13 +782,25 @@ func newAgentCLIBatchDurableTool(
 			return externalAgentResult{}, fmt.Errorf("encode agent batch task: %w", err)
 		}
 		callID := ctxFunctionCallID(ctx)
-		job, err := jobStarter.Start(ctx, domain.ExternalAgentJobRequest{
+		request := domain.ExternalAgentJobRequest{
 			Provider: externalAgentBatchProvider, Profile: externalAgentBatchProfile,
 			PrimaryProject: args.Project, PrimaryPath: primaryPath, RegistryRevision: registryRevision,
 			Task: string(encodedTask), Mode: domain.JobDetached, Timeout: timeout,
 			WrapperCallID: callID, OriginalCallID: callID, Actor: actor,
 			TeamID: teamIDFromConversation(key), ConversationKey: key,
-		})
+		}
+		if args.Workstream != nil {
+			admission := domain.WorkstreamTaskAdmission{
+				WorkstreamID:     args.Workstream.WorkstreamID,
+				TaskID:           args.Workstream.TaskID,
+				ExpectedRevision: args.Workstream.ExpectedRevision,
+			}
+			if err := admission.Validate(); err != nil {
+				return externalAgentResult{}, err
+			}
+			request.WorkstreamTask = &admission
+		}
+		job, err := jobStarter.Start(ctx, request)
 		if err != nil {
 			return externalAgentResult{}, err
 		}
@@ -877,10 +896,11 @@ func newAgentCLIDurableTool(
 				return externalAgentResult{}, fmt.Errorf("resolve external-agent completion binding: %w", bindingErr)
 			}
 			if found {
-				request.WorkstreamID = binding.WorkstreamID
-				request.TaskID = binding.TaskID
-				request.ExecutionIdentity = binding.ExecutionIdentity
-				request.AdmissionRevision = binding.AdmissionRevision
+				request.WorkstreamTask = &domain.WorkstreamTaskAdmission{
+					WorkstreamID:     binding.WorkstreamID,
+					TaskID:           binding.TaskID,
+					ExpectedRevision: binding.AdmissionRevision,
+				}
 			}
 		}
 		job, err := jobStarter.Start(ctx, request)

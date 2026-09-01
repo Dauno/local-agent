@@ -1167,6 +1167,7 @@ func extractConfirmation(fc *genai.FunctionCall) *domain.PendingConfirmation {
 	if strings.TrimSpace(summary) == "" {
 		summary = fmt.Sprintf("Tool %q requires confirmation", originalCall.Name)
 	}
+	summary = boundedConfirmationSummary(summary)
 	payload, ok := confirmationPayload(fc, originalCall)
 	if !ok {
 		return nil
@@ -1215,6 +1216,19 @@ func confirmationHint(fc *genai.FunctionCall) string {
 		return ""
 	}
 	return usableConfirmationHint(confirmation.Hint)
+}
+
+func boundedConfirmationSummary(summary string) string {
+	const maxCodePoints = 200
+	const truncationMarker = "…"
+
+	summary = strings.TrimSpace(summary)
+	runes := []rune(summary)
+	if len(runes) <= maxCodePoints {
+		return summary
+	}
+	marker := []rune(truncationMarker)
+	return string(runes[:maxCodePoints-len(marker)]) + truncationMarker
 }
 
 func requestedToolConfirmation(fc *genai.FunctionCall) (toolconfirmation.ToolConfirmation, bool) {

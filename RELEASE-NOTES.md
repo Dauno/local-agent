@@ -2,7 +2,8 @@
 
 ## v0.15.0
 
-- Added schema v45 with immutable host completion policies and activation scopes.
+- Added schema v47 for workstream-owned durable job admission and task settlement.
+- `workstream_tasks.job_id` is the only durable job association; external-agent jobs remain generic.
 - Detached ad hoc workers use automatic root integration when no eligible workstream binding remains.
 - Conversation-scope completions use no tools, proposals, confirmations, delegation, or mutations.
 

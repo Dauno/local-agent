@@ -56,7 +56,7 @@ func TestMigrationV45BackfillsPoliciesAndActivationScopesWithoutCreatingRows(t *
 		policy string
 	}{
 		{"foreground", "delivery_only"},
-		{"detached-bound", "workstream_only"},
+		{"detached-bound", "delivery_only"},
 		{"detached-unbound", "delivery_only"},
 	} {
 		var got string

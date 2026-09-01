@@ -144,14 +144,14 @@ func (f ActivationFrame) validateActivationScope() error {
 	if workstreamSnapshotRunes(f.Workstream) > HardMaxWorkstreamSnapshotRunes {
 		return errors.New("activation frame workstream snapshot is too large")
 	}
-	if f.TaskID == "" || f.Task.ID != f.TaskID || f.Task.Status != TaskRunning || f.Task.Project != f.Workstream.Project || f.Task.Project != f.PrimaryProject ||
-		f.Task.ExecutionIdentity != f.ExecutionIdentity {
+	if f.TaskID == "" || f.Task.ID != f.TaskID || !activationTaskStatusMatches(f.Task.Status, f.TerminalStatus) || f.Task.Project != f.Workstream.Project || f.Task.Project != f.PrimaryProject ||
+		f.Task.JobID != f.JobID || f.Task.ExecutionIdentity != f.ExecutionIdentity {
 		return errors.New("activation frame task binding is invalid")
 	}
 	found := false
 	for _, task := range f.Workstream.Tasks {
 		if task.ID == f.TaskID {
-			found = task.ExecutionIdentity == f.ExecutionIdentity
+			found = task.JobID == f.JobID && task.ExecutionIdentity == f.ExecutionIdentity
 			break
 		}
 	}
@@ -161,10 +161,25 @@ func (f ActivationFrame) validateActivationScope() error {
 	if err := f.Task.Validate(); err != nil {
 		return fmt.Errorf("activation frame task is invalid: %w", err)
 	}
-	if sha256Hex(f.Task.Description) != strings.ToLower(f.DelegatedTaskSHA256) {
-		return errors.New("activation frame delegated task digest does not match workstream task")
-	}
 	return nil
+}
+
+func activationTaskStatusMatches(status TaskStatus, terminal ExternalAgentJobStatus) bool {
+	if status == TaskRunning {
+		return true
+	}
+	switch terminal {
+	case JobCompleted:
+		return status == TaskCompleted
+	case JobFailed:
+		return status == TaskFailed
+	case JobCancelled:
+		return status == TaskCancelled
+	case JobCompletionUnknown, JobAbandoned:
+		return status == TaskCompletionUnknown
+	default:
+		return false
+	}
 }
 
 func (f ActivationFrame) validateActivationResult() error {

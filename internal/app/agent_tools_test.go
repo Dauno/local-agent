@@ -691,6 +691,38 @@ func (s *recordingJobStarter) Start(_ context.Context, request domain.ExternalAg
 	return &domain.ExternalAgentJob{ID: "job-1", RequestSHA256: "digest"}, nil
 }
 
+func TestDurableAgentBatchPassesOnlyTransientWorkstreamSelector(t *testing.T) {
+	starter := &recordingJobStarter{}
+	batch, err := newAgentCLIBatchDurableTool(
+		[]preparedAgentTool{batchTestChild("smoke_worker", "sha256:smoke", "done")},
+		starter, "U12345678", "slack:T12345678:dm:D12345678", 4,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runnable, ok := batch.(interface {
+		Run(agent.Context, any) (map[string]any, error)
+	})
+	if !ok {
+		t.Fatal("batch tool does not expose the function runner")
+	}
+	_, err = runnable.Run(&agent.ContextMock{}, map[string]any{
+		"mode": "sequential", "project": "workspace",
+		"tasks":             []any{map[string]any{"agent": "smoke_worker", "task": "inspect"}},
+		"final_instruction": "Presenta una síntesis.",
+		"workstream": map[string]any{
+			"workstream_id": "ws-1", "task_id": "task-1", "expected_revision": 4,
+		},
+	})
+	if err != nil {
+		t.Fatalf("run batch tool: %v", err)
+	}
+	if starter.request.WorkstreamTask == nil || starter.request.WorkstreamTask.WorkstreamID != "ws-1" ||
+		starter.request.WorkstreamTask.TaskID != "task-1" || starter.request.WorkstreamTask.ExpectedRevision != 4 {
+		t.Fatalf("workstream admission selector = %#v", starter.request.WorkstreamTask)
+	}
+}
+
 func TestDurableAgentCLIToolUsesOptionalConfirmationPolicy(t *testing.T) {
 	for _, test := range []struct {
 		name                 string

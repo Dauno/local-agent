@@ -291,7 +291,7 @@ func (confirmationResolvedView) Template() string { return "confirmation.resolve
 func compileConfirmationMessageV2(engine *blockkit.Engine, delivery port.ConfirmationDelivery, expectedLayoutSHA256 string) (string, []slackapi.Block, error) {
 	display := buildConfirmationDisplay(delivery)
 	message, err := engine.Message(confirmationPromptView{
-		Summary: delivery.Summary, CallID: delivery.OriginalCallID, WrapperCallID: delivery.WrapperCallID,
+		Summary: truncateConfirmationText(strings.TrimSpace(delivery.Summary), 200), CallID: delivery.OriginalCallID, WrapperCallID: delivery.WrapperCallID,
 		ExpiresAt: delivery.Expiry, Project: display.Project, Task: display.ProposedTask,
 		Workstream: display.WorkstreamData, Payload: display.Payload,
 	})

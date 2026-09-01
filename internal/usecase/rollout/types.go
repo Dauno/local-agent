@@ -5,25 +5,25 @@ import "time"
 // Schema versions of the TRD 09 rollout contract: db upgrade accepts sources
 // in [MinSourceVersion, MaxSourceVersion] and drives them to TargetVersion.
 const (
-	TargetVersion    = 45
+	TargetVersion    = 47
 	MinSourceVersion = 33
-	MaxSourceVersion = 44
+	MaxSourceVersion = 46
 )
 
 // Durable runtime_state keys owned by the rollout. The quarantine marker is
 // written only by Create's adoption transaction; its read belongs to
 // checkpoint 5.
 const (
-	KeyBaseline            = "v45_upgrade_baseline"
-	KeyCutoff              = "v45_rollout_cutoff_unix_nanos"
-	KeyPostflightStatus    = "v45_postflight_status"
-	KeyPostflightDetail    = "v45_postflight_detail"
-	KeyBackupPath          = "v45_upgrade_backup_path"
-	KeyBackupBytes         = "v45_upgrade_backup_bytes"
-	KeyBackupSHA256        = "v45_upgrade_backup_sha256"
-	KeyBackupSourceVersion = "v45_upgrade_backup_source_version"
-	KeyBackupVerifiedAt    = "v45_upgrade_backup_verified_at"
-	KeyBackupNotRequiredAt = "v45_upgrade_backup_not_required_at"
+	KeyBaseline            = "v47_upgrade_baseline"
+	KeyCutoff              = "v47_rollout_cutoff_unix_nanos"
+	KeyPostflightStatus    = "v47_postflight_status"
+	KeyPostflightDetail    = "v47_postflight_detail"
+	KeyBackupPath          = "v47_upgrade_backup_path"
+	KeyBackupBytes         = "v47_upgrade_backup_bytes"
+	KeyBackupSHA256        = "v47_upgrade_backup_sha256"
+	KeyBackupSourceVersion = "v47_upgrade_backup_source_version"
+	KeyBackupVerifiedAt    = "v47_upgrade_backup_verified_at"
+	KeyBackupNotRequiredAt = "v47_upgrade_backup_not_required_at"
 	KeyLegacyQuarantineAt  = "legacy_identity_quarantine_applied_at"
 )
 
@@ -101,7 +101,7 @@ type UpgradeReport struct {
 	PostActivationsWithoutContent     int
 }
 
-// BackupIdentity mirrors either the five durable v45_upgrade_backup_* keys
+// BackupIdentity mirrors either the five durable v47_upgrade_backup_* keys
 // or the single mutually exclusive not-required marker.
 type BackupIdentity struct {
 	Path          string

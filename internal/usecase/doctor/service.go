@@ -23,11 +23,11 @@ const (
 	defaultAuxiliaryModelTimeoutSeconds = 120
 )
 
-// This release's v45 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
+// This release's v47 connection-model contract (DEC-08-1, DEC-08-2, TRD 08
 // checkpoint 6). A database or connection outside this contract fails
 // doctor with actionable remediation rather than being silently accepted.
 const (
-	expectedSQLiteSchemaVersion      = 45
+	expectedSQLiteSchemaVersion      = 47
 	expectedSQLiteJournalMode        = "wal"
 	expectedSQLiteSynchronous        = 2 // PRAGMA synchronous FULL
 	expectedSQLiteBusyTimeoutMillis  = 5000
@@ -40,8 +40,8 @@ const (
 const (
 	minimumSchemaConnectionModel = 1
 	minimumSchemaDatabaseFile    = 1
-	minimumSchemaJobs            = 45
-	minimumSchemaActivations     = 45
+	minimumSchemaJobs            = 47
+	minimumSchemaActivations     = 47
 	minimumSchemaResultIdentity  = 32
 	minimumSchemaRecoverableRefs = 41
 	minimumSchemaResultRetention = 34
@@ -1215,7 +1215,7 @@ func validateConnectionPragmas(health domain.SQLiteRuntimeHealth) []string {
 }
 
 // validateSQLiteRuntimeContract compares an observed connection model
-// against this release's full v45 contract and returns one problem string
+// against this release's full v47 contract and returns one problem string
 // per mismatch, or nil when the connection model is healthy.
 func validateSQLiteRuntimeContract(health domain.SQLiteRuntimeHealth) []string {
 	var problems []string

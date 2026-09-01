@@ -15,7 +15,7 @@ func digest(value string) string {
 
 func TestActivationFrameRenderIncludesBoundedWorkstreamSnapshot(t *testing.T) {
 	task := domain.WorkstreamTask{
-		ID: "task-1", Project: "workspace", Description: "inspect the repository",
+		ID: "task-1", JobID: "job-1", Project: "workspace", Description: "inspect the repository",
 		Status: domain.TaskRunning, ExecutionIdentity: "exec-1", RequiredInputs: []string{"scope"},
 	}
 	frame := domain.ActivationFrame{

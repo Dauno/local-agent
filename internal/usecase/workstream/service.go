@@ -5,8 +5,6 @@ package workstream
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -204,12 +202,12 @@ func (s *Service) SnapshotForActivation(ctx context.Context, workstreamID, actor
 	if err := workstream.ValidateWithLimits(s.cfg.Limits); err != nil {
 		return domain.WorkstreamSnapshot{}, err
 	}
-	return workstream.Snapshot(), nil
+	return workstream.SnapshotForActivation(), nil
 }
 
-// CompletionBindingForTask returns a binding only for an exact task already
-// running in the caller's active workstream. No model value can choose the
-// workstream, task ID, execution identity, or revision.
+// CompletionBindingForTask returns an admission selector for an exact task
+// that has no job yet. The job store owns the atomic state transition and job
+// association; no model value can choose the trusted execution identity.
 func (s *Service) CompletionBindingForTask(ctx context.Context, actor string, conversationKey domain.ConversationKey, project, task string) (domain.ExternalAgentJobCompletionBinding, bool, error) {
 	if err := s.requireEnabled(); err != nil {
 		return domain.ExternalAgentJobCompletionBinding{}, false, err
@@ -232,12 +230,16 @@ func (s *Service) CompletionBindingForTask(ctx context.Context, actor string, co
 		return domain.ExternalAgentJobCompletionBinding{}, false, nil
 	}
 	for _, candidate := range workstream.Tasks {
-		if candidate.Project == project && candidate.Description == task && candidate.Status == domain.TaskRunning && candidate.ExecutionIdentity != "" {
-			return domain.ExternalAgentJobCompletionBinding{
-				WorkstreamID: workstream.ID, TaskID: candidate.ID, ExecutionIdentity: candidate.ExecutionIdentity, AdmissionRevision: workstream.Revision,
-				RequiredInputs: append([]string(nil), candidate.RequiredInputs...),
-			}, true, nil
+		if candidate.Project != project || candidate.Description != task || candidate.JobID != "" {
+			continue
 		}
+		if candidate.Status != domain.TaskProposed {
+			continue
+		}
+		return domain.ExternalAgentJobCompletionBinding{
+			WorkstreamID: workstream.ID, TaskID: candidate.ID, ExecutionIdentity: candidate.ExecutionIdentity, AdmissionRevision: workstream.Revision,
+			RequiredInputs: append([]string(nil), candidate.RequiredInputs...),
+		}, true, nil
 	}
 	return domain.ExternalAgentJobCompletionBinding{}, false, nil
 }
@@ -497,25 +499,13 @@ func (s *Service) apply(
 	transition.ConversationKey = binding.ConversationKey
 	transition.Project = binding.Project
 	// TRD 07 Completion and Dependent Dispatch: an incomplete, failed, or
-	// stale analysis bound to this workstream blocks every root confirmation
-	// transition and the start_task execution transition, across all four
-	// public entry points (Apply, ApplyConfirmed, ApplyHostConfirmed,
-	// ApplyHuman), because they all reach this one apply method. A generic
-	// handoff (a result link, a proposed task) never satisfies this: the
-	// check only looks at analysis state, never at whether the workstream
-	// already has other context bound to it.
-	if transition.RequiresConfirmation() || transition.Action == domain.WorkstreamActionStartTask {
+	// stale analysis bound to this workstream blocks root confirmation
+	// transitions. Job admission performs its own atomic task admission in
+	// the job store.
+	if transition.RequiresConfirmation() {
 		if err := s.checkAnalysisDispatchGate(ctx, binding, transition.WorkstreamID); err != nil {
 			return domain.WorkstreamTransitionRecord{}, domain.WorkstreamSnapshot{}, err
 		}
-	}
-	if transition.Action == domain.WorkstreamActionStartTask {
-		// The execution identity is always host-owned and derived from the
-		// trusted binding plus the caller's provenance identity. A caller-
-		// supplied value is never persisted, and a replay of the same
-		// source identity resolves the same execution identity, so the
-		// journaled payload digest stays stable.
-		transition.ExecutionIdentity = executionIdentityFor(transition.WorkstreamID, transition.TaskID, transition.SourceID)
 	}
 	if transition.TransitionPayloadDigest == "" {
 		transition.TransitionPayloadDigest = transition.PayloadDigestValue()
@@ -591,15 +581,6 @@ func (s *Service) requireEnabled() error {
 		return ErrDisabled
 	}
 	return nil
-}
-
-// executionIdentityFor derives the host-owned execution identity from the
-// trusted workstream, task, and provenance identity. It never accepts a
-// caller-supplied value and is stable across replays of the same source
-// identity, keeping the journaled transition payload digest deterministic.
-func executionIdentityFor(workstreamID, taskID, sourceID string) string {
-	digest := sha256.Sum256([]byte(workstreamID + "\x00" + taskID + "\x00" + sourceID))
-	return "exec_" + hex.EncodeToString(digest[:])
 }
 
 func (s *Service) validateBinding(binding Binding) error {

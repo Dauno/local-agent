@@ -712,6 +712,34 @@ func TestConfirmationPublisherPublish(t *testing.T) {
 	}
 }
 
+func TestConfirmationPublisherBoundsPersistedSummary(t *testing.T) {
+	t.Parallel()
+	client := &fakeConfirmationBlockClient{}
+	pub := newConfirmationPublisher(client, "U99999999", 5*time.Second, nil)
+	longSummary := strings.Repeat("á", 220)
+
+	_, err := pub.PublishConfirmation(context.Background(), port.ConfirmationDelivery{
+		WrapperCallID: "wrapper-long", OriginalCallID: "original-long",
+		ChannelID: "C12345678", Summary: longSummary,
+		CorrelationID: "confirmation:wrapper-long",
+		Expiry:        time.Date(2026, 8, 31, 18, 30, 0, 0, time.UTC),
+	})
+	if err != nil {
+		t.Fatalf("PublishConfirmation() error = %v", err)
+	}
+	if len(client.postedBlocks) != 1 {
+		t.Fatalf("posted blocks = %d, want 1 message", len(client.postedBlocks))
+	}
+	expectedSummary := truncateConfirmationText(longSummary, 200)
+	message := blockkit.Message{FallbackText: client.fallbackTexts[0], Blocks: client.postedBlocks[0]}
+	if !blockkit.Reachable(message, expectedSummary) {
+		t.Fatalf("bounded summary did not reach the rendered tree")
+	}
+	if blockkit.Reachable(message, longSummary) {
+		t.Fatal("unbounded summary reached the rendered tree")
+	}
+}
+
 func TestConfirmationPublisherUpdate(t *testing.T) {
 	t.Parallel()
 	client := &fakeConfirmationBlockClient{}

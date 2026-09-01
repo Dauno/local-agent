@@ -269,8 +269,8 @@ func TestSeamResetStateRecordsCreateUnderLock(t *testing.T) {
 		t.Fatalf("ResetState: %v", err)
 	}
 	assertOrder(t, log, "create")
-	if version := probeUserVersion(t, dbPath); version != 45 {
-		t.Fatalf("post-reset user_version = %d, want 45", version)
+	if version := probeUserVersion(t, dbPath); version != rollout.TargetVersion {
+		t.Fatalf("post-reset user_version = %d, want %d", version, rollout.TargetVersion)
 	}
 
 	if err := os.Remove(dbPath); err != nil {

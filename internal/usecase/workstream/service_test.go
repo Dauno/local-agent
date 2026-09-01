@@ -71,7 +71,7 @@ func TestServiceRejectsForeignActorForReadAndMutation(t *testing.T) {
 func TestServiceSnapshotForActivationRechecksTrustedActiveBinding(t *testing.T) {
 	stored := testWorkstream()
 	stored.Status = domain.WorkstreamActive
-	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "run task", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}}
+	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", JobID: "job-1", Project: "workspace", Description: "run task", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}}
 	store := &fakeStore{workstream: stored}
 	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
 	if err != nil {
@@ -94,17 +94,17 @@ func TestServiceSnapshotForActivationRechecksTrustedActiveBinding(t *testing.T) 
 	}
 }
 
-func TestCompletionBindingForTaskRequiresExactRunningTask(t *testing.T) {
+func TestCompletionBindingForTaskReturnsOnlyUnassignedProposedTask(t *testing.T) {
 	stored := testWorkstream()
 	stored.Status = domain.WorkstreamActive
 	stored.Revision = 7
-	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "run task", Status: domain.TaskRunning, ExecutionIdentity: "exec-1"}}
+	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "run task", Status: domain.TaskProposed}}
 	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: &fakeStore{workstream: stored}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	binding, found, err := service.CompletionBindingForTask(ctx(), "U12345678", stored.ConversationKey, "workspace", "run task")
-	if err != nil || !found || binding.WorkstreamID != stored.ID || binding.TaskID != "task-1" || binding.ExecutionIdentity != "exec-1" || binding.AdmissionRevision != 7 {
+	if err != nil || !found || binding.WorkstreamID != stored.ID || binding.TaskID != "task-1" || binding.ExecutionIdentity != "" || binding.AdmissionRevision != 7 {
 		t.Fatalf("binding = %+v, found=%t, err=%v", binding, found, err)
 	}
 	if _, found, err := service.CompletionBindingForTask(ctx(), "U12345678", stored.ConversationKey, "workspace", "other task"); err != nil || found {
@@ -136,6 +136,68 @@ func TestServiceCreationAndFeatureGate(t *testing.T) {
 	}
 }
 
+func TestServiceCreationEntryPointsAndValidation(t *testing.T) {
+	binding := workstream.Binding{Actor: "U12345678", ConversationKey: "slack:T12345678:dm:D12345678", Project: "workspace"}
+	store := &fakeStore{}
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := service.ValidateCreate(ctx(), binding, "ws-validate", "objective"); err != nil {
+		t.Fatalf("valid create proposal rejected: %v", err)
+	}
+	if err := service.ValidateCreate(ctx(), binding, "", "objective"); err == nil {
+		t.Fatal("invalid create proposal was accepted")
+	}
+	if _, err := service.CreateHuman(ctx(), binding, "ws-human", "human objective", "human-source"); err != nil {
+		t.Fatalf("human create: %v", err)
+	}
+	rootStore := &fakeStore{}
+	rootService, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: rootStore})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rootService.CreateFromRoot(ctx(), binding, "ws-root", "root objective", "root-source"); err != nil {
+		t.Fatalf("root create: %v", err)
+	}
+
+	active, err := rootService.Active(ctx(), binding)
+	if err != nil {
+		t.Fatalf("active workstream: %v", err)
+	}
+	if active.ID != "ws-root" || active.OwnerActor != binding.Actor {
+		t.Fatalf("active snapshot = %+v", active)
+	}
+}
+
+func TestServiceValidatesAndAppliesHostConfirmedProposal(t *testing.T) {
+	stored := testWorkstream()
+	store := &fakeStore{workstream: stored}
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
+	if err != nil {
+		t.Fatal(err)
+	}
+	binding := workstream.Binding{Actor: stored.OwnerActor, ConversationKey: stored.ConversationKey, Project: stored.Project}
+	proposal := domain.WorkstreamTransition{
+		WorkstreamID: "ws-1", ExpectedRevision: stored.Revision, SourceID: "root-activate",
+		Action: domain.WorkstreamActionActivateWorkstream,
+	}
+	if err := service.ValidateProposal(ctx(), binding, domain.WorkstreamSourceRoot, proposal); err != nil {
+		t.Fatalf("valid proposal rejected: %v", err)
+	}
+	record, snapshot, err := service.ApplyHostConfirmed(ctx(), binding, domain.WorkstreamSourceRoot, proposal, "host-confirmation")
+	if err != nil {
+		t.Fatalf("host-confirmed proposal: %v", err)
+	}
+	if record.Action != domain.WorkstreamActionActivateWorkstream ||
+		snapshot.Status != domain.WorkstreamActive ||
+		store.lastTransition.Confirmation == nil ||
+		!store.lastTransition.Confirmation.Approved {
+		t.Fatalf("record=%+v snapshot=%+v transition=%+v", record, snapshot, store.lastTransition)
+	}
+}
+
 func TestServiceRejectsOverLimitCreationBeforePersistence(t *testing.T) {
 	store := &fakeStore{}
 	service, err := workstream.New(workstream.Config{
@@ -160,48 +222,20 @@ func TestServiceEnabledRequiresRegisteredProjects(t *testing.T) {
 	}
 }
 
-func TestServiceStartTaskGeneratesHostExecutionIdentity(t *testing.T) {
+func TestServiceRejectsDirectStartTask(t *testing.T) {
 	stored := testWorkstream()
 	stored.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "admit me", Status: domain.TaskProposed}}
-	store := &fakeStore{workstream: stored}
-	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: store})
+	service, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: &fakeStore{workstream: stored}})
 	if err != nil {
 		t.Fatal(err)
 	}
 	binding := workstream.Binding{Actor: "U12345678", ConversationKey: testWorkstream().ConversationKey, Project: "workspace"}
-	// A caller-supplied identity must never be persisted.
 	_, _, err = service.ApplyHuman(ctx(), binding, domain.WorkstreamTransition{
 		WorkstreamID: "ws-1", ExpectedRevision: 0, SourceID: "slack-human:event-start",
 		Action: domain.WorkstreamActionStartTask, TaskID: "task-1", ExecutionIdentity: "forged-identity",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if store.lastTransition.Action != domain.WorkstreamActionStartTask || strings.TrimSpace(store.lastTransition.ExecutionIdentity) == "" {
-		t.Fatalf("start task transition = %+v", store.lastTransition)
-	}
-	if store.lastTransition.ExecutionIdentity == "forged-identity" || !strings.HasPrefix(store.lastTransition.ExecutionIdentity, "exec_") {
-		t.Fatalf("generated execution identity = %q", store.lastTransition.ExecutionIdentity)
-	}
-	firstIdentity := store.lastTransition.ExecutionIdentity
-
-	// The derivation is deterministic per trusted binding and provenance: the
-	// same command on a fresh store resolves the same execution identity, so a
-	// replay keeps the journaled payload digest stable.
-	fresh := &fakeStore{workstream: testWorkstream()}
-	fresh.workstream.Tasks = []domain.WorkstreamTask{{ID: "task-1", Project: "workspace", Description: "admit me", Status: domain.TaskProposed}}
-	replay, err := workstream.New(workstream.Config{Enabled: true, AllowedProjects: map[string]struct{}{"workspace": {}}}, workstream.Dependencies{Store: fresh})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, _, err := replay.ApplyHuman(ctx(), binding, domain.WorkstreamTransition{
-		WorkstreamID: "ws-1", ExpectedRevision: 0, SourceID: "slack-human:event-start",
-		Action: domain.WorkstreamActionStartTask, TaskID: "task-1",
-	}); err != nil {
-		t.Fatal(err)
-	}
-	if fresh.lastTransition.ExecutionIdentity != firstIdentity {
-		t.Fatalf("replayed identity = %q, want %q", fresh.lastTransition.ExecutionIdentity, firstIdentity)
+	if err == nil || !strings.Contains(err.Error(), "system job path") {
+		t.Fatalf("direct start task error = %v", err)
 	}
 }
 

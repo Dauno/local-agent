@@ -19,21 +19,15 @@ func TestCompletionPolicyControlsRootActivationDisposition(t *testing.T) {
 	}
 	for _, test := range []struct {
 		name, policy string
-		workstream   bool
 		wantMarker   bool
 	}{
-		{"automatic root without binding", string(domain.ExternalAgentCompletionAutomaticRoot), false, true},
-		{"automatic root with binding", string(domain.ExternalAgentCompletionAutomaticRoot), true, true},
-		{"workstream only with binding", string(domain.ExternalAgentCompletionWorkstream), true, true},
-		{"workstream only without binding", string(domain.ExternalAgentCompletionWorkstream), false, false},
-		{"delivery only", string(domain.ExternalAgentCompletionDeliveryOnly), true, false},
+		{"automatic root", string(domain.ExternalAgentCompletionAutomaticRoot), true},
+		{"workstream only is no longer a job disposition", string(domain.ExternalAgentCompletionWorkstream), false},
+		{"delivery only", string(domain.ExternalAgentCompletionDeliveryOnly), false},
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			job := base
 			job.CompletionPolicy = domain.ExternalAgentCompletionPolicy(test.policy)
-			if test.workstream {
-				job.WorkstreamID, job.TaskID, job.ExecutionIdentity, job.AdmissionRevision = "ws", "task", "exec", 2
-			}
 			notification, err := domain.NewExternalAgentJobNotification(job)
 			if err != nil {
 				t.Fatal(err)

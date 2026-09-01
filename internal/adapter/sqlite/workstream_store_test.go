@@ -83,10 +83,17 @@ func TestWorkstreamStoreStartTaskPersistsRunningBindingAndJournal(t *testing.T) 
 	if _, err := workstreams.Apply(ctx, propose, domain.DefaultWorkstreamLimits(), time.Unix(11, 0).UTC()); err != nil {
 		t.Fatal(err)
 	}
-	start := testSQLiteTransition(workstream, domain.WorkstreamSourceHuman, domain.WorkstreamActionStartTask, 2)
+	jobs := NewExternalAgentJobStore(store)
+	job := testExternalAgentJob(time.Unix(12, 0).UTC())
+	job.ID, job.OriginalCallID, job.WrapperCallID = "job-1", "original-job-1", "wrapper-job-1"
+	if _, _, err := jobs.CreateIfAbsent(ctx, job); err != nil {
+		t.Fatalf("create start-task job: %v", err)
+	}
+	start := testSQLiteTransition(workstream, domain.WorkstreamSourceSystem, domain.WorkstreamActionStartTask, 2)
 	start.SourceID = "start-1"
 	start.TaskID = "task-1"
-	start.ExecutionIdentity = "exec-host-1"
+	start.JobID = job.ID
+	start.ExecutionIdentity = job.ID
 	if _, err := workstreams.Apply(ctx, start, domain.DefaultWorkstreamLimits(), time.Unix(12, 0).UTC()); err != nil {
 		t.Fatalf("start task: %v", err)
 	}
@@ -94,7 +101,7 @@ func TestWorkstreamStoreStartTaskPersistsRunningBindingAndJournal(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got.Tasks) != 1 || got.Tasks[0].Status != domain.TaskRunning || got.Tasks[0].ExecutionIdentity != "exec-host-1" {
+	if len(got.Tasks) != 1 || got.Tasks[0].Status != domain.TaskRunning || got.Tasks[0].JobID != job.ID || got.Tasks[0].ExecutionIdentity != job.ID {
 		t.Fatalf("started workstream = %+v", got)
 	}
 	var journalAction string

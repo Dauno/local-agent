@@ -37,18 +37,23 @@ func TestParseHumanWorkstreamCommandRejectsUnknownFields(t *testing.T) {
 	}
 }
 
-func TestParseHumanWorkstreamCommandStartTask(t *testing.T) {
-	command, handled, err := parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":2,"action":"start_task","task_id":"task-1"}`)
-	if err != nil || !handled {
-		t.Fatalf("parse start_task: handled=%v err=%v", handled, err)
+func TestParseHumanWorkstreamCommandRejectsDirectStartTask(t *testing.T) {
+	_, handled, err := parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":2,"action":"start_task","task_id":"task-1"}`)
+	if !handled || err == nil || !strings.Contains(err.Error(), "durable job") {
+		t.Fatalf("direct start_task: handled=%v err=%v, want durable-job error", handled, err)
 	}
-	if command.Transition.Action != domain.WorkstreamActionStartTask || command.Transition.TaskID != "task-1" {
-		t.Fatalf("start_task transition = %+v", command.Transition)
-	}
+}
 
-	_, handled, err = parseHumanWorkstreamCommand(`workstream-human {"project":"workspace","workstream_id":"ws-1","expected_revision":2,"action":"start_task"}`)
-	if !handled || err == nil {
-		t.Fatalf("start_task without task_id: handled=%v err=%v, want error", handled, err)
+func TestParseHumanWorkstreamCommandRepairsSlackLineContinuations(t *testing.T) {
+	commandText := `workstream-human
+ {"project":"local-agent","workstream_id":"ws_batch_file_v46","expected_revision":2,"action":"propose_task","task_id":"task_bat
+ ch_file_v46","task_description":"run the batch"}`
+	command, handled, err := parseHumanWorkstreamCommand(commandText)
+	if err != nil || !handled {
+		t.Fatalf("parse continued propose_task: handled=%v err=%v", handled, err)
+	}
+	if command.Transition.Action != domain.WorkstreamActionProposeTask || command.Transition.Task.ID != "task_batch_file_v46" {
+		t.Fatalf("continued propose_task transition = %+v", command.Transition)
 	}
 }
 

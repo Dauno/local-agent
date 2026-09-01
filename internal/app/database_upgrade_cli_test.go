@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"os"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -28,16 +29,16 @@ func executeUpgradeCLI(t *testing.T, h *upgradeHarness, args []string, stdin str
 }
 
 const (
-	freshSummaryPrefix      = "will migrate v33 to v45; backup will be written under "
-	databaseAlreadyComplete = "database already at schema v45; nothing to do"
+	freshSummaryPrefix      = "will migrate v33 to v47; backup will be written under "
+	databaseAlreadyComplete = "database already at schema v47; nothing to do"
 	upgradeCancelled        = "Actualizacion cancelada."
-	resumeNeededSummary     = "database is at v45 with an incomplete rollout (postflight not yet passed); will re-run postflight"
+	resumeNeededSummary     = "database is at v47 with an incomplete rollout (postflight not yet passed); will re-run postflight"
 )
 
 const (
-	promptMigrate     = "Aplicar la migracion de schema v33 a v45 sobre "
+	promptMigrate     = "Aplicar la migracion de schema v33 a v47 sobre "
 	promptV33Stopped  = "El proceso v33 desplegado no participa en el protocolo de bloqueo de este comando. Confirme que ese proceso esta detenido antes de continuar."
-	terminalRangeText = "is outside the range local-agent db upgrade accepts ([33, 44]); this file cannot be upgraded or opened by this binary"
+	terminalRangeText = "is outside the range local-agent db upgrade accepts ([33, 46]); this file cannot be upgraded or opened by this binary"
 )
 
 func TestDBUpgradeFreshRunPromptsTwiceThenCompletes(t *testing.T) {
@@ -129,10 +130,10 @@ func TestDBUpgradeOutOfRangeExitsTwoWithoutPrompts(t *testing.T) {
 		{20, "database schema v20 " + terminalRangeText},
 		{14, "database schema v14 " + terminalRangeText},
 		{0, "database schema v0 " + terminalRangeText},
-		{46, "found v46"},
+		{48, "found v48"},
 	}
 	for _, testCase := range cases {
-		t.Run("v"+string(rune('0'+testCase.version)), func(t *testing.T) {
+		t.Run("v"+strconv.Itoa(testCase.version), func(t *testing.T) {
 			h := newUpgradeHarness(t)
 			replaceFixture(t, h.paths.DatabaseFile, testCase.version, nil)
 
@@ -157,7 +158,7 @@ func TestRollbackCheckClearAndBlocked(t *testing.T) {
 	t.Run("clear", func(t *testing.T) {
 		h := newUpgradeHarness(t)
 		code, out, stderr := executeUpgradeCLI(t, h, []string{"db", "rollback-check"}, "")
-		const clearText = "rollback drain clear: 0 sessions have a pending discovery marker; safe to run a schema-v41-compatible binary at or before 3cfe091 after the schema v45 rollout"
+		const clearText = "rollback drain clear: 0 sessions have a pending discovery marker; safe to run a schema-v41-compatible binary at or before 3cfe091 after the schema v47 rollout"
 		if code != 0 || out != clearText+"\n" || stderr != "" {
 			t.Fatalf("exit=%d out=%q stderr=%q, want the exact clear text with exit 0", code, out, stderr)
 		}
@@ -178,7 +179,7 @@ func TestRollbackCheckClearAndBlocked(t *testing.T) {
 			}
 		}
 		code, out, _ := executeUpgradeCLI(t, h, []string{"db", "rollback-check"}, "")
-		const blockedPrefix = "rollback blocked: 2 sessions have a pending discovery marker; let the current binary drain them or cancel them explicitly before rolling back after the schema v45 rollout to a binary at or before 3cfe091"
+		const blockedPrefix = "rollback blocked: 2 sessions have a pending discovery marker; let the current binary drain them or cancel them explicitly before rolling back after the schema v47 rollout to a binary at or before 3cfe091"
 		if code != 1 {
 			t.Fatalf("exit=%d out=%q, want 1", code, out)
 		}
@@ -189,7 +190,7 @@ func TestRollbackCheckClearAndBlocked(t *testing.T) {
 }
 
 // TestNoBadAdviceOnUnsupportedSchemas pins FIND-179 across the four ordinary
-// commands this checkpoint owns: schema outside [33, 45] exits 1 with the
+// commands this checkpoint owns: schema outside [33, 46] exits 1 with the
 // terminal message and never recommends db upgrade.
 func TestNoBadAdviceOnUnsupportedSchemas(t *testing.T) {
 	h := newUpgradeHarness(t)
@@ -303,31 +304,31 @@ func TestDBUpgradeBoundaryMatrix(t *testing.T) {
 			},
 			stdin:       "y\ny\n",
 			wantExit:    0,
-			wantKindOut: "will migrate v40 to v45; backup will be written under ",
+			wantKindOut: "will migrate v40 to v47; backup will be written under ",
 			prompts:     2, lock: true, backup: true,
 		},
 		{
-			name: "v44 to v45 upgrade",
+			name: "v44 to v47 upgrade",
 			build: func(t *testing.T, h *upgradeHarness) {
 				replaceFixture(t, h.paths.DatabaseFile, 44, nil)
 			},
 			stdin:       "y\ny\n",
 			wantExit:    0,
-			wantKindOut: "will migrate v44 to v45; backup will be written under ",
+			wantKindOut: "will migrate v44 to v47; backup will be written under ",
 			prompts:     2, lock: true, backup: true,
 		},
 		{
-			name: "v45 adoption",
+			name: "v47 adoption",
 			build: func(t *testing.T, h *upgradeHarness) {
-				replaceFixture(t, h.paths.DatabaseFile, 45, nil)
+				replaceFixture(t, h.paths.DatabaseFile, 47, nil)
 			},
 			stdin:       "y\ny\n",
 			wantExit:    0,
-			wantKindOut: "database is already at v45 but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under ",
+			wantKindOut: "database is already at v47 but was never rolled out through local-agent db upgrade; will record a baseline and cutoff now and back up first, under ",
 			prompts:     2, lock: true, backup: true,
 		},
 		{
-			name:        "v45 complete",
+			name:        "v47 complete",
 			build:       func(*testing.T, *upgradeHarness) {},
 			stdin:       "",
 			wantExit:    0,
@@ -335,9 +336,9 @@ func TestDBUpgradeBoundaryMatrix(t *testing.T) {
 			prompts:     0, lock: false, backup: false,
 		},
 		{
-			name: "v46 future",
+			name: "v48 future",
 			build: func(t *testing.T, h *upgradeHarness) {
-				replaceFixture(t, h.paths.DatabaseFile, 46, nil)
+				replaceFixture(t, h.paths.DatabaseFile, 48, nil)
 			},
 			stdin:    "",
 			wantExit: 2,

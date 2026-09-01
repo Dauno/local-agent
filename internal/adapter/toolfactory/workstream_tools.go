@@ -92,6 +92,7 @@ type workstreamQuestionResult struct {
 
 type workstreamTaskResult struct {
 	ID             string   `json:"id"`
+	JobID          string   `json:"job_id,omitempty"`
 	Project        string   `json:"project"`
 	Description    string   `json:"description"`
 	Status         string   `json:"status"`
@@ -468,6 +469,7 @@ func renderWorkstreamState(snapshot domain.WorkstreamSnapshot) workstreamStateRe
 			result.Tasks,
 			workstreamTaskResult{
 				ID:             task.ID,
+				JobID:          task.JobID,
 				Project:        task.Project,
 				Description:    task.Description,
 				Status:         string(task.Status),

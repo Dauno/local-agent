@@ -385,7 +385,7 @@ func (s *Service) activationFrame(ctx context.Context, activation domain.Externa
 	}
 	switch activation.ActivationScope {
 	case domain.ExternalAgentActivationWorkstream:
-		if err := s.populateActivationWorkstreamFrame(ctx, activation, job, executionTask, &frame); err != nil {
+		if err := s.populateActivationWorkstreamFrame(ctx, activation, job, &frame); err != nil {
 			return domain.ActivationFrame{}, err
 		}
 	case domain.ExternalAgentActivationConversation:
@@ -411,10 +411,6 @@ func (s *Service) activationFrameJob(ctx context.Context, activation domain.Exte
 		job.Status != activation.TerminalStatus || job.StatusRevision != activation.StatusRevision || job.PrimaryProject == "" {
 		return nil, errActivationJobIdentityInvalid
 	}
-	if job.WorkstreamID != activation.WorkstreamID || job.TaskID != activation.TaskID ||
-		job.ExecutionIdentity != activation.ExecutionIdentity || job.AdmissionRevision != activation.AdmissionRevision {
-		return nil, errActivationJobIdentityInvalid
-	}
 	return job, nil
 }
 
@@ -422,7 +418,6 @@ func (s *Service) populateActivationWorkstreamFrame(
 	ctx context.Context,
 	activation domain.ExternalAgentJobActivation,
 	job *domain.ExternalAgentJob,
-	executionTask string,
 	frame *domain.ActivationFrame,
 ) error {
 	if s.workstreams == nil || !domain.CompletionBindingPresent(activation.WorkstreamID, activation.TaskID, activation.ExecutionIdentity, activation.AdmissionRevision) {
@@ -443,11 +438,29 @@ func (s *Service) populateActivationWorkstreamFrame(
 			break
 		}
 	}
-	if frame.Task.ID == "" || frame.Task.Project != job.PrimaryProject || frame.Task.Description != executionTask ||
-		frame.Task.Status != domain.TaskRunning || frame.Task.ExecutionIdentity != activation.ExecutionIdentity {
+	if frame.Task.ID == "" || frame.Task.JobID != job.ID || frame.Task.Project != job.PrimaryProject ||
+		!activationTaskStatusMatches(frame.Task.Status, activation.TerminalStatus) || frame.Task.ExecutionIdentity != activation.ExecutionIdentity {
 		return errors.New("activation task binding is invalid")
 	}
 	return nil
+}
+
+func activationTaskStatusMatches(status domain.TaskStatus, terminal domain.ExternalAgentJobStatus) bool {
+	if status == domain.TaskRunning {
+		return true
+	}
+	switch terminal {
+	case domain.JobCompleted:
+		return status == domain.TaskCompleted
+	case domain.JobFailed:
+		return status == domain.TaskFailed
+	case domain.JobCancelled:
+		return status == domain.TaskCancelled
+	case domain.JobCompletionUnknown, domain.JobAbandoned:
+		return status == domain.TaskCompletionUnknown
+	default:
+		return false
+	}
 }
 
 func (s *Service) populateActivationResult(ctx context.Context, activation domain.ExternalAgentJobActivation, frame *domain.ActivationFrame) error {
